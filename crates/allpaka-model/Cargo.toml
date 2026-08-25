@@ -1,0 +1,11 @@
+[package]
+name = "allpaka-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Llama-family forward pass for the allpaka engine, parameterised by GGUF metadata"
+
+[dependencies]
+allpaka-backend.workspace = true
+allpaka-gguf.workspace = true
+anyhow.workspace = true

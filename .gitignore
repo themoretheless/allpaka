@@ -1,0 +1,6 @@
+/target/
+/models/
+*.log
+rag.duckdb
+*.zip
+.DS_Store

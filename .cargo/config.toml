@@ -1,0 +1,4 @@
+# Tune release builds for the machine they are built on. The Windows
+# cross-target keeps a portable baseline, since that binary travels.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=native"]

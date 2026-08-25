@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "rag-mcp": {
+      "type": "local",
+      "command": ["/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp"],
+      "environment": {
+        "RAG_DB_PATH": "/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb",
+        "RAG_INGEST_ROOTS": "/Users/themoretheless/.claude/projects/-Users-themoretheless-Documents-Sources-allpaka/memory",
+        "RAG_DEFAULT_SEARCH_MODE": "lex",
+        "RAG_LLM_ENABLED": "false",
+        "RAG_TOOLS": "spine"
+      }
+    }
+  }
+}

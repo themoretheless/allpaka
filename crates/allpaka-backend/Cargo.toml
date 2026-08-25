@@ -1,0 +1,14 @@
+[package]
+name = "allpaka-backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Tensor operations for the allpaka engine; CPU reference first, accelerators checked against it"
+
+[dependencies]
+allpaka-gguf.workspace = true
+anyhow.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.29"
+objc = "0.2"

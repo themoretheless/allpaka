@@ -1,0 +1,105 @@
+# allpaka cluster description.
+#
+# A "node" is one memory pool, not one machine. A desktop with a discrete GPU
+# has two of them: VRAM, fast and small, and system RAM, large and dozens of
+# times slower. They hold different weights and stream at different
+# speeds, so they are listed separately and joined by a PCIe "link". A Mac has
+# unified memory and is therefore genuinely one node.
+#
+# Node order does not matter. The planner tries every ordering, because with
+# unequal links the choice of which machine leads the pipeline changes the
+# answer.
+#
+# Preset values are vendor specifications and therefore optimistic. Override
+# any of them once you have measured the real number.
+
+[[nodes]]
+name = "mac"
+preset = "m4max-128"
+# usable_gib = 96
+# mem_bandwidth_gbps = 546
+
+# The two pools below share a chassis, which is what `host` records. The
+# planner then reports them as one machine (one failure domain, one CPU) rather
+# than pretending three pools are three computers.
+[[nodes]]
+name = "pc-gpu"
+preset = "rtx5090"
+host = "pc"
+
+# System RAM on the same PC. Buys capacity, not speed: layers placed here are
+# computed by the CPU at DDR5 bandwidth. The planner will only use it once the
+# faster pools are full - which is exactly what you want.
+[[nodes]]
+name = "pc-ram"
+preset = "ddr4-64"
+host = "pc"
+mem_bandwidth_gbps = 44.9    # measured 2026-08-17 with `allpaka bench --mem` on the PC.
+                             # An earlier run under load gave 28.7 - that is what this
+                             # pool does when the machine is busy, so treat 44.9 as the
+                             # quiet-machine ceiling, not a promise.
+# contention = 0.8           # bandwidth left when pc-gpu also serves; measure
+# prefill_tflops = 0.4       # prompt processing is compute-bound; on a CPU it
+#                            # is brutally slow, and this is where a plan's
+#                            # time-to-first-token dies. Measure prompt tok/s.
+
+# The PCIe bus between the GPU and system RAM of the same machine. It is not a
+# network, but it is a boundary activations cross, so it belongs here. Latency
+# is microseconds rather than milliseconds, which is why an in-box split is
+# almost free compared with any cable.
+[[links]]
+between = ["pc-gpu", "pc-ram"]
+throughput_bytes_per_sec = 50000000000.0
+rtt_p50_secs = 0.000012
+rtt_p99_secs = 0.000030
+
+# Wi-Fi between the Mac and the PC, measured 2026-08-17 with `allpaka bench`
+# (mac -> tmtl-pc 192.168.50.79, two runs, numbers stable). The tail is ~17x
+# the median - a shared radio - and it is the p99 that every split pays per
+# token. Both PC pools sit behind the same radio, hence two identical blocks.
+# Re-measure if the PC's 10 GbE port ever gets plugged in; both Ethernet
+# adapters were down at measurement time.
+[[links]]
+between = ["mac", "pc-gpu"]
+throughput_bytes_per_sec = 36638737
+rtt_p50_secs = 0.005466
+rtt_p99_secs = 0.091436
+
+[[links]]
+between = ["mac", "pc-ram"]
+throughput_bytes_per_sec = 36638737
+rtt_p50_secs = 0.005466
+rtt_p99_secs = 0.091436
+
+# Agents: what actually runs where. `allpaka fleet` reads this and places each
+# agent on a pool. Leave `pin` unset to let the planner choose; set it when you
+# know something the cost model does not. `port` is recorded here so the routing
+# table and the placement cannot drift apart.
+
+[[agents]]
+name = "reasoner"            # the big model, worth waiting for
+model = "models/qwen3-235b-a22b-Q2_K.gguf"
+ctx = 32768
+prompt = 4096                # ingests documents; sets the TTFT estimate
+port = 8081
+
+[[agents]]
+name = "tools"               # routing and tool calls: short, frequent, latency-bound
+model = "models/qwen3-30b-a3b-Q6_K.gguf"
+ctx = 8192
+prompt = 1024
+pin = "pc-gpu"
+port = 8082
+
+[[agents]]
+name = "background"          # summarising and indexing: nobody is waiting
+model = "models/qwen3-30b-a3b-Q8_0.gguf"
+ctx = 8192
+prompt = 2048
+pin = "pc-ram"
+port = 8083
+
+[defaults]
+context_tokens = 8192
+prompt_tokens = 2048
+kv_cache_dtype_bytes = 2

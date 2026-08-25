@@ -1,0 +1,28 @@
+{
+  "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
+  "name": "allpaka",
+  "version": "0.1.0+local.20260826-010318",
+  "description": "Локальный LLM-inference движок allpaka (Rust/Metal): serve, OpenAI-совместимый chat API на 127.0.0.1:8099, сабкоманды status/chat/rag-test, встроенные RAG-инструменты rag_search/rag_read.",
+  "keywords": [
+    "allpaka",
+    "llm",
+    "inference",
+    "gguf",
+    "local-ai",
+    "chat",
+    "metal"
+  ],
+  "author": "themoretheless",
+  "license": "MIT",
+  "skillInstructions": "Локальный LLM-inference движок allpaka (Rust/Metal, GGUF) с OpenAI-совместимым API на 127.0.0.1:8099 и встроенными RAG-инструментами rag_search/rag_read. Использовать, когда пользователь просит запустить локальную модель, сделать запрос к allpaka serve, проверить его статус или протестировать RAG tool-calling. Все действия — сабкоманды бинарника allpaka: status / serve / chat / rag-test. Не перезапускать и не останавливать сервер, уже запущенный пользователем. Для быстрых проверок брать qwen3-0.6b-Q8_0; 235B грузится ~50 с и занимает ~83 GiB — предупреждать перед запуском.",
+  "interface": {
+    "displayName": "Allpaka Engine",
+    "shortDescription": "Локальный inference-движок allpaka с OpenAI-совместимым API",
+    "longDescription": "Локальный LLM-inference движок allpaka: запуск serve, OpenAI-совместимый chat API на 127.0.0.1:8099 со встроенными RAG-инструментами rag_search/rag_read.",
+    "developerName": "themoretheless",
+    "websiteURL": "",
+    "iconUrl": "",
+    "category": "DEVELOPER"
+  },
+  "skills": "./skills/"
+}

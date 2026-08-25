@@ -1,0 +1,45 @@
+{
+  "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
+  "name": "rag-mcp",
+  "version": "0.1.0",
+  "description": "Локальный RAG-сервер (DuckDB) с заметками по движку allpaka: гибридный поиск, wiki-индекс, инжест и контекст-упаковка для LLM.",
+  "keywords": [
+    "rag",
+    "memory",
+    "duckdb",
+    "search",
+    "allpaka",
+    "knowledge-base"
+  ],
+  "author": "themoretheless",
+  "license": "MIT",
+  "skillInstructions": "Локальный RAG-сервер (stdio MCP, DuckDB) с инженерной базой знаний по движку allpaka — заметки по Metal/GPU-оптимизации, бенчмаркам и архитектуре.\n\nКогда использовать: пользователь спрашивает про заметки/документацию allpaka, оптимизацию Metal, результаты бенчмарков, архитектурные решения, или просит поиск по локальной базе знаний.\n\nПорядок запросов (обязательный, index-first):\n1. query_with_index — совпадение по каталогу wiki (slug/title/summary).\n2. search_wiki — семантический/лексический поиск только по скомпилированной wiki.\n3. search (mode=hybrid когда возможно) — запасной вариант по raw/chunk.\n4. get_neighbors / get_backlinks — структура после нахождения узла/документа.\n5. get_document / get_source — полный текст только для 1-2 id.\n6. pack_context — сжать ранжированные хиты под токен-бюджет перед длинным синтезом.\n\nНе начинайте с дампа list_documents или get_graph по всему корпусу. Не выдумывайте факты; цитируйте document ids / wiki slugs из результатов инструментов.\n\nЗапись (compile loop, клиент владеет синтезом): get_schema → get_source/get_document → write_wiki_page → rebuild_index → append_log. Raw-слой неизменяем (переинжест для замены). Перед записью в базу покажите планируемые изменения пользователю и дождитесь подтверждения.",
+  "interface": {
+    "displayName": "Allpaka RAG",
+    "shortDescription": "Локальный RAG по заметкам allpaka: поиск, wiki-индекс, контекст",
+    "longDescription": "Локальный RAG-сервер (DuckDB) с заметками по движку allpaka: гибридный поиск, wiki-индекс, инжест и контекст-упаковка для LLM.",
+    "developerName": "themoretheless",
+    "websiteURL": "",
+    "iconUrl": "",
+    "category": "DEVELOPER",
+    "hostKind": "local",
+    "platforms": [
+      "macos",
+      "linux",
+      "windows"
+    ]
+  },
+  "mcpServers": {
+    "rag-mcp": {
+      "command": "/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp",
+      "args": [],
+      "env": {
+        "RAG_DB_PATH": "/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb",
+        "RAG_INGEST_ROOTS": "/Users/themoretheless/.claude/projects/-Users-themoretheless-Documents-Sources-allpaka/memory",
+        "RAG_DEFAULT_SEARCH_MODE": "lex",
+        "RAG_LLM_ENABLED": "false",
+        "RAG_TOOLS": "spine"
+      }
+    }
+  }
+}

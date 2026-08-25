@@ -1,0 +1,10 @@
+[package]
+name = "allpaka-gguf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "GGUF reading for allpaka: metadata, tensor table, mmap'd data, dequantisation"
+
+[dependencies]
+anyhow.workspace = true
+memmap2.workspace = true

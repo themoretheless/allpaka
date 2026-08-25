@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "crates/allpaka-core",
+    "crates/allpaka-cli",
+    "crates/allpaka-gguf",
+    "crates/allpaka-backend",
+    "crates/allpaka-model",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+
+# Cross-crate inlining matters here: the hot dot kernels in allpaka-backend
+# call per-block helpers from allpaka-gguf (f16_to_f32, scale_min_k4) once or
+# more per 32-256 elements, and without LTO those stay real calls.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[workspace.dependencies]
+allpaka-core = { path = "crates/allpaka-core" }
+allpaka-backend = { path = "crates/allpaka-backend" }
+allpaka-model = { path = "crates/allpaka-model" }
+allpaka-gguf = { path = "crates/allpaka-gguf" }
+anyhow = "1"
+memmap2 = "0.9"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
