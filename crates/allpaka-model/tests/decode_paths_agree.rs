@@ -41,6 +41,10 @@ fn decode_logits(cpu_attn: bool) -> Vec<Vec<f32>> {
 
 #[test]
 fn fused_decode_matches_the_step_by_step_path() {
+    if !std::path::Path::new(MODEL).is_file() {
+        eprintln!("SKIP: {MODEL} not present (CI runners have no models)");
+        return;
+    }
     let fused = decode_logits(false);
     let stepped = decode_logits(true);
     for (step, (f, s)) in fused.iter().zip(&stepped).enumerate() {
