@@ -1569,18 +1569,19 @@ mod attention_tests {
     /// Attach the GPU to a throwaway page-aligned region, once per process.
     /// The weights it points at are never read - the attention kernel takes
     /// its cache from a separate wrapping - but `attach` is what creates the
-    /// device and the pipelines.
-    fn attach_a_device_for_tests() {
+    /// device and the pipelines. False when the host has no Metal device
+    /// (GitHub-hosted runners); the test then skips instead of failing.
+    fn attach_a_device_for_tests() -> bool {
         use std::sync::OnceLock;
         static REGION: OnceLock<bool> = OnceLock::new();
-        REGION.get_or_init(|| {
+        *REGION.get_or_init(|| {
             const PAGE: usize = 16384;
             let layout = std::alloc::Layout::from_size_align(PAGE, PAGE).unwrap();
             let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
             assert!(!ptr.is_null());
             let region: &'static [u8] = unsafe { std::slice::from_raw_parts(ptr, PAGE) };
             allpaka_backend::gpu::attach(region)
-        });
+        })
     }
 
     /// The Metal attention kernel against the CPU path it replaces, on a
@@ -1589,6 +1590,10 @@ mod attention_tests {
     /// has to combine groups that saw different numbers of positions.
     #[test]
     fn gpu_attention_matches_the_cpu_path() {
+        if !attach_a_device_for_tests() {
+            eprintln!("SKIP: no Metal device");
+            return;
+        }
         // A small odd case, then the 30B's real shape at a context long
         // enough that every SIMD group rescales its accumulator many times.
         check_gpu_attention(8, 2, 71);
