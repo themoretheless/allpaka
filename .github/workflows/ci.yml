@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+        # plugin_smoke skips its engine/RAG cases gracefully: CI runners have
+        # neither the GGUF models nor the rag-mcp binary + DuckDB. Unit tests
+        # and everything not needing local data still run. To cover the smoke
+        # tests too, run this workflow on a self-hosted runner that has
+        # models/qwen3-0.6b-Q8_0.gguf and RAG_MCP_BIN/RAG_DB_PATH set.
