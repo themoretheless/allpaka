@@ -15,26 +15,34 @@ use allpaka_gguf::GgmlType;
 const PAGE: usize = 16384;
 
 /// Leaked page-aligned region the tests attach to the GPU once.
-fn attached_region() -> &'static [u8] {
+/// None when the host has no Metal device (GitHub-hosted runners): the GPU
+/// tests then report SKIP instead of failing.
+fn attached_region() -> Option<&'static [u8]> {
     use std::sync::OnceLock;
-    static REGION: OnceLock<&'static [u8]> = OnceLock::new();
-    REGION.get_or_init(|| {
-        let len = 64 << 20;
-        let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
-        let ptr = unsafe { std::alloc::alloc(layout) };
-        assert!(!ptr.is_null());
-        let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
-        // Deterministic pseudo-random bytes: valid quant blocks for every
-        // format under test (any bit pattern decodes; f16 scales are tamed
-        // below per matrix).
-        let mut state = 0x243F_6A88_85A3_08D3u64;
-        for b in region.iter_mut() {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            *b = (state >> 56) as u8;
-        }
-        assert!(gpu::attach(region), "no Metal device; parity tests need one");
-        region
-    })
+    static REGION: OnceLock<Option<&'static [u8]>> = OnceLock::new();
+    REGION
+        .get_or_init(|| {
+            let len = 64 << 20;
+            let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
+            let ptr = unsafe { std::alloc::alloc(layout) };
+            assert!(!ptr.is_null());
+            let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+            // Deterministic pseudo-random bytes: valid quant blocks for every
+            // format under test (any bit pattern decodes; f16 scales are tamed
+            // below per matrix).
+            let mut state = 0x243F_6A88_85A3_08D3u64;
+            for b in region.iter_mut() {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                *b = (state >> 56) as u8;
+            }
+            if !gpu::attach(region) {
+                eprintln!("SKIP: no Metal device; parity tests need one");
+                return None;
+            }
+            Some(&*region)
+        })
+        .as_ref()
+        .copied()
 }
 
 /// Overwrite every f16 scale field in the region's blocks with small sane
@@ -77,7 +85,7 @@ fn tame_scales(region: &mut [u8], ty: GgmlType, off: usize, rows: usize, n_in: u
 }
 
 fn check_parity(ty: GgmlType, n_out: usize, n_in: usize, m: usize, off: usize) {
-    let region = attached_region();
+    let Some(region) = attached_region() else { return };
     // Redo the taming through a raw pointer: the region is logically ours.
     let region_mut =
         unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
@@ -142,7 +150,7 @@ fn check_parity(ty: GgmlType, n_out: usize, n_in: usize, m: usize, off: usize) {
 /// The fused gate/up/swiglu/down path against dequant-and-compute in f32.
 #[test]
 fn fused_ffn_matches_cpu_reference() {
-    let region = attached_region();
+    let Some(region) = attached_region() else { return };
     let region_mut =
         unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
     let (hidden, ffn) = (512usize, 256usize);

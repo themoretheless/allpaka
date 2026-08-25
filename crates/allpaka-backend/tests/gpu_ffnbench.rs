@@ -34,7 +34,10 @@ fn ffn_shaped_matvecs_report_effective_bandwidth() {
     // Scales of random bits include inf/NaN; zero every f16 scale field so
     // the kernels do finite arithmetic (speed is the same either way, but
     // NaN accumulators can change instruction timing on some GPUs).
-    assert!(gpu::attach(region), "no Metal device");
+    if !gpu::attach(region) {
+        eprintln!("SKIP: no Metal device");
+        return;
+    }
 
     // gate/up shape: Q2_K [1536, 4096]; down shape: Q3_K [4096, 1536].
     let q2_bytes = 1536 * (4096 / 256) * 84;
@@ -141,7 +144,10 @@ fn mm_shaped_matmuls_report_effective_bandwidth() {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         *b = (state >> 56) as u8;
     }
-    assert!(gpu::attach(region), "no Metal device");
+    if !gpu::attach(region) {
+        eprintln!("SKIP: no Metal device");
+        return;
+    }
 
     // Expert stage at a 32-row group: [1536, 4096] Q2_K, m = 32.
     let q2_bytes = 1536 * (4096 / 256) * 84;
