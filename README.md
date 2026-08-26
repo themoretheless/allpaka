@@ -96,6 +96,26 @@ allpaka bench --connect 192.168.1.50:9797
 Выводит throughput, p50/p99 round-trip и готовый TOML-фрагмент. Вписать его в
 конфиг - паспортные цифры Wi-Fi для этого непригодны.
 
+### Локальный inference (`serve`)
+
+Свой движок (Rust + Metal, GGUF) с OpenAI-совместимым API:
+
+```bash
+allpaka serve --model models/qwen3-0.6b-Q8_0.gguf --bind 127.0.0.1:8099
+```
+
+Клиентские сабкоманды против запущенного сервера:
+
+```bash
+allpaka status                     # /health + /stats: какая модель, сколько контекста занято
+allpaka chat "привет"              # один запрос к /v1/chat/completions
+allpaka chat "что в заметках про Metal?" --rag   # с инструментами rag_search/rag_read
+allpaka rag-test                   # smoke-тест RAG tool-loop; exit != 0 при регрессе
+```
+
+Роуты сервера: `POST /v1/chat/completions`, `GET /health`, `GET /stats`,
+`GET /` (веб-чат). RAG-бэкенды и переменные — в разделе ниже.
+
 ### Проверка на двух машинах: пошагово
 
 Инструмент кроссплатформенный (чистый std, собирается под
@@ -104,8 +124,8 @@ allpaka bench --connect 192.168.1.50:9797
 
 На Windows-PC (PowerShell):
 
-Проект пока не в git, поэтому папку `allpaka` на PC скопировать любым способом
-(scp, общая папка, флешка); `target/` можно не копировать.
+Репозиторий на GitHub: `git clone https://github.com/themoretheless/allpaka`
+(для Windows-сборки нужны только `crates/`, `Cargo.toml`, `Cargo.lock`).
 
 ```powershell
 cd allpaka
@@ -281,8 +301,31 @@ allpaka fleet --model models/reasoner.gguf --model models/tools.gguf --model mod
   - `link.rs` - одно измерение линка, односторонняя и round-trip цена.
   - `speculation.rs` - спекулятивное декодирование: сколько токенов даёт проход.
 - `crates/allpaka-cli` - бинарь `allpaka`.
-  - `gguf.rs` - чтение метаданных GGUF без загрузки весов.
-  - `bench.rs` - измеритель сети.
+  - `bench.rs` - измеритель сети и движка.
+  - `serve.rs` - OpenAI-совместимый сервер: chat API, сессия с KV-кэшем,
+    RAG tool-loop (см. раздел про RAG).
+  - `client.rs` - клиентские сабкоманды `status` / `chat` / `rag-test`
+    (HTTP по голому TcpStream + serde_json, без зависимостей).
+  - `rag_mcp.rs` - stdio JSON-RPC клиент к внешнему `rag-mcp` (BM25/DuckDB):
+    spawn, MCP-handshake, таймауты, откат на grep.
+  - `verify.rs` - сверка логитов с llama-server.
+- `crates/allpaka-cli/tests/plugin_smoke.rs` - интеграционные тесты: serve
+  end-to-end, RAG через mcp/grep/fallback, rag-mcp по stdio. Тесты
+  сериализованы общим мьютексом (один порт, одна GPU); скипаются, если нет
+  модели или бинарника rag-mcp.
+- `plugins/allpaka`, `plugins/rag-mcp` - Kimi-плагины (личный маркет):
+  движок и RAG как MCP/скилл. Установка: вкладка «个人» → ＋.
+
+## Тесты и CI
+
+```bash
+cargo test --workspace    # юниты + GPU-тесты + smoke (локально, с Metal)
+```
+
+GPU-тесты и smoke-тесты скипаются там, где нет Metal-устройства или моделей
+(GitHub-раннеры), поэтому CI зелёный и на них. Workflow:
+`.github/workflows/ci.yml` (macos-14, `cargo test --workspace` на push).
+Полное покрытие (реальные кернелы + end-to-end RAG) даёт локальный прогон.
 
 ## Откуда берутся числа
 
@@ -299,11 +342,11 @@ allpaka fleet --model models/reasoner.gguf --model models/tools.gguf --model mod
 
 ## Что дальше
 
-Ближайший практический шаг - обвязка вокруг `llama.cpp`: планировщик выдаёт
-раскладку слоёв, `allpaka` поднимает `rpc-server` на узлах и передаёт
-`--tensor-split` координатору. Это даёт работающий распределённый инференс без
-написания своего рантайма.
+Свой движок уже есть и работает (`serve`: Metal-backend, MoE, GPU routing,
+RAG tool-loop). Ближайшие шаги:
 
-Свой движок на Rust (candle/burn + собственный транспорт) имеет смысл начинать
-после того, как измерения покажут, где именно готовое решение упирается. Модель
-стоимости в `plan.rs` останется той же - она про физику, а не про реализацию.
+- Распределённый инференс по измеренным линкам: планировщик выдаёт раскладку
+  слоёв, движок поднимается на узлах, активации идут по сети. Модель стоимости
+  в `plan.rs` про физику, а не про реализацию - она остаётся той же.
+- Self-hosted CI раннер на машине с Metal: тогда CI покроет GPU-кернелы и
+  smoke-тесты с настоящими моделями, а не только CPU-часть.
