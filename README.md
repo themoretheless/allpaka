@@ -1,5 +1,7 @@
 # allpaka
 
+[![ci](https://github.com/themoretheless/allpaka/actions/workflows/ci.yml/badge.svg)](https://github.com/themoretheless/allpaka/actions/workflows/ci.yml)
+
 Планировщик размещения языковой модели по нескольким машинам. Отвечает на
 вопрос «стоит ли вообще разделять эту модель между этими машинами» - числами,
 а не надеждой.
