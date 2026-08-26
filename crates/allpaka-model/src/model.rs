@@ -208,7 +208,7 @@ impl Ffn<'_> {
             QuantMat::ffn_grouped(
                 gate_exps, up_exps, down_exps,
                 n_expert, hidden, *expert_ffn,
-                &table, hs, &tok, total_rows, None, None,
+                &table, hs, &tok, total_rows, None, None, None,
             )
             .map(|flat| (flat, table))
         };
@@ -988,11 +988,32 @@ impl<'a> Model<'a> {
             // Dense layer is one "group" covering every token with weight 1.
             let router_span = profile::span(profile::Phase::Router);
             let (gate_m, up_m, down_m, ffn_w, sh_m);
+            let mut gpu_route = None;
             let (table, tok, total_rows, hits_per_token) = match &layer.ffn {
                 Ffn::Moe {
                     gate_exps, up_exps, down_exps, shared, expert_ffn, n_used,
                     gating, weights_norm, weights_scale, router_bias, ..
                 } => {
+                    gate_m = gate_exps;
+                    up_m = up_exps;
+                    down_m = down_exps;
+                    ffn_w = *expert_ffn;
+                    sh_m = shared.as_ref().map(|sh| (&sh.gate, &sh.up, &sh.down));
+                    if logits.is_empty() {
+                        // GPU routing: the attention block left the logits in
+                        // y_arena; route_pick/scan/scatter build everything
+                        // below on-device at the head of the FFN buffer.
+                        if *gating != Gating::Sigmoid || *n_used > 8 {
+                            return None;
+                        }
+                        gpu_route = Some(allpaka_backend::gpu::GroupedRoute {
+                            n_used: *n_used,
+                            norm: *weights_norm,
+                            scale: *weights_scale,
+                            bias: router_bias.as_ref().map(|b| b.0.as_slice()),
+                        });
+                        (Vec::new(), Vec::new(), m * *n_used, Vec::new())
+                    } else {
                     let mut groups: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n_expert];
                     for i in 0..m {
                         let row = &logits[i * n_expert..(i + 1) * n_expert];
@@ -1032,12 +1053,8 @@ impl<'a> Model<'a> {
                             h.push(((total_rows + i) as u32, 1.0));
                         }
                     }
-                    gate_m = gate_exps;
-                    up_m = up_exps;
-                    down_m = down_exps;
-                    ffn_w = *expert_ffn;
-                    sh_m = shared.as_ref().map(|sh| (&sh.gate, &sh.up, &sh.down));
                     (table, tok, total_rows, hits)
+                    }
                 }
                 Ffn::Dense { w_gate, w_up, w_down, .. } => {
                     gate_m = w_gate;
@@ -1079,6 +1096,7 @@ impl<'a> Model<'a> {
                     m,
                 }),
                 sh_m,
+                gpu_route,
             )?;
         }
         let mut out = vec![0f32; m * hidden];

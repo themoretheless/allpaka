@@ -399,6 +399,7 @@ impl<'a> QuantMat<'a> {
         total_rows: usize,
         fused: Option<crate::gpu::GroupedCombine>,
         shared: Option<(&QuantMat, &QuantMat, &QuantMat)>,
+        route: Option<crate::gpu::GroupedRoute>,
     ) -> Option<Vec<f32>> {
         let shared = shared.map(|(g, u, d)| crate::gpu::GroupedShared {
             gate: (g.ty, g.data),
@@ -419,6 +420,7 @@ impl<'a> QuantMat<'a> {
             total_rows,
             fused,
             shared,
+            route,
         })
     }
 
