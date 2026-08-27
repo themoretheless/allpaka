@@ -50,6 +50,18 @@ pub struct MoeConfig {
     pub weights_scale: f32,
 }
 
+/// Gated delta net (linear attention) layer parameters, qwen35moe. Layers
+/// with `(index + 1) % full_attention_interval != 0` are GDN; the rest are
+/// full attention.
+#[derive(Debug, Clone)]
+pub struct SsmConfig {
+    pub d_inner: u32,
+    pub d_state: u32,
+    pub dt_rank: u32,
+    pub n_group: u32,
+    pub d_conv: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub architecture: String,
@@ -65,6 +77,14 @@ pub struct Config {
     pub rms_eps: f32,
     pub rope_freq_base: f32,
     pub rope_style: RopeStyle,
+    /// IMROPE frequency-band sizes (t,h,w,e) of qwen35 models; for text the
+    /// per-band positions coincide, which collapses the bands to the plain
+    /// partial-NEOX table - kept for documentation/verification.
+    pub rope_sections: [u32; 4],
+    /// Every Nth layer is full attention (qwen35moe: 4); 0 = every layer.
+    pub full_attention_interval: u32,
+    /// Gated delta net parameters when the model has linear-attention layers.
+    pub ssm: Option<SsmConfig>,
     /// Qwen3 normalises each attention head's q and k before RoPE; Llama and
     /// Mistral do not. Decided by whether the tensors exist, not by name
     /// matching on the architecture.
@@ -107,7 +127,10 @@ impl Config {
                 n_used,
                 expert_ffn: need("expert_feed_forward_length")?,
                 leading_dense: f.meta_u32(&key("leading_dense_block_count")).unwrap_or(0),
-                n_shared: f.meta_u32(&key("expert_shared_count")).unwrap_or(0),
+                // qwen35moe omits expert_shared_count but ships the tensors.
+                n_shared: f.meta_u32(&key("expert_shared_count")).unwrap_or_else(|| {
+                    u32::from(f.tensor("blk.0.ffn_up_shexp.weight").is_some())
+                }),
                 gating,
                 weights_norm: f.meta_bool(&key("expert_weights_norm")).unwrap_or(true),
                 weights_scale: f.meta_f32(&key("expert_weights_scale")).unwrap_or(1.0),
@@ -161,7 +184,8 @@ impl Config {
         Ok(Config {
             n_layers,
             n_kv_heads: f.meta_u32(&key("attention.head_count_kv")).unwrap_or(n_heads),
-            ffn_hidden: need("feed_forward_length")?,
+            // Absent on linear-attention hybrids (qwen35moe has no dense FFN).
+            ffn_hidden: f.meta_u32(&key("feed_forward_length")).unwrap_or(0),
             moe,
             vocab: embd.dims[1] as u32,
             rms_eps: f
@@ -169,7 +193,27 @@ impl Config {
                 .unwrap_or(1e-5),
             rope_freq_base: f.meta_f32(&key("rope.freq_base")).unwrap_or(10000.0),
             rope_style,
-            has_qk_norm: f.tensor("blk.0.attn_q_norm.weight").is_some(),
+            rope_sections: f
+                .meta_u32_arr(&key("rope.dimension_sections"))
+                .map(|s| [s[0], s[1], s[2], s[3]])
+                .unwrap_or([0, 0, 0, 0]),
+            full_attention_interval: f
+                .meta_u32(&key("full_attention_interval"))
+                .unwrap_or(0),
+            ssm: match f.meta_u32(&key("ssm.inner_size")) {
+                Some(d_inner) => Some(SsmConfig {
+                    d_inner,
+                    d_state: need("ssm.state_size")?,
+                    dt_rank: need("ssm.time_step_rank")?,
+                    n_group: need("ssm.group_count")?,
+                    d_conv: need("ssm.conv_kernel")?,
+                }),
+                None => None,
+            },
+            // Probe beyond layer 0: qwen35moe's layer 0 is a gated-delta-net
+            // layer, and only its full-attention layers carry q/k norms.
+            has_qk_norm: (0..n_layers as usize)
+                .any(|i| f.tensor(&format!("blk.{i}.attn_q_norm.weight")).is_some()),
             has_attn_bias: f.tensor("blk.0.attn_q.bias").is_some(),
             rope_dim,
             architecture: arch,

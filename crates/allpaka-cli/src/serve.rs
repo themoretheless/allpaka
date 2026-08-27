@@ -25,7 +25,30 @@ use crate::rag_mcp::{RagMcp, RagMcpConfig};
 struct ChatState {
     session: Session,
     tokens: Vec<u32>,
+    /// SSM snapshots at past prompt boundaries (qwen35moe). The KV cache
+    /// rolls back by truncating, but the gated-delta-net recurrence is
+    /// irreversible: a prefix hit must restore the state as of that prefix.
+    /// One snapshot per request, taken right after its prefill, plus the
+    /// prefill's last logits so a fully-covered prompt needs no prefill at
+    /// all. Bounded by [SSM_SNAPSHOTS_MAX], oldest evicted first.
+    snaps: std::collections::VecDeque<SsmSnap>,
 }
+
+/// One prompt-boundary snapshot of the recurrent state.
+struct SsmSnap {
+    /// Token count of the prompt this state was captured after.
+    tokens: usize,
+    /// `SsmCache::snapshot()` at the prompt's end.
+    state: Vec<f32>,
+    /// The prefill's last-position logits, kept so a repeated prompt skips
+    /// the prefill entirely (greedy determinism is then bit-exact).
+    logits: Vec<f32>,
+}
+
+/// SSM snapshots are ~66 MB each on Qwen3.6-35B (30 layers x conv window +
+/// 32 heads x 128x128 f32); eight boundaries cover a chat with edits and
+/// branches without growing memory without limit.
+const SSM_SNAPSHOTS_MAX: usize = 8;
 
 /// Context the persistent session is sized for. f32 KV cache is heavy
 /// (~0.4 MB per token on Qwen3-30B), so this is a deliberate budget, not the
@@ -449,13 +472,66 @@ fn run_inference(
     let prompt = template.prompt(tok, messages)?;
     let stops = template.stop_tokens(tok);
     let mut sampler = Sampler::new(temperature, top_p, repeat_penalty);
+    // Greedy without a repeat penalty can take the on-GPU argmax: one word
+    // read back per token instead of the whole vocabulary.
+    let greedy = temperature <= 0.0 && repeat_penalty == 1.0;
 
     let mut common =
         chat.tokens.iter().zip(&prompt).take_while(|(a, b)| **a == **b).count();
+    let mut logits: Vec<f32> = Vec::new();
+    let mut skip_prefill = false;
     if prompt.len() + max_tokens + 1 > chat.session.capacity() {
         chat.session = model.new_session(SESSION_TOKENS.max(prompt.len() + max_tokens + 1));
         chat.tokens.clear();
+        chat.snaps.clear();
         common = 0;
+    } else if chat.session.ssm.is_some() {
+        // The gated-delta-net state cannot be rolled back by truncating
+        // like the KV cache: a shared prefix is only reusable through the
+        // snapshot taken at that prefix's end. Without one, replay from
+        // scratch (slow, but correct).
+        if common < chat.tokens.len() {
+            match chat.snaps.iter().find(|s| s.tokens == common) {
+                Some(snap) => {
+                    let state = snap.state.clone();
+                    chat.session.ssm.as_mut().expect("ssm session").restore(&state);
+                    chat.session.truncate(common);
+                    chat.tokens.truncate(common);
+                    if common == prompt.len() {
+                        // The prompt is fully covered: its last logits are
+                        // in the snapshot, no prefill at all.
+                        logits = snap.logits.clone();
+                        skip_prefill = true;
+                    }
+                }
+                None => {
+                    chat.session =
+                        model.new_session(SESSION_TOKENS.max(prompt.len() + max_tokens + 1));
+                    chat.tokens.clear();
+                    chat.snaps.clear();
+                    common = 0;
+                }
+            }
+        } else if common == prompt.len() {
+            // History IS the prompt: the state already sits at its end and
+            // only the last logits are missing (KV-only models replay one
+            // token here; the SSM cannot step back). The snapshot has them.
+            match chat.snaps.iter().find(|s| s.tokens == common) {
+                Some(snap) => {
+                    logits = snap.logits.clone();
+                    skip_prefill = true;
+                }
+                None => {
+                    chat.session =
+                        model.new_session(SESSION_TOKENS.max(prompt.len() + max_tokens + 1));
+                    chat.tokens.clear();
+                    chat.snaps.clear();
+                    common = 0;
+                }
+            }
+        }
+        // else: common == chat.tokens.len() < prompt.len() - the state is
+        // already exactly where the prefix ends; nothing to restore.
     } else {
         if common == prompt.len() {
             common -= 1;
@@ -466,24 +542,58 @@ fn run_inference(
 
     let prefill_chunk = allpaka_model::Model::prefill_chunk();
     let t0 = std::time::Instant::now();
-    let mut logits = Vec::new();
-    for chunk in prompt[common..].chunks(prefill_chunk) {
-        logits = model.forward_batch(chunk, &mut chat.session)?;
-        chat.tokens.extend_from_slice(chunk);
+    if !skip_prefill {
+        for chunk in prompt[common..].chunks(prefill_chunk) {
+            logits = model.forward_batch(chunk, &mut chat.session)?;
+            chat.tokens.extend_from_slice(chunk);
+        }
     }
     let prefill_secs = t0.elapsed().as_secs_f64();
 
+    // Remember the recurrent state at this prompt's boundary (qwen35moe):
+    // the next request sharing the prefix restores it instead of replaying.
+    // Snapshot before generation, when the state is exactly "prompt consumed".
+    if let Some(ssm) = chat.session.ssm.as_ref() {
+        if !logits.is_empty() {
+            let snap = SsmSnap { tokens: prompt.len(), state: ssm.snapshot(), logits: logits.clone() };
+            if let Some(existing) = chat.snaps.iter_mut().find(|s| s.tokens == prompt.len()) {
+                *existing = snap;
+            } else {
+                chat.snaps.push_back(snap);
+                while chat.snaps.len() > SSM_SNAPSHOTS_MAX {
+                    chat.snaps.pop_front();
+                }
+            }
+        }
+    }
+
     let mut streaming = stream.is_some();
+    let think_prefix = template.think_prefix();
     if streaming {
         write_sse_headers(stream.as_mut().unwrap())?;
+        // The primed `<think>\n` is part of the reply text but not of the
+        // generated token stream; send it ahead of the first real delta.
+        if !think_prefix.is_empty() {
+            write_sse_event(
+                stream.as_mut().unwrap(),
+                &json!({
+                    "object": "chat.completion.chunk",
+                    "choices": [{"index": 0, "delta": {"content": think_prefix}}],
+                }),
+            )?;
+        }
     }
 
     let t1 = std::time::Instant::now();
     let mut generated = Vec::new();
     let mut emitted = String::new();
     let mut finish = "length";
+    let mut greedy_next: Option<u32> = None;
     for _ in 0..max_tokens {
-        let next = sampler.pick(&logits, &chat.tokens);
+        let next = match greedy_next.take() {
+            Some(t) => t,
+            None => sampler.pick(&logits, &chat.tokens),
+        };
         if stops.contains(&next) {
             finish = "stop";
             break;
@@ -506,12 +616,16 @@ fn run_inference(
                 }
             }
         }
-        logits = model.forward(next, &mut chat.session)?;
+        if greedy {
+            greedy_next = Some(model.forward_greedy(next, &mut chat.session)?);
+        } else {
+            logits = model.forward(next, &mut chat.session)?;
+        }
         chat.tokens.push(next);
     }
     let decode_secs = t1.elapsed().as_secs_f64();
 
-    let text = tok.decode(&generated);
+    let text = format!("{think_prefix}{}", tok.decode(&generated));
     let (content, tool_calls) = if parse_tools {
         parse_tool_calls(&text)
     } else {
@@ -529,7 +643,8 @@ fn run_inference(
     );
 
     if streaming {
-        if let Some(delta) = content.strip_prefix(emitted.as_str()) {
+        // `emitted` tracks the body only; the think prefix went out first.
+        if let Some(delta) = content[think_prefix.len()..].strip_prefix(emitted.as_str()) {
             if !delta.is_empty() {
                 write_sse_event(
                     stream.as_mut().unwrap(),
@@ -597,7 +712,10 @@ fn run_inference(
 /// special tokens the vocabulary actually contains.
 enum Template {
     /// `<|im_start|>role\n...<|im_end|>\n` - Qwen and much of the ecosystem.
-    ChatMl { im_start: u32, im_end: u32 },
+    /// `force_think` mirrors the GGUF chat template of the thinking Qwen
+    /// generations: the assistant turn is primed with a literal `<think>\n`
+    /// (llama.cpp renders the same prefix from the jinja template).
+    ChatMl { im_start: u32, im_end: u32, think: Option<u32>, force_think: bool },
     /// `<|start_header_id|>role<|end_header_id|>\n\n...<|eot_id|>` - Llama 3.
     Llama3 { bos: u32, start_header: u32, end_header: u32, eot: u32 },
     /// `[gMASK]<sop><|user|>\n...<|assistant|>\n` - GLM-4.x (ChatGLM).
@@ -609,7 +727,12 @@ impl Template {
         if let (Some(im_start), Some(im_end)) =
             (tok.piece_id("<|im_start|>"), tok.piece_id("<|im_end|>"))
         {
-            return Ok(Template::ChatMl { im_start, im_end });
+            return Ok(Template::ChatMl {
+                im_start,
+                im_end,
+                think: tok.piece_id("<think>"),
+                force_think: false,
+            });
         }
         if let (Some(start_header), Some(end_header), Some(eot)) = (
             tok.piece_id("<|start_header_id|>"),
@@ -639,12 +762,22 @@ impl Template {
         bail!("the vocabulary has neither ChatML nor Llama 3 nor GLM special tokens");
     }
 
+    /// The literal prefix the assistant turn was primed with (`<think>\n`
+    /// for the thinking Qwens, empty otherwise). The reply text gets it back
+    /// so clients see the complete `<think>...</think>` block.
+    fn think_prefix(&self) -> &'static str {
+        match self {
+            Template::ChatMl { force_think: true, .. } => "<think>\n",
+            _ => "",
+        }
+    }
+
     /// Format a conversation into token ids, ending where the assistant
     /// starts writing.
     fn prompt(&self, tok: &Tokenizer, messages: &[(String, String)]) -> Result<Vec<u32>> {
         let mut ids = Vec::new();
         match self {
-            Template::ChatMl { im_start, im_end } => {
+            Template::ChatMl { im_start, im_end, think, force_think } => {
                 for (role, content) in messages {
                     ids.push(*im_start);
                     ids.extend(tok.encode(&format!("{role}\n{content}"))?);
@@ -653,6 +786,17 @@ impl Template {
                 }
                 ids.push(*im_start);
                 ids.extend(tok.encode("assistant\n")?);
+                if *force_think {
+                    // The special token by id, exactly as the jinja template
+                    // renders it - plain BPE would split the literal text.
+                    match think {
+                        Some(t) => {
+                            ids.push(*t);
+                            ids.extend(tok.encode("\n")?);
+                        }
+                        None => ids.extend(tok.encode("<think>\n")?),
+                    }
+                }
             }
             Template::Llama3 { bos, start_header, end_header, eot } => {
                 ids.push(*bos);
@@ -946,7 +1090,14 @@ pub fn run(model_path: &Path, bind: &str) -> Result<()> {
     let model = Model::load(&file)?;
     let tokenizer = Tokenizer::from_gguf(&file)?;
     tokenizer.self_check()?;
-    let template = Template::detect(&tokenizer)?;
+    let mut template = Template::detect(&tokenizer)?;
+    // Thinking Qwen generations prime the assistant turn with `<think>\n`
+    // in their jinja chat template; mirror that prefix in ours.
+    if let Template::ChatMl { force_think, .. } = &mut template {
+        *force_think = file
+            .meta_str("tokenizer.chat_template")
+            .is_some_and(|t| t.contains("<think>"));
+    }
     let model_name = model_path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -958,7 +1109,11 @@ pub fn run(model_path: &Path, bind: &str) -> Result<()> {
         tokenizer.vocab_size(),
         match template { Template::ChatMl { .. } => "chatml", Template::Llama3 { .. } => "llama3", Template::Glm { .. } => "glm" });
 
-    let mut chat = ChatState { session: model.new_session(SESSION_TOKENS), tokens: Vec::new() };
+    let mut chat = ChatState {
+        session: model.new_session(SESSION_TOKENS),
+        tokens: Vec::new(),
+        snaps: std::collections::VecDeque::new(),
+    };
     let rag_tools = RagTools::load();
 
     for stream in listener.incoming() {

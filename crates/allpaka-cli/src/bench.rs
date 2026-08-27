@@ -269,14 +269,14 @@ pub fn measure_engine(model_path: &std::path::Path, draft_path: Option<&std::pat
     allpaka_model::profile::reset();
     let t1 = std::time::Instant::now();
     let decode_tokens = 32usize;
+    let mut next = logits
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(i, _)| i as u32)
+        .unwrap_or(0);
     for _ in 0..decode_tokens {
-        let next = logits
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))
-            .map(|(i, _)| i as u32)
-            .unwrap_or(0);
-        logits = model.forward(next, &mut session)?;
+        next = model.forward_greedy(next, &mut session)?;
     }
     let decode_secs = t1.elapsed().as_secs_f64();
     let decode_rate = decode_tokens as f64 / decode_secs;

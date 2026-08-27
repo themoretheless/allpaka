@@ -58,6 +58,130 @@ impl Drop for Region {
 /// Plain K/V storage for one model: `[layer][pos][kv_dim]`, f16, with K for
 /// every layer followed by V for every layer in one allocation.
 ///
+/// Gated-delta-net per-layer state (qwen35moe): the depthwise-conv window
+/// (d_conv-1 previous qkv rows per layer) and the deltanet recurrence state
+/// (dt_rank matrices of d_state x d_state). Only present when the model has
+/// linear-attention layers. Plain f32 in one page-aligned allocation, so the
+/// GPU decode kernels read and update it in place (same trick as the KV
+/// cache): CPU prefill and GPU decode share the memory, no copies at the
+/// boundary.
+pub struct SsmCache {
+    store: Region,
+    /// The conv half's element count; the state half follows.
+    conv_elems: usize,
+    state_elems: usize,
+    /// The same memory, wrapped for the GDN kernels; None without a GPU.
+    shared: Option<allpaka_backend::gpu::SharedRegion>,
+    pub conv_channels: usize,
+    pub d_conv: usize,
+    pub dt_rank: usize,
+    pub d_state: usize,
+}
+
+impl SsmCache {
+    pub fn new(n_layers: usize, d_conv: usize, conv_channels: usize, dt_rank: usize, d_state: usize) -> Self {
+        let conv_elems = n_layers * (d_conv - 1) * conv_channels;
+        let state_elems = n_layers * dt_rank * d_state * d_state;
+        let store = Region::zeroed((conv_elems + state_elems) * 2);
+        let shared = allpaka_backend::gpu::wrap_region(store.as_bytes());
+        Self {
+            store,
+            conv_elems,
+            state_elems,
+            shared,
+            conv_channels,
+            d_conv,
+            dt_rank,
+            d_state,
+        }
+    }
+
+    fn floats(&self) -> &[f32] {
+        let s = self.store.as_slice();
+        unsafe { std::slice::from_raw_parts(s.as_ptr() as *const f32, s.len() / 2) }
+    }
+
+    fn floats_mut(&mut self) -> &mut [f32] {
+        let s = self.store.as_mut_slice();
+        unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr() as *mut f32, s.len() / 2) }
+    }
+
+    /// Every layer's conv windows, `n_layers * (d_conv-1) * conv_channels`.
+    pub fn conv_all_mut(&mut self) -> &mut [f32] {
+        let n = self.conv_elems;
+        &mut self.floats_mut()[..n]
+    }
+
+    /// Every layer's deltanet states, after the conv half.
+    pub fn state_all_mut(&mut self) -> &mut [f32] {
+        let (c, s) = (self.conv_elems, self.state_elems);
+        &mut self.floats_mut()[c..c + s]
+    }
+
+    /// Both halves at once, disjoint (the recurrence touches window and
+    /// state in the same loop).
+    pub fn both_mut(&mut self) -> (&mut [f32], &mut [f32]) {
+        let c = self.conv_elems;
+        let all = self.floats_mut();
+        let (conv, state) = all.split_at_mut(c);
+        (conv, state)
+    }
+
+    /// A copy of the whole recurrent state (conv windows + deltanet
+    /// states), for the serve prompt cache: unlike the KV cache, the
+    /// recurrence cannot be rolled back by truncating, so a prefix hit has
+    /// to restore a snapshot taken at that prefix's end.
+    pub fn snapshot(&self) -> Vec<f32> {
+        self.floats()[..self.conv_elems + self.state_elems].to_vec()
+    }
+
+    /// Restore a [`snapshot`]; the slice must come from the same-shaped
+    /// cache (same layer count and dims).
+    pub fn restore(&mut self, snap: &[f32]) {
+        assert_eq!(
+            snap.len(),
+            self.conv_elems + self.state_elems,
+            "ssm snapshot shape mismatch"
+        );
+        self.floats_mut()[..snap.len()].copy_from_slice(snap);
+    }
+
+    /// This layer's conv window rows, `(d_conv - 1) * conv_channels`.
+    pub fn conv_layer(&mut self, layer: usize) -> &mut [f32] {
+        let n = (self.d_conv - 1) * self.conv_channels;
+        let at = layer * n;
+        &mut self.conv_all_mut()[at..at + n]
+    }
+
+    /// This layer's deltanet state, `dt_rank * d_state * d_state`.
+    pub fn state_layer(&mut self, layer: usize) -> &mut [f32] {
+        let n = self.dt_rank * self.d_state * self.d_state;
+        let at = layer * n;
+        &mut self.state_all_mut()[at..at + n]
+    }
+
+    /// The wrapped region for the GDN decode kernels. Conv window of layer
+    /// `i` sits at element offset `i * (d_conv-1) * conv_channels`, its
+    /// deltanet state at `conv_elems + i * dt_rank * d_state * d_state`.
+    pub fn gpu_view(&mut self) -> Option<&allpaka_backend::gpu::SharedRegion> {
+        if self.shared.is_none() {
+            self.shared = allpaka_backend::gpu::wrap_region(self.store.as_bytes());
+        }
+        self.shared.as_ref()
+    }
+
+    /// Element offset of a layer's deltanet state inside the region.
+    pub fn state_off(&self, layer: usize) -> usize {
+        self.conv_elems + layer * self.dt_rank * self.d_state * self.d_state
+    }
+
+    /// Element offset of a layer's conv window inside the region.
+    pub fn conv_off(&self, layer: usize) -> usize {
+        layer * (self.d_conv - 1) * self.conv_channels
+    }
+}
+
+/// Per-position K and V for one transformer layer: `kv_dim` floats each.
 /// Half precision costs nothing measurable in the logits - attention scores
 /// are exponentiated and normalised, and llama.cpp caches f16 by default -
 /// and halves the one tensor that is both written and fully re-read every

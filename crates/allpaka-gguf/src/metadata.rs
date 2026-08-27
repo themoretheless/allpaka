@@ -81,6 +81,9 @@ pub(crate) enum Value {
     Str(String),
     /// A string array the caller asked to keep (vocabulary, merges).
     StrArray(Vec<String>),
+    /// A small u32 array (rope dimension sections and the like); large
+    /// arrays are still skipped rather than materialised.
+    U32Array(Vec<u32>),
     /// Arrays are otherwise skipped rather than materialised - most are large
     /// and nothing reads them.
     Skipped,
@@ -131,6 +134,22 @@ impl Header {
             Value::Float(v) => Some(*v as f32),
             Value::Uint(v) => Some(*v as f32),
             Value::Int(v) => Some(*v as f32),
+            _ => None,
+        }
+    }
+
+    /// A small u32 array field by full key, e.g. `qwen35moe.rope.dimension_sections`.
+    pub(crate) fn field_u32_arr(&self, key: &str) -> Option<&[u32]> {
+        match self.field(key)? {
+            Value::U32Array(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// A string field by full key, e.g. `tokenizer.chat_template`.
+    pub(crate) fn field_str(&self, key: &str) -> Option<&str> {
+        match self.field(key)? {
+            Value::Str(v) => Some(v),
             _ => None,
         }
     }
@@ -292,6 +311,16 @@ fn read_value(r: &mut (impl Read + Seek), keep_array: bool) -> Result<Value> {
             Value::StrArray(items)
         }
         9 => {
+            let elem_type = read_u32(r)?;
+            let len = read_u64(r)?;
+            if elem_type == 4 && len <= 1024 {
+                let mut items = Vec::with_capacity(len as usize);
+                for _ in 0..len {
+                    items.push(read_u32(r)?);
+                }
+                return Ok(Value::U32Array(items));
+            }
+            r.seek(SeekFrom::Current(-12i64))?;
             skip_array(r)?;
             Value::Skipped
         }

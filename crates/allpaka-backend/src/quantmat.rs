@@ -346,6 +346,7 @@ impl<'a> QuantMat<'a> {
         k_norm: Option<&[f32]>,
         ropes: &[[f32; 2]],
         rot_dim: usize,
+        gate_in_q: bool,
         attn_bias: Option<(&[u8], &[u8], &[u8])>,
         eps: f32,
         cache: &crate::gpu::SharedRegion,
@@ -367,6 +368,7 @@ impl<'a> QuantMat<'a> {
             k_norm,
             ropes,
             rot_dim,
+            gate_in_q,
             attn_bias,
             eps,
             cache,
@@ -378,6 +380,52 @@ impl<'a> QuantMat<'a> {
             n_kv_heads,
             base,
             scale,
+            fusion,
+        })
+    }
+
+    /// A prefill chunk of one gated-delta-net layer; see
+    /// `gpu::prefill_gdn_block`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prefill_gdn_block(
+        wqkv: &QuantMat,
+        zgate: &QuantMat,
+        alpha: &QuantMat,
+        beta: &QuantMat,
+        conv1d_raw: &[u8],
+        a: &[f32],
+        dt: &[f32],
+        ssm_norm: &[f32],
+        ssm_out: &QuantMat,
+        dims: (usize, usize, usize, usize),
+        hidden: usize,
+        m: usize,
+        eps: f32,
+        ssm: &crate::gpu::SharedRegion,
+        offs: (usize, usize),
+        fusion: Option<crate::gpu::PrefillFusion>,
+    ) -> Option<Vec<f32>> {
+        let (heads_k, heads_v, d, d_conv) = dims;
+        crate::gpu::prefill_gdn_block(&crate::gpu::PrefillGdnReq {
+            wqkv: (wqkv.ty, wqkv.data, wqkv.n_out),
+            zgate: (zgate.ty, zgate.data, zgate.n_out),
+            alpha: alpha.data,
+            beta: beta.data,
+            conv1d: conv1d_raw,
+            a,
+            dt,
+            ssm_norm,
+            ssm_out: (ssm_out.ty, ssm_out.data, ssm_out.n_out),
+            heads_k,
+            heads_v,
+            d,
+            d_conv,
+            hidden,
+            m,
+            eps,
+            ssm,
+            conv_off: offs.0,
+            state_off: offs.1,
             fusion,
         })
     }
@@ -398,14 +446,15 @@ impl<'a> QuantMat<'a> {
         tok: &[u32],
         total_rows: usize,
         fused: Option<crate::gpu::GroupedCombine>,
-        shared: Option<(&QuantMat, &QuantMat, &QuantMat)>,
+        shared: Option<(&QuantMat, &QuantMat, &QuantMat, Option<&QuantMat>)>,
         route: Option<crate::gpu::GroupedRoute>,
     ) -> Option<Vec<f32>> {
-        let shared = shared.map(|(g, u, d)| crate::gpu::GroupedShared {
+        let shared = shared.map(|(g, u, d, go)| crate::gpu::GroupedShared {
             gate: (g.ty, g.data),
             up: (u.ty, u.data),
             down: (d.ty, d.data),
             ffn: g.n_out,
+            gate_out: go.map(|g| (g.ty, g.data)),
         });
         crate::gpu::ffn_batch_grouped(&crate::gpu::GroupedFfnReq {
             gate: (gate.ty, gate.data),

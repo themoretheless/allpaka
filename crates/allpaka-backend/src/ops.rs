@@ -124,6 +124,75 @@ pub fn silu(x: f32) -> f32 {
     x / (1.0 + (-x).exp())
 }
 
+/// L2 normalisation to unit norm, like `ggml_l2_norm`: `x / sqrt(sum(x^2) + eps)`.
+pub fn l2_norm(x: &mut [f32], eps: f32) {
+    let s: f32 = x.iter().map(|v| v * v).sum();
+    let inv = 1.0 / (s + eps).sqrt();
+    for v in x.iter_mut() {
+        *v *= inv;
+    }
+}
+
+/// `ln(1 + e^x)`, the delta-net's dt activation.
+pub fn softplus(x: f32) -> f32 {
+    if x > 20.0 {
+        x
+    } else {
+        (1.0 + x.exp()).ln()
+    }
+}
+
+/// One gated-delta-net step over `heads` value-heads of `d`-dimensional state
+/// (llama.cpp `build_delta_net_autoregressive` /
+/// `kernel_gated_delta_net_impl` semantics):
+///
+/// ```text
+/// S *= exp(g);  sk = S . k;  d = (v - sk) * beta;  S += k . d;  y = (S . q) / sqrt(d)
+/// ```
+///
+/// `state` is `heads` row-major `d x d` matrices; q and k carry `heads_k`
+/// heads, mapped onto the value heads as `h % heads_k` (qwen35moe: 32
+/// value heads over 16 key heads).
+#[allow(clippy::too_many_arguments)]
+pub fn gated_deltanet_step(
+    state: &mut [f32],
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    gate: &[f32],
+    beta: &[f32],
+    out: &mut [f32],
+) {
+    let heads = gate.len();
+    let d = v.len() / heads;
+    let heads_k = k.len() / d;
+    assert_eq!(state.len(), heads * d * d);
+    assert_eq!(q.len(), heads_k * d);
+    assert_eq!(out.len(), v.len());
+    let scale = 1.0 / (d as f32).sqrt();
+    for h in 0..heads {
+        let kh = h % heads_k;
+        let g = gate[h].exp();
+        let b = beta[h];
+        let s = &mut state[h * d * d..(h + 1) * d * d];
+        for i in 0..d {
+            let row = &mut s[i * d..(i + 1) * d];
+            let mut sk = 0.0f32;
+            for j in 0..d {
+                row[j] *= g;
+                sk += row[j] * k[kh * d + j];
+            }
+            let delta = (v[h * d + i] - sk) * b;
+            let mut y = 0.0f32;
+            for j in 0..d {
+                row[j] += k[kh * d + j] * delta;
+                y += row[j] * q[kh * d + j];
+            }
+            out[h * d + i] = y * scale;
+        }
+    }
+}
+
 /// Sigmoid in place over one row: the GLM-family MoE router scores each
 /// expert independently instead of softmaxing across them.
 pub fn sigmoid(x: &mut [f32]) {
@@ -651,4 +720,88 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
         total += x * y;
     }
     total
+}
+
+#[cfg(test)]
+mod gdn_tests {
+    use super::*;
+
+    /// The gated-delta-net step, written out independently from the
+    /// llama.cpp autoregressive formula with explicit temporaries:
+    /// S1 = S*exp(g); sk = S1.k; d = (v-sk)*beta; S2 = S1 + k.d; y = S2.q/sqrt(d).
+    fn reference_step(
+        s0: &[f32], q: &[f32], k: &[f32], v: &[f32], g: f32, b: f32, d: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut s1 = s0.to_vec();
+        for x in s1.iter_mut() {
+            *x *= g.exp();
+        }
+        let mut out = vec![0f32; d];
+        let mut s2 = s1.clone();
+        for i in 0..d {
+            let mut sk = 0.0f32;
+            for j in 0..d {
+                sk += s1[i * d + j] * k[j];
+            }
+            let delta = (v[i] - sk) * b;
+            for j in 0..d {
+                s2[i * d + j] += k[j] * delta;
+                out[i] += s2[i * d + j] * q[j];
+            }
+            out[i] /= (d as f32).sqrt();
+        }
+        (s2, out)
+    }
+
+    #[test]
+    fn deltanet_step_matches_the_independent_formula() {
+        let (heads, d) = (3usize, 8usize);
+        let mut seed = 0x5eedu64;
+        let mut rnd = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((seed >> 40) as u32) as f32 / (1u64 << 24) as f32 - 0.5
+        };
+        let state0: Vec<f32> = (0..heads * d * d).map(|_| rnd()).collect();
+        let q: Vec<f32> = (0..heads * d).map(|_| rnd()).collect();
+        let k: Vec<f32> = (0..heads * d).map(|_| rnd()).collect();
+        let v: Vec<f32> = (0..heads * d).map(|_| rnd()).collect();
+        let gate: Vec<f32> = (0..heads).map(|_| rnd()).collect();
+        let beta: Vec<f32> = (0..heads).map(|_| rnd().abs()).collect();
+
+        let mut state = state0.clone();
+        let mut out = vec![0f32; heads * d];
+        gated_deltanet_step(&mut state, &q, &k, &v, &gate, &beta, &mut out);
+
+        for h in 0..heads {
+            let (s_ref, o_ref) = reference_step(
+                &state0[h * d * d..(h + 1) * d * d],
+                &q[h * d..(h + 1) * d],
+                &k[h * d..(h + 1) * d],
+                &v[h * d..(h + 1) * d],
+                gate[h],
+                beta[h],
+                d,
+            );
+            for j in 0..d * d {
+                let a = state[h * d * d + j];
+                let b = s_ref[j];
+                assert!((a - b).abs() < 1e-5, "state mismatch h{h} j{j}: {a} vs {b}");
+            }
+            for i in 0..d {
+                let a = out[h * d + i];
+                let b = o_ref[i];
+                assert!((a - b).abs() < 1e-5, "out mismatch h{h} i{i}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn l2_norm_unitizes_and_softplus_is_stable() {
+        let mut x = vec![3.0f32, 4.0];
+        l2_norm(&mut x, 1e-6);
+        let n: f32 = x.iter().map(|v| v * v).sum();
+        assert!((n - 1.0).abs() < 1e-5);
+        assert_eq!(softplus(50.0), 50.0);
+        assert!((softplus(0.0) - std::f32::consts::LN_2).abs() < 1e-6);
+    }
 }

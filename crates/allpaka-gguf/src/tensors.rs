@@ -194,6 +194,16 @@ impl GgufFile {
         self.header.field_u32(key).map(|v| v != 0)
     }
 
+    /// A small u32 array metadata field by full key.
+    pub fn meta_u32_arr(&self, key: &str) -> Option<&[u32]> {
+        self.header.field_u32_arr(key)
+    }
+
+    /// A string metadata field by full key, e.g. `"tokenizer.chat_template"`.
+    pub fn meta_str(&self, key: &str) -> Option<&str> {
+        self.header.field_str(key)
+    }
+
     /// The vocabulary pieces, when the file carries a tokenizer.
     pub fn vocab_tokens(&self) -> Option<&[String]> {
         self.header.tokens.as_deref()
