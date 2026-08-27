@@ -327,6 +327,10 @@ GPU-тесты и smoke-тесты скипаются там, где нет Meta
 `.github/workflows/ci.yml` (macos-14, `cargo test --workspace` на push).
 Полное покрытие (реальные кернелы + end-to-end RAG) даёт локальный прогон.
 
+Оптимизации MoE-prefill под Metal (GPU-роутинг, fused SwiGLU, замеры против
+llama.cpp, список фальсифицированных идей) задокументированы в
+[docs/moe-prefill.md](docs/moe-prefill.md).
+
 ## Откуда берутся числа
 
 - **Веса** - размер файла GGUF на диске. Это честный footprint на выбранной
