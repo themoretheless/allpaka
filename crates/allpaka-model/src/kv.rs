@@ -72,6 +72,14 @@ pub struct SsmCache {
     state_elems: usize,
     /// The same memory, wrapped for the GDN kernels; None without a GPU.
     shared: Option<allpaka_backend::gpu::SharedRegion>,
+    /// Per-row rollback slots for MTP verification: `n_slots` copies of the
+    /// whole [conv | state] region, written per chunk row by the GPU batch
+    /// kernels (and by the CPU fallback) while armed. Restoring slot i rolls
+    /// the recurrence back to "after row i" - the speculative round's
+    /// accepted prefix - without a replay.
+    slot_store: Option<Region>,
+    slot_shared: Option<allpaka_backend::gpu::SharedRegion>,
+    slots_armed: bool,
     pub conv_channels: usize,
     pub d_conv: usize,
     pub dt_rank: usize,
@@ -89,11 +97,80 @@ impl SsmCache {
             conv_elems,
             state_elems,
             shared,
+            slot_store: None,
+            slot_shared: None,
+            slots_armed: false,
             conv_channels,
             d_conv,
             dt_rank,
             d_state,
         }
+    }
+
+    /// Elements of the whole region (conv + state); one slot's stride.
+    pub fn total_elems(&self) -> usize {
+        self.conv_elems + self.state_elems
+    }
+
+    /// Allocate (once) and arm the rollback slots for a speculative verify.
+    /// The buffer is `slots` whole-region copies; re-arming a smaller count
+    /// reuses it.
+    pub fn arm_slots(&mut self, slots: usize) {
+        if self.slot_store.is_none() {
+            let store = Region::zeroed(slots * self.total_elems() * 2);
+            self.slot_shared = allpaka_backend::gpu::wrap_region(store.as_bytes());
+            self.slot_store = Some(store);
+        }
+        self.slots_armed = true;
+    }
+
+    /// Stop writing slots (the next plain prefill leaves them stale).
+    pub fn disarm_slots(&mut self) {
+        self.slots_armed = false;
+    }
+
+    /// Both GPU regions in one borrow for the fused prefill: the state
+    /// region (wrapped if needed) and the armed rollback slots.
+    pub fn regions_for_gpu(
+        &mut self,
+    ) -> (
+        Option<&allpaka_backend::gpu::SharedRegion>,
+        Option<(&allpaka_backend::gpu::SharedRegion, usize)>,
+    ) {
+        if self.shared.is_none() {
+            self.shared = allpaka_backend::gpu::wrap_region(self.store.as_bytes());
+        }
+        let slots = self.slots_region();
+        (self.shared.as_ref(), slots)
+    }
+
+    /// The wrapped slot buffer and the slot stride in elements, when armed.
+    pub fn slots_region(&self) -> Option<(&allpaka_backend::gpu::SharedRegion, usize)> {
+        if !self.slots_armed {
+            return None;
+        }
+        Some((self.slot_shared.as_ref()?, self.total_elems()))
+    }
+
+    /// Slot `i` (conv + state after chunk row i).
+    pub fn slot(&self, i: usize) -> &[f32] {
+        let store = self.slot_store.as_ref().expect("slots not allocated");
+        let s = store.as_slice();
+        let floats = unsafe { std::slice::from_raw_parts(s.as_ptr() as *const f32, s.len() / 2) };
+        let n = self.total_elems();
+        &floats[i * n..(i + 1) * n]
+    }
+
+    /// Roll the recurrence back to "after chunk row `i`": one contiguous
+    /// copy, the slot layout mirrors the region.
+    pub fn restore_slot(&mut self, i: usize) {
+        let n = self.total_elems();
+        unsafe {
+            let sp = self.slot(i).as_ptr();
+            let dp = self.store.as_mut_slice().as_mut_ptr() as *mut f32;
+            std::ptr::copy_nonoverlapping(sp, dp, n);
+        }
+        self.slots_armed = false;
     }
 
     fn floats(&self) -> &[f32] {
@@ -133,6 +210,45 @@ impl SsmCache {
     /// to restore a snapshot taken at that prefix's end.
     pub fn snapshot(&self) -> Vec<f32> {
         self.floats()[..self.conv_elems + self.state_elems].to_vec()
+    }
+
+    /// Raw pointers for the CPU path's per-row slot write: this layer's
+    /// conv/state source pointers (already offset), the slot buffer base,
+    /// and the geometry (conv_off, state_off, n_conv, n_state, slot
+    /// stride). Addresses are stable for the region's lifetime; the caller
+    /// must not outlive the cache.
+    #[allow(clippy::type_complexity)]
+    pub fn slot_write_ptrs(
+        &mut self,
+        li: usize,
+    ) -> Option<(*const f32, *const f32, *mut f32, usize, usize, usize, usize, usize)> {
+        if !self.slots_armed {
+            return None;
+        }
+        let n_conv = (self.d_conv - 1) * self.conv_channels;
+        let n_state = self.dt_rank * self.d_state * self.d_state;
+        let conv_off = li * n_conv;
+        let state_off = self.conv_elems + li * n_state;
+        let total = self.total_elems();
+        unsafe {
+            let sp = self.store.as_slice().as_ptr() as *const f32;
+            let dp = self
+                .slot_store
+                .as_mut()
+                .expect("slots armed without buffer")
+                .as_mut_slice()
+                .as_mut_ptr() as *mut f32;
+            Some((
+                sp.add(conv_off),
+                sp.add(state_off),
+                dp,
+                conv_off,
+                state_off,
+                n_conv,
+                n_state,
+                total,
+            ))
+        }
     }
 
     /// Restore a [`snapshot`]; the slice must come from the same-shaped
@@ -291,6 +407,23 @@ impl KvCache {
         assert_eq!(k.len(), self.kv_dim);
         assert_eq!(v.len(), self.kv_dim);
         assert!(pos >= self.len, "position {pos} is already sealed");
+        assert!(pos < self.capacity, "position {pos} past capacity {}", self.capacity);
+        let at = pos * self.kv_dim;
+        let (kr, vr) = (self.k_range(layer), self.v_range(layer));
+        let kv_dim = self.kv_dim;
+        let store = self.store.as_mut_slice();
+        ops::f16::from_f32(k, &mut store[kr.start + at..kr.start + at + kv_dim]);
+        ops::f16::from_f32(v, &mut store[vr.start + at..vr.start + at + kv_dim]);
+    }
+
+    /// Store at an explicit position that may already be sealed. Only for
+    /// the MTP draft layer's slot: the trunk's verify batch seals positions
+    /// in the trunk layers, and the MTP block appends its own layer at the
+    /// same positions afterwards. Truncated positions are rewritten, never
+    /// read past `len`, so no clearing is needed.
+    pub fn store_at_rewrite(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) {
+        assert_eq!(k.len(), self.kv_dim);
+        assert_eq!(v.len(), self.kv_dim);
         assert!(pos < self.capacity, "position {pos} past capacity {}", self.capacity);
         let at = pos * self.kv_dim;
         let (kr, vr) = (self.k_range(layer), self.v_range(layer));

@@ -16,6 +16,8 @@ use std::path::Path;
 pub enum GgmlType {
     F32,
     F16,
+    /// bfloat16 (ggml id 30): the qwen35moe MTP block's router weights.
+    BF16,
     Q5_0,
     Q8_0,
     Q2K,
@@ -31,6 +33,7 @@ impl GgmlType {
         match id {
             0 => GgmlType::F32,
             1 => GgmlType::F16,
+            30 => GgmlType::BF16,
             6 => GgmlType::Q5_0,
             8 => GgmlType::Q8_0,
             10 => GgmlType::Q2K,
@@ -45,7 +48,7 @@ impl GgmlType {
     /// Elements per quantisation block.
     pub fn block_elements(self) -> Option<u64> {
         match self {
-            GgmlType::F32 | GgmlType::F16 => Some(1),
+            GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 => Some(1),
             GgmlType::Q5_0 | GgmlType::Q8_0 => Some(32),
             GgmlType::Q2K | GgmlType::Q3K | GgmlType::Q4K | GgmlType::Q5K | GgmlType::Q6K => {
                 Some(256)
@@ -58,7 +61,7 @@ impl GgmlType {
     pub fn block_bytes(self) -> Option<u64> {
         match self {
             GgmlType::F32 => Some(4),
-            GgmlType::F16 => Some(2),
+            GgmlType::F16 | GgmlType::BF16 => Some(2),
             // f16 scale + 32 int8 values.
             GgmlType::Q8_0 => Some(34),
             // f16 scale + 32 high bits + 16 nibble bytes.

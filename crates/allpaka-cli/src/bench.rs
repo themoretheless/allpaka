@@ -409,6 +409,120 @@ pub fn measure_engine(model_path: &std::path::Path, draft_path: Option<&std::pat
             let at = emitted.iter().zip(&plain).position(|(a, b)| a != b);
             anyhow::bail!("speculative stream DIVERGED from plain greedy at {at:?}");
         }
+    } else if model.config.nextn {
+        // Native MTP speculation: the draft is the model's own nextn block,
+        // no second model. Same harness as the draft path - the emitted
+        // stream must be a bit-exact copy of plain greedy.
+        let k: usize = std::env::var("ALLPAKA_DRAFT_K")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4);
+        let tok = allpaka_model::Tokenizer::from_gguf(&file)?;
+        let spec_prompt = tok.encode(
+            "The history of computing began long before electronics. Mechanical \
+             calculators appeared in the seventeenth century, and by the nineteenth \
+             century Charles Babbage had designed a programmable machine. His \
+             analytical engine was never completed, but the ideas behind it - a \
+             store for numbers, a mill for arithmetic, and cards carrying the \
+             program - anticipated the structure of the modern computer in",
+        )?;
+        let hidden = model.config.hidden as usize;
+        let mut ts = model.new_session_mtp(spec_prompt.len() + 64 + k + 1);
+        let xs = model.forward_batch_hidden(&spec_prompt, &mut ts)?;
+        let plain_logits =
+            model.lm_head(&model.output_normed(&xs[(spec_prompt.len() - 1) * hidden..]))?;
+        let prefill_end = ts.pos();
+        let mut plain = Vec::new();
+        let mut logits = plain_logits.clone();
+        let t_plain = std::time::Instant::now();
+        for _ in 0..decode_tokens {
+            let next = logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, _)| i as u32)
+                .unwrap_or(0);
+            if std::env::var_os("ALLPAKA_PLAIN_DEBUG").is_some() {
+                let mut top: Vec<(u32, f32)> = logits
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| (i as u32, v))
+                    .collect();
+                top.sort_by(|a, b| b.1.total_cmp(&a.1));
+                eprintln!(
+                    "plain @{}: {} (gap {:.6}, runner {} = {:.6})",
+                    plain.len(),
+                    next,
+                    top[0].1 - top[1].1,
+                    top[1].0,
+                    top[1].1 - top[0].1,
+                );
+            }
+            plain.push(next);
+            logits = model.forward(next, &mut ts)?;
+        }
+        let plain_secs = t_plain.elapsed().as_secs_f64();
+        println!(
+            "  plain on the same text: {:>4} tok in {plain_secs:>6.2} s   {:>7.1} tok/s",
+            plain.len(),
+            plain.len() as f64 / plain_secs,
+        );
+
+        // The speculative run from a fresh session (the plain pass advanced
+        // the irreversible GDN state; re-prefill instead of rolling back).
+        let mut ss = model.new_session_mtp(spec_prompt.len() + 64 + k + 1);
+        let xs = model.forward_batch_hidden(&spec_prompt, &mut ss)?;
+        let h0 = model.output_normed(&xs[(spec_prompt.len() - 1) * hidden..]);
+        let mut spec = allpaka_model::speculate::MtpSpeculator {
+            model: &model,
+            session: &mut ss,
+            k,
+            h: h0,
+        };
+        let mut next = plain_logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, _)| i as u32)
+            .unwrap_or(0);
+        let mut emitted = Vec::new();
+        let mut drafted = 0usize;
+        let mut accepted = 0usize;
+        let t2 = std::time::Instant::now();
+        while emitted.len() < decode_tokens {
+            let round = spec.round(next)?;
+            emitted.extend_from_slice(&round.emitted);
+            drafted += round.drafted;
+            accepted += round.accepted;
+            next = round.next;
+        }
+        let spec_secs = t2.elapsed().as_secs_f64();
+        emitted.truncate(decode_tokens);
+
+        let rate = emitted.len() as f64 / spec_secs;
+        println!(
+            "  mtp speculative (k={k}): {:>4} tok in {spec_secs:>6.2} s   {rate:>7.1} tok/s, \
+             acceptance {accepted}/{drafted} ({:.0}%)",
+            emitted.len(),
+            accepted as f64 / drafted.max(1) as f64 * 100.0,
+        );
+        if emitted == plain {
+            println!("  mtp stream matches plain greedy: PASS");
+        } else {
+            let at = emitted.iter().zip(&plain).position(|(a, b)| a != b);
+            if let Some(i) = at {
+                eprintln!(
+                    "  divergence @{}: spec {} vs plain {} (ctx spec {:?} vs plain {:?})",
+                    i,
+                    emitted[i],
+                    plain[i],
+                    &emitted[i.saturating_sub(4)..i],
+                    &plain[i.saturating_sub(4)..i],
+                );
+            }
+            anyhow::bail!("mtp stream DIVERGED from plain greedy at {at:?}");
+        }
+        let _ = prefill_end;
     }
     Ok(())
 }

@@ -601,11 +601,32 @@ pub struct Model<'a> {
     pub config: Config,
     embd: QuantMat<'a>,
     layers: Vec<Layer<'a>>,
+    /// The MTP (nextn) speculative block past the trunk, when the GGUF
+    /// carries one (qwen35moe with nextn_predict_layers).
+    mtp: Option<MtpLayer<'a>>,
     output_norm: Vec<f32>,
     output_norm_raw: &'a [u8],
     output: QuantMat<'a>,
     /// `base^(-2i/d)` per rotary pair, hoisted out of the per-head loops.
     rope_inv_freq: Vec<f32>,
+}
+
+/// The MTP block (llama.cpp graph_mtp): one full-attention transformer layer
+/// whose input is [enorm(emb(next)) | hnorm(trunk hidden)] projected by
+/// eh_proj, and whose output feeds the trunk's LM head via shared_head_norm.
+/// A nextn.shared_head_head / nextn.embed_tokens pair is absent in the
+/// Qwen3.6 GGUF, so the trunk head and embedding are reused.
+struct MtpLayer<'a> {
+    attn_norm: Vec<f32>,
+    attn: AttnWeights<'a>,
+    q_norm: Option<Vec<f32>>,
+    k_norm: Option<Vec<f32>>,
+    ffn_norm: Vec<f32>,
+    ffn: Ffn<'a>,
+    eh_proj: QuantMat<'a>,
+    enorm: Vec<f32>,
+    hnorm: Vec<f32>,
+    shared_head_norm: Vec<f32>,
 }
 
 /// Mutable decode state: the cache plus the implicit position.
@@ -772,15 +793,94 @@ impl<'a> Model<'a> {
             qmat(f, "token_embd.weight", config.vocab as usize, hidden)?
         };
 
+        // The MTP speculative block (blk.n_layers.*), when present: a
+        // full-attention layer plus the nextn input/output glue.
+        let mtp = if config.nextn {
+            let i = config.n_layers;
+            let name = |part: &str| format!("blk.{i}.{part}.weight");
+            let q_dim = config.q_dim();
+            let kv_dim = config.kv_dim();
+            let gate_in_q = f
+                .tensor(&name("attn_q"))
+                .is_some_and(|t| t.dims.len() == 2 && t.dims[1] == 2 * q_dim as u64);
+            let attn = AttnWeights {
+                wq: qmat(f, &name("attn_q"), if gate_in_q { 2 * q_dim } else { q_dim }, hidden)?,
+                wk: qmat(f, &name("attn_k"), kv_dim, hidden)?,
+                wv: qmat(f, &name("attn_v"), kv_dim, hidden)?,
+                wo: qmat(f, &name("attn_output"), hidden, q_dim)?,
+                gate_in_q,
+            };
+            let ffn = match &config.moe {
+                Some(moe) => moe_ffn(f, &name, moe, hidden)?,
+                None => {
+                    let ffn = config.ffn_hidden as usize;
+                    Ffn::Dense {
+                        w_gate: qmat(f, &name("ffn_gate"), ffn, hidden)?,
+                        w_up: qmat(f, &name("ffn_up"), ffn, hidden)?,
+                        w_down: qmat(f, &name("ffn_down"), hidden, ffn)?,
+                    }
+                }
+            };
+            Some(MtpLayer {
+                attn_norm: norm_vec(f, &name("attn_norm"), hidden)?,
+                attn,
+                q_norm: if config.has_qk_norm {
+                    Some(norm_vec(f, &name("attn_q_norm"), config.head_dim as usize)?)
+                } else {
+                    None
+                },
+                k_norm: if config.has_qk_norm {
+                    Some(norm_vec(f, &name("attn_k_norm"), config.head_dim as usize)?)
+                } else {
+                    None
+                },
+                ffn_norm: norm_vec(f, &name("post_attention_norm"), hidden)?,
+                ffn,
+                eh_proj: qmat(f, &name("nextn.eh_proj"), hidden, 2 * hidden)?,
+                enorm: norm_vec(f, &name("nextn.enorm"), hidden)?,
+                hnorm: norm_vec(f, &name("nextn.hnorm"), hidden)?,
+                shared_head_norm: match f.tensor(&name("nextn.shared_head_norm")) {
+                    Some(_) => norm_vec(f, &name("nextn.shared_head_norm"), hidden)?,
+                    None => norm_vec(f, "output_norm.weight", hidden)?,
+                },
+            })
+        } else {
+            None
+        };
+
         Ok(Model {
             embd: qmat(f, "token_embd.weight", config.vocab as usize, hidden)?,
             output_norm: norm_vec(f, "output_norm.weight", hidden)?,
             output_norm_raw: norm_raw(f, "output_norm.weight"),
             layers,
+            mtp,
             output,
             rope_inv_freq: ops::rope_inv_freq(config.rope_dim as usize, config.rope_freq_base),
             config,
         })
+    }
+
+    /// A session whose KV cache has one extra layer for the MTP block
+    /// (index n_layers); plain sessions do not pay for it.
+    pub fn new_session_mtp(&self, context_tokens: usize) -> Session {
+        Session {
+            kv: KvCache::new(
+                self.config.n_layers as usize + self.config.nextn as usize,
+                self.config.kv_dim(),
+                context_tokens,
+            ),
+            rope_cache: Vec::new(),
+            rope_cache_pairs: self.config.rope_dim as usize / 2,
+            ssm: self.config.ssm.as_ref().map(|s| {
+                crate::kv::SsmCache::new(
+                    self.config.n_layers as usize,
+                    s.d_conv as usize,
+                    (s.d_inner + 2 * (s.n_group * s.d_state)) as usize,
+                    s.dt_rank as usize,
+                    s.d_state as usize,
+                )
+            }),
+        }
     }
 
     pub fn new_session(&self, context_tokens: usize) -> Session {
@@ -832,8 +932,11 @@ impl<'a> Model<'a> {
         let d_conv = ssm.d_conv as usize;
         let eps = c.rms_eps;
 
-        let mut qkv = g.wqkv.matmul(hs, m)?;
-        let z = g.zgate.matmul(hs, m)?;
+        // The two Q8_0 projections batch into one GPU submission; the F32
+        // alpha/beta run on the CPU (the grouped GPU path excludes F32).
+        let mut parts = QuantMat::matmul_many(&[(&g.wqkv, hs), (&g.zgate, hs)])?;
+        let z = parts.pop().expect("z");
+        let mut qkv = parts.pop().expect("qkv");
         let beta = g.beta.matmul(hs, m)?;
         let alpha = g.alpha.matmul(hs, m)?;
         trace("qkv_mixed", li, &qkv);
@@ -844,6 +947,10 @@ impl<'a> Model<'a> {
         let st = s.ssm.as_mut().expect("gdn session without ssm cache");
         let n_conv = (st.d_conv - 1) * st.conv_channels;
         let n_state = st.dt_rank * st.d_state * st.d_state;
+        // MTP rollback slots: when armed, every row's window and state are
+        // also mirrored into the row's slot (same pointers the slices below
+        // alias; the copy happens once per row inside the loop).
+        let slot_ptrs = st.slot_write_ptrs(li);
         let (conv_all, state_all) = st.both_mut();
         let conv = &mut conv_all[li * n_conv..(li + 1) * n_conv];
         let state = &mut state_all[li * n_state..(li + 1) * n_state];
@@ -911,6 +1018,14 @@ impl<'a> Model<'a> {
                     *y *= ops::silu(zv);
                 }
             }
+            // MTP rollback slot: this row's window and state, mirrored.
+            if let Some((cp, sp, dp, conv_off, state_off, ncv, nst, total)) = slot_ptrs {
+                unsafe {
+                    let slot = dp.add(i * total);
+                    std::ptr::copy_nonoverlapping(cp, slot.add(conv_off), ncv);
+                    std::ptr::copy_nonoverlapping(sp, slot.add(state_off), nst);
+                }
+            }
             if i == 0 {
                 trace("final_out", li, &out[..value_dim]);
             }
@@ -966,9 +1081,126 @@ impl<'a> Model<'a> {
         self.output.matmul(&last, 1)
     }
 
+    /// rmsnorm(row, output_norm): the trunk's final hidden in the form the
+    /// MTP block's hnorm expects (llama's t_h_nextn).
+    pub fn output_normed(&self, row: &[f32]) -> Vec<f32> {
+        let mut v = row.to_vec();
+        ops::rmsnorm(&mut v, &self.output_norm, self.config.rms_eps);
+        v
+    }
+
+    /// The LM head over an already output-normed hidden row.
+    pub fn lm_head(&self, normed: &[f32]) -> Result<Vec<f32>> {
+        self.output.matmul(normed, 1)
+    }
+
+    /// One MTP draft step (qwen35moe nextn): run `token` through the MTP
+    /// block at the explicit position `pos` and return (logits, h_out).
+    /// `h_prev` seeds the chain (the trunk's output-normed hidden; later
+    /// steps take the previous step's h_out). The step writes only the MTP
+    /// layer's KV slot (index n_layers) at `pos` - the shared position
+    /// counter stays with the trunk's verify batch.
+    pub fn mtp_step(&self, h_prev: &[f32], token: u32, pos: usize, s: &mut Session) -> Result<(Vec<f32>, Vec<f32>)> {
+        let c = &self.config;
+        let m = self.mtp.as_ref().expect("mtp_step without an mtp block");
+        let head_dim = c.head_dim as usize;
+        if token >= c.vocab {
+            bail!("token {token} out of vocabulary {}", c.vocab);
+        }
+
+        // eh_proj([enorm(emb(token)) | hnorm(h_prev)]).
+        let mut e = self.embd.row(token as usize)?;
+        ops::rmsnorm(&mut e, &m.enorm, c.rms_eps);
+        let mut hn = h_prev.to_vec();
+        ops::rmsnorm(&mut hn, &m.hnorm, c.rms_eps);
+        let mut cat = e;
+        cat.extend_from_slice(&hn);
+        let mut x = m.eh_proj.matmul(&cat, 1)?;
+
+        // Attention, identical to a trunk full-attention decode step.
+        let aw = &m.attn;
+        let mut h = x.clone();
+        ops::rmsnorm(&mut h, &m.attn_norm, c.rms_eps);
+        let mut qkv = QuantMat::matmul_many(&[
+            (&aw.wq, h.as_slice()),
+            (&aw.wk, h.as_slice()),
+            (&aw.wv, h.as_slice()),
+        ])?;
+        let mut v = qkv.pop().expect("v");
+        let mut k = qkv.pop().expect("k");
+        let mut q = qkv.pop().expect("q");
+        let gate: Vec<f32> = if aw.gate_in_q {
+            let mut gq = Vec::with_capacity(c.q_dim());
+            let mut gg = Vec::with_capacity(c.q_dim());
+            for h in 0..c.n_heads as usize {
+                gq.extend_from_slice(&q[h * 2 * head_dim..h * 2 * head_dim + head_dim]);
+                gg.extend_from_slice(&q[h * 2 * head_dim + head_dim..(h + 1) * 2 * head_dim]);
+            }
+            q = gq;
+            gg
+        } else {
+            Vec::new()
+        };
+        let rope_pairs = s.rope_cache(&self.rope_inv_freq, pos, 1).to_vec();
+        for head in q.chunks_mut(head_dim) {
+            if let Some(w) = &m.q_norm {
+                ops::rmsnorm(head, w, c.rms_eps);
+            }
+            self.rope_from_arrays(head, &rope_pairs);
+        }
+        for head in k.chunks_mut(head_dim) {
+            if let Some(w) = &m.k_norm {
+                ops::rmsnorm(head, w, c.rms_eps);
+            }
+            self.rope_from_arrays(head, &rope_pairs);
+        }
+        let li = c.n_layers as usize;
+        s.kv.store_at_rewrite(li, pos, &k, &v);
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let mut attn_out = vec![0f32; c.q_dim()];
+        let group_span = c.group_size() * head_dim;
+        let kv = &s.kv;
+        let q_ref = &q;
+        std::thread::scope(|scope| {
+            for (kv_head, out_group) in attn_out.chunks_mut(group_span).enumerate() {
+                scope.spawn(move || {
+                    attend_group(
+                        c, kv, li, pos,
+                        &q_ref[kv_head * group_span..(kv_head + 1) * group_span],
+                        kv_head, out_group, scale,
+                    );
+                });
+            }
+        });
+        if aw.gate_in_q {
+            for (o, &gv) in attn_out.iter_mut().zip(&gate) {
+                *o *= 1.0 / (1.0 + (-gv).exp());
+            }
+        }
+        let projected = aw.wo.matmul(&attn_out, 1)?;
+        for (a, b) in x.iter_mut().zip(&projected) {
+            *a += b;
+        }
+
+        // MoE FFN, the shared head norm, and the trunk LM head (the GGUF
+        // carries no nextn.shared_head_head).
+        let h2 = {
+            let mut h = x.clone();
+            ops::rmsnorm(&mut h, &m.ffn_norm, c.rms_eps);
+            h
+        };
+        let down = m.ffn.forward(&h2)?;
+        for (a, b) in x.iter_mut().zip(&down) {
+            *a += b;
+        }
+        ops::rmsnorm(&mut x, &m.shared_head_norm, c.rms_eps);
+        let logits = self.output.matmul(&x, 1)?;
+        Ok((logits, x))
+    }
+
     /// The shared body of the batch paths: every layer over every position,
     /// returning the residual stream `[m, hidden]` before the output norm.
-    fn forward_batch_hidden(&self, tokens: &[u32], s: &mut Session) -> Result<Vec<f32>> {
+    pub fn forward_batch_hidden(&self, tokens: &[u32], s: &mut Session) -> Result<Vec<f32>> {
         let c = &self.config;
         let m = tokens.len();
         if m == 0 {
@@ -1338,7 +1570,8 @@ impl<'a> Model<'a> {
             let logits = if let Some(g) = &layer.gdn {
                 let ssm = s.ssm.as_mut().expect("gdn layer without ssm cache");
                 let (conv_off, state_off) = (ssm.conv_off(li), ssm.state_off(li));
-                let region = ssm.gpu_view()?;
+                let (region, slots) = ssm.regions_for_gpu();
+                let region = region?;
                 let sc = c.ssm.as_ref().expect("gdn arch");
                 let _s = profile::span(profile::Phase::Attend);
                 QuantMat::prefill_gdn_block(
@@ -1348,6 +1581,7 @@ impl<'a> Model<'a> {
                      sc.d_state as usize, sc.d_conv as usize),
                     hidden, m, c.rms_eps,
                     region,
+                    slots,
                     (conv_off, state_off),
                     fusion,
                 )?
@@ -1510,6 +1744,24 @@ impl<'a> Model<'a> {
         Some(())
     }
 
+    /// [`forward_batch_full`] plus every row's output-normed hidden (the
+    /// LM head's input): MTP speculation needs the trunk hidden at the
+    /// accepted row to seed the next draft round (llama's t_h_nextn).
+    pub fn forward_batch_full_hn(
+        &self,
+        tokens: &[u32],
+        s: &mut Session,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
+        let m = tokens.len();
+        let hidden = self.config.hidden as usize;
+        let mut xs = self.forward_batch_hidden(tokens, s)?;
+        for row in xs.chunks_mut(hidden) {
+            ops::rmsnorm(row, &self.output_norm, self.config.rms_eps);
+        }
+        let logits = self.output.matmul(&xs, m)?;
+        Ok((logits, xs))
+    }
+
     /// Like [`forward_batch`], but returns the logits of EVERY position,
     /// `[m, vocab]` row-major.
     ///
@@ -1538,7 +1790,7 @@ impl<'a> Model<'a> {
         pos: usize,
         argmax: bool,
     ) -> Result<Option<allpaka_backend::gpu::TokenOut>> {
-        use allpaka_backend::gpu::{TokenFfn, TokenGdn, TokenLayer, TokenReq};
+        use allpaka_backend::gpu::TokenReq;
         let c = &self.config;
         let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
         if self.output_norm_raw.is_empty() {
@@ -1546,16 +1798,15 @@ impl<'a> Model<'a> {
             return Ok(None);
         }
         let rope_table = s.rope_cache(&self.rope_inv_freq, pos, 1).to_vec();
+        let Some(layers) = self.token_layers(s)? else {
+            return Ok(None);
+        };
         let Some((cache, _, _)) = s.kv.gpu_view_ref(0) else {
             if dbg { eprintln!("tokenbuf declined: no gpu cache view"); }
             return Ok(None);
         };
         // The GDN arch decodes on the GPU when the SSM region wraps; its
-        // attention layers take the head_dim-256 kernels. Offsets are pure
-        // arithmetic - precomputed so the region borrow can outlive them.
-        let ssm_offsets: Option<Vec<(usize, usize)>> = s.ssm.as_ref().map(|ssm| {
-            (0..self.layers.len()).map(|li| (ssm.conv_off(li), ssm.state_off(li))).collect()
-        });
+        // attention layers take the head_dim-256 kernels.
         let ssm_region = match s.ssm.as_mut() {
             Some(ssm) => match ssm.gpu_view() {
                 Some(r) => Some(r),
@@ -1567,6 +1818,109 @@ impl<'a> Model<'a> {
             None => None,
         };
         let x = self.embd.row(token as usize)?;
+        let (out_ty, out_bytes) = self.output.raw();
+        Ok(allpaka_backend::gpu::decode_token(&TokenReq {
+            x: &x,
+            m: 1,
+            layers: &layers,
+            cache,
+            ssm: ssm_region,
+            ssm_slots: None,
+            kv_dim: c.kv_dim(),
+            head_dim: c.head_dim as usize,
+            n_heads: c.n_heads as usize,
+            n_kv_heads: c.n_kv_heads as usize,
+            pos,
+            scale: 1.0 / (c.head_dim as f32).sqrt(),
+            rope: &rope_table,
+            rot_dim: c.rope_dim as usize,
+            eps: c.rms_eps,
+            output_norm: self.output_norm_raw,
+            output: (out_ty, out_bytes, self.output.n_out),
+            argmax,
+        }))
+    }
+
+    /// The whole-token GPU request for a batch of `m` consecutive tokens
+    /// (the speculative verify): one command buffer, per-row argmax and the
+    /// output-normed hidden rows. Ok(None) declines to the batch path.
+    pub fn verify_tokens(
+        &self,
+        tokens: &[u32],
+        s: &mut Session,
+    ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
+        use allpaka_backend::gpu::{TokenOut, TokenReq};
+        let c = &self.config;
+        let m = tokens.len();
+        if m == 0 || m > 8 || std::env::var_os("ALLPAKA_NO_TOKENBUF").is_some() {
+            return Ok(None);
+        }
+        if self.output_norm_raw.is_empty() {
+            return Ok(None);
+        }
+        let pos = s.pos();
+        let rope_table = s.rope_cache(&self.rope_inv_freq, pos, m).to_vec();
+        let Some(layers) = self.token_layers(s)? else {
+            return Ok(None);
+        };
+        let Some((cache, _, _)) = s.kv.gpu_view_ref(0) else {
+            return Ok(None);
+        };
+        let (ssm_region, slots) = match s.ssm.as_mut() {
+            Some(ssm) => ssm.regions_for_gpu(),
+            None => (None, None),
+        };
+        let mut x = Vec::with_capacity(m * c.hidden as usize);
+        for &t in tokens {
+            if t >= c.vocab {
+                bail!("token {t} out of vocabulary {}", c.vocab);
+            }
+            x.extend_from_slice(&self.embd.row(t as usize)?);
+        }
+        let (out_ty, out_bytes) = self.output.raw();
+        let out = allpaka_backend::gpu::decode_token(&TokenReq {
+            x: &x,
+            m,
+            layers: &layers,
+            cache,
+            ssm: ssm_region,
+            ssm_slots: slots,
+            kv_dim: c.kv_dim(),
+            head_dim: c.head_dim as usize,
+            n_heads: c.n_heads as usize,
+            n_kv_heads: c.n_kv_heads as usize,
+            pos,
+            scale: 1.0 / (c.head_dim as f32).sqrt(),
+            rope: &rope_table,
+            rot_dim: c.rope_dim as usize,
+            eps: c.rms_eps,
+            output_norm: self.output_norm_raw,
+            output: (out_ty, out_bytes, self.output.n_out),
+            argmax: true,
+        });
+        match out {
+            Some(TokenOut::Rows { argmax, hidden }) => {
+                s.kv.commit(pos + m);
+                Ok(Some((argmax, hidden)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The decode layers of the whole-token GPU paths, shared by
+    /// forward_token_gpu and verify_tokens. None means "decline": a norm is
+    /// not raw F32, the KV/SSM region is not wrapped, or the router's
+    /// sigmoid gating carries a norm/scale the GPU top-k does not implement.
+    fn token_layers(
+        &self,
+        s: &Session,
+    ) -> Result<Option<Vec<allpaka_backend::gpu::TokenLayer>>> {
+        use allpaka_backend::gpu::{TokenFfn, TokenGdn, TokenLayer};
+        let c = &self.config;
+        let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
+        let ssm_offsets: Option<Vec<(usize, usize)>> = s.ssm.as_ref().map(|ssm| {
+            (0..self.layers.len()).map(|li| (ssm.conv_off(li), ssm.state_off(li))).collect()
+        });
         let mut layers = Vec::with_capacity(self.layers.len());
         for (li, layer) in self.layers.iter().enumerate() {
             if layer.attn_norm_raw.is_empty() || layer.ffn_norm_raw.is_empty() {
@@ -1699,25 +2053,7 @@ impl<'a> Model<'a> {
                 ffn,
             });
         }
-        let (out_ty, out_bytes) = self.output.raw();
-        Ok(allpaka_backend::gpu::decode_token(&TokenReq {
-            x: &x,
-            layers: &layers,
-            cache,
-            ssm: ssm_region,
-            kv_dim: c.kv_dim(),
-            head_dim: c.head_dim as usize,
-            n_heads: c.n_heads as usize,
-            n_kv_heads: c.n_kv_heads as usize,
-            pos,
-            scale: 1.0 / (c.head_dim as f32).sqrt(),
-            rope: &rope_table,
-            rot_dim: c.rope_dim as usize,
-            eps: c.rms_eps,
-            output_norm: self.output_norm_raw,
-            output: (out_ty, out_bytes, self.output.n_out),
-            argmax,
-        }))
+        Ok(Some(layers))
     }
 
     /// Consume one token, return logits over the vocabulary.
@@ -2209,6 +2545,7 @@ mod attention_tests {
             moe: None,
             has_attn_bias: false,
             rope_dim: head_dim as u32,
+            nextn: false,
         };
         // The GPU module wakes up on the first `attach`, which normally comes
         // from loading a model; without one the cache is never wrapped and
@@ -2285,6 +2622,7 @@ mod attention_tests {
             moe: None,
             has_attn_bias: false,
             rope_dim: head_dim as u32,
+            nextn: false,
         };
         let kv_dim = c.kv_dim();
         let mut kv = KvCache::new(1, kv_dim, positions);
@@ -2323,6 +2661,25 @@ mod attention_tests {
 }
 
 /// The stacked-expert weights of one MoE layer.
+/// A router-width projection that may be BF16 (ggml id 30, the qwen35moe
+/// MTP block's router and shared-expert gate): BF16 tensors are converted
+/// to F32 at load (they are kilobytes-to-a-megabyte; the buffer is leaked
+/// into the process lifetime like any other model-resident weight).
+fn qmat_f32ish<'a>(f: &'a GgufFile, name: &str, n_out: usize, n_in: usize) -> Result<QuantMat<'a>> {
+    let t = f.tensor(name).with_context(|| format!("missing {name}"))?;
+    if t.ggml_type != allpaka_gguf::GgmlType::BF16 {
+        return qmat(f, name, n_out, n_in);
+    }
+    let raw = f.data(t)?;
+    let mut v = Vec::with_capacity(raw.len() * 2);
+    for b in raw.chunks_exact(2) {
+        let f32b = f32::from_bits((u16::from_le_bytes([b[0], b[1]]) as u32) << 16).to_le_bytes();
+        v.extend_from_slice(&f32b);
+    }
+    let leaked: &'a [u8] = Box::leak(v.into_boxed_slice());
+    QuantMat::new(leaked, allpaka_gguf::GgmlType::F32, n_out, n_in)
+}
+
 fn moe_ffn<'a>(
     f: &'a GgufFile,
     name: &dyn Fn(&str) -> String,
@@ -2342,6 +2699,9 @@ fn moe_ffn<'a>(
             // qwen35moe gates the shared expert's output per token; the gate
             // tensor is 1-D [hidden] (dot product to a scalar).
             gate_out: match f.tensor(&name("ffn_gate_inp_shexp")) {
+                Some(t) if t.ggml_type == allpaka_gguf::GgmlType::BF16 => {
+                    Some(qmat_f32ish(f, &name("ffn_gate_inp_shexp"), 1, hidden)?)
+                }
                 Some(t) => Some(QuantMat::new(f.data(t)?, t.ggml_type, 1, hidden)?),
                 None => None,
             },
@@ -2358,7 +2718,7 @@ fn moe_ffn<'a>(
         None
     };
     Ok(Ffn::Moe {
-        router: qmat(f, &name("ffn_gate_inp"), n_expert, hidden)?,
+        router: qmat_f32ish(f, &name("ffn_gate_inp"), n_expert, hidden)?,
         router_bias,
         gate_exps: qmat3(f, &name("ffn_gate_exps"), expert_ffn, hidden, n_expert)?,
         up_exps: qmat3(f, &name("ffn_up_exps"), expert_ffn, hidden, n_expert)?,

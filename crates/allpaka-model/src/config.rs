@@ -66,6 +66,9 @@ pub struct SsmConfig {
 pub struct Config {
     pub architecture: String,
     pub n_layers: u32,
+    /// An MTP (nextn) speculative block sits past the trunk layers
+    /// (qwen35moe: blk.n_layers); the trunk is `n_layers` deep.
+    pub nextn: bool,
     pub hidden: u32,
     pub n_heads: u32,
     pub n_kv_heads: u32,
@@ -173,16 +176,22 @@ impl Config {
 
         // Some converters count speculative (MTP) blocks in block_count but do
         // not write their tensors (GLM-4.5's nextn layer); trim blocks whose
-        // attention weights are absent rather than failing the load.
+        // attention weights are absent rather than failing the load. When the
+        // MTP block IS present (qwen35moe nextn), it is not a trunk layer:
+        // subtract it - the trunk is layers 0..n_layers-nextn.
+        let nextn = f.meta_u32(&key("nextn_predict_layers")).unwrap_or(0);
         let mut n_layers = need("block_count")?;
         while n_layers > 0
             && f.tensor(&format!("blk.{}.attn_q.weight", n_layers - 1)).is_none()
         {
             n_layers -= 1;
         }
+        let nextn = nextn.min(n_layers);
+        n_layers -= nextn;
 
         Ok(Config {
             n_layers,
+            nextn: nextn > 0,
             n_kv_heads: f.meta_u32(&key("attention.head_count_kv")).unwrap_or(n_heads),
             // Absent on linear-attention hybrids (qwen35moe has no dense FFN).
             ffn_hidden: f.meta_u32(&key("feed_forward_length")).unwrap_or(0),

@@ -29,6 +29,13 @@ pub fn dequant(ty: GgmlType, data: &[u8], elements: usize) -> Result<Vec<f32>> {
                 out.push(f16_to_f32(u16::from_le_bytes(c.try_into().unwrap())));
             }
         }
+        GgmlType::BF16 => {
+            for c in data.chunks_exact(2) {
+                out.push(f32::from_bits(
+                    (u16::from_le_bytes(c.try_into().unwrap()) as u32) << 16,
+                ));
+            }
+        }
         GgmlType::Q5_0 => {
             for block in data.chunks_exact(22) {
                 dequant_q5_0_block(block, &mut out);

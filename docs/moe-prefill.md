@@ -10,6 +10,12 @@ Result: prefill **286 → ~331-336 tok/s** (llama stays ~8-12% ahead; the
 remaining gap is spread ~5-10% across all mm kernels, in-model mm achieves
 ~10.5 TFLOPS vs ~12.4-12.7 in a steady-state microbenchmark).
 
+**Update 2026-08-28**: with the later kernel work in-tree (pipelined
+K-loop, attend_mm) plus the per-chunk one-buffer segments (item 8), GLM
+measures **362.8-368.4 tok/s pp480** - at llama parity (361-376 baseline),
+the ~8-12% gap is closed. Decode 36.5-37.5 tok/s (the llama decode gap,
+~41-43, remains a separate front).
+
 ## What landed (all verified: 199 tests green, greedy output identical)
 
 1. **GPU-side MoE routing** (`route_pick` / `route_scan` / `route_scatter`
@@ -57,18 +63,30 @@ remaining gap is spread ~5-10% across all mm kernels, in-model mm achieves
    `ALLPAKA_PF_SPLIT` (per-stage timing of the attention buffer, same
    serialising caveat as FFN_SPLIT).
 
-8. **One-buffer prefill chunk** (`pf_obuf_cmd` in `Gpu`): the whole fused
-   chunk encodes into ONE command buffer - a sequential encoder per stage,
+8. **One-buffer prefill chunk** (`pf_obuf_cmd` in `Gpu`): the fused chunk
+   encodes into ONE command buffer - a sequential encoder per stage,
    the existing (load-bearing) barriers order the stages, one commit+wait
    in `prefill_end`. llama.cpp runs its whole graph the same way. Measured
    qwen3-30b pp480: 1222-1230 vs 1196-1198 tok/s with the event chain
    (pp1200: 1124 vs 1095); GPU executing unchanged - this removes the
-   per-buffer start overhead. All-or-nothing per chunk: a non-eligible
-   layer while armed declines the chunk and disables the mode for the
-   process (`pf_obuf_disabled`), so GLM's leading Dense layer keeps the
-   event chain. The y_arena logits rescue becomes a GPU `copy_f32` encoded
-   in place (nothing has committed for a CPU readback to see).
-   `ALLPAKA_PF_ONEBUF=0` reverts to the event chain.
+   per-buffer start overhead. The y_arena logits rescue becomes a GPU
+   `copy_f32` encoded in place (nothing has committed for a CPU readback
+   to see). `ALLPAKA_PF_ONEBUF=0` reverts to the event chain.
+   **2026-08-28 rework: per-chunk SEGMENTS instead of all-or-nothing.**
+   The shared buffer is armed lazily by the first eligible layer of the
+   chunk (chained behind the last committed buffer through `pf_ev`) and
+   sealed - committed chained - by the first layer that cannot join it;
+   the next eligible layer re-arms. GLM's leading Dense layer now splits
+   the chunk into segments (attn segment, dense FFN on its own chained
+   buffer, one segment for the 45 MoE layers: 3 waits/chunk vs 93 on the
+   chain) instead of disabling onebuf process-wide. A fused non-route
+   buffer now also chains through the event (`defer` widened to
+   `req.fused.is_some()`) so later segments stay ordered after it.
+   Measured (pp480, back-to-back, powermode 2): GLM 362.8/364.4 vs
+   368.4 chain (neutral within drift - but GLM now sits at llama parity:
+   361-376 baseline); qwen3-30b 1523.6 vs 1484.8 (+2.6%, the onebuf win
+   preserved); qwen35moe 1467.1 vs 1426.6 (+2.8%). `pf_obuf_disabled`
+   is gone.
 
 9. **Software-pipelined K-loop in the q4_k mm kernels** (`mmllp_q4_k`,
    `mmllpg_id_q4_k`, `mmllps_id_q4_k`, default ON, `ALLPAKA_MM_PIPE=0`

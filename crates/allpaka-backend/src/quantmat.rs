@@ -402,6 +402,7 @@ impl<'a> QuantMat<'a> {
         m: usize,
         eps: f32,
         ssm: &crate::gpu::SharedRegion,
+        ssm_slots: Option<(&crate::gpu::SharedRegion, usize)>,
         offs: (usize, usize),
         fusion: Option<crate::gpu::PrefillFusion>,
     ) -> Option<Vec<f32>> {
@@ -424,6 +425,7 @@ impl<'a> QuantMat<'a> {
             m,
             eps,
             ssm,
+            ssm_slots,
             conv_off: offs.0,
             state_off: offs.1,
             fusion,

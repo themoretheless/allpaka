@@ -141,6 +141,12 @@ pub fn run(
         let model = allpaka_model::Model::load(&file)?;
         let mut session = model.new_session(tokens.len() + 1);
         let logits = model.forward_batch(&tokens, &mut session)?;
+        if std::env::var_os("ALLPAKA_PHASES").is_some() {
+            let t = allpaka_model::profile::take();
+            for (i, ns) in t.iter().enumerate() {
+                eprintln!("  phase {}: {:.3} ms", allpaka_model::profile::NAMES[i], *ns as f64 / 1e6);
+            }
+        }
         let ours = log_softmax(&logits);
         let mut order: Vec<usize> = (0..ours.len()).collect();
         order.sort_by(|&a, &b| ours[b].total_cmp(&ours[a]));
