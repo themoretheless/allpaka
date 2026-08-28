@@ -468,6 +468,7 @@ fn run_inference(
     repeat_penalty: f32,
     parse_tools: bool,
     mut stream: Option<&mut TcpStream>,
+    emit_done: bool,
 ) -> Result<CompletionResult> {
     let prompt = template.prompt(tok, messages)?;
     let stops = template.stop_tokens(tok);
@@ -673,27 +674,29 @@ fn run_inference(
                 }),
             )?;
         }
-        write_sse_event(
-            stream.as_mut().unwrap(),
-            &json!({
-                "object": "chat.completion.chunk",
-                "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
-                "usage": {
-                    "prompt_tokens": prompt.len(),
-                    "completion_tokens": generated.len(),
-                    "total_tokens": prompt.len() + generated.len(),
-                },
-                "timing": {
-                    "prefill_secs": prefill_secs,
-                    "decode_secs": decode_secs,
-                    "tokens_per_sec": generated.len() as f64 / decode_secs.max(1e-9),
-                    "cached_tokens": common,
-                    "context_used": chat.tokens.len(),
-                    "context_capacity": chat.session.capacity(),
-                },
-            }),
-        )?;
-        stream.as_mut().unwrap().write_all(b"data: [DONE]\n\n")?;
+        if emit_done {
+            write_sse_event(
+                stream.as_mut().unwrap(),
+                &json!({
+                    "object": "chat.completion.chunk",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
+                    "usage": {
+                        "prompt_tokens": prompt.len(),
+                        "completion_tokens": generated.len(),
+                        "total_tokens": prompt.len() + generated.len(),
+                    },
+                    "timing": {
+                        "prefill_secs": prefill_secs,
+                        "decode_secs": decode_secs,
+                        "tokens_per_sec": generated.len() as f64 / decode_secs.max(1e-9),
+                        "cached_tokens": common,
+                        "context_used": chat.tokens.len(),
+                        "context_capacity": chat.session.capacity(),
+                    },
+                }),
+            )?;
+            stream.as_mut().unwrap().write_all(b"data: [DONE]\n\n")?;
+        }
     }
 
     Ok(CompletionResult {
@@ -706,6 +709,44 @@ fn run_inference(
         prefill_secs,
         decode_secs,
     })
+}
+
+fn emit_stream_completion(
+    stream: &mut TcpStream,
+    completion: &CompletionResult,
+    emit_content: bool,
+    finish: &str,
+) -> Result<()> {
+    if emit_content && !completion.content.is_empty() {
+        write_sse_event(
+            stream,
+            &json!({
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"content": completion.content}}],
+            }),
+        )?;
+    }
+    write_sse_event(
+        stream,
+        &json!({
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
+            "usage": {
+                "prompt_tokens": completion.prompt_tokens,
+                "completion_tokens": completion.completion_tokens,
+                "total_tokens": completion.prompt_tokens + completion.completion_tokens,
+            },
+            "timing": {
+                "prefill_secs": completion.prefill_secs,
+                "decode_secs": completion.decode_secs,
+                "tokens_per_sec": completion.completion_tokens as f64
+                    / completion.decode_secs.max(1e-9),
+                "cached_tokens": completion.cached_tokens,
+            },
+        }),
+    )?;
+    stream.write_all(b"data: [DONE]\n\n")?;
+    Ok(())
 }
 
 /// The chat template families this server can format. Decided by which
@@ -1227,20 +1268,23 @@ fn handle(
     let streaming = req["stream"].as_bool().unwrap_or(false);
 
     if streaming {
-        run_inference(
-            model,
-            tok,
-            template,
-            chat,
-            &messages,
-            max_tokens,
-            temperature,
-            top_p,
-            repeat_penalty,
-            tools.is_some(),
-            Some(&mut stream),
-        )?;
-        return Ok(());
+        if tools.is_none() || !rag.cfg.enabled {
+            run_inference(
+                model,
+                tok,
+                template,
+                chat,
+                &messages,
+                max_tokens,
+                temperature,
+                top_p,
+                repeat_penalty,
+                false,
+                Some(&mut stream),
+                true,
+            )?;
+            return Ok(());
+        }
     }
 
     let completion = if tools.is_none() {
@@ -1255,7 +1299,8 @@ fn handle(
             top_p,
             repeat_penalty,
             false,
-            None,
+            if streaming { Some(&mut stream) } else { None },
+            !streaming,
         )?
     } else if !rag.cfg.enabled {
         run_inference(
@@ -1269,7 +1314,8 @@ fn handle(
             top_p,
             repeat_penalty,
             true,
-            None,
+            if streaming { Some(&mut stream) } else { None },
+            !streaming,
         )?
     } else {
         let mut conversation = raw_messages.to_vec();
@@ -1287,7 +1333,8 @@ fn handle(
                 top_p,
                 repeat_penalty,
                 true,
-                None,
+                if streaming { Some(&mut stream) } else { None },
+                !streaming,
             )?;
             if outcome.tool_calls.is_empty() {
                 final_outcome = Some(outcome);
@@ -1325,6 +1372,11 @@ fn handle(
         }
         final_outcome.context("tool loop completed without output")?
     };
+
+    if streaming && !tools.is_none() && rag.cfg.enabled {
+        emit_stream_completion(&mut stream, &completion, false, &completion.finish)?;
+        return Ok(());
+    }
 
     respond(
         &mut stream,
