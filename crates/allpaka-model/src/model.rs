@@ -1927,8 +1927,10 @@ impl<'a> Model<'a> {
                 if dbg { eprintln!("tokenbuf declined: layer {li} norm not raw F32"); }
                 return Ok(None);
             }
-            let (_, k_off, v_off) =
-                s.kv.gpu_view_ref(li).expect("region wrapped, checked above");
+            let (_, k_off, v_off) = match s.kv.gpu_view_ref(li) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
             let ffn = match &layer.ffn {
                 Ffn::Dense { w_gate, w_up, w_down } => {
                     let (gt, gb) = w_gate.raw();
