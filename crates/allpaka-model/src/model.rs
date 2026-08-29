@@ -1799,11 +1799,15 @@ impl<'a> Model<'a> {
         }
         let rope_table = s.rope_cache(&self.rope_inv_freq, pos, 1).to_vec();
         let Some(layers) = self.token_layers(s)? else {
+            if dbg { eprintln!("tokenbuf declined: token_layers"); }
             return Ok(None);
         };
-        let Some((cache, _, _)) = s.kv.gpu_view_ref(0) else {
-            if dbg { eprintln!("tokenbuf declined: no gpu cache view"); }
-            return Ok(None);
+        let (cache, _, _) = match s.kv.gpu_view_checked(0) {
+            Ok(view) => view,
+            Err(reason) => {
+                if dbg { eprintln!("tokenbuf declined: stage=kv-cache reason={reason}"); }
+                return Ok(None);
+            }
         };
         // The GDN arch decodes on the GPU when the SSM region wraps; its
         // attention layers take the head_dim-256 kernels.
@@ -1819,7 +1823,7 @@ impl<'a> Model<'a> {
         };
         let x = self.embd.row(token as usize)?;
         let (out_ty, out_bytes) = self.output.raw();
-        Ok(allpaka_backend::gpu::decode_token(&TokenReq {
+        let request = TokenReq {
             x: &x,
             m: 1,
             layers: &layers,
@@ -1838,7 +1842,14 @@ impl<'a> Model<'a> {
             output_norm: self.output_norm_raw,
             output: (out_ty, out_bytes, self.output.n_out),
             argmax,
-        }))
+        };
+        match allpaka_backend::gpu::decode_token_checked(&request) {
+            Ok(out) => Ok(Some(out)),
+            Err(reason) => {
+                if dbg { eprintln!("tokenbuf declined: {reason}"); }
+                Ok(None)
+            }
+        }
     }
 
     /// The whole-token GPU request for a batch of `m` consecutive tokens
@@ -1850,6 +1861,7 @@ impl<'a> Model<'a> {
         s: &mut Session,
     ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
         use allpaka_backend::gpu::{TokenOut, TokenReq};
+        let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
         let c = &self.config;
         let m = tokens.len();
         if m == 0 || m > 8 || std::env::var_os("ALLPAKA_NO_TOKENBUF").is_some() {
@@ -1861,10 +1873,15 @@ impl<'a> Model<'a> {
         let pos = s.pos();
         let rope_table = s.rope_cache(&self.rope_inv_freq, pos, m).to_vec();
         let Some(layers) = self.token_layers(s)? else {
+            if dbg { eprintln!("tokenbuf declined: verify token_layers"); }
             return Ok(None);
         };
-        let Some((cache, _, _)) = s.kv.gpu_view_ref(0) else {
-            return Ok(None);
+        let (cache, _, _) = match s.kv.gpu_view_checked(0) {
+            Ok(view) => view,
+            Err(reason) => {
+                if dbg { eprintln!("tokenbuf declined: stage=verify-kv-cache reason={reason}"); }
+                return Ok(None);
+            }
         };
         let (ssm_region, slots) = match s.ssm.as_mut() {
             Some(ssm) => ssm.regions_for_gpu(),
@@ -1878,7 +1895,7 @@ impl<'a> Model<'a> {
             x.extend_from_slice(&self.embd.row(t as usize)?);
         }
         let (out_ty, out_bytes) = self.output.raw();
-        let out = allpaka_backend::gpu::decode_token(&TokenReq {
+        let request = TokenReq {
             x: &x,
             m,
             layers: &layers,
@@ -1897,13 +1914,17 @@ impl<'a> Model<'a> {
             output_norm: self.output_norm_raw,
             output: (out_ty, out_bytes, self.output.n_out),
             argmax: true,
-        });
-        match out {
-            Some(TokenOut::Rows { argmax, hidden }) => {
+        };
+        match allpaka_backend::gpu::decode_token_checked(&request) {
+            Ok(TokenOut::Rows { argmax, hidden }) => {
                 s.kv.commit(pos + m);
                 Ok(Some((argmax, hidden)))
             }
-            _ => Ok(None),
+            Ok(_) => Ok(None),
+            Err(reason) => {
+                if dbg { eprintln!("tokenbuf declined: verify {reason}"); }
+                Ok(None)
+            }
         }
     }
 
@@ -1913,7 +1934,7 @@ impl<'a> Model<'a> {
     /// sigmoid gating carries a norm/scale the GPU top-k does not implement.
     fn token_layers(
         &self,
-        s: &Session,
+        s: &mut Session,
     ) -> Result<Option<Vec<allpaka_backend::gpu::TokenLayer>>> {
         use allpaka_backend::gpu::{TokenFfn, TokenGdn, TokenLayer};
         let c = &self.config;
@@ -1927,9 +1948,12 @@ impl<'a> Model<'a> {
                 if dbg { eprintln!("tokenbuf declined: layer {li} norm not raw F32"); }
                 return Ok(None);
             }
-            let (_, k_off, v_off) = match s.kv.gpu_view_ref(li) {
-                Some(v) => v,
-                None => return Ok(None),
+            let (_, k_off, v_off) = match s.kv.gpu_view_checked(li) {
+                Ok(view) => view,
+                Err(reason) => {
+                    if dbg { eprintln!("tokenbuf declined: stage=token-layers reason={reason}"); }
+                    return Ok(None);
+                }
             };
             let ffn = match &layer.ffn {
                 Ffn::Dense { w_gate, w_up, w_down } => {
@@ -2077,12 +2101,15 @@ impl<'a> Model<'a> {
             && std::env::var_os("ALLPAKA_CPU_ATTN").is_none()
             && std::env::var_os("ALLPAKA_NO_TOKENBUF").is_none()
         {
+            let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
             if let Some(allpaka_backend::gpu::TokenOut::Logits(logits)) =
                 self.forward_token_gpu(token, s, pos, false)?
             {
                 let _ = profile::span(profile::Phase::Attend);
                 s.kv.advance();
                 return Ok(logits);
+            } else if dbg {
+                eprintln!("tokenbuf declined: forward_token_gpu for token {token} pos {pos}");
             }
         }
 

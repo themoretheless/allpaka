@@ -8379,6 +8379,31 @@ enum FfnRefs {
     },
 }
 
+/// A whole-token GPU request was rejected before submission. The checked API
+/// keeps this distinct from a successful GPU result so callers cannot silently
+/// mistake a CPU fallback for GPU execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeDecline {
+    pub stage: &'static str,
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for DecodeDecline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stage={} reason={}", self.stage, self.reason)
+    }
+}
+
+impl std::error::Error for DecodeDecline {}
+
+/// Diagnostic-preserving entry point for production fast paths.
+pub fn decode_token_checked(req: &TokenReq) -> Result<TokenOut, DecodeDecline> {
+    decode_token(req).ok_or(DecodeDecline {
+        stage: "backend-decode",
+        reason: "request shape, tensor format, or Metal pipeline is unsupported",
+    })
+}
+
 pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
     macro_rules! why {
@@ -8414,6 +8439,24 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         why!(true, "lock");
         return None;
     };
+    let resolve_or_decline = |label: &str, ty: GgmlType, w: &[u8], dbg: bool, gpu: &mut _| -> Option<MatRef> {
+        let Some(mat) = resolve(gpu, ty, w) else {
+            if dbg {
+                eprintln!("tokenbuf declined: {label} resolve");
+            }
+            return None;
+        };
+        Some(mat)
+    };
+    let resolve_f32_or_decline = |label: &str, b: &[u8], n: usize, dbg: bool, gpu: &mut _| -> Option<MatRef> {
+        let Some(norm) = resolve_f32(gpu, b, n) else {
+            if dbg {
+                eprintln!("tokenbuf declined: {label} norm resolve");
+            }
+            return None;
+        };
+        Some(norm)
+    };
 
     let mut layers = Vec::with_capacity(req.layers.len());
     let mut max_ffn = 0usize;
@@ -8433,11 +8476,11 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 why!(g.conv1d.len() != channels * g.d_conv * 4, "gdn conv dims");
                 why!(g.a.len() != g.heads_v || g.dt.len() != g.heads_v || g.ssm_norm.len() != g.d, "gdn vec dims");
                 let mats = [
-                    resolve(&gpu, g.wqkv.0, g.wqkv.1)?,
-                    resolve(&gpu, g.zgate.0, g.zgate.1)?,
-                    resolve_f32(&gpu, g.alpha, hidden)?,
-                    resolve_f32(&gpu, g.beta, hidden)?,
-                    resolve(&gpu, g.ssm_out.0, g.ssm_out.1)?,
+                    resolve_or_decline("gdn.wqkv", g.wqkv.0, g.wqkv.1, dbg, &mut gpu)?,
+                    resolve_or_decline("gdn.zgate", g.zgate.0, g.zgate.1, dbg, &mut gpu)?,
+                    resolve_f32_or_decline("gdn.alpha", g.alpha, hidden, dbg, &mut gpu)?,
+                    resolve_f32_or_decline("gdn.beta", g.beta, hidden, dbg, &mut gpu)?,
+                    resolve_or_decline("gdn.ssm_out", g.ssm_out.0, g.ssm_out.1, dbg, &mut gpu)?,
                 ];
                 let mut states = Vec::with_capacity(5);
                 for (mat, n_in) in mats.iter().zip([hidden, hidden, hidden, hidden, value_dim]) {
@@ -8472,10 +8515,10 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             let dims = [(hidden, wq_out), (hidden, l.wk.2), (hidden, l.wv.2), (q_dim, l.wo.2)];
             why!(l.wq.2 != wq_out || l.wk.2 != kv || l.wv.2 != kv || l.wo.2 != hidden, "attn dims");
             let mats = [
-                resolve(&gpu, l.wq.0, l.wq.1)?,
-                resolve(&gpu, l.wk.0, l.wk.1)?,
-                resolve(&gpu, l.wv.0, l.wv.1)?,
-                resolve(&gpu, l.wo.0, l.wo.1)?,
+                resolve_or_decline("attn.wq", l.wq.0, l.wq.1, dbg, &mut gpu)?,
+                resolve_or_decline("attn.wk", l.wk.0, l.wk.1, dbg, &mut gpu)?,
+                resolve_or_decline("attn.wv", l.wv.0, l.wv.1, dbg, &mut gpu)?,
+                resolve_or_decline("attn.wo", l.wo.0, l.wo.1, dbg, &mut gpu)?,
             ];
             Some((mats, dims))
         } else {
@@ -8512,9 +8555,9 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     return None;
                 }
                 let mats = [
-                    resolve(&gpu, gate.0, gate.1)?,
-                    resolve(&gpu, up.0, up.1)?,
-                    resolve(&gpu, down.0, down.1)?,
+                    resolve_or_decline("ffn.gate", gate.0, gate.1, dbg, &mut gpu)?,
+                    resolve_or_decline("ffn.up", up.0, up.1, dbg, &mut gpu)?,
+                    resolve_or_decline("ffn.down", down.0, down.1, dbg, &mut gpu)?,
                 ];
                 let mut states = Vec::with_capacity(3);
                 for (mat, n_in) in mats.iter().zip([hidden, hidden, gate.2]) {
@@ -8531,7 +8574,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             TokenFfn::Moe { router, router_bias, gate, up, down, expert_ffn, n_used, sigmoid, shared, shared_gate } => {
                 why!(router.0 != GgmlType::F32 || router.2 > 256 || *n_used > 16, "router shape");
                 why!(shared_gate.is_some() && shared.is_none(), "shared gate without shared expert");
-                let router_ref = resolve_f32(&gpu, router.1, hidden)?;
+                let router_ref = resolve_f32_or_decline("router", router.1, hidden, dbg, &mut gpu)?;
                 let router_state = gpu
                     .pipeline_wait(
                         "matvec_f32",
@@ -8543,9 +8586,9 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     )?
                     .to_owned();
                 let mats = [
-                    resolve(&gpu, gate.0, gate.1)?,
-                    resolve(&gpu, up.0, up.1)?,
-                    resolve(&gpu, down.0, down.1)?,
+                    resolve_or_decline("ffn.gate", gate.0, gate.1, dbg, &mut gpu)?,
+                    resolve_or_decline("ffn.up", up.0, up.1, dbg, &mut gpu)?,
+                    resolve_or_decline("ffn.down", down.0, down.1, dbg, &mut gpu)?,
                 ];
                 let n_expert = router.2;
                 let strides = [
@@ -8565,7 +8608,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 // down carries the variant too - otherwise its slot would
                 // read raw gate values once the standalone swiglu is gone.
                 let shared_down_sw = match shared {
-                    Some(sh) => resolve(&gpu, sh[2].0, sh[2].1)
+                    Some(sh) => resolve_or_decline("ffn.shared.down", sh[2].0, sh[2].1, dbg, &mut gpu)
                         .is_some_and(|m| sw_capable(m.kernel)),
                     None => true,
                 };
@@ -8606,9 +8649,9 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         why!(sh[0].2 != *expert_ffn || sh[1].2 != *expert_ffn
                             || sh[2].2 != hidden, "shared dims");
                         let smats = [
-                            resolve(&gpu, sh[0].0, sh[0].1)?,
-                            resolve(&gpu, sh[1].0, sh[1].1)?,
-                            resolve(&gpu, sh[2].0, sh[2].1)?,
+                            resolve_or_decline("ffn.shared.gate", sh[0].0, sh[0].1, dbg, &mut gpu)?,
+                            resolve_or_decline("ffn.shared.up", sh[1].0, sh[1].1, dbg, &mut gpu)?,
+                            resolve_or_decline("ffn.shared.down", sh[2].0, sh[2].1, dbg, &mut gpu)?,
                         ];
                         let mut sstates = Vec::with_capacity(3);
                         for (i, (mat, n_in)) in
@@ -8688,7 +8731,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     shared_gate: match shared_gate {
                         Some(sg) => {
                             why!(sg.len() != hidden * 4, "shared gate dims");
-                            let mat = resolve_f32(&gpu, sg, hidden)?;
+                            let mat = resolve_f32_or_decline("ffn.shared.gate_out", sg, hidden, dbg, &mut gpu)?;
                             let state = gpu
                                 .pipeline("matvec_f32", 1, lanes_per_row(GgmlType::F32, hidden))?
                                 .to_owned();

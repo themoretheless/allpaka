@@ -7,6 +7,26 @@
 //! instead of full K/V, and only this module will know.
 
 use allpaka_backend::ops;
+use std::fmt;
+
+/// Concrete reason why cache storage cannot participate in a GPU fast path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuViewError {
+    pub cache: &'static str,
+    pub layer: Option<usize>,
+    pub reason: &'static str,
+}
+
+impl fmt::Display for GpuViewError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.layer {
+            Some(layer) => write!(f, "{} layer {}: {}", self.cache, layer, self.reason),
+            None => write!(f, "{}: {}", self.cache, self.reason),
+        }
+    }
+}
+
+impl std::error::Error for GpuViewError {}
 
 /// Page-aligned f16 storage, so the GPU can read it with no copy at all.
 ///
@@ -340,11 +360,27 @@ impl KvCache {
         &mut self,
         layer: usize,
     ) -> Option<(&allpaka_backend::gpu::SharedRegion, usize, usize)> {
+        self.gpu_view_checked(layer).ok()
+    }
+
+    /// Fast-path view that never erases the reason Metal wrapping failed.
+    pub fn gpu_view_checked(
+        &mut self,
+        layer: usize,
+    ) -> Result<(&allpaka_backend::gpu::SharedRegion, usize, usize), GpuViewError> {
         if self.shared.is_none() {
             self.shared = allpaka_backend::gpu::wrap_region(self.store.as_bytes());
         }
-        let shared = self.shared.as_ref()?;
-        Some((
+        let shared = self.shared.as_ref().ok_or(GpuViewError {
+            cache: "kv-cache",
+            layer: Some(layer),
+            reason: if allpaka_backend::gpu::is_attached() {
+                "Metal rejected the page-aligned shared region"
+            } else {
+                "no Metal device or model mapping is attached"
+            },
+        })?;
+        Ok((
             shared,
             layer * self.layer_stride,
             self.v_base + layer * self.layer_stride,
