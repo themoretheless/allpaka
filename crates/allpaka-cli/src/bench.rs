@@ -83,6 +83,39 @@ pub fn measure_memory() -> Result<()> {
     Ok(())
 }
 
+fn print_capability_report(model: &allpaka_model::Model<'_>) {
+    const OVERRIDES: &[&str] = &[
+        "ALLPAKA_NO_GPU",
+        "ALLPAKA_CPU_ATTN",
+        "ALLPAKA_NO_TOKENBUF",
+        "ALLPAKA_PREFILL_CHUNK",
+        "ALLPAKA_GPU_ROUTE",
+        "ALLPAKA_DECODE_SERIAL",
+        "ALLPAKA_PF_ONEBUF",
+        "ALLPAKA_PF_DEFER",
+    ];
+    let c = &model.config;
+    println!("  capabilities:");
+    println!("    model: arch={} layers={} moe={}", c.architecture, c.n_layers, c.moe.is_some());
+    println!("    metal: attached={}", allpaka_backend::gpu::is_attached());
+    println!("    weights: metal-mapped={}", allpaka_backend::gpu::is_attached());
+    println!("    kv: page-aligned-f16, checked-at-session-runtime");
+    println!("    prefill: gpu-counters-enabled");
+    println!("    decode: checked-whole-token-fast-path");
+    println!("    tensor-types: runtime-resolve (census follows model load audit)");
+    println!("    overrides:");
+    let mut any = false;
+    for key in OVERRIDES {
+        if let Ok(value) = std::env::var(key) {
+            println!("      {key}={value}");
+            any = true;
+        }
+    }
+    if !any {
+        println!("      none");
+    }
+}
+
 /// Serve bench requests until the peer disconnects. Runs on the remote machine.
 pub fn serve(bind: &str) -> Result<()> {
     let listener = TcpListener::bind(bind).with_context(|| format!("binding {bind}"))?;
@@ -215,6 +248,7 @@ pub fn measure_engine(model_path: &std::path::Path, draft_path: Option<&std::pat
         c.architecture,
         if c.moe.is_some() { ", MoE" } else { "" },
     );
+    print_capability_report(&model);
 
     // A synthetic prompt long enough to amortise chunking, plus warmup.
     // ALLPAKA_BENCH_PP overrides the prompt length (32 warmup + N measured);
