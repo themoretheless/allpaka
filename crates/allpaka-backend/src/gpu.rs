@@ -8388,6 +8388,26 @@ pub struct DecodeDecline {
     pub reason: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DecodePathStats {
+    pub attempts: u64,
+    pub successes: u64,
+    pub declines: u64,
+}
+
+static DECODE_ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DECODE_SUCCESSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DECODE_DECLINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn decode_path_stats() -> DecodePathStats {
+    use std::sync::atomic::Ordering::Relaxed;
+    DecodePathStats {
+        attempts: DECODE_ATTEMPTS.load(Relaxed),
+        successes: DECODE_SUCCESSES.load(Relaxed),
+        declines: DECODE_DECLINES.load(Relaxed),
+    }
+}
+
 impl std::fmt::Display for DecodeDecline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "stage={} reason={}", self.stage, self.reason)
@@ -8398,10 +8418,21 @@ impl std::error::Error for DecodeDecline {}
 
 /// Diagnostic-preserving entry point for production fast paths.
 pub fn decode_token_checked(req: &TokenReq) -> Result<TokenOut, DecodeDecline> {
-    decode_token(req).ok_or(DecodeDecline {
-        stage: "backend-decode",
-        reason: "request shape, tensor format, or Metal pipeline is unsupported",
-    })
+    use std::sync::atomic::Ordering::Relaxed;
+    DECODE_ATTEMPTS.fetch_add(1, Relaxed);
+    match decode_token(req) {
+        Some(out) => {
+            DECODE_SUCCESSES.fetch_add(1, Relaxed);
+            Ok(out)
+        }
+        None => {
+            DECODE_DECLINES.fetch_add(1, Relaxed);
+            Err(DecodeDecline {
+                stage: "backend-decode",
+                reason: "request shape, tensor format, or Metal pipeline is unsupported",
+            })
+        }
+    }
 }
 
 pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {

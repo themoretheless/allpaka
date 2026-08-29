@@ -198,6 +198,7 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
 /// before and after every change; a speedup that does not show here is
 /// imaginary.
 pub fn measure_engine(model_path: &std::path::Path, draft_path: Option<&std::path::Path>) -> Result<()> {
+    let decode_stats_before = allpaka_backend::gpu::decode_path_stats();
     let file = allpaka_gguf::GgufFile::open(model_path)?;
     // Sequential prewarm, or the warmup forward faults tens of GiB in GPU
     // access order and the first numbers measure the SSD, not the engine.
@@ -282,6 +283,21 @@ pub fn measure_engine(model_path: &std::path::Path, draft_path: Option<&std::pat
     let decode_rate = decode_tokens as f64 / decode_secs;
     println!(
         "  decode   {decode_tokens:>4} tok in {decode_secs:>6.2} s   {decode_rate:>7.1} tok/s"
+    );
+    let decode_stats_after = allpaka_backend::gpu::decode_path_stats();
+    let gpu_attempts = decode_stats_after.attempts - decode_stats_before.attempts;
+    let gpu_successes = decode_stats_after.successes - decode_stats_before.successes;
+    let gpu_declines = decode_stats_after.declines - decode_stats_before.declines;
+    anyhow::ensure!(
+        allpaka_backend::gpu::is_attached(),
+        "benchmark invalid: Metal GPU is not attached; refusing to report CPU fallback as GPU throughput"
+    );
+    anyhow::ensure!(
+        gpu_successes > 0,
+        "benchmark invalid: whole-token GPU decode never succeeded (attempts={gpu_attempts}, declines={gpu_declines})"
+    );
+    println!(
+        "  gpu path decode: attempts={gpu_attempts} successes={gpu_successes} declines={gpu_declines}"
     );
     let gpu_after = allpaka_backend::gpu::stats();
     report_gpu_split("decode", gpu_before, gpu_after, decode_secs);
