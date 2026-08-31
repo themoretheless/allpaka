@@ -6792,6 +6792,18 @@ pub fn is_attached() -> bool {
     GPU.get().map_or(false, Option::is_some)
 }
 
+/// Runtime state that determines whether large mapped models avoid Metal's
+/// per-submit residency scan. The values are reported by benchmarks so a
+/// missing residency set cannot masquerade as slow kernels.
+pub fn residency_status() -> (usize, bool) {
+    let Some(Some(cell)) = GPU.get() else {
+        return (0, false);
+    };
+    cell.lock()
+        .map(|gpu| (gpu.chunks.len(), gpu.residency.is_some()))
+        .unwrap_or((0, false))
+}
+
 /// Largest request a chunked mapping can serve; chunks overlap by this much.
 /// Tensors in real GGUFs top out in the hundreds of megabytes (the 235B's
 /// biggest is ~0.5 GiB), so 2 GiB of overlap leaves a wide margin.

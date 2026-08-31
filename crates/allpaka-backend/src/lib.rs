@@ -29,6 +29,9 @@ pub mod gpu {
     pub fn is_attached() -> bool {
         false
     }
+    pub fn residency_status() -> (usize, bool) {
+        (0, false)
+    }
     pub fn matvec(
         _ty: allpaka_gguf::GgmlType,
         _w: &[u8],

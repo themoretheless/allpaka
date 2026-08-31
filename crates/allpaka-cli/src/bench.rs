@@ -99,6 +99,9 @@ fn print_capability_report(model: &allpaka_model::Model<'_>, file: &allpaka_gguf
     println!("    model: arch={} layers={} moe={}", c.architecture, c.n_layers, c.moe.is_some());
     println!("    metal: attached={}", allpaka_backend::gpu::is_attached());
     println!("    weights: metal-mapped={}", allpaka_backend::gpu::is_attached());
+    let (weight_windows, residency_set) = allpaka_backend::gpu::residency_status();
+    println!("    residency: windows={weight_windows} set={residency_set}");
+    println!("    encoders: concurrent, resource-barriers=enabled");
     println!("    kv: page-aligned-f16, checked-at-session-runtime");
     println!("    prefill: gpu-counters-enabled");
     println!("    decode: checked-whole-token-fast-path");
