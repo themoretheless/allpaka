@@ -95,6 +95,7 @@ fn print_capability_report(model: &allpaka_model::Model<'_>, file: &allpaka_gguf
         "ALLPAKA_PF_DEFER",
         "ALLPAKA_MM_PIPE",
         "ALLPAKA_ATTN_SPLIT",
+        "ALLPAKA_NORMFLAG",
     ];
     let c = &model.config;
     let model_capability = c.capability();

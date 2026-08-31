@@ -8570,7 +8570,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         // The spin-flag scheme replaces the two norm barriers when every
         // consumer kernel carries the WAIT variant: qkv (q4_k_mv) and the
         // router (f32). `ALLPAKA_NORMFLAG=0` reverts to barriers.
-        let normflag = std::env::var("ALLPAKA_NORMFLAG").is_ok_and(|v| v == "1")
+        let normflag = !std::env::var("ALLPAKA_NORMFLAG").is_ok_and(|v| v == "0")
             && mats_pre.as_ref().is_some_and(|(m, _)| {
                 m.iter().take(3).all(|m| m.kernel == "matvec_q4_k_mv")
             })
