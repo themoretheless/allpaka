@@ -60,6 +60,9 @@ enum Command {
         /// rates. Run before and after every optimisation.
         #[arg(long, conflicts_with_all = ["serve", "connect", "mem"])]
         engine: Option<PathBuf>,
+        /// Typed runtime profile and overrides from allpaka.toml.
+        #[arg(long, requires = "engine")]
+        config: Option<PathBuf>,
         /// Draft model for speculative decoding (with --engine): decodes
         /// twice, plain and speculative, and asserts the streams match.
         #[arg(long, requires = "engine")]
@@ -104,6 +107,9 @@ enum Command {
         /// Address to listen on.
         #[arg(long, default_value = "127.0.0.1:8099")]
         bind: String,
+        /// Typed runtime profile and overrides from allpaka.toml.
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 
     /// Probe a running `allpaka serve`: /health plus /stats.
@@ -218,9 +224,13 @@ fn main() -> Result<()> {
             report::gguf(&model, &info);
             Ok(())
         }
-        Command::Bench { serve, bind, connect, mem, engine, draft } => {
+        Command::Bench { serve, bind, connect, mem, engine, draft, config } => {
             match (engine, mem, serve, connect) {
-                (Some(model), _, _, _) => bench::measure_engine(&model, draft.as_deref()),
+                (Some(model), _, _, _) => {
+                    let runtime = config.as_deref().map(config::Config::load).transpose()?;
+                    runtime.as_ref().map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone()).apply();
+                    bench::measure_engine(&model, draft.as_deref())
+                }
                 (None, true, _, _) => bench::measure_memory(),
                 (None, false, true, _) => bench::serve(&bind),
                 (None, false, false, Some(addr)) => {
@@ -258,7 +268,11 @@ fn main() -> Result<()> {
         Command::Verify { model, addr, prompt, top, tol, decode } => {
             verify::run(&model, &addr, &prompt, top, tol, decode)
         }
-        Command::Serve { model, bind } => serve::run(&model, &bind),
+        Command::Serve { model, bind, config } => {
+            let runtime = config.as_deref().map(config::Config::load).transpose()?;
+            runtime.as_ref().map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone()).apply();
+            serve::run(&model, &bind)
+        }
         Command::Status { addr } => client::status(&addr),
         Command::Chat { prompt, system, rag, max_tokens, model_name, addr } => {
             client::chat(&addr, &prompt, system.as_deref(), rag, max_tokens, &model_name)

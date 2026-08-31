@@ -93,10 +93,13 @@ fn print_capability_report(model: &allpaka_model::Model<'_>, file: &allpaka_gguf
         "ALLPAKA_DECODE_SERIAL",
         "ALLPAKA_PF_ONEBUF",
         "ALLPAKA_PF_DEFER",
+        "ALLPAKA_MM_PIPE",
+        "ALLPAKA_ATTN_SPLIT",
     ];
     let c = &model.config;
     println!("  capabilities:");
     println!("    model: arch={} layers={} moe={}", c.architecture, c.n_layers, c.moe.is_some());
+    println!("    profile: {}", std::env::var("ALLPAKA_PROFILE").unwrap_or_else(|_| "auto".into()));
     println!("    metal: attached={}", allpaka_backend::gpu::is_attached());
     println!("    weights: metal-mapped={}", allpaka_backend::gpu::is_attached());
     let (weight_windows, residency_set) = allpaka_backend::gpu::residency_status();

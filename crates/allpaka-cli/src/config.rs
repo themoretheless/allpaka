@@ -25,6 +25,58 @@ pub struct Config {
     pub agents: Vec<AgentConfig>,
     #[serde(default)]
     pub defaults: Defaults,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PerformanceProfile {
+    #[default]
+    Auto,
+    Safe,
+    MaxPerformance,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    pub profile: PerformanceProfile,
+    pub prefill_chunk: Option<usize>,
+    pub attention_split: Option<usize>,
+}
+
+impl RuntimeConfig {
+    /// Apply typed launch policy before the backend initialises its OnceLocks.
+    /// Explicit environment variables remain the highest-priority overrides.
+    pub fn apply(&self) {
+        let set_default = |key: &str, value: String| {
+            if std::env::var_os(key).is_none() {
+                unsafe { std::env::set_var(key, value) };
+            }
+        };
+        let profile = match self.profile {
+            PerformanceProfile::Auto => "auto",
+            PerformanceProfile::Safe => {
+                set_default("ALLPAKA_DECODE_SERIAL", "1".into());
+                "safe"
+            }
+            PerformanceProfile::MaxPerformance => {
+                set_default("ALLPAKA_GPU_ROUTE", "1".into());
+                set_default("ALLPAKA_PF_ONEBUF", "1".into());
+                set_default("ALLPAKA_PF_DEFER", "1".into());
+                set_default("ALLPAKA_MM_PIPE", "1".into());
+                "max-performance"
+            }
+        };
+        set_default("ALLPAKA_PROFILE", profile.into());
+        if let Some(n) = self.prefill_chunk {
+            set_default("ALLPAKA_PREFILL_CHUNK", n.to_string());
+        }
+        if let Some(n) = self.attention_split {
+            set_default("ALLPAKA_ATTN_SPLIT", n.to_string());
+        }
+    }
 }
 
 /// One agent: a name, a model, and how much of the machine it needs.
@@ -226,6 +278,11 @@ pub const EXAMPLE: &str = r#"# allpaka cluster description.
 #
 # Preset values are vendor specifications and therefore optimistic. Override
 # any of them once you have measured the real number.
+
+[runtime]
+profile = "auto" # auto, safe, or max-performance
+# prefill_chunk = 256
+# attention_split = 12
 
 [[nodes]]
 name = "mac"
