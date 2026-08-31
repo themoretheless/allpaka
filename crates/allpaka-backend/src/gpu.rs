@@ -8894,14 +8894,16 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     // ALLPAKA_ATTN_SPLIT forces the fan-out, 1 disables the split path.
     let n_pos = req.pos + 1;
     static SPLIT_FORCE: OnceLock<Option<usize>> = OnceLock::new();
-    let nsplit = match *SPLIT_FORCE.get_or_init(|| {
+    let forced_split = *SPLIT_FORCE.get_or_init(|| {
         std::env::var("ALLPAKA_ATTN_SPLIT").ok().and_then(|v| v.parse().ok())
-    }) {
-        Some(n) => n,
-        None => n_pos / 128,
-    }
-    .clamp(1, 16)
-    .min(n_pos);
+    });
+    // On M4 Max, twelve slices are consistently faster than sixteen once the
+    // cache is long enough to saturate memory-level parallelism. Keep the
+    // larger range available to explicit overrides for other GPUs.
+    let nsplit = forced_split
+        .unwrap_or_else(|| (n_pos / 128).clamp(1, 12))
+        .clamp(1, 16)
+        .min(n_pos);
     let sp_acc_at = ctr_at + align(1);
     let sp_md_at = sp_acc_at + align(req.n_heads * nsplit * hd);
     // The greedy argmax: 64 (value, index) partial pairs plus the winner.
