@@ -8928,41 +8928,81 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
 
     let out = objc::rc::autoreleasepool(|| {
         let t_encode = std::time::Instant::now();
-        let mut cmd = gpu.queue.new_command_buffer();
+        let cmd = gpu.queue.new_command_buffer();
         // ALLPAKA_DECODE_SERIAL=1: serial encoder, implicit ordering, all
         // explicit barriers skipped - probes whether the driver's own
         // hazard tracking beats our barrier drains per stage boundary.
         static SERIAL: OnceLock<bool> = OnceLock::new();
         let serial = *SERIAL
             .get_or_init(|| std::env::var("ALLPAKA_DECODE_SERIAL").is_ok_and(|v| v == "1"));
-        let mut enc = cmd.compute_command_encoder_with_dispatch_type(if serial {
-            metal::MTLDispatchType::Serial
-        } else {
-            metal::MTLDispatchType::Concurrent
-        });
-        // ALLPAKA_DECODE_SPLIT=1: commit after every stage and accumulate its
-        // GPU time per label. Debug-only; serialises the stages, so wall time
-        // degrades. Printed per token at the end of the buffer.
+        // ALLPAKA_DECODE_SPLIT=1: sample the GPU timestamp counter at existing
+        // stage boundaries. Profile mode uses multiple compute encoders inside
+        // the same command buffer; production mode remains one concurrent
+        // encoder. Both modes keep one submit and one wait per token.
         let split = std::env::var_os("ALLPAKA_DECODE_SPLIT").is_some();
-        let mut split_acc: Vec<(&'static str, f64)> = Vec::new();
+        const MAX_SPLIT_SAMPLES: u64 = 2048;
+        let split_counter = if split
+            && gpu
+                .device
+                .supports_counter_sampling(metal::MTLCounterSamplingPoint::AtStageBoundary)
+        {
+            let desc = metal::CounterSampleBufferDescriptor::new();
+            desc.set_storage_mode(metal::MTLStorageMode::Shared);
+            desc.set_sample_count(MAX_SPLIT_SAMPLES);
+            gpu.device
+                .counter_sets()
+                .iter()
+                .find(|set| set.name() == "timestamp")
+                .and_then(|set| {
+                    desc.set_counter_set(set);
+                    gpu.device.new_counter_sample_buffer_with_descriptor(&desc).ok()
+                })
+        } else {
+            None
+        };
+        let split_resolved = split_counter.as_ref().map(|_| {
+            gpu.device.new_buffer(
+                MAX_SPLIT_SAMPLES * std::mem::size_of::<u64>() as u64,
+                metal::MTLResourceOptions::StorageModeShared,
+            )
+        });
+        let mut split_labels: Vec<&'static str> = Vec::new();
+        let mut split_index = 0u64;
+        let mut split_cpu_start = 0u64;
+        let mut split_gpu_start = 0u64;
+        let profile_encoder = |counter: &metal::CounterSampleBufferRef,
+                               start: u64,
+                               end: u64| {
+            let desc = metal::ComputePassDescriptor::new();
+            let attachment = desc
+                .sample_buffer_attachments()
+                .object_at(0)
+                .expect("Metal compute counter attachment 0");
+            attachment.set_sample_buffer(counter);
+            attachment.set_start_of_encoder_sample_index(start);
+            attachment.set_end_of_encoder_sample_index(end);
+            cmd.compute_command_encoder_with_descriptor(desc)
+        };
+        let mut enc = if let Some(counter) = split_counter.as_ref() {
+            gpu.device.sample_timestamps(&mut split_cpu_start, &mut split_gpu_start);
+            split_index = 2;
+            profile_encoder(counter, 0, 1)
+        } else {
+            cmd.compute_command_encoder_with_dispatch_type(if serial {
+                metal::MTLDispatchType::Serial
+            } else {
+                metal::MTLDispatchType::Concurrent
+            })
+        };
         macro_rules! split_here {
             ($label:expr) => {
-                if split {
-                    use objc::{msg_send, sel, sel_impl};
-                    enc.end_encoding();
-                    cmd.commit();
-                    cmd.wait_until_completed();
-                    let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
-                    let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
-                    let ms = (ge - gs) * 1e3;
-                    match split_acc.iter_mut().find(|(l, _)| *l == $label) {
-                        Some(e) => e.1 += ms,
-                        None => split_acc.push(($label, ms)),
+                if let Some(counter) = split_counter.as_ref() {
+                    if split_index + 1 < MAX_SPLIT_SAMPLES {
+                        enc.end_encoding();
+                        split_labels.push($label);
+                        enc = profile_encoder(counter, split_index, split_index + 1);
+                        split_index += 2;
                     }
-                    cmd = gpu.queue.new_command_buffer();
-                    enc = cmd.compute_command_encoder_with_dispatch_type(
-                        metal::MTLDispatchType::Concurrent,
-                    );
                 }
             };
         }
@@ -9812,20 +9852,50 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(32, 1, 1));
             split_here!("argmax");
         }
-        if split {
-            let tot: f64 = split_acc.iter().map(|e| e.1).sum();
-            eprintln!("decode split, ms/token (GPU executing):");
-            for (l, ms) in &split_acc {
-                eprintln!("  {l:<10} {ms:6.3} ({:4.1}%)", ms / tot * 100.0);
-            }
-        }
         enc.end_encoding();
+        if let (Some(counter), Some(resolved)) = (split_counter.as_ref(), split_resolved.as_ref()) {
+            let blit = cmd.new_blit_command_encoder();
+            blit.resolve_counters(counter, metal::NSRange::new(0, split_index), resolved, 0);
+            blit.end_encoding();
+        }
         ENCODE_NS.fetch_add(t_encode.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         let t_wait = std::time::Instant::now();
         cmd.commit();
         cmd.wait_until_completed();
         note_gpu_times(cmd);
+        if let Some(resolved) = split_resolved.as_ref() {
+            let mut cpu_end = 0u64;
+            let mut gpu_end = 0u64;
+            gpu.device.sample_timestamps(&mut cpu_end, &mut gpu_end);
+            let samples = unsafe {
+                std::slice::from_raw_parts(resolved.contents() as *const u64, split_index as usize)
+            };
+            let scale = if gpu_end > split_gpu_start {
+                (cpu_end - split_cpu_start) as f64 / (gpu_end - split_gpu_start) as f64
+            } else {
+                1.0
+            };
+            let mut split_acc: Vec<(&'static str, f64)> = Vec::new();
+            for (stage, label) in split_labels.iter().enumerate() {
+                let begin = samples[stage * 2];
+                let end = samples[stage * 2 + 1];
+                let ms = end.saturating_sub(begin) as f64 * scale / 1e6;
+                match split_acc.iter_mut().find(|(known, _)| known == label) {
+                    Some(entry) => entry.1 += ms,
+                    None => split_acc.push((*label, ms)),
+                }
+            }
+            let total: f64 = split_acc.iter().map(|entry| entry.1).sum();
+            static PRINTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !PRINTED.swap(true, Ordering::Relaxed) {
+                eprintln!("decode profile, ms/token (GPU counters, one submit):");
+                for (label, ms) in split_acc {
+                    eprintln!("  {label:<10} {ms:6.3} ({:4.1}%)", ms / total * 100.0);
+                }
+            }
+        }
         WAIT_NS.fetch_add(t_wait.elapsed().as_nanos() as u64, Ordering::Relaxed);
         CALLS.fetch_add(1, Ordering::Relaxed);
         DISPATCHES.fetch_add(dispatched + 2, Ordering::Relaxed);
