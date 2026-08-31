@@ -9619,6 +9619,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 } => {
                     let n_slots = *n_used + shared.is_some() as usize;
                     let sig_last = shared_gate.is_some() as u32;
+                    let mut ffn_dispatches = 0u64;
                     if !probe_skip("router") {
                     if moe_plain {
                         // FFN residual norm + router matvec + gating + top-k
@@ -9651,6 +9652,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         enc.set_bytes(13, 4, &sg as *const u32 as *const _);
                         enc.set_bytes(14, 4, &hb as *const u32 as *const _);
                         enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(256, 1, 1));
+                        ffn_dispatches += 1;
                     } else if !refs.normflag && rtopk_fused() {
                         // Router matvec + gating + top-k in ONE dispatch: the
                         // two tiny dispatches and the drain between them were
@@ -9678,6 +9680,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         enc.set_bytes(9, 4, &sg as *const u32 as *const _);
                         enc.set_bytes(10, 4, &hb as *const u32 as *const _);
                         enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(256, 1, 1));
+                        ffn_dispatches += 1;
                     } else {
                     matvec(enc, router_state, router, hidden, *n_expert, h_at, logits_at);
                     bar(enc);
@@ -9704,6 +9707,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         }
                     }
                     enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(32, 1, 1));
+                    ffn_dispatches += 2;
                     }
                     }
                     split_here!("router");
@@ -9712,6 +9716,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     // kernel applies the sigmoid.
                     if let Some((sg_mat, sg_state)) = shared_gate {
                         matvec(enc, sg_state, sg_mat, hidden, 1, h_at, wts_at + *n_used);
+                        ffn_dispatches += 1;
                     }
                     bar_c(enc, b'f');
                     if !probe_skip("experts") {
@@ -9754,12 +9759,14 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                                 ),
                                 MTLSize::new(128, 1, 1),
                             );
+                            ffn_dispatches += 1;
                         }
                         None => {
                             matvec_idx(enc, &states[0], &mats[0], hidden, *expert_ffn,
                                 h_at, gate_at, strides[0], *n_used, 0);
                             matvec_idx(enc, &states[1], &mats[1], hidden, *expert_ffn,
                                 h_at, up_at, strides[1], *n_used, 0);
+                            ffn_dispatches += 2;
                         }
                     }
                     // The shared expert is a plain matvec into the extra slot.
@@ -9768,6 +9775,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                             h_at, gate_at + *n_used * *expert_ffn);
                         matvec(enc, &sstates[1], &smats[1], hidden, *expert_ffn,
                             h_at, up_at + *n_used * *expert_ffn);
+                        ffn_dispatches += 2;
                     }
                     split_here!("gate_up");
                     bar_c(enc, b'f');
@@ -9781,6 +9789,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                             MTLSize::new((n32 as u64).div_ceil(256), 1, 1),
                             MTLSize::new(256, 1, 1),
                         );
+                        ffn_dispatches += 1;
                         split_here!("swiglu");
                         bar_c(enc, b'f');
                     } else {
@@ -9790,6 +9799,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     }
                     matvec_idx(enc, &states[2], &mats[2], *expert_ffn, hidden,
                         gate_at, downo_at, strides[2], *n_used, *expert_ffn);
+                    ffn_dispatches += 1;
                     if let Some((smats, sstates)) = shared {
                         // The shared down reads its own raw up slot.
                         if *sw_fused {
@@ -9798,6 +9808,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         matvec(enc, &sstates[2], &smats[2], *expert_ffn, hidden,
                             gate_at + *n_used * *expert_ffn,
                             downo_at + *n_used * hidden);
+                        ffn_dispatches += 1;
                     }
                     }
                     split_here!("down");
@@ -9809,9 +9820,10 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         pending_combine = Some((n_slots as u32, sig_last));
                     } else {
                         combine(enc, n_slots as u32, sig_last);
+                        ffn_dispatches += 1;
                     }
                     split_here!("combine");
-                    dispatched += 6;
+                    dispatched += ffn_dispatches;
                 }
             }
             // The fused combine+norm is ordered by the down stage's barrier;
@@ -12780,7 +12792,9 @@ fn cfuse() -> bool {
 }
 
 /// The decode gate+up dual dispatch: one INDEXED launch covers both
-/// matrices (DUAL_GW function constant). `ALLPAKA_DECODE_GUFUSE=1` enables.
+/// matrices (DUAL_GW function constant). OFF by default: qwen3-30b measured
+/// 105.0 tok/s versus 113.7 for two concurrent dispatches on M4 Max.
+/// `ALLPAKA_DECODE_GUFUSE=1` enables the diagnostic variant.
 fn gufuse() -> bool {
     static G: OnceLock<bool> = OnceLock::new();
     *G.get_or_init(|| std::env::var("ALLPAKA_DECODE_GUFUSE").is_ok_and(|v| v == "1"))
