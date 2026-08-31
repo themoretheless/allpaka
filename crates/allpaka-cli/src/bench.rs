@@ -97,8 +97,13 @@ fn print_capability_report(model: &allpaka_model::Model<'_>, file: &allpaka_gguf
         "ALLPAKA_ATTN_SPLIT",
     ];
     let c = &model.config;
+    let model_capability = c.capability();
     println!("  capabilities:");
     println!("    model: arch={} layers={} moe={}", c.architecture, c.n_layers, c.moe.is_some());
+    println!(
+        "    model-support: {:?} ({})",
+        model_capability.support, model_capability.reason
+    );
     println!("    profile: {}", std::env::var("ALLPAKA_PROFILE").unwrap_or_else(|_| "auto".into()));
     println!("    metal: attached={}", allpaka_backend::gpu::is_attached());
     println!("    weights: metal-mapped={}", allpaka_backend::gpu::is_attached());

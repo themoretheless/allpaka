@@ -17,7 +17,7 @@ pub mod profile;
 pub mod speculate;
 pub mod tokenizer;
 
-pub use config::{Config, RopeStyle};
+pub use config::{Config, ModelCapability, ModelSupport, RopeStyle};
 pub use kv::KvCache;
 pub use model::{Model, Session};
 pub use tokenizer::Tokenizer;

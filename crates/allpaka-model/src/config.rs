@@ -30,6 +30,19 @@ pub enum Gating {
     Sigmoid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSupport {
+    Supported,
+    Experimental,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ModelCapability {
+    pub support: ModelSupport,
+    pub reason: &'static str,
+}
+
 /// Mixture-of-experts hyperparameters, present when the file declares experts.
 #[derive(Debug, Clone)]
 pub struct MoeConfig {
@@ -104,6 +117,35 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn capability(&self) -> ModelCapability {
+        match self.architecture.as_str() {
+            "qwen3" | "qwen3moe" | "qwen35moe" => ModelCapability {
+                support: ModelSupport::Supported,
+                reason: "Qwen dense, MoE, and hybrid GDN kernels are implemented",
+            },
+            "llama" | "mistral" => ModelCapability {
+                support: ModelSupport::Supported,
+                reason: "Llama-like dense graph with adjacent-pair RoPE is implemented",
+            },
+            "glm4moe" => ModelCapability {
+                support: ModelSupport::Experimental,
+                reason: "sigmoid MoE, shared experts, bias, and partial RoPE are implemented",
+            },
+            "deepseek2" | "deepseek3" => ModelCapability {
+                support: ModelSupport::Unsupported,
+                reason: "MLA KV cache and attention kernels are not implemented",
+            },
+            "gemma4" => ModelCapability {
+                support: ModelSupport::Unsupported,
+                reason: "head_dim=512 attention kernels are not implemented",
+            },
+            _ => ModelCapability {
+                support: ModelSupport::Unsupported,
+                reason: "architecture has no registered execution capability",
+            },
+        }
+    }
+
     pub fn from_gguf(f: &GgufFile) -> Result<Self> {
         let arch = f.architecture().to_string();
         let key = |suffix: &str| format!("{arch}.{suffix}");

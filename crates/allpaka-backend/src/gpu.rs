@@ -10361,9 +10361,33 @@ fn encode_verify_tokens(
                 enc.memory_barrier_with_resources(&[y, ssm_buf]);
                 // The last d_conv-1 raw rows become the next chunk's window.
                 enc.set_compute_pipeline_state(&gpu.pipelines[&("copy_f32", 1, 1)]);
-                enc.set_buffer(0, Some(y), e(gqkv_at + (m - (g.d_conv as usize - 1)) * g.channels));
+                let window_rows = g.d_conv as usize - 1;
+                let window_src = if m >= window_rows {
+                    gqkv_at + (m - window_rows) * g.channels
+                } else {
+                    let old = (window_rows - m) * g.channels;
+                    enc.set_buffer(0, Some(ssm_buf), ((g.conv_off + m as u64 * g.channels as u64) * 4) as u64);
+                    enc.set_buffer(1, Some(y), e(gate_at));
+                    let old32 = old as u32;
+                    enc.set_bytes(2, 4, &old32 as *const u32 as *const _);
+                    enc.dispatch_thread_groups(
+                        MTLSize::new((old as u64).div_ceil(256), 1, 1),
+                        MTLSize::new(256, 1, 1),
+                    );
+                    enc.set_buffer(0, Some(y), e(gqkv_at));
+                    enc.set_buffer(1, Some(y), e(gate_at + old));
+                    let new32 = (m * g.channels) as u32;
+                    enc.set_bytes(2, 4, &new32 as *const u32 as *const _);
+                    enc.dispatch_thread_groups(
+                        MTLSize::new((new32 as u64).div_ceil(256), 1, 1),
+                        MTLSize::new(256, 1, 1),
+                    );
+                    enc.memory_barrier_with_resources(&[y, ssm_buf]);
+                    gate_at
+                };
+                enc.set_buffer(0, Some(y), e(window_src));
                 enc.set_buffer(1, Some(ssm_buf), (g.conv_off * 4) as u64);
-                let nwin = ((g.d_conv as usize - 1) * g.channels) as u32;
+                let nwin = (window_rows * g.channels) as u32;
                 enc.set_bytes(2, 4, &nwin as *const u32 as *const _);
                 enc.dispatch_thread_groups(
                     MTLSize::new((nwin as u64).div_ceil(256), 1, 1),
@@ -12168,7 +12192,8 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
     let out_at = gy_at + align(req.m * value_dim);
     let router_at = out_at + align(req.m * hidden);
     let n_expert = fusion.as_ref().map_or(0, |f| f.n_expert);
-    gpu.ensure_arenas(4096, (router_at + align(req.m * n_expert)) * 4);
+    let window_at = router_at + align(req.m * n_expert);
+    gpu.ensure_arenas(4096, (window_at + align((req.d_conv - 1) * channels)) * 4);
 
     let out = objc::rc::autoreleasepool(|| {
         let t_encode = std::time::Instant::now();
@@ -12312,9 +12337,33 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
         // The session window update, now that every row's read is done: the
         // last d_conv-1 RAW qkv rows become the next chunk's window.
         enc.set_compute_pipeline_state(&gpu.pipelines[&("copy_f32", 1, 1)]);
-        enc.set_buffer(0, Some(y), e(qkv_at + (req.m - (req.d_conv - 1)) * channels));
+        let window_rows = req.d_conv - 1;
+        let window_src = if req.m >= window_rows {
+            qkv_at + (req.m - window_rows) * channels
+        } else {
+            let old = (window_rows - req.m) * channels;
+            enc.set_buffer(0, Some(&req.ssm.buf), ((req.conv_off + req.m * channels) * 4) as u64);
+            enc.set_buffer(1, Some(y), e(window_at));
+            let old32 = old as u32;
+            enc.set_bytes(2, 4, &old32 as *const u32 as *const _);
+            enc.dispatch_thread_groups(
+                MTLSize::new((old as u64).div_ceil(256), 1, 1),
+                MTLSize::new(256, 1, 1),
+            );
+            enc.set_buffer(0, Some(y), e(qkv_at));
+            enc.set_buffer(1, Some(y), e(window_at + old));
+            let new32 = (req.m * channels) as u32;
+            enc.set_bytes(2, 4, &new32 as *const u32 as *const _);
+            enc.dispatch_thread_groups(
+                MTLSize::new((new32 as u64).div_ceil(256), 1, 1),
+                MTLSize::new(256, 1, 1),
+            );
+            enc.memory_barrier_with_resources(&[y, &req.ssm.buf]);
+            window_at
+        };
+        enc.set_buffer(0, Some(y), e(window_src));
         enc.set_buffer(1, Some(&req.ssm.buf), (req.conv_off * 4) as u64);
-        let nwin = ((req.d_conv - 1) * channels) as u32;
+        let nwin = (window_rows * channels) as u32;
         enc.set_bytes(2, 4, &nwin as *const u32 as *const _);
         enc.dispatch_thread_groups(
             MTLSize::new((nwin as u64).div_ceil(256), 1, 1),

@@ -681,6 +681,14 @@ impl Session {
 impl<'a> Model<'a> {
     pub fn load(f: &'a GgufFile) -> Result<Self> {
         let config = Config::from_gguf(f)?;
+        let capability = config.capability();
+        if capability.support == crate::config::ModelSupport::Unsupported {
+            bail!(
+                "architecture {} is unsupported: {}",
+                config.architecture,
+                capability.reason
+            );
+        }
         // Offer the weights to the GPU; on a machine without Metal this is a
         // no-op and every matmul stays on the CPU reference. Split files get
         // one GPU window set per part.
