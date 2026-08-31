@@ -230,9 +230,9 @@ impl<'a> QuantMat<'a> {
     /// pay a single wait. Items are `(gate, up, down, x)` with the batch size
     /// implied by `x.len()`.
     ///
-    /// Returns None when the GPU declines (no device, foreign bytes, a
-    /// format without a kernel, or mismatched shapes) - the caller then runs
-    /// its usual matmul + swiglu + matmul path.
+    /// A mixed batch is not all-or-nothing: if the combined GPU dispatch
+    /// declines, each item is retried independently and only unsupported
+    /// items use the ordinary matmul + swiglu + matmul path.
     pub fn ffn_many(
         items: &[(&QuantMat<'_>, &QuantMat<'_>, &QuantMat<'_>, &[f32])],
     ) -> Option<Vec<Vec<f32>>> {
@@ -265,7 +265,25 @@ impl<'a> QuantMat<'a> {
                 m: x.len() / hidden,
             });
         }
-        crate::gpu::ffn_batch(&reqs)
+        if let Some(out) = crate::gpu::ffn_batch(&reqs) {
+            return Some(out);
+        }
+
+        let mut out = Vec::with_capacity(items.len());
+        for (item, req) in items.iter().zip(&reqs) {
+            if let Some(mut one) = crate::gpu::ffn_batch(std::slice::from_ref(req)) {
+                out.push(one.pop().expect("one FFN result per request"));
+                continue;
+            }
+
+            let (gate, up, down, x) = *item;
+            let m = x.len() / gate.n_in;
+            let mut activated = gate.matmul(x, m).ok()?;
+            let up = up.matmul(x, m).ok()?;
+            crate::ops::swiglu(&mut activated, &up);
+            out.push(down.matmul(&activated, m).ok()?);
+        }
+        Some(out)
     }
 
     /// Attention for one decode step followed by this matrix as the output
