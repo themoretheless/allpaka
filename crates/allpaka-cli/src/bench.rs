@@ -83,7 +83,7 @@ pub fn measure_memory() -> Result<()> {
     Ok(())
 }
 
-fn print_capability_report(model: &allpaka_model::Model<'_>) {
+fn print_capability_report(model: &allpaka_model::Model<'_>, file: &allpaka_gguf::GgufFile) {
     const OVERRIDES: &[&str] = &[
         "ALLPAKA_NO_GPU",
         "ALLPAKA_CPU_ATTN",
@@ -102,7 +102,34 @@ fn print_capability_report(model: &allpaka_model::Model<'_>) {
     println!("    kv: page-aligned-f16, checked-at-session-runtime");
     println!("    prefill: gpu-counters-enabled");
     println!("    decode: checked-whole-token-fast-path");
-    println!("    tensor-types: runtime-resolve (census follows model load audit)");
+    println!("    tensor-types:");
+    let mut census = std::collections::BTreeMap::<String, (usize, u64, bool)>::new();
+    for tensor in file.tensors() {
+        let name = match tensor.ggml_type {
+            allpaka_gguf::GgmlType::Other(id) => format!("Other({id})"),
+            ty => format!("{ty:?}"),
+        };
+        let metal_matmul = matches!(
+            tensor.ggml_type,
+            allpaka_gguf::GgmlType::F32
+                | allpaka_gguf::GgmlType::Q8_0
+                | allpaka_gguf::GgmlType::Q2K
+                | allpaka_gguf::GgmlType::Q3K
+                | allpaka_gguf::GgmlType::Q4K
+                | allpaka_gguf::GgmlType::Q5K
+                | allpaka_gguf::GgmlType::Q6K
+        );
+        let entry = census.entry(name).or_insert((0, 0, metal_matmul));
+        entry.0 += 1;
+        entry.1 += tensor.byte_size().unwrap_or(0);
+    }
+    for (ty, (count, bytes, metal_matmul)) in census {
+        println!(
+            "      {ty}: tensors={count} bytes={:.2} GiB matmul-kernel={}",
+            bytes as f64 / (1u64 << 30) as f64,
+            if metal_matmul { "yes" } else { "no" },
+        );
+    }
     println!("    overrides:");
     let mut any = false;
     for key in OVERRIDES {
@@ -248,7 +275,7 @@ pub fn measure_engine(model_path: &std::path::Path, draft_path: Option<&std::pat
         c.architecture,
         if c.moe.is_some() { ", MoE" } else { "" },
     );
-    print_capability_report(&model);
+    print_capability_report(&model, &file);
 
     // A synthetic prompt long enough to amortise chunking, plus warmup.
     // ALLPAKA_BENCH_PP overrides the prompt length (32 warmup + N measured);
