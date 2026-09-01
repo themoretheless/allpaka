@@ -16,6 +16,7 @@
 
 #[cfg(target_os = "macos")]
 pub mod gpu;
+pub mod accel;
 pub mod ops;
 pub mod quantmat;
 

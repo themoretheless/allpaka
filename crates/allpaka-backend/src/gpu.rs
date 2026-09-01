@@ -8447,6 +8447,18 @@ pub fn decode_token_checked(req: &TokenReq) -> Result<TokenOut, DecodeDecline> {
     }
 }
 
+/// Backend-neutral checked decode contract. New callers should use this
+/// rather than interpreting `None` from the compatibility API below.
+pub fn decode_token_outcome(req: &TokenReq) -> crate::accel::AccelOutcome<TokenOut> {
+    match decode_token_checked(req) {
+        Ok(out) => crate::accel::AccelOutcome::Executed(out),
+        Err(reason) => crate::accel::AccelOutcome::Declined(crate::accel::DeclineReason::Backend {
+            operation: "decode-token",
+            detail: reason.to_string(),
+        }),
+    }
+}
+
 pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
     macro_rules! why {
