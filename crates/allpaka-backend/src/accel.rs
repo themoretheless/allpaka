@@ -75,6 +75,15 @@ impl<T> AccelOutcome<T> {
             Self::Declined(reason) => Some(reason),
         }
     }
+
+    /// Select an explicit fallback without discarding why acceleration was
+    /// declined. The fallback is never evaluated for an executed fast path.
+    pub fn fallback<U>(self, fallback: impl FnOnce(DeclineReason) -> U) -> Result<T, U> {
+        match self {
+            Self::Executed(value) => Ok(value),
+            Self::Declined(reason) => Err(fallback(reason)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -86,5 +95,17 @@ mod tests {
         let out: AccelOutcome<()> = AccelOutcome::Declined(DeclineReason::NoDevice);
         assert!(out.decline_reason().is_some());
         assert!(out.executed().is_none());
+    }
+
+    #[test]
+    fn fallback_runs_only_for_declines() {
+        assert_eq!(AccelOutcome::Executed(7).fallback(|_| 99), Ok(7));
+
+        let declined = AccelOutcome::<i32>::Declined(DeclineReason::NoDevice)
+            .fallback(|reason| match reason {
+                DeclineReason::NoDevice => 42,
+                _ => 0,
+            });
+        assert_eq!(declined, Err(42));
     }
 }
