@@ -16,6 +16,7 @@
 
 pub mod accel;
 pub mod command;
+pub mod execution;
 #[cfg(target_os = "macos")]
 pub mod gpu;
 pub mod ops;
