@@ -2,6 +2,7 @@
 //! and if so, where to cut it.
 
 mod bench;
+mod benchmark_report;
 mod client;
 mod config;
 use allpaka_gguf as gguf;
@@ -224,27 +225,44 @@ fn main() -> Result<()> {
             report::gguf(&model, &info);
             Ok(())
         }
-        Command::Bench { serve, bind, connect, mem, engine, draft, config } => {
-            match (engine, mem, serve, connect) {
-                (Some(model), _, _, _) => {
-                    let runtime = config.as_deref().map(config::Config::load).transpose()?;
-                    runtime.as_ref().map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone()).apply();
-                    bench::measure_engine(&model, draft.as_deref())
-                }
-                (None, true, _, _) => bench::measure_memory(),
-                (None, false, true, _) => bench::serve(&bind),
-                (None, false, false, Some(addr)) => {
-                    println!("measuring path to {addr} ...");
-                    let link = bench::measure(&addr)?;
-                    report::link(&link);
-                    Ok(())
-                }
-                (None, false, false, None) => {
-                    bail!("pass --serve, --connect <host:port>, --mem, or --engine <model>")
-                }
+        Command::Bench {
+            serve,
+            bind,
+            connect,
+            mem,
+            engine,
+            draft,
+            config,
+        } => match (engine, mem, serve, connect) {
+            (Some(model), _, _, _) => {
+                let runtime = config.as_deref().map(config::Config::load).transpose()?;
+                runtime
+                    .as_ref()
+                    .map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone())
+                    .apply();
+                bench::measure_engine(&model, draft.as_deref())
             }
-        }
-        Command::Plan { model, config: config_path, ctx, prompt, draft, draft_len, accept } => {
+            (None, true, _, _) => bench::measure_memory(),
+            (None, false, true, _) => bench::serve(&bind),
+            (None, false, false, Some(addr)) => {
+                println!("measuring path to {addr} ...");
+                let link = bench::measure(&addr)?;
+                report::link(&link);
+                Ok(())
+            }
+            (None, false, false, None) => {
+                bail!("pass --serve, --connect <host:port>, --mem, or --engine <model>")
+            }
+        },
+        Command::Plan {
+            model,
+            config: config_path,
+            ctx,
+            prompt,
+            draft,
+            draft_len,
+            accept,
+        } => {
             let spec = match draft {
                 None => None,
                 Some(path) => {
@@ -261,22 +279,50 @@ fn main() -> Result<()> {
             };
             run_plan(&model, &config_path, ctx, prompt, spec)
         }
-        Command::Fleet { config: config_path, models, ctx } => {
-            run_fleet(&config_path, &models, ctx)
-        }
-        Command::Launch { config: config_path } => run_launch(&config_path),
-        Command::Verify { model, addr, prompt, top, tol, decode } => {
-            verify::run(&model, &addr, &prompt, top, tol, decode)
-        }
-        Command::Serve { model, bind, config } => {
+        Command::Fleet {
+            config: config_path,
+            models,
+            ctx,
+        } => run_fleet(&config_path, &models, ctx),
+        Command::Launch {
+            config: config_path,
+        } => run_launch(&config_path),
+        Command::Verify {
+            model,
+            addr,
+            prompt,
+            top,
+            tol,
+            decode,
+        } => verify::run(&model, &addr, &prompt, top, tol, decode),
+        Command::Serve {
+            model,
+            bind,
+            config,
+        } => {
             let runtime = config.as_deref().map(config::Config::load).transpose()?;
-            runtime.as_ref().map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone()).apply();
+            runtime
+                .as_ref()
+                .map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone())
+                .apply();
             serve::run(&model, &bind)
         }
         Command::Status { addr } => client::status(&addr),
-        Command::Chat { prompt, system, rag, max_tokens, model_name, addr } => {
-            client::chat(&addr, &prompt, system.as_deref(), rag, max_tokens, &model_name)
-        }
+        Command::Chat {
+            prompt,
+            system,
+            rag,
+            max_tokens,
+            model_name,
+            addr,
+        } => client::chat(
+            &addr,
+            &prompt,
+            system.as_deref(),
+            rag,
+            max_tokens,
+            &model_name,
+        ),
         Command::RagTest { model_name, addr } => client::rag_test(&addr, &model_name),
     }
 }
@@ -299,11 +345,7 @@ fn load_model(path: &std::path::Path, kv_cache_dtype_bytes: u64) -> Result<Model
     })
 }
 
-fn run_fleet(
-    config_path: &std::path::Path,
-    ad_hoc: &[PathBuf],
-    ctx: Option<u32>,
-) -> Result<()> {
+fn run_fleet(config_path: &std::path::Path, ad_hoc: &[PathBuf], ctx: Option<u32>) -> Result<()> {
     let cfg = config::Config::load(config_path).with_context(|| {
         format!(
             "loading cluster config; run `allpaka init > {}` to create one",
