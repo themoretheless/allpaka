@@ -8582,7 +8582,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         // The spin-flag scheme replaces the two norm barriers when every
         // consumer kernel carries the WAIT variant: qkv (q4_k_mv) and the
         // router (f32). `ALLPAKA_NORMFLAG=0` reverts to barriers.
-        let normflag = !std::env::var("ALLPAKA_NORMFLAG").is_ok_and(|v| v == "0")
+        let normflag = crate::runtime::get().normflag
             && mats_pre.as_ref().is_some_and(|(m, _)| {
                 m.iter().take(3).all(|m| m.kernel == "matvec_q4_k_mv")
             })
@@ -8917,10 +8917,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     // positions across nsplit threadgroups and merge the partials.
     // ALLPAKA_ATTN_SPLIT forces the fan-out, 1 disables the split path.
     let n_pos = req.pos + 1;
-    static SPLIT_FORCE: OnceLock<Option<usize>> = OnceLock::new();
-    let forced_split = *SPLIT_FORCE.get_or_init(|| {
-        std::env::var("ALLPAKA_ATTN_SPLIT").ok().and_then(|v| v.parse().ok())
-    });
+    let forced_split = crate::runtime::get().attention_split;
     // On M4 Max, twelve slices are consistently faster than sixteen once the
     // cache is long enough to saturate memory-level parallelism. Keep the
     // larger range available to explicit overrides for other GPUs.
@@ -12692,8 +12689,7 @@ pub struct GroupedCombine<'a> {
 /// layer N+1 while the GPU still runs layer N. `ALLPAKA_PF_DEFER=0` reverts
 /// to per-layer waits.
 fn pf_defer() -> bool {
-    static D: OnceLock<bool> = OnceLock::new();
-    *D.get_or_init(|| std::env::var("ALLPAKA_PF_DEFER").map_or(true, |v| v != "0"))
+    crate::runtime::get().prefill_defer
 }
 
 /// The whole fused prefill chunk as ONE command buffer (sequential
@@ -12702,8 +12698,7 @@ fn pf_defer() -> bool {
 /// (pp1200: 1124 vs 1095) - pure buffer-start overhead removal, GPU
 /// executing unchanged. `ALLPAKA_PF_ONEBUF=0` reverts to PF_DEFER chaining.
 fn pf_onebuf() -> bool {
-    static O: OnceLock<bool> = OnceLock::new();
-    *O.get_or_init(|| std::env::var("ALLPAKA_PF_ONEBUF").map_or(true, |v| v != "0"))
+    crate::runtime::get().prefill_one_buffer
 }
 
 /// ALLPAKA_GPU_COUNTERS=1: per-dispatch GPUTimestamp sampling in the fused
@@ -12851,8 +12846,7 @@ fn q2_kernel() -> &'static str {
 /// at the head of the FFN command buffer instead of a CPU readback + top-k.
 /// `ALLPAKA_GPU_ROUTE=0` reverts to the CPU router.
 fn gpu_route() -> bool {
-    static R: OnceLock<bool> = OnceLock::new();
-    *R.get_or_init(|| std::env::var("ALLPAKA_GPU_ROUTE").map_or(true, |v| v != "0"))
+    crate::runtime::get().gpu_route
 }
 
 /// The decode-side combine fold into the next residual norm
@@ -12905,8 +12899,7 @@ fn mm_k64() -> bool {
 /// (mmllp_q4_k, mmllpg/ps_id_q4_k). Default ON. `ALLPAKA_MM_PIPE=0` reverts
 /// to the two-barrier llama-structure loop.
 fn mm_pipe() -> bool {
-    static P: OnceLock<bool> = OnceLock::new();
-    *P.get_or_init(|| std::env::var("ALLPAKA_MM_PIPE").map_or(true, |v| v != "0"))
+    crate::runtime::get().mm_pipeline
 }
 
 /// K-step 64 for the mmid (MoE) kernels only: `ALLPAKA_MMID_K64=1`. The FFN
