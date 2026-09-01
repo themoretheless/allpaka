@@ -15,6 +15,7 @@
 //!   `mul_mat` semantics.
 
 pub mod accel;
+pub mod command;
 #[cfg(target_os = "macos")]
 pub mod gpu;
 pub mod ops;
