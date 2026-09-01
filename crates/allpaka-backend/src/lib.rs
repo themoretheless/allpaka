@@ -14,12 +14,13 @@
 //!   weight row with an activation row per output element, exactly ggml's
 //!   `mul_mat` semantics.
 
+pub mod accel;
 #[cfg(target_os = "macos")]
 pub mod gpu;
-pub mod accel;
 pub mod ops;
 pub mod quantmat;
 pub mod runtime;
+pub mod telemetry;
 
 /// On platforms without Metal the GPU module is a stub that always declines,
 /// and every matmul stays on the CPU reference path.
