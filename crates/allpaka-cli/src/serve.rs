@@ -5,15 +5,16 @@
 //! an agent framework pointed at this URL cannot tell it is not llama-server -
 //! same route, same response shape.
 
+mod rag_tools;
+use rag_tools::{rag_default_tool_schemas, run_rag_tool, RagTools};
+
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use std::cell::RefCell;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 
 use allpaka_model::{Model, Session, Tokenizer};
-use crate::rag_mcp::{RagMcp, RagMcpConfig};
 
 /// The KV cache carried across requests.
 ///
@@ -55,396 +56,6 @@ const SSM_SNAPSHOTS_MAX: usize = 8;
 /// model's maximum.
 const SESSION_TOKENS: usize = 16384;
 
-const DEFAULT_RAG_NOTES_DIR: &str =
-    "/Users/themoretheless/.claude/projects/-Users-themoretheless-Documents-Sources-allpaka/memory";
-const RAG_SEARCH_MAX_RESULTS: usize = 5;
-const RAG_SEARCH_MAX_LINES: usize = 6;
-const RAG_TOOL_MAX_ROUNDS: usize = 2;
-const RAG_READ_MAX_CHARS: usize = 12_000;
-
-#[derive(Debug, Clone)]
-struct RagToolConfig {
-    enabled: bool,
-    notes_dir: PathBuf,
-    search_max_results: usize,
-    search_max_lines: usize,
-    max_tool_rounds: usize,
-    read_max_chars: usize,
-    inject_tools_when_missing: bool,
-}
-
-impl RagToolConfig {
-    fn load() -> Self {
-        let enabled = std::env::var("ALLPAKA_RAG_TOOLS")
-            .ok()
-            .is_none_or(|v| v != "0");
-        let notes_dir = std::env::var("ALLPAKA_RAG_NOTES_DIR")
-            .map(PathBuf::from)
-            .or_else(|_| std::env::var("RAG_INGEST_ROOTS").map(PathBuf::from))
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_RAG_NOTES_DIR));
-        let search_max_results = parse_env_usize("ALLPAKA_RAG_SEARCH_MAX_RESULTS")
-            .unwrap_or(RAG_SEARCH_MAX_RESULTS);
-        let search_max_lines = parse_env_usize("ALLPAKA_RAG_SEARCH_MAX_LINES")
-            .unwrap_or(RAG_SEARCH_MAX_LINES);
-        let max_tool_rounds = parse_env_usize("ALLPAKA_RAG_MAX_TOOL_ROUNDS")
-            .unwrap_or(RAG_TOOL_MAX_ROUNDS)
-            .max(1);
-        let read_max_chars = parse_env_usize("ALLPAKA_RAG_READ_MAX_CHARS").unwrap_or(RAG_READ_MAX_CHARS);
-        let inject_tools_when_missing = parse_env_bool("ALLPAKA_RAG_AUTO_TOOLS");
-        RagToolConfig {
-            enabled,
-            notes_dir,
-            search_max_results,
-            search_max_lines,
-            max_tool_rounds,
-            read_max_chars,
-            inject_tools_when_missing,
-        }
-    }
-}
-
-fn parse_env_usize(name: &str) -> Option<usize> {
-    std::env::var(name).ok().and_then(|v| v.parse().ok())
-}
-
-/// Which retrieval backend serves rag_search/rag_read.
-///
-/// `Auto` (default): rag-mcp when its binary and DuckDB are present, grep
-/// otherwise. `Mcp` forces rag-mcp (a missing server is an error in the tool
-/// reply, not a silent downgrade). `Grep` keeps the old directory scan, and
-/// is also the runtime fallback when the MCP child dies mid-session.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum RagBackend {
-    Auto,
-    Mcp,
-    Grep,
-}
-
-impl RagBackend {
-    fn load() -> Self {
-        match std::env::var("ALLPAKA_RAG_BACKEND").as_deref() {
-            Ok("mcp") => RagBackend::Mcp,
-            Ok("grep") => RagBackend::Grep,
-            _ => RagBackend::Auto,
-        }
-    }
-}
-
-/// The tool surface: static config plus the lazily spawned MCP child.
-/// RefCell because `handle` sees everything by reference; serve is
-/// single-threaded, so there is no real sharing.
-struct RagTools {
-    cfg: RagToolConfig,
-    backend: RagBackend,
-    mcp_cfg: RagMcpConfig,
-    mcp: RefCell<Option<RagMcp>>,
-}
-
-impl RagTools {
-    fn load() -> Self {
-        let cfg = RagToolConfig::load();
-        let backend = RagBackend::load();
-        let mcp_cfg = RagMcpConfig::from_env(&cfg.notes_dir);
-        let mcp = match backend {
-            RagBackend::Grep => None,
-            RagBackend::Auto | RagBackend::Mcp if mcp_cfg.available() => {
-                match RagMcp::spawn(&mcp_cfg) {
-                    Ok(m) => {
-                        println!("rag backend: rag-mcp ({}, BM25 index)", mcp_cfg.db.display());
-                        Some(m)
-                    }
-                    Err(e) => {
-                        if backend == RagBackend::Mcp {
-                            println!("rag backend: rag-mcp failed to start ({e:#})");
-                        } else {
-                            println!("rag backend: rag-mcp unavailable ({e:#}), using grep");
-                        }
-                        None
-                    }
-                }
-            }
-            _ => {
-                if backend == RagBackend::Mcp {
-                    println!("rag backend: rag-mcp binary/db missing, tool calls will fail");
-                } else {
-                    println!("rag backend: grep over {}", cfg.notes_dir.display());
-                }
-                None
-            }
-        };
-        RagTools { cfg, backend, mcp_cfg, mcp: RefCell::new(mcp) }
-    }
-
-    /// Run `f` against the MCP child. On any failure the child is dropped,
-    /// the backend degrades to grep for the rest of the process, and the
-    /// caller retries with grep. Spawns lazily when Auto found nothing at
-    /// startup (the db may have appeared since).
-    fn with_mcp(&self, f: impl FnOnce(&mut RagMcp) -> Result<String>) -> Option<String> {
-        if self.backend == RagBackend::Grep {
-            return None;
-        }
-        {
-            let mut slot = self.mcp.borrow_mut();
-            if slot.is_none() && self.backend == RagBackend::Auto && self.mcp_cfg.available() {
-                *slot = RagMcp::spawn(&self.mcp_cfg).ok();
-            }
-            if let Some(m) = slot.as_mut() {
-                match f(m) {
-                    Ok(s) => return Some(s),
-                    Err(e) => {
-                        println!("rag-mcp call failed ({e:#}); falling back to grep");
-                        *slot = None;
-                    }
-                }
-            }
-        }
-        if self.backend == RagBackend::Mcp {
-            return Some("rag-mcp backend is unavailable".to_string());
-        }
-        None
-    }
-}
-
-fn parse_env_bool(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"))
-}
-
-fn rag_search(tools: &RagTools, query: &str) -> Result<String> {
-    if let Some(s) = tools.with_mcp(|m| rag_search_mcp(&tools.cfg, m, query)) {
-        return Ok(s);
-    }
-    rag_search_grep(&tools.cfg, query)
-}
-
-/// Format MCP hits into the same `## title / - line` blocks the grep backend
-/// produces, so the model-facing contract does not change with the index.
-fn rag_search_mcp(cfg: &RagToolConfig, mcp: &mut RagMcp, query: &str) -> Result<String> {
-    let hits = mcp.search(query, cfg.search_max_results)?;
-    if hits.is_empty() {
-        return Ok(format!("no notes match: {query}"));
-    }
-    let mut out = Vec::new();
-    for hit in hits.iter().take(cfg.search_max_results) {
-        let title = hit["document_title"].as_str().unwrap_or("note");
-        let score = hit["score"].as_f64().unwrap_or(0.0);
-        let body = hit["snippet"].as_str().or_else(|| hit["content"].as_str()).unwrap_or("");
-        let mut block = format!("## {title} (score: {score:.2})");
-        for line in body.lines().take(cfg.search_max_lines) {
-            block.push_str(&format!("\n- {line}"));
-        }
-        out.push(block);
-    }
-    Ok(out.join("\n\n"))
-}
-
-fn rag_read(tools: &RagTools, name: &str) -> Result<String> {
-    if let Some(s) = tools.with_mcp(|m| rag_read_mcp(&tools.cfg, m, name)) {
-        return Ok(s);
-    }
-    rag_read_grep(&tools.cfg, name)
-}
-
-/// rag_read by file name: find the document whose title matches, then fetch
-/// it whole. Falls back to the top hit when no title matches exactly.
-fn rag_read_mcp(cfg: &RagToolConfig, mcp: &mut RagMcp, name: &str) -> Result<String> {
-    if name.trim().is_empty() {
-        return Ok("rag_read: missing name".to_string());
-    }
-    let hits = mcp.search(name, 5)?;
-    let hit = hits
-        .iter()
-        .find(|h| h["document_title"].as_str() == Some(name))
-        .or_else(|| hits.first())
-        .with_context(|| format!("no such note: {name}"))?;
-    let doc_id = hit["document_id"].as_str().context("hit has no document_id")?;
-    let mut text = mcp.get_document(doc_id)?;
-    if text.len() > cfg.read_max_chars {
-        text = text.chars().take(cfg.read_max_chars).collect();
-        text.push_str("\n...\n[truncated]");
-    }
-    Ok(text)
-}
-
-fn rag_search_grep(cfg: &RagToolConfig, query: &str) -> Result<String> {
-    let query = query.to_lowercase();
-    let words: Vec<String> = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_string)
-        .collect();
-    if words.is_empty() {
-        return Ok("empty query".to_string());
-    }
-    if !cfg.notes_dir.exists() {
-        return Ok(format!("notes root does not exist: {}", cfg.notes_dir.display()));
-    }
-    let mut notes: Vec<PathBuf> = Vec::new();
-    collect_notes(&cfg.notes_dir, &mut notes).with_context(|| {
-        format!("reading notes directory {}", cfg.notes_dir.display())
-    })?;
-    notes.sort();
-    let mut matches: Vec<(usize, PathBuf, Vec<String>)> = Vec::new();
-    for note in notes {
-        let text = match std::fs::read_to_string(&note) {
-            Ok(text) => text,
-            Err(_) => continue,
-        };
-        let low = text.to_lowercase();
-        let mut score = 0usize;
-        for w in &words {
-            score += low.matches(w).count();
-        }
-        if score == 0 {
-            continue;
-        }
-        let mut lines = Vec::new();
-        for line in text.lines() {
-            let lower_line = line.to_lowercase();
-            if words.iter().any(|w| lower_line.contains(w)) {
-                lines.push(line.to_string());
-                if lines.len() >= cfg.search_max_lines {
-                    break;
-                }
-            }
-        }
-        if !lines.is_empty() {
-            matches.push((score, note, lines));
-        }
-    }
-    if matches.is_empty() {
-        return Ok(format!("no notes match: {query}"));
-    }
-    matches.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    let mut out = Vec::new();
-    for (score, note, lines) in matches.into_iter().take(cfg.search_max_results) {
-        let name = note.file_name().and_then(|n| n.to_str()).unwrap_or("note");
-        let mut block = format!("## {name} (hits: {score})");
-        for line in lines {
-            block.push('\n');
-            block.push_str(&format!("- {line}"));
-        }
-        out.push(block);
-    }
-    Ok(out.join("\n\n"))
-}
-
-fn rag_read_grep(cfg: &RagToolConfig, name: &str) -> Result<String> {
-    if name.trim().is_empty() {
-        return Ok("rag_read: missing name".to_string());
-    }
-    let file = cfg.notes_dir.join(Path::new(name).file_name().unwrap_or_default());
-    let mut text = match std::fs::read_to_string(&file) {
-        Ok(text) => text,
-        Err(_) => return Ok(format!("no such note: {}", file.display())),
-    };
-    if text.len() > cfg.read_max_chars {
-        text = text.chars().take(cfg.read_max_chars).collect();
-        text.push_str("\n...\n[truncated]");
-    }
-    Ok(text)
-}
-
-fn parse_rag_tool_args(call: &Value) -> Value {
-    let raw = &call["function"]["arguments"];
-    if let Some(raw) = raw.as_str() {
-        serde_json::from_str::<Value>(raw).unwrap_or(Value::Null)
-    } else if raw.is_object() || raw.is_array() || raw.is_null() || raw.is_string() {
-        raw.clone()
-    } else {
-        Value::Null
-    }
-}
-
-fn collect_notes(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let entries = match std::fs::read_dir(&current) {
-            Ok(entries) => entries,
-            Err(e) => return Err(anyhow::anyhow!("reading {}: {e}", current.display())),
-        };
-        let mut entry_paths = Vec::new();
-        for entry in entries {
-            let entry = entry?;
-            entry_paths.push(entry.path());
-        }
-        entry_paths.sort();
-        for path in entry_paths {
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
-                out.push(path);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn run_rag_tool(call: &Value, tools: &RagTools) -> Result<String> {
-    let tool_name = call["function"]["name"].as_str().unwrap_or_default();
-    let args = parse_rag_tool_args(call);
-    if !tools.cfg.enabled {
-        return Ok("rag tools are disabled".to_string());
-    }
-    match tool_name {
-        "rag_search" => {
-            let query = args
-                .get("query")
-                .or_else(|| args.get("q"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            rag_search(tools, query).with_context(|| format!("tool call {tool_name}"))
-        }
-        "rag_read" => {
-            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            rag_read(tools, name).with_context(|| format!("tool call {tool_name}"))
-        }
-        other => Ok(format!(
-            "tool `{other}` is not available; supported: rag_search, rag_read"
-        )),
-    }
-}
-
-fn rag_default_tool_schemas() -> Vec<Value> {
-    vec![
-        json!({
-            "type": "function",
-            "function": {
-                "name": "rag_search",
-                "description": "Search local markdown notes by keyword.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Words to search for."
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "rag_read",
-                "description": "Read one note by file name as returned by rag_search.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "File name of the note, for example engine-status.md."
-                        }
-                    },
-                    "required": ["name"]
-                }
-            }
-        }),
-    ]
-}
-
 struct CompletionResult {
     content: String,
     tool_calls: Vec<Value>,
@@ -477,8 +88,12 @@ fn run_inference(
     // read back per token instead of the whole vocabulary.
     let greedy = temperature <= 0.0 && repeat_penalty == 1.0;
 
-    let mut common =
-        chat.tokens.iter().zip(&prompt).take_while(|(a, b)| **a == **b).count();
+    let mut common = chat
+        .tokens
+        .iter()
+        .zip(&prompt)
+        .take_while(|(a, b)| **a == **b)
+        .count();
     let mut logits: Vec<f32> = Vec::new();
     let mut skip_prefill = false;
     if prompt.len() + max_tokens + 1 > chat.session.capacity() {
@@ -495,7 +110,11 @@ fn run_inference(
             match chat.snaps.iter().find(|s| s.tokens == common) {
                 Some(snap) => {
                     let state = snap.state.clone();
-                    chat.session.ssm.as_mut().expect("ssm session").restore(&state);
+                    chat.session
+                        .ssm
+                        .as_mut()
+                        .expect("ssm session")
+                        .restore(&state);
                     chat.session.truncate(common);
                     chat.tokens.truncate(common);
                     if common == prompt.len() {
@@ -556,7 +175,11 @@ fn run_inference(
     // Snapshot before generation, when the state is exactly "prompt consumed".
     if let Some(ssm) = chat.session.ssm.as_ref() {
         if !logits.is_empty() {
-            let snap = SsmSnap { tokens: prompt.len(), state: ssm.snapshot(), logits: logits.clone() };
+            let snap = SsmSnap {
+                tokens: prompt.len(),
+                state: ssm.snapshot(),
+                logits: logits.clone(),
+            };
             if let Some(existing) = chat.snaps.iter_mut().find(|s| s.tokens == prompt.len()) {
                 *existing = snap;
             } else {
@@ -603,8 +226,11 @@ fn run_inference(
         if streaming {
             let full = tok.decode(&generated);
             let complete = full.strip_suffix('\u{FFFD}').unwrap_or(&full);
-            let complete =
-                if parse_tools { &complete[..stream_safe_len(complete)] } else { complete };
+            let complete = if parse_tools {
+                &complete[..stream_safe_len(complete)]
+            } else {
+                complete
+            };
             if let Some(delta) = complete.strip_prefix(emitted.as_str()) {
                 if !delta.is_empty() {
                     let chunk = json!({
@@ -756,11 +382,27 @@ enum Template {
     /// `force_think` mirrors the GGUF chat template of the thinking Qwen
     /// generations: the assistant turn is primed with a literal `<think>\n`
     /// (llama.cpp renders the same prefix from the jinja template).
-    ChatMl { im_start: u32, im_end: u32, think: Option<u32>, force_think: bool },
+    ChatMl {
+        im_start: u32,
+        im_end: u32,
+        think: Option<u32>,
+        force_think: bool,
+    },
     /// `<|start_header_id|>role<|end_header_id|>\n\n...<|eot_id|>` - Llama 3.
-    Llama3 { bos: u32, start_header: u32, end_header: u32, eot: u32 },
+    Llama3 {
+        bos: u32,
+        start_header: u32,
+        end_header: u32,
+        eot: u32,
+    },
     /// `[gMASK]<sop><|user|>\n...<|assistant|>\n` - GLM-4.x (ChatGLM).
-    Glm { gmask: Option<u32>, sop: Option<u32>, system: u32, user: u32, assistant: u32 },
+    Glm {
+        gmask: Option<u32>,
+        sop: Option<u32>,
+        system: u32,
+        user: u32,
+        assistant: u32,
+    },
 }
 
 impl Template {
@@ -808,7 +450,9 @@ impl Template {
     /// so clients see the complete `<think>...</think>` block.
     fn think_prefix(&self) -> &'static str {
         match self {
-            Template::ChatMl { force_think: true, .. } => "<think>\n",
+            Template::ChatMl {
+                force_think: true, ..
+            } => "<think>\n",
             _ => "",
         }
     }
@@ -818,7 +462,12 @@ impl Template {
     fn prompt(&self, tok: &Tokenizer, messages: &[(String, String)]) -> Result<Vec<u32>> {
         let mut ids = Vec::new();
         match self {
-            Template::ChatMl { im_start, im_end, think, force_think } => {
+            Template::ChatMl {
+                im_start,
+                im_end,
+                think,
+                force_think,
+            } => {
                 for (role, content) in messages {
                     ids.push(*im_start);
                     ids.extend(tok.encode(&format!("{role}\n{content}"))?);
@@ -839,7 +488,12 @@ impl Template {
                     }
                 }
             }
-            Template::Llama3 { bos, start_header, end_header, eot } => {
+            Template::Llama3 {
+                bos,
+                start_header,
+                end_header,
+                eot,
+            } => {
                 ids.push(*bos);
                 for (role, content) in messages {
                     ids.push(*start_header);
@@ -853,7 +507,13 @@ impl Template {
                 ids.push(*end_header);
                 ids.extend(tok.encode("\n\n")?);
             }
-            Template::Glm { gmask, sop, system, user, assistant } => {
+            Template::Glm {
+                gmask,
+                sop,
+                system,
+                user,
+                assistant,
+            } => {
                 if let Some(g) = gmask {
                     ids.push(*g);
                 }
@@ -914,11 +574,19 @@ impl Sampler {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x5eed)
             | 1;
-        Self { temperature, top_p, repeat_penalty, state: seed }
+        Self {
+            temperature,
+            top_p,
+            repeat_penalty,
+            state: seed,
+        }
     }
 
     fn next_f32(&mut self) -> f32 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.state >> 40) as f32 / (1u64 << 24) as f32
     }
 
@@ -967,8 +635,10 @@ impl Sampler {
         order.truncate(kth + 1);
         order.sort_unstable_by(|&a, &b| logits[b].total_cmp(&logits[a]));
 
-        let mut scaled: Vec<f32> =
-            order.iter().map(|&i| logits[i] / self.temperature).collect();
+        let mut scaled: Vec<f32> = order
+            .iter()
+            .map(|&i| logits[i] / self.temperature)
+            .collect();
         allpaka_backend::softmax(&mut scaled);
 
         // Nucleus: keep the smallest prefix whose mass reaches top_p.
@@ -1058,7 +728,10 @@ fn render_messages(raw: &[Value], tools: Option<&[Value]>) -> Vec<(String, Strin
             Some((_, content)) => content.push_str(&section),
             None => out.insert(
                 0,
-                ("system".into(), format!("You are a helpful assistant.{section}")),
+                (
+                    "system".into(),
+                    format!("You are a helpful assistant.{section}"),
+                ),
             ),
         }
     }
@@ -1146,9 +819,16 @@ pub fn run(model_path: &Path, bind: &str) -> Result<()> {
 
     let listener = TcpListener::bind(bind).with_context(|| format!("binding {bind}"))?;
     println!("allpaka serve: {model_name} on http://{bind}/v1/chat/completions");
-    println!("  arch {}, vocab {}, template {}", model.config.architecture,
+    println!(
+        "  arch {}, vocab {}, template {}",
+        model.config.architecture,
         tokenizer.vocab_size(),
-        match template { Template::ChatMl { .. } => "chatml", Template::Llama3 { .. } => "llama3", Template::Glm { .. } => "glm" });
+        match template {
+            Template::ChatMl { .. } => "chatml",
+            Template::Llama3 { .. } => "llama3",
+            Template::Glm { .. } => "glm",
+        }
+    );
 
     let mut chat = ChatState {
         session: model.new_session(SESSION_TOKENS),
@@ -1240,14 +920,22 @@ fn handle(
 
     let req: Value = match serde_json::from_str(&body) {
         Ok(v) => v,
-        Err(e) => return respond(&mut stream, 400, &json!({"error": format!("bad JSON: {e}")})),
+        Err(e) => {
+            return respond(
+                &mut stream,
+                400,
+                &json!({"error": format!("bad JSON: {e}")}),
+            )
+        }
     };
     let Some(raw_messages) = req["messages"].as_array() else {
         return respond(&mut stream, 400, &json!({"error": "messages[] required"}));
     };
     let tool_specs: Option<Vec<Value>> = match req["tools"].as_array() {
         Some(t) if !t.is_empty() => Some(t.to_vec()),
-        _ if rag.cfg.enabled && rag.cfg.inject_tools_when_missing => Some(rag_default_tool_schemas()),
+        _ if rag.cfg.enabled && rag.cfg.inject_tools_when_missing => {
+            Some(rag_default_tool_schemas())
+        }
         _ => None,
     };
     let tools = tool_specs.as_ref().map(|t| t.as_slice());
@@ -1429,7 +1117,10 @@ fn read_request(stream: &mut TcpStream) -> Result<(String, String)> {
     let request_line = head.lines().next().unwrap_or_default().to_string();
     let content_length: usize = head
         .lines()
-        .find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("content-length")))
+        .find_map(|l| {
+            l.split_once(':')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        })
         .and_then(|(_, v)| v.trim().parse().ok())
         .unwrap_or(0);
 
@@ -1502,7 +1193,10 @@ mod tests {
         assert!(out[0].1.contains("\"search\""));
         assert_eq!(out[1], ("user".into(), "hi".into()));
         // An existing system message is extended, not duplicated.
-        let msgs2 = vec![json!({"role":"system","content":"be brief"}), msgs[0].clone()];
+        let msgs2 = vec![
+            json!({"role":"system","content":"be brief"}),
+            msgs[0].clone(),
+        ];
         let out2 = render_messages(&msgs2, Some(&tools));
         assert_eq!(out2.len(), 2);
         assert!(out2[0].1.starts_with("be brief"));
@@ -1594,8 +1288,8 @@ mod tests {
         let mut logits = vec![0.0f32; 1000];
         logits[7] = 3.0; // the looping token
         logits[8] = 2.9; // the almost-as-good alternative
-        // Without history the loop token wins; with itself in the window it
-        // is divided down below the alternative.
+                         // Without history the loop token wins; with itself in the window it
+                         // is divided down below the alternative.
         assert_eq!(s.pick(&logits, &[]), 7);
         assert_eq!(s.pick(&logits, &[7]), 8);
         // Negative logits move away from zero instead.
