@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use crate::benchmark_report::{model_fingerprint, BenchmarkReport};
 
 pub const AUTOTUNE_SCHEMA_VERSION: u32 = 1;
-pub const KERNEL_ABI_VERSION: u32 = 1;
+pub const KERNEL_ABI_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AutotuneKey {
@@ -109,16 +109,7 @@ impl AutotuneCache {
 
 pub fn run(model_path: &Path, cache_path: Option<&Path>, force: bool) -> Result<()> {
     let file = allpaka_gguf::GgufFile::open(model_path)?;
-    let fingerprint = model_fingerprint(model_path, &file);
-    let key = AutotuneKey {
-        device_registry_id: host_value("sysctl", &["-n", "machdep.cpu.brand_string"]),
-        metal_os_version: host_value("sw_vers", &["-productVersion"]),
-        model_fingerprint: fingerprint,
-        model_architecture: file.architecture().to_string(),
-        model_dimensions: format!("tensors={}", file.tensors().len()),
-        tensor_census_hash: tensor_census(&file),
-        kernel_abi_version: KERNEL_ABI_VERSION,
-    };
+    let key = key_for(model_path, &file);
     let cache_path = cache_path
         .map(ToOwned::to_owned)
         .unwrap_or_else(default_cache_path);
@@ -196,6 +187,54 @@ pub fn run(model_path: &Path, cache_path: Option<&Path>, force: bool) -> Result<
         cache_path.display()
     );
     Ok(())
+}
+
+/// Apply a compatible cached profile before model loading. Explicit process
+/// configuration always wins; callers also skip this when a config file was
+/// supplied.
+pub fn apply_cached(model_path: &Path, cache_path: Option<&Path>) -> Result<bool> {
+    if std::env::var_os("ALLPAKA_PROFILE").is_some() {
+        return Ok(false);
+    }
+    let file = allpaka_gguf::GgufFile::open(model_path)?;
+    let key = key_for(model_path, &file);
+    let cache_path = cache_path
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(default_cache_path);
+    let cache = AutotuneCache::load(&cache_path)?;
+    let Some(hit) = cache.get(&key) else {
+        return Ok(false);
+    };
+    // Startup is still single-threaded here. Publish the resolved profile so
+    // legacy capability reporters and remaining env-backed probes cannot
+    // disagree with the installed typed policy.
+    std::env::set_var(
+        "ALLPAKA_PROFILE",
+        &hit.parameters.command_strategy,
+    );
+    let profile: allpaka_backend::profile::RuntimeProfile =
+        hit.parameters.command_strategy.parse()?;
+    let resolved = profile.resolve_with_env();
+    let _ = allpaka_backend::runtime::install(resolved.policy);
+    println!(
+        "autotune cache applied: profile={} objective={:.1} tok/s ({})",
+        hit.parameters.command_strategy,
+        hit.objective_tok_s,
+        cache_path.display()
+    );
+    Ok(true)
+}
+
+fn key_for(model_path: &Path, file: &allpaka_gguf::GgufFile) -> AutotuneKey {
+    AutotuneKey {
+        device_registry_id: host_value("sysctl", &["-n", "machdep.cpu.brand_string"]),
+        metal_os_version: host_value("sw_vers", &["-productVersion"]),
+        model_fingerprint: model_fingerprint(model_path, file),
+        model_architecture: file.architecture().to_string(),
+        model_dimensions: format!("tensors={}", file.tensors().len()),
+        tensor_census_hash: tensor_census(file),
+        kernel_abi_version: KERNEL_ABI_VERSION,
+    }
 }
 
 fn measurement<'a>(report: &'a BenchmarkReport, name: &str) -> Result<&'a crate::benchmark_report::Measurement> {

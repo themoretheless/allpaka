@@ -272,6 +272,9 @@ fn main() -> Result<()> {
             config,
         } => match (engine, mem, serve, connect) {
             (Some(model), _, _, _) => {
+                if config.is_none() {
+                    autotune::apply_cached(&model, None)?;
+                }
                 let runtime = config.as_deref().map(config::Config::load).transpose()?;
                 runtime
                     .as_ref()
@@ -337,6 +340,9 @@ fn main() -> Result<()> {
             bind,
             config,
         } => {
+            if config.is_none() {
+                autotune::apply_cached(&model, None)?;
+            }
             let runtime = config.as_deref().map(config::Config::load).transpose()?;
             runtime
                 .as_ref()
