@@ -8951,7 +8951,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
 
     let out = objc::rc::autoreleasepool(|| {
         let t_encode = std::time::Instant::now();
-        let cmd = gpu.queue.new_command_buffer();
+        let command_buffer = gpu.queue.new_command_buffer();
+        let cmd = crate::command::CommandScope::new(command_buffer);
         // ALLPAKA_DECODE_SERIAL=1: serial encoder, implicit ordering, all
         // explicit barriers skipped - probes whether the driver's own
         // hazard tracking beats our barrier drains per stage boundary.
@@ -9045,7 +9046,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 enc.memory_barrier_with_resources(&[y]);
             }
         };
-        let bar = |enc: &metal::ComputeCommandEncoderRef| bar_c(enc, b'x');
+        let bar = |enc: &metal::ComputeCommandEncoderRef| bar_c(&enc, b'x');
         let e = |off: usize| (off * 4) as u64;
 
         // One plain matvec: in and out are arena element offsets.
@@ -9178,28 +9179,28 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             // the separate combine (its norm has no fused sig variant).
             let fused = match pending_combine.take() {
                 Some((slots, sig_last)) if !refs.normflag => {
-                    combine_resnorm(enc, &refs.attn_norm, slots, sig_last);
-                    bar_c(enc, b'n');
+                    combine_resnorm(&enc, &refs.attn_norm, slots, sig_last);
+                    bar_c(&enc, b'n');
                     true
                 }
                 Some((slots, sig_last)) => {
-                    combine(enc, slots, sig_last);
-                    bar(enc);
+                    combine(&enc, slots, sig_last);
+                    bar(&enc);
                     false
                 }
                 None => false,
             };
             if !fused {
                 if refs.normflag {
-                    resnorm_sig(enc, &refs.attn_norm, ep_attn);
+                    resnorm_sig(&enc, &refs.attn_norm, ep_attn);
                     enc.set_buffer(9, Some(y), e(flag_at));
                     enc.set_bytes(10, 4, &ep_attn as *const u32 as *const _);
                     if probe_skip("keepbar") {
-                        bar_c(enc, b'n');
+                        bar_c(&enc, b'n');
                     }
                 } else {
-                    resnorm(enc, &refs.attn_norm);
-                    bar_c(enc, b'n');
+                    resnorm(&enc, &refs.attn_norm);
+                    bar_c(&enc, b'n');
                 }
             }
             split_here!("resnorm");
@@ -9209,12 +9210,12 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 let tg = &l.gdn.as_ref().expect("gdn refs without gdn layer");
                 let ssm_buf = &req.ssm.expect("gdn layer without ssm region").buf;
                 if !probe_skip("qkv") {
-                    matvec(enc, &g.states[0], &g.mats[0], hidden, g.channels, h_at, gqkv_at);
-                    matvec(enc, &g.states[1], &g.mats[1], hidden, g.value_dim, h_at, gz_at);
-                    matvec(enc, &g.states[2], &g.mats[2], hidden, g.heads_v as usize, h_at, gab_at);
-                    matvec(enc, &g.states[3], &g.mats[3], hidden, g.heads_v as usize, h_at, gab_at + g.heads_v as usize);
+                    matvec(&enc, &g.states[0], &g.mats[0], hidden, g.channels, h_at, gqkv_at);
+                    matvec(&enc, &g.states[1], &g.mats[1], hidden, g.value_dim, h_at, gz_at);
+                    matvec(&enc, &g.states[2], &g.mats[2], hidden, g.heads_v as usize, h_at, gab_at);
+                    matvec(&enc, &g.states[3], &g.mats[3], hidden, g.heads_v as usize, h_at, gab_at + g.heads_v as usize);
                 }
-                bar_c(enc, b'a');
+                bar_c(&enc, b'a');
                 split_here!("qkv");
                 if !probe_skip("attend") {
                     // Depthwise conv (+silu), updating the window in place.
@@ -9277,23 +9278,23 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     );
                 }
                 split_here!("attend");
-                bar_c(enc, b'a');
+                bar_c(&enc, b'a');
                 // ssm_out straight into delta.
                 if !probe_skip("qkv") {
-                    matvec(enc, &g.states[4], &g.mats[4], g.value_dim, hidden, gy_at, delta_at);
+                    matvec(&enc, &g.states[4], &g.mats[4], g.value_dim, hidden, gy_at, delta_at);
                 }
-                bar_c(enc, b'a');
+                bar_c(&enc, b'a');
                 split_here!("wo");
             } else {
             // qkv from h.
             let amats = refs.mats.as_ref().expect("attention layer without mats");
             let astates = refs.mat_states.as_ref().expect("attention layer without mat states");
             if !probe_skip("qkv") {
-                matvec(enc, &astates[0], &amats[0], hidden, l.wq.2, h_at, q_at);
-                matvec(enc, &astates[1], &amats[1], hidden, kv, h_at, k_at);
-                matvec(enc, &astates[2], &amats[2], hidden, kv, h_at, v_at);
+                matvec(&enc, &astates[0], &amats[0], hidden, l.wq.2, h_at, q_at);
+                matvec(&enc, &astates[1], &amats[1], hidden, kv, h_at, k_at);
+                matvec(&enc, &astates[2], &amats[2], hidden, kv, h_at, v_at);
             }
-            bar_c(enc, b'a');
+            bar_c(&enc, b'a');
             split_here!("qkv");
             // Norm + rope + cache store.
             if !probe_skip("attend") {
@@ -9493,12 +9494,12 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             }
             }
             split_here!("attend");
-            bar_c(enc, b'a');
+            bar_c(&enc, b'a');
             // Output projection straight into delta.
             if !probe_skip("qkv") {
-                matvec(enc, &astates[3], &amats[3], q_dim, hidden, attn_at, delta_at);
+                matvec(&enc, &astates[3], &amats[3], q_dim, hidden, attn_at, delta_at);
             }
-            bar_c(enc, b'a');
+            bar_c(&enc, b'a');
             split_here!("wo");
             }
             // The megakernel absorbs the whole FFN half, resnorm included.
@@ -9574,7 +9575,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     MTLSize::new(ntg as u64, 1, 1),
                     MTLSize::new(256, 1, 1),
                 );
-                bar_c(enc, b'f');
+                bar_c(&enc, b'f');
                 dispatched += 1;
                 continue;
                 }
@@ -9587,25 +9588,25 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 !refs.normflag && rfuse() && matches!(&refs.ffn, FfnRefs::Moe { .. });
             if !moe_plain {
                 if refs.normflag {
-                    resnorm_sig(enc, &refs.ffn_norm, ep_ffn);
+                    resnorm_sig(&enc, &refs.ffn_norm, ep_ffn);
                     enc.set_buffer(9, Some(y), e(flag_at));
                     enc.set_bytes(10, 4, &ep_ffn as *const u32 as *const _);
                     if probe_skip("keepbar") {
-                        bar_c(enc, b'n');
+                        bar_c(&enc, b'n');
                     }
                 } else {
-                    resnorm(enc, &refs.ffn_norm);
-                    bar_c(enc, b'n');
+                    resnorm(&enc, &refs.ffn_norm);
+                    bar_c(&enc, b'n');
                 }
             }
             split_here!("resnorm");
 
             match &refs.ffn {
                 FfnRefs::Dense { mats, states, ffn_dim } => {
-                    matvec(enc, &states[0], &mats[0], hidden, *ffn_dim, h_at, gate_at);
-                    matvec(enc, &states[1], &mats[1], hidden, *ffn_dim, h_at, up_at);
+                    matvec(&enc, &states[0], &mats[0], hidden, *ffn_dim, h_at, gate_at);
+                    matvec(&enc, &states[1], &mats[1], hidden, *ffn_dim, h_at, up_at);
                     split_here!("gate_up");
-                    bar(enc);
+                    bar(&enc);
                     enc.set_compute_pipeline_state(&swiglu_state);
                     enc.set_buffer(0, Some(y), e(gate_at));
                     enc.set_buffer(1, Some(y), e(up_at));
@@ -9616,8 +9617,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         MTLSize::new(256, 1, 1),
                     );
                     split_here!("swiglu");
-                    bar(enc);
-                    matvec(enc, &states[2], &mats[2], *ffn_dim, hidden, gate_at, delta_at);
+                    bar(&enc);
+                    matvec(&enc, &states[2], &mats[2], *ffn_dim, hidden, gate_at, delta_at);
                     split_here!("down");
                     dispatched += 4;
                 }
@@ -9703,8 +9704,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(256, 1, 1));
                         ffn_dispatches += 1;
                     } else {
-                    matvec(enc, router_state, router, hidden, *n_expert, h_at, logits_at);
-                    bar(enc);
+                    matvec(&enc, router_state, router, hidden, *n_expert, h_at, logits_at);
+                    bar(&enc);
                     enc.set_compute_pipeline_state(&topk_state);
                     enc.set_buffer(0, Some(y), e(logits_at));
                     enc.set_buffer(1, Some(y), e(ids_at));
@@ -9736,10 +9737,10 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     // the raw logit into its combine slot; the combine
                     // kernel applies the sigmoid.
                     if let Some((sg_mat, sg_state)) = shared_gate {
-                        matvec(enc, sg_state, sg_mat, hidden, 1, h_at, wts_at + *n_used);
+                        matvec(&enc, sg_state, sg_mat, hidden, 1, h_at, wts_at + *n_used);
                         ffn_dispatches += 1;
                     }
-                    bar_c(enc, b'f');
+                    bar_c(&enc, b'f');
                     if !probe_skip("experts") {
                     match gu_dual {
                         // gate + up in ONE dual-output indexed dispatch.
@@ -9783,23 +9784,23 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                             ffn_dispatches += 1;
                         }
                         None => {
-                            matvec_idx(enc, &states[0], &mats[0], hidden, *expert_ffn,
+                            matvec_idx(&enc, &states[0], &mats[0], hidden, *expert_ffn,
                                 h_at, gate_at, strides[0], *n_used, 0);
-                            matvec_idx(enc, &states[1], &mats[1], hidden, *expert_ffn,
+                            matvec_idx(&enc, &states[1], &mats[1], hidden, *expert_ffn,
                                 h_at, up_at, strides[1], *n_used, 0);
                             ffn_dispatches += 2;
                         }
                     }
                     // The shared expert is a plain matvec into the extra slot.
                     if let Some((smats, sstates)) = shared {
-                        matvec(enc, &sstates[0], &smats[0], hidden, *expert_ffn,
+                        matvec(&enc, &sstates[0], &smats[0], hidden, *expert_ffn,
                             h_at, gate_at + *n_used * *expert_ffn);
-                        matvec(enc, &sstates[1], &smats[1], hidden, *expert_ffn,
+                        matvec(&enc, &sstates[1], &smats[1], hidden, *expert_ffn,
                             h_at, up_at + *n_used * *expert_ffn);
                         ffn_dispatches += 2;
                     }
                     split_here!("gate_up");
-                    bar_c(enc, b'f');
+                    bar_c(&enc, b'f');
                     if !*sw_fused {
                         enc.set_compute_pipeline_state(&swiglu_state);
                         enc.set_buffer(0, Some(y), e(gate_at));
@@ -9812,13 +9813,13 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         );
                         ffn_dispatches += 1;
                         split_here!("swiglu");
-                        bar_c(enc, b'f');
+                        bar_c(&enc, b'f');
                     } else {
                         // The down kernel reads raw gate (x) and raw up
                         // (buffer 8) and applies swiglu on load.
                         enc.set_buffer(8, Some(y), e(up_at));
                     }
-                    matvec_idx(enc, &states[2], &mats[2], *expert_ffn, hidden,
+                    matvec_idx(&enc, &states[2], &mats[2], *expert_ffn, hidden,
                         gate_at, downo_at, strides[2], *n_used, *expert_ffn);
                     ffn_dispatches += 1;
                     if let Some((smats, sstates)) = shared {
@@ -9826,21 +9827,21 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         if *sw_fused {
                             enc.set_buffer(8, Some(y), e(up_at + *n_used * *expert_ffn));
                         }
-                        matvec(enc, &sstates[2], &smats[2], *expert_ffn, hidden,
+                        matvec(&enc, &sstates[2], &smats[2], *expert_ffn, hidden,
                             gate_at + *n_used * *expert_ffn,
                             downo_at + *n_used * hidden);
                         ffn_dispatches += 1;
                     }
                     }
                     split_here!("down");
-                    bar_c(enc, b'f');
+                    bar_c(&enc, b'f');
                     if cfuse() {
                         // No standalone combine: it folds into the next
                         // residual norm (combine_resnorm), which the barrier
                         // above already orders against the down writes.
                         pending_combine = Some((n_slots as u32, sig_last));
                     } else {
-                        combine(enc, n_slots as u32, sig_last);
+                        combine(&enc, n_slots as u32, sig_last);
                         ffn_dispatches += 1;
                     }
                     split_here!("combine");
@@ -9850,33 +9851,33 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             // The fused combine+norm is ordered by the down stage's barrier;
             // only the plain paths still need the layer-end drain.
             if pending_combine.is_none() {
-                bar(enc);
+                bar(&enc);
             }
             dispatched += 8;
         }
         // Final norm and the output projection, still in the same buffer; a
         // pending combine from the last MoE layer folds into the final norm.
         match pending_combine.take() {
-            Some((slots, sig_last)) => combine_resnorm(enc, &out_norm, slots, sig_last),
-            None => resnorm(enc, &out_norm),
+            Some((slots, sig_last)) => combine_resnorm(&enc, &out_norm, slots, sig_last),
+            None => resnorm(&enc, &out_norm),
         }
         split_here!("resnorm");
-        bar(enc);
+        bar(&enc);
         if !probe_skip("head") {
-            matvec(enc, &out_state, &out_mat, hidden, vocab, h_at, out_logits_at);
+            matvec(&enc, &out_state, &out_mat, hidden, vocab, h_at, out_logits_at);
         }
         split_here!("head");
         if req.argmax {
             // Greedy: the winner reduces on the GPU; the readback below is
             // one 32-bit word instead of the whole vocabulary.
-            bar(enc);
+            bar(&enc);
             enc.set_compute_pipeline_state(&argmax_state);
             enc.set_buffer(0, Some(y), e(out_logits_at));
             let v32 = vocab as u32;
             enc.set_bytes(1, 4, &v32 as *const u32 as *const _);
             enc.set_buffer(2, Some(y), e(amax_at));
             enc.dispatch_thread_groups(MTLSize::new(64, 1, 1), MTLSize::new(256, 1, 1));
-            bar(enc);
+            bar(&enc);
             enc.set_compute_pipeline_state(&argmax_final_state);
             enc.set_buffer(0, Some(y), e(amax_at));
             let np = 64u32;
@@ -9894,8 +9895,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         ENCODE_NS.fetch_add(t_encode.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         let t_wait = std::time::Instant::now();
-        cmd.commit();
-        cmd.wait_until_completed();
+        let cmd = cmd.commit_and_wait();
         note_gpu_times(cmd);
         if let Some(resolved) = split_resolved.as_ref() {
             let mut cpu_end = 0u64;
