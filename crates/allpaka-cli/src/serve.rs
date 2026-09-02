@@ -1126,6 +1126,9 @@ fn handle(
                 "moe": model.config.moe.is_some(),
                 "prefix_cache_entries": prefixes.len(),
                 "prefix_cache_bytes": prefixes.resident_bytes(),
+                "batching_mode": "model-aware-admission",
+                "kernel_batching": false,
+                "gpu_fallback": "runtime-policy-controlled",
             }),
         );
     }
