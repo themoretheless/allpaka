@@ -12,6 +12,11 @@
 
 use allpaka_core::Link;
 use anyhow::{bail, Context, Result};
+use crate::benchmark_report::{
+    BenchmarkMetadata, BenchmarkReport, FastPathStats, Measurement, PhaseMetric,
+    RegressionPolicy, SCHEMA_VERSION,
+};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::time::Instant;
@@ -47,7 +52,10 @@ const MEM_PASSES: usize = 5;
 /// runtime actually gets.
 pub fn measure_memory() -> Result<()> {
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    println!("streaming a {} MiB buffer with {threads} threads ...", MEM_BUFFER_BYTES >> 20);
+    println!(
+        "streaming a {} MiB buffer with {threads} threads ...",
+        MEM_BUFFER_BYTES >> 20
+    );
 
     // u64 words, initialised so the pages are really committed - reading
     // untouched zero pages measures the kernel, not the RAM.
@@ -100,14 +108,28 @@ fn print_capability_report(model: &allpaka_model::Model<'_>, file: &allpaka_gguf
     let c = &model.config;
     let model_capability = c.capability();
     println!("  capabilities:");
-    println!("    model: arch={} layers={} moe={}", c.architecture, c.n_layers, c.moe.is_some());
+    println!(
+        "    model: arch={} layers={} moe={}",
+        c.architecture,
+        c.n_layers,
+        c.moe.is_some()
+    );
     println!(
         "    model-support: {:?} ({})",
         model_capability.support, model_capability.reason
     );
-    println!("    profile: {}", std::env::var("ALLPAKA_PROFILE").unwrap_or_else(|_| "auto".into()));
-    println!("    metal: attached={}", allpaka_backend::gpu::is_attached());
-    println!("    weights: metal-mapped={}", allpaka_backend::gpu::is_attached());
+    println!(
+        "    profile: {}",
+        std::env::var("ALLPAKA_PROFILE").unwrap_or_else(|_| "auto".into())
+    );
+    println!(
+        "    metal: attached={}",
+        allpaka_backend::gpu::is_attached()
+    );
+    println!(
+        "    weights: metal-mapped={}",
+        allpaka_backend::gpu::is_attached()
+    );
     let (weight_windows, residency_set) = allpaka_backend::gpu::residency_status();
     println!("    residency: windows={weight_windows} set={residency_set}");
     println!("    encoders: concurrent, resource-barriers=enabled");
@@ -158,7 +180,10 @@ fn print_capability_report(model: &allpaka_model::Model<'_>, file: &allpaka_gguf
 /// Serve bench requests until the peer disconnects. Runs on the remote machine.
 pub fn serve(bind: &str) -> Result<()> {
     let listener = TcpListener::bind(bind).with_context(|| format!("binding {bind}"))?;
-    println!("allpaka bench server listening on {}", listener.local_addr()?);
+    println!(
+        "allpaka bench server listening on {}",
+        listener.local_addr()?
+    );
     println!("run `allpaka bench --connect <this-host>:<port>` on the other machine");
 
     for stream in listener.incoming() {
@@ -269,7 +294,10 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
 /// batching) and decode tok/s (bandwidth-bound, loves fewer GPU waits). Run
 /// before and after every change; a speedup that does not show here is
 /// imaginary.
-pub fn measure_engine(model_path: &std::path::Path, draft_path: Option<&std::path::Path>) -> Result<()> {
+pub fn measure_engine(
+    model_path: &std::path::Path,
+    draft_path: Option<&std::path::Path>,
+) -> Result<()> {
     let decode_stats_before = allpaka_backend::gpu::decode_path_stats();
     let file = allpaka_gguf::GgufFile::open(model_path)?;
     // Sequential prewarm, or the warmup forward faults tens of GiB in GPU
@@ -282,7 +310,10 @@ pub fn measure_engine(model_path: &std::path::Path, draft_path: Option<&std::pat
     let c = &model.config;
     println!(
         "engine bench: {} ({} layers, {}{})",
-        model_path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default(),
+        model_path
+            .file_stem()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default(),
         c.n_layers,
         c.architecture,
         if c.moe.is_some() { ", MoE" } else { "" },
@@ -298,7 +329,9 @@ pub fn measure_engine(model_path: &std::path::Path, draft_path: Option<&std::pat
         .and_then(|v| v.parse().ok())
         .map_or(512, |n: u32| n.max(32) + 32)
         .min(1 << 15);
-    let prompt: Vec<u32> = (0..pp).map(|i| (i * 733 + 17) % c.vocab.min(30000)).collect();
+    let prompt: Vec<u32> = (0..pp)
+        .map(|i| (i * 733 + 17) % c.vocab.min(30000))
+        .collect();
     let mut session = model.new_session(prompt.len() + 64);
 
     let warm = model.forward_batch(&prompt[..32], &mut session)?;
@@ -336,7 +369,7 @@ pub fn measure_engine(model_path: &std::path::Path, draft_path: Option<&std::pat
         gpu_pre.3,
         gpu_prefill.3,
     );
-    report_phases("prefill", prefill_secs, prompt.len() - 32);
+    let prefill_phases = report_phases("prefill", prefill_secs, prompt.len() - 32);
 
     let gpu_before = allpaka_backend::gpu::stats();
     let clock_before = allpaka_backend::gpu::gpu_time_stats();
@@ -382,7 +415,7 @@ pub fn measure_engine(model_path: &std::path::Path, draft_path: Option<&std::pat
         gpu_after.3,
     );
 
-    report_phases("decode", decode_secs, decode_tokens);
+    let decode_phases = report_phases("decode", decode_secs, decode_tokens);
     println!(
         "  context at end: {} tokens (attention cost grows with this)",
         session.pos()
@@ -613,18 +646,148 @@ pub fn measure_engine(model_path: &std::path::Path, draft_path: Option<&std::pat
         }
         let _ = prefill_end;
     }
+    write_engine_report(
+        model_path,
+        &file,
+        prefill_rate,
+        prompt.len() - 32,
+        prefill_phases,
+        decode_rate,
+        decode_tokens,
+        decode_phases,
+        FastPathStats {
+            attempts: gpu_attempts,
+            successes: gpu_successes,
+            declines: gpu_declines,
+        },
+    )?;
     Ok(())
+}
+
+fn write_engine_report(
+    model_path: &std::path::Path,
+    file: &allpaka_gguf::GgufFile,
+    prefill_rate: f64,
+    prefill_tokens: usize,
+    prefill_phases: Vec<PhaseMetric>,
+    decode_rate: f64,
+    decode_tokens: usize,
+    decode_phases: Vec<PhaseMetric>,
+    decode_fast_path: FastPathStats,
+) -> Result<()> {
+    let mut prefill = Measurement::new("prefill", prefill_tokens, vec![prefill_rate]);
+    prefill.phases = prefill_phases;
+    let mut decode = Measurement::new("decode", decode_tokens, vec![decode_rate]);
+    decode.phases = decode_phases;
+    decode.fast_path = decode_fast_path;
+    let mut overrides = BTreeMap::new();
+    for (name, value) in std::env::vars().filter(|(name, _)| name.starts_with("ALLPAKA_")) {
+        overrides.insert(name, value);
+    }
+    let generated_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let report = BenchmarkReport {
+        schema_version: SCHEMA_VERSION,
+        metadata: BenchmarkMetadata {
+            generated_at_unix_ms,
+            git_commit: option_env!("ALLPAKA_GIT_COMMIT").unwrap_or("unknown").into(),
+            model: model_path.display().to_string(),
+            model_fingerprint: model_fingerprint(model_path, file),
+            device: if allpaka_backend::gpu::is_attached() {
+                "metal".into()
+            } else {
+                "cpu".into()
+            },
+            runtime_profile: std::env::var("ALLPAKA_PROFILE").unwrap_or_else(|_| "auto".into()),
+            resolved_overrides: overrides,
+        },
+        measurements: vec![prefill, decode],
+    };
+
+    if let Some(baseline_path) = std::env::var_os("ALLPAKA_BENCH_BASELINE") {
+        let baseline_bytes = std::fs::read(&baseline_path).with_context(|| {
+            format!("reading benchmark baseline {}", std::path::Path::new(&baseline_path).display())
+        })?;
+        let baseline: BenchmarkReport = serde_json::from_slice(&baseline_bytes)?;
+        anyhow::ensure!(
+            baseline.metadata.model_fingerprint == report.metadata.model_fingerprint,
+            "benchmark baseline belongs to a different model fingerprint"
+        );
+        let tolerance = std::env::var("ALLPAKA_BENCH_TOLERANCE_PERCENT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(3.0);
+        let policy = RegressionPolicy {
+            throughput_tolerance_percent: tolerance,
+            fail_on_decline: true,
+        };
+        for candidate in &report.measurements {
+            let baseline_measurement = baseline
+                .measurements
+                .iter()
+                .find(|measurement| measurement.name == candidate.name)
+                .with_context(|| format!("baseline has no {} measurement", candidate.name))?;
+            let verdict = policy.evaluate(baseline_measurement, candidate);
+            anyhow::ensure!(
+                verdict.passed,
+                "{} regression gate failed: {}",
+                candidate.name,
+                verdict.reasons.join("; ")
+            );
+            println!(
+                "  {} regression gate: PASS ({:+.2}%)",
+                candidate.name, verdict.throughput_change_percent
+            );
+        }
+    }
+
+    let default_name = model_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let report_path = std::env::var_os("ALLPAKA_BENCH_REPORT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from("target/allpaka-bench")
+                .join(format!("{default_name}.json"))
+        });
+    if let Some(parent) = report_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = report_path.with_extension("tmp");
+    std::fs::write(&temporary, serde_json::to_vec_pretty(&report)?)?;
+    std::fs::rename(&temporary, &report_path)?;
+    println!("  benchmark report: {}", report_path.display());
+    Ok(())
+}
+
+fn model_fingerprint(model_path: &std::path::Path, file: &allpaka_gguf::GgufFile) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    file.architecture().hash(&mut hasher);
+    std::fs::metadata(model_path).map(|meta| meta.len()).unwrap_or(0).hash(&mut hasher);
+    for tensor in file.tensors() {
+        tensor.name.hash(&mut hasher);
+        format!("{:?}", tensor.ggml_type).hash(&mut hasher);
+        tensor.dims.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
 }
 
 /// Every phase of a forward pass, biggest first, in ms per token. Phases
 /// that submit to the GPU include their wait, so they are read against the
 /// GPU line above; the rest is CPU work with nowhere to hide. Resets the
 /// counters for the next section.
-fn report_phases(what: &str, secs: f64, tokens: usize) {
+fn report_phases(what: &str, secs: f64, tokens: usize) -> Vec<PhaseMetric> {
     let phases = allpaka_model::profile::take();
     allpaka_model::profile::reset();
-    let mut rows: Vec<(&str, u64)> =
-        allpaka_model::profile::NAMES.iter().copied().zip(phases).collect();
+    let mut rows: Vec<(&str, u64)> = allpaka_model::profile::NAMES
+        .iter()
+        .copied()
+        .zip(phases)
+        .collect();
     rows.sort_by_key(|&(_, ns)| std::cmp::Reverse(ns));
     let per_token = |ns: u64| ns as f64 / 1e6 / tokens as f64;
     let accounted: u64 = phases.iter().sum();
@@ -642,12 +805,25 @@ fn report_phases(what: &str, secs: f64, tokens: usize) {
         secs * 1e3 / tokens as f64 - per_token(accounted),
         (secs * 1e9 - accounted as f64) / (secs * 1e9) * 100.0,
     );
+    rows.into_iter()
+        .filter(|(_, ns)| *ns > 0)
+        .map(|(name, ns)| PhaseMetric {
+            name: name.to_string(),
+            milliseconds: ns as f64 / 1e6,
+            calls: 0,
+        })
+        .collect()
 }
 
 /// Where a phase's wall time went on the GPU path: round trips are the fixed
 /// cost every command buffer pays, and wait time is the CPU blocked on the
 /// GPU. Whatever wall time is left over is CPU work outside the kernels.
-fn report_gpu_split(phase: &str, before: (u64, u64, u64, u64), after: (u64, u64, u64, u64), secs: f64) {
+fn report_gpu_split(
+    phase: &str,
+    before: (u64, u64, u64, u64),
+    after: (u64, u64, u64, u64),
+    secs: f64,
+) {
     let calls = after.0 - before.0;
     if calls == 0 {
         return;
@@ -668,7 +844,13 @@ fn report_gpu_split(phase: &str, before: (u64, u64, u64, u64), after: (u64, u64,
 /// GPU actually executed, how much the driver spent scheduling, and how much
 /// was pure round trip. This is the arbiter between "the kernels are slow"
 /// and "the kernels are idle" - the two need opposite fixes.
-fn report_gpu_clock(phase: &str, before: (u64, u64), after: (u64, u64), wait_before: u64, wait_after: u64) {
+fn report_gpu_clock(
+    phase: &str,
+    before: (u64, u64),
+    after: (u64, u64),
+    wait_before: u64,
+    wait_after: u64,
+) {
     let busy_ms = (after.0 - before.0) as f64 / 1e6;
     let sched_ms = (after.1 - before.1) as f64 / 1e6;
     let wait_ms = (wait_after - wait_before) as f64 / 1e6;
@@ -705,7 +887,11 @@ mod tests {
         assert!(link.rtt_p99_secs >= link.rtt_p50_secs);
         // Loopback moves gigabytes per second; anything below 100 MB/s means
         // the throughput phase measured something other than the transport.
-        assert!(link.throughput_bytes_per_sec > 100e6, "{}", link.throughput_bytes_per_sec);
+        assert!(
+            link.throughput_bytes_per_sec > 100e6,
+            "{}",
+            link.throughput_bytes_per_sec
+        );
         // And it is fast: p50 over a millisecond on loopback would mean the
         // Nagle/delayed-ack trap is back.
         assert!(link.rtt_p50_secs < 1e-3, "{}", link.rtt_p50_secs);
