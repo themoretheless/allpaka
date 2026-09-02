@@ -12766,10 +12766,12 @@ fn q4_kernel() -> &'static str {
     if q4_mv() { "matvec_q4_k_mv" } else { "matvec_q4_k" }
 }
 
-/// The q6_k llama-structure matvec probe: `ALLPAKA_Q6_MV=1` to enable.
+/// The q6_k llama-structure matvec. Default ON after alternating 30B A/B on
+/// M4 Max measured 133.4 versus 131.6 tok/s with decode parity preserved.
+/// `ALLPAKA_Q6_MV=0` restores the reference kernel.
 fn q6_mv() -> bool {
     static MV: OnceLock<bool> = OnceLock::new();
-    *MV.get_or_init(|| std::env::var("ALLPAKA_Q6_MV").is_ok_and(|v| v == "1"))
+    *MV.get_or_init(|| std::env::var("ALLPAKA_Q6_MV").map_or(true, |v| v != "0"))
 }
 
 fn q6_kernel() -> &'static str {
