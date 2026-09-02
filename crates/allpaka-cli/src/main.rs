@@ -4,6 +4,7 @@
 mod bench;
 mod benchmark_report;
 mod autotune;
+mod explain;
 mod client;
 mod config;
 use allpaka_gguf as gguf;
