@@ -7,6 +7,7 @@ mod autotune;
 mod explain;
 mod scheduler;
 mod model_registry;
+mod serving_runtime;
 mod client;
 mod config;
 use allpaka_gguf as gguf;
@@ -124,15 +125,30 @@ enum Command {
 
     /// Serve a model over an OpenAI-compatible chat API, on our own engine.
     Serve {
-        /// Path to the .gguf to serve.
-        #[arg(long)]
-        model: PathBuf,
+        /// Path to a .gguf to serve; repeat --model for multi-model serving.
+        #[arg(long, required = true)]
+        model: Vec<PathBuf>,
         /// Address to listen on.
         #[arg(long, default_value = "127.0.0.1:8099")]
         bind: String,
         /// Typed runtime profile and overrides from allpaka.toml.
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Maximum accepted connections waiting for inference.
+        #[arg(long, default_value_t = 256)]
+        max_queued: usize,
+        /// Maximum requests selected in one model-aware scheduling batch.
+        #[arg(long, default_value_t = 16)]
+        max_batch: usize,
+        /// Maximum aggregate prompt tokens in a scheduling batch.
+        #[arg(long, default_value_t = 32768)]
+        batch_context_tokens: usize,
+        /// Total resident model budget in GiB; zero means unlimited.
+        #[arg(long, default_value_t = 0)]
+        model_budget_gib: u64,
+        /// Prefix-cache budget in MiB.
+        #[arg(long, default_value_t = 512)]
+        prefix_cache_mib: usize,
     },
 
     /// Probe a running `allpaka serve`: /health plus /stats.
@@ -339,16 +355,37 @@ fn main() -> Result<()> {
             model,
             bind,
             config,
+            max_queued,
+            max_batch,
+            batch_context_tokens,
+            model_budget_gib,
+            prefix_cache_mib,
         } => {
             if config.is_none() {
-                autotune::apply_cached(&model, None)?;
+                if let Some(primary) = model.first() {
+                    autotune::apply_cached(primary, None)?;
+                }
             }
             let runtime = config.as_deref().map(config::Config::load).transpose()?;
             runtime
                 .as_ref()
                 .map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone())
                 .apply();
-            serve::run(&model, &bind)
+            serve::run(
+                &model,
+                &bind,
+                serving_runtime::ServingLimits {
+                    max_queued,
+                    max_batch,
+                    max_batch_context_tokens: batch_context_tokens,
+                    model_budget_bytes: if model_budget_gib == 0 {
+                        u64::MAX
+                    } else {
+                        model_budget_gib.saturating_mul(1 << 30)
+                    },
+                    prefix_budget_bytes: prefix_cache_mib.saturating_mul(1 << 20),
+                },
+            )
         }
         Command::Status { addr } => client::status(&addr),
         Command::Chat {

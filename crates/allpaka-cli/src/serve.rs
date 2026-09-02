@@ -13,8 +13,11 @@ use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
+use allpaka_model::prefix_cache::PrefixCache;
 use allpaka_model::{Model, Session, Tokenizer};
+use crate::serving_runtime::{ServingLimits, ServingRuntime};
 
 /// The KV cache carried across requests.
 ///
@@ -26,30 +29,17 @@ use allpaka_model::{Model, Session, Tokenizer};
 struct ChatState {
     session: Session,
     tokens: Vec<u32>,
-    /// SSM snapshots at past prompt boundaries (qwen35moe). The KV cache
-    /// rolls back by truncating, but the gated-delta-net recurrence is
-    /// irreversible: a prefix hit must restore the state as of that prefix.
-    /// One snapshot per request, taken right after its prefill, plus the
-    /// prefill's last logits so a fully-covered prompt needs no prefill at
-    /// all. Bounded by [SSM_SNAPSHOTS_MAX], oldest evicted first.
-    snaps: std::collections::VecDeque<SsmSnap>,
 }
 
-/// One prompt-boundary snapshot of the recurrent state.
-struct SsmSnap {
+/// Byte-budgeted prompt-boundary snapshot shared by requests for one model.
+struct PrefixSnap {
     /// Token count of the prompt this state was captured after.
     tokens: usize,
-    /// `SsmCache::snapshot()` at the prompt's end.
-    state: Vec<f32>,
-    /// The prefill's last-position logits, kept so a repeated prompt skips
-    /// the prefill entirely (greedy determinism is then bit-exact).
+    /// `SsmCache::snapshot()` at the prompt's end for hybrid models.
+    ssm_state: Option<Vec<f32>>,
+    /// Last-position logits let an exact repeated prompt skip all prefill.
     logits: Vec<f32>,
 }
-
-/// SSM snapshots are ~66 MB each on Qwen3.6-35B (30 layers x conv window +
-/// 32 heads x 128x128 f32); eight boundaries cover a chat with edits and
-/// branches without growing memory without limit.
-const SSM_SNAPSHOTS_MAX: usize = 8;
 
 /// Context the persistent session is sized for. f32 KV cache is heavy
 /// (~0.4 MB per token on Qwen3-30B), so this is a deliberate budget, not the
@@ -67,11 +57,85 @@ struct CompletionResult {
     decode_secs: f64,
 }
 
+struct ModelService {
+    model: Model<'static>,
+    tokenizer: Tokenizer,
+    force_think: bool,
+    chat: ChatState,
+}
+
+struct QueuedConnection {
+    stream: TcpStream,
+    request_line: String,
+    body: String,
+}
+
+type ServerRuntime = ServingRuntime<Mutex<ModelService>, QueuedConnection, PrefixSnap>;
+
+fn model_prefix_namespace(model: &str) -> u32 {
+    model
+        .bytes()
+        .fold(2_166_136_261u32, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
+        })
+}
+
+fn prefix_key(namespace: u32, tokens: &[u32]) -> Vec<u32> {
+    let mut key = Vec::with_capacity(tokens.len() + 1);
+    key.push(namespace);
+    key.extend_from_slice(tokens);
+    key
+}
+
+fn exact_prefix_snapshot(
+    cache: &mut PrefixCache<PrefixSnap>,
+    namespace: u32,
+    tokens: &[u32],
+) -> Option<Arc<PrefixSnap>> {
+    let key = prefix_key(namespace, tokens);
+    let hit = cache.longest_prefix(&key)?;
+    (hit.matched_tokens == key.len() && hit.value.tokens == tokens.len()).then_some(hit.value)
+}
+
+#[cfg(test)]
+mod prefix_snapshot_tests {
+    use super::{
+        exact_prefix_snapshot, model_prefix_namespace, prefix_key, PrefixCache, PrefixSnap,
+    };
+
+    #[test]
+    fn exact_hits_are_model_namespaced() {
+        let mut cache = PrefixCache::new(1024);
+        let first = model_prefix_namespace("first");
+        let second = model_prefix_namespace("second");
+        cache.insert(
+            prefix_key(first, &[1, 2, 3]),
+            PrefixSnap {
+                tokens: 3,
+                ssm_state: None,
+                logits: vec![4.0],
+            },
+            4,
+        );
+
+        assert_eq!(
+            exact_prefix_snapshot(&mut cache, first, &[1, 2, 3])
+                .unwrap()
+                .logits,
+            vec![4.0]
+        );
+        assert!(exact_prefix_snapshot(&mut cache, first, &[1, 2]).is_none());
+        assert!(exact_prefix_snapshot(&mut cache, second, &[1, 2, 3]).is_none());
+    }
+}
+
 fn run_inference(
     model: &Model,
     tok: &Tokenizer,
     template: &Template,
     chat: &mut ChatState,
+    prefixes: &mut PrefixCache<PrefixSnap>,
+    prefix_namespace: u32,
     messages: &[(String, String)],
     max_tokens: usize,
     temperature: f32,
@@ -99,7 +163,6 @@ fn run_inference(
     if prompt.len() + max_tokens + 1 > chat.session.capacity() {
         chat.session = model.new_session(SESSION_TOKENS.max(prompt.len() + max_tokens + 1));
         chat.tokens.clear();
-        chat.snaps.clear();
         common = 0;
     } else if chat.session.ssm.is_some() {
         // The gated-delta-net state cannot be rolled back by truncating
@@ -107,14 +170,17 @@ fn run_inference(
         // snapshot taken at that prefix's end. Without one, replay from
         // scratch (slow, but correct).
         if common < chat.tokens.len() {
-            match chat.snaps.iter().find(|s| s.tokens == common) {
+            match exact_prefix_snapshot(prefixes, prefix_namespace, &prompt[..common]) {
                 Some(snap) => {
-                    let state = snap.state.clone();
+                    let state = snap
+                        .ssm_state
+                        .as_ref()
+                        .expect("SSM prefix snapshot must contain recurrent state");
                     chat.session
                         .ssm
                         .as_mut()
                         .expect("ssm session")
-                        .restore(&state);
+                        .restore(state);
                     chat.session.truncate(common);
                     chat.tokens.truncate(common);
                     if common == prompt.len() {
@@ -128,7 +194,6 @@ fn run_inference(
                     chat.session =
                         model.new_session(SESSION_TOKENS.max(prompt.len() + max_tokens + 1));
                     chat.tokens.clear();
-                    chat.snaps.clear();
                     common = 0;
                 }
             }
@@ -136,7 +201,7 @@ fn run_inference(
             // History IS the prompt: the state already sits at its end and
             // only the last logits are missing (KV-only models replay one
             // token here; the SSM cannot step back). The snapshot has them.
-            match chat.snaps.iter().find(|s| s.tokens == common) {
+            match exact_prefix_snapshot(prefixes, prefix_namespace, &prompt) {
                 Some(snap) => {
                     logits = snap.logits.clone();
                     skip_prefill = true;
@@ -145,7 +210,6 @@ fn run_inference(
                     chat.session =
                         model.new_session(SESSION_TOKENS.max(prompt.len() + max_tokens + 1));
                     chat.tokens.clear();
-                    chat.snaps.clear();
                     common = 0;
                 }
             }
@@ -154,7 +218,12 @@ fn run_inference(
         // already exactly where the prefix ends; nothing to restore.
     } else {
         if common == prompt.len() {
-            common -= 1;
+            if let Some(snap) = exact_prefix_snapshot(prefixes, prefix_namespace, &prompt) {
+                logits = snap.logits.clone();
+                skip_prefill = true;
+            } else {
+                common = common.saturating_sub(1);
+            }
         }
         chat.session.truncate(common);
         chat.tokens.truncate(common);
@@ -170,28 +239,25 @@ fn run_inference(
     }
     let prefill_secs = t0.elapsed().as_secs_f64();
 
-    // Remember the recurrent state at this prompt's boundary (qwen35moe):
-    // the next request sharing the prefix restores it instead of replaying.
-    // Snapshot before generation, when the state is exactly "prompt consumed".
-    if let Some(ssm) = chat.session.ssm.as_ref() {
-        if !logits.is_empty() {
-            let snap = SsmSnap {
+    // Snapshot before generation, when state is exactly "prompt consumed".
+    if !logits.is_empty() {
+        let ssm_state = chat.session.ssm.as_ref().map(|ssm| ssm.snapshot());
+        let value_bytes = logits.len() * size_of::<f32>()
+            + ssm_state
+                .as_ref()
+                .map_or(0, |state| state.len() * size_of::<f32>());
+        prefixes.insert(
+            prefix_key(prefix_namespace, &prompt),
+            PrefixSnap {
                 tokens: prompt.len(),
-                state: ssm.snapshot(),
+                ssm_state,
                 logits: logits.clone(),
-            };
-            if let Some(existing) = chat.snaps.iter_mut().find(|s| s.tokens == prompt.len()) {
-                *existing = snap;
-            } else {
-                chat.snaps.push_back(snap);
-                while chat.snaps.len() > SSM_SNAPSHOTS_MAX {
-                    chat.snaps.pop_front();
-                }
-            }
-        }
+            },
+            value_bytes,
+        );
     }
 
-    let mut streaming = stream.is_some();
+    let streaming = stream.is_some();
     let think_prefix = template.think_prefix();
     if streaming {
         write_sse_headers(stream.as_mut().unwrap())?;
@@ -796,66 +862,217 @@ fn stream_safe_len(text: &str) -> usize {
     bytes.len()
 }
 
-pub fn run(model_path: &Path, bind: &str) -> Result<()> {
-    let file = allpaka_gguf::GgufFile::open(model_path)?;
-    for m in file.mappings() {
-        prewarm(m);
+pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits) -> Result<()> {
+    anyhow::ensure!(!model_paths.is_empty(), "at least one --model is required");
+    let mut planned_bytes = Vec::with_capacity(model_paths.len());
+    for path in model_paths {
+        let file = allpaka_gguf::GgufFile::open(path)?;
+        planned_bytes.push(file.mappings().map(|m| m.len() as u64).sum::<u64>());
     }
-    let model = Model::load(&file)?;
-    let tokenizer = Tokenizer::from_gguf(&file)?;
-    tokenizer.self_check()?;
-    let mut template = Template::detect(&tokenizer)?;
-    // Thinking Qwen generations prime the assistant turn with `<think>\n`
-    // in their jinja chat template; mirror that prefix in ours.
-    if let Template::ChatMl { force_think, .. } = &mut template {
-        *force_think = file
-            .meta_str("tokenizer.chat_template")
-            .is_some_and(|t| t.contains("<think>"));
-    }
-    let model_name = model_path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "allpaka".into());
-
-    let listener = TcpListener::bind(bind).with_context(|| format!("binding {bind}"))?;
-    println!("allpaka serve: {model_name} on http://{bind}/v1/chat/completions");
-    println!(
-        "  arch {}, vocab {}, template {}",
-        model.config.architecture,
-        tokenizer.vocab_size(),
-        match template {
-            Template::ChatMl { .. } => "chatml",
-            Template::Llama3 { .. } => "llama3",
-            Template::Glm { .. } => "glm",
-        }
+    let total_bytes = planned_bytes.iter().try_fold(0u64, |total, bytes| {
+        total.checked_add(*bytes).context("resident model byte total overflow")
+    })?;
+    anyhow::ensure!(
+        total_bytes <= limits.model_budget_bytes,
+        "models require {:.1} GiB but --model-budget-gib allows {:.1} GiB",
+        total_bytes as f64 / (1u64 << 30) as f64,
+        limits.model_budget_bytes as f64 / (1u64 << 30) as f64,
     );
 
-    let mut chat = ChatState {
-        session: model.new_session(SESSION_TOKENS),
-        tokens: Vec::new(),
-        snaps: std::collections::VecDeque::new(),
-    };
+    let mut runtime = ServerRuntime::new(limits);
+    let mut default_model = String::new();
+    for (path, bytes) in model_paths.iter().zip(planned_bytes) {
+        let (name, service) = load_model_service(path)?;
+        if default_model.is_empty() {
+            default_model.clone_from(&name);
+        }
+        runtime
+            .install_model(name.clone(), Mutex::new(service), bytes)
+            .map_err(|error| anyhow::anyhow!("installing model {name}: {error:?}"))?;
+    }
+    let listener = TcpListener::bind(bind).with_context(|| format!("binding {bind}"))?;
+    println!(
+        "allpaka serve: {} on http://{bind}/v1/chat/completions",
+        runtime.model_names().join(", ")
+    );
+    println!(
+        "  scheduler: queued={} batch={} context={} tokens; resident {:.1} GiB; prefix cache {:.1} MiB",
+        limits.max_queued,
+        limits.max_batch,
+        limits.max_batch_context_tokens,
+        runtime.resident_model_bytes() as f64 / (1u64 << 30) as f64,
+        limits.prefix_budget_bytes as f64 / (1u64 << 20) as f64,
+    );
     let rag_tools = RagTools::load();
 
-    for stream in listener.incoming() {
-        let stream = match stream {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        // One request at a time: the model is the bottleneck, not the socket.
-        if let Err(e) = handle(
-            stream,
-            &model,
-            &tokenizer,
-            &template,
-            &model_name,
-            &mut chat,
-            &rag_tools,
-        ) {
-            println!("request failed: {e:#}");
+    loop {
+        let (first, _) = listener.accept()?;
+        let mut ready = vec![first];
+        listener.set_nonblocking(true)?;
+        while ready.len() < limits.max_queued {
+            match listener.accept() {
+                Ok((stream, _)) => ready.push(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    listener.set_nonblocking(false)?;
+                    return Err(error.into());
+                }
+            }
+        }
+        listener.set_nonblocking(false)?;
+
+        for stream in ready {
+            match prepare_connection(stream, &default_model, limits.max_batch_context_tokens) {
+                Ok((model_name, context_tokens, connection)) => {
+                    if let Err(error) = runtime.enqueue(model_name, context_tokens, connection) {
+                        println!("request rejected by scheduler: {error:?}");
+                    }
+                }
+                Err(error) => println!("request failed before admission: {error:#}"),
+            }
+        }
+
+        while runtime.queued() > 0 {
+            for scheduled in runtime.next_batch() {
+                if let Err(error) = dispatch_connection(
+                    scheduled.model,
+                    scheduled.payload,
+                    &mut runtime,
+                    &rag_tools,
+                ) {
+                    println!("request failed: {error:#}");
+                }
+            }
         }
     }
-    Ok(())
+}
+
+fn load_model_service(model_path: &Path) -> Result<(String, ModelService)> {
+    // A serving model borrows mmap-backed tensor bytes for the process
+    // lifetime. Leaking the owner is deliberate: Metal bytes-no-copy buffers
+    // must remain valid until server shutdown, when the OS reclaims mappings.
+    let file: &'static allpaka_gguf::GgufFile =
+        Box::leak(Box::new(allpaka_gguf::GgufFile::open(model_path)?));
+    for mapping in file.mappings() {
+        prewarm(mapping);
+    }
+    let model = Model::load(file)?;
+    let tokenizer = Tokenizer::from_gguf(file)?;
+    tokenizer.self_check()?;
+    let force_think = file
+        .meta_str("tokenizer.chat_template")
+        .is_some_and(|value| value.contains("<think>"));
+    let template_name = match Template::detect(&tokenizer)? {
+        Template::ChatMl { .. } => "chatml",
+        Template::Llama3 { .. } => "llama3",
+        Template::Glm { .. } => "glm",
+    };
+    let name = model_path
+        .file_stem()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "allpaka".into());
+    let chat = ChatState {
+        session: model.new_session(SESSION_TOKENS),
+        tokens: Vec::new(),
+    };
+    println!(
+        "  model {name}: arch {}, vocab {}, template {}",
+        model.config.architecture,
+        tokenizer.vocab_size(),
+        template_name,
+    );
+    Ok((
+        name,
+        ModelService {
+            model,
+            tokenizer,
+            force_think,
+            chat,
+        },
+    ))
+}
+
+fn prepare_connection(
+    mut stream: TcpStream,
+    default_model: &str,
+    max_context_tokens: usize,
+) -> Result<(String, usize, QueuedConnection)> {
+    let (request_line, body) = read_request(&mut stream)?;
+    let requested = serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|request| request["model"].as_str().map(ToOwned::to_owned))
+        .filter(|model| model != "allpaka")
+        .unwrap_or_else(|| default_model.to_string());
+    let context_tokens = body.len().div_ceil(4).clamp(1, max_context_tokens.max(1));
+    Ok((
+        requested,
+        context_tokens,
+        QueuedConnection {
+            stream,
+            request_line,
+            body,
+        },
+    ))
+}
+
+fn dispatch_connection(
+    model_name: String,
+    connection: QueuedConnection,
+    runtime: &mut ServerRuntime,
+    rag: &RagTools,
+) -> Result<()> {
+    if connection.request_line.starts_with("GET /v1/models") {
+        let data = runtime
+            .model_names()
+            .into_iter()
+            .map(|id| json!({"id": id, "object": "model", "owned_by": "allpaka"}))
+            .collect::<Vec<_>>();
+        return respond(
+            &mut connection.stream.try_clone()?,
+            200,
+            &json!({"object": "list", "data": data}),
+        );
+    }
+    let Some(service) = runtime.model(&model_name) else {
+        let mut stream = connection.stream;
+        return respond(
+            &mut stream,
+            404,
+            &json!({"error": format!("unknown model: {model_name}")}),
+        );
+    };
+    let mut service = service
+        .lock()
+        .map_err(|_| anyhow::anyhow!("model service lock poisoned: {model_name}"))?;
+    let ModelService {
+        model,
+        tokenizer,
+        force_think,
+        chat,
+    } = &mut *service;
+    let mut template = Template::detect(tokenizer)?;
+    if let Template::ChatMl {
+        force_think: enabled,
+        ..
+    } = &mut template
+    {
+        *enabled = *force_think;
+    }
+    let prefix_namespace = model_prefix_namespace(&model_name);
+    let prefixes = runtime.prefixes();
+    handle(
+        connection.stream,
+        connection.request_line,
+        connection.body,
+        model,
+        tokenizer,
+        &template,
+        &model_name,
+        chat,
+        prefixes,
+        prefix_namespace,
+        rag,
+    )
 }
 
 /// Touch every page of the weight mapping once, sequentially.
@@ -882,15 +1099,17 @@ pub fn prewarm(mapping: &[u8]) {
 
 fn handle(
     mut stream: TcpStream,
+    request_line: String,
+    body: String,
     model: &Model,
     tok: &Tokenizer,
     template: &Template,
     model_name: &str,
     chat: &mut ChatState,
+    prefixes: &mut PrefixCache<PrefixSnap>,
+    prefix_namespace: u32,
     rag: &RagTools,
 ) -> Result<()> {
-    let (request_line, body) = read_request(&mut stream)?;
-
     if request_line.starts_with("GET /health") {
         return respond(&mut stream, 200, &json!({"status": "ok"}));
     }
@@ -905,6 +1124,8 @@ fn handle(
                 "context_capacity": chat.session.capacity(),
                 "n_layers": model.config.n_layers,
                 "moe": model.config.moe.is_some(),
+                "prefix_cache_entries": prefixes.len(),
+                "prefix_cache_bytes": prefixes.resident_bytes(),
             }),
         );
     }
@@ -962,6 +1183,8 @@ fn handle(
                 tok,
                 template,
                 chat,
+                prefixes,
+                prefix_namespace,
                 &messages,
                 max_tokens,
                 temperature,
@@ -981,6 +1204,8 @@ fn handle(
             tok,
             template,
             chat,
+            prefixes,
+            prefix_namespace,
             &messages,
             max_tokens,
             temperature,
@@ -996,6 +1221,8 @@ fn handle(
             tok,
             template,
             chat,
+            prefixes,
+            prefix_namespace,
             &messages,
             max_tokens,
             temperature,
@@ -1015,6 +1242,8 @@ fn handle(
                 tok,
                 template,
                 chat,
+                prefixes,
+                prefix_namespace,
                 &round_messages,
                 max_tokens,
                 temperature,
