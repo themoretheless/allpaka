@@ -67,6 +67,7 @@ impl<T> ContinuousBatcher<T> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn cancel(&mut self, id: RequestId) -> Option<ScheduledRequest<T>> {
         for queue in self.queues.values_mut() {
             if let Some(index) = queue.iter().position(|request| request.id == id) {

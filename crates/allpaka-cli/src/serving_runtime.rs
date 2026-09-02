@@ -83,10 +83,6 @@ impl<M, P, V> ServingRuntime<M, P, V> {
         Ok(id)
     }
 
-    pub fn cancel(&mut self, id: RequestId) -> Option<ScheduledRequest<P>> {
-        self.queue.cancel(id)
-    }
-
     pub fn next_batch(&mut self) -> Vec<ScheduledRequest<P>> {
         self.queue.next_batch()
     }

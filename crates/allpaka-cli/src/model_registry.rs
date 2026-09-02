@@ -75,19 +75,6 @@ impl<T> ModelRegistry<T> {
         Ok(())
     }
 
-    pub fn unload(&mut self, name: &str) -> bool {
-        let can_unload = self
-            .entries
-            .get(name)
-            .is_some_and(|entry| Arc::strong_count(&entry.model) == 1);
-        if !can_unload {
-            return false;
-        }
-        let entry = self.entries.remove(name).expect("entry existed");
-        self.resident_bytes -= entry.bytes;
-        true
-    }
-
     fn evict_until(
         &mut self,
         mut projected_bytes: u64,
