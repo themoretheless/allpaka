@@ -647,40 +647,26 @@ pub fn measure_engine(
         }
         let _ = prefill_end;
     }
-    write_engine_report(
-        model_path,
-        &file,
-        prefill_rate,
-        prompt.len() - 32,
-        prefill_phases,
-        decode_rate,
-        decode_tokens,
-        decode_phases,
-        FastPathStats {
-            attempts: gpu_attempts,
-            successes: gpu_successes,
-            declines: gpu_declines,
-        },
-    )?;
+    let mut prefill_measurement =
+        Measurement::new("prefill", prompt.len() - 32, vec![prefill_rate]);
+    prefill_measurement.phases = prefill_phases;
+    let mut decode_measurement = Measurement::new("decode", decode_tokens, vec![decode_rate]);
+    decode_measurement.phases = decode_phases;
+    decode_measurement.fast_path = FastPathStats {
+        attempts: gpu_attempts,
+        successes: gpu_successes,
+        declines: gpu_declines,
+    };
+    write_engine_report(model_path, &file, prefill_measurement, decode_measurement)?;
     Ok(())
 }
 
 fn write_engine_report(
     model_path: &std::path::Path,
     file: &allpaka_gguf::GgufFile,
-    prefill_rate: f64,
-    prefill_tokens: usize,
-    prefill_phases: Vec<PhaseMetric>,
-    decode_rate: f64,
-    decode_tokens: usize,
-    decode_phases: Vec<PhaseMetric>,
-    decode_fast_path: FastPathStats,
+    prefill: Measurement,
+    decode: Measurement,
 ) -> Result<()> {
-    let mut prefill = Measurement::new("prefill", prefill_tokens, vec![prefill_rate]);
-    prefill.phases = prefill_phases;
-    let mut decode = Measurement::new("decode", decode_tokens, vec![decode_rate]);
-    decode.phases = decode_phases;
-    decode.fast_path = decode_fast_path;
     let mut overrides = BTreeMap::new();
     for (name, value) in std::env::vars().filter(|(name, _)| name.starts_with("ALLPAKA_")) {
         overrides.insert(name, value);

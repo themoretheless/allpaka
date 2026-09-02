@@ -150,11 +150,12 @@ pub fn run(model_path: &Path, cache_path: Option<&Path>, force: bool) -> Result<
         let decode = measurement(&report, "decode")?.summary.median;
         let prefill = measurement(&report, "prefill")?.summary.median;
         println!("  {profile}: decode={decode:.1} prefill={prefill:.1} tok/s");
-        let replace = best.as_ref().is_none_or(|(_, current)| {
-            measurement(current, "decode")
+        let replace = match best.as_ref() {
+            None => true,
+            Some((_, current)) => measurement(current, "decode")
                 .map(|value| decode > value.summary.median)
-                .unwrap_or(true)
-        });
+                .unwrap_or(true),
+        };
         if replace {
             best = Some((profile.to_string(), report));
         }

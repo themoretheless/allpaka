@@ -25,9 +25,10 @@ pub(super) struct RagToolConfig {
 
 impl RagToolConfig {
     pub(super) fn load() -> Self {
-        let enabled = std::env::var("ALLPAKA_RAG_TOOLS")
-            .ok()
-            .is_none_or(|v| v != "0");
+        let enabled = match std::env::var("ALLPAKA_RAG_TOOLS") {
+            Ok(value) => value != "0",
+            Err(_) => true,
+        };
         let notes_dir = std::env::var("ALLPAKA_RAG_NOTES_DIR")
             .map(PathBuf::from)
             .or_else(|_| std::env::var("RAG_INGEST_ROOTS").map(PathBuf::from))
