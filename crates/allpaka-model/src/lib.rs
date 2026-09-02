@@ -14,6 +14,7 @@ pub mod config;
 pub mod kv;
 pub mod model;
 pub mod profile;
+pub mod requirements;
 pub mod speculate;
 pub mod tokenizer;
 
@@ -33,7 +34,10 @@ mod tests {
     struct Rng(u64);
     impl Rng {
         fn next_f32(&mut self) -> f32 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             // Map to roughly [-0.1, 0.1]: small weights keep activations tame
             // through two layers without normal init math.
             ((self.0 >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.2
@@ -48,7 +52,11 @@ mod tests {
 
     impl FileBuilder {
         fn new() -> Self {
-            Self { kvs: Vec::new(), kv_count: 0, tensors: Vec::new() }
+            Self {
+                kvs: Vec::new(),
+                kv_count: 0,
+                tensors: Vec::new(),
+            }
         }
 
         fn key(&mut self, k: &str) {
@@ -186,7 +194,10 @@ mod tests {
     fn logits_for(f: &GgufFile, tokens: &[u32]) -> Vec<Vec<f32>> {
         let model = Model::load(f).unwrap();
         let mut s = model.new_session(16);
-        tokens.iter().map(|&t| model.forward(t, &mut s).unwrap()).collect()
+        tokens
+            .iter()
+            .map(|&t| model.forward(t, &mut s).unwrap())
+            .collect()
     }
 
     #[test]
@@ -370,8 +381,11 @@ mod tests {
         let seq = logits_for(&f, &[3, 1, 4]);
         let mut s = model.new_session(16);
         let batched = model.forward_batch(&[3, 1, 4], &mut s).unwrap();
-        let diff =
-            batched.iter().zip(&seq[2]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        let diff = batched
+            .iter()
+            .zip(&seq[2])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
         assert!(diff < 1e-4, "moe batched logits diverge by {diff}");
         std::fs::remove_file(path).ok();
     }
@@ -443,7 +457,10 @@ mod tests {
             .u32_kv(&format!("{arch}.feed_forward_length"), FFN as u32)
             .u32_kv(&format!("{arch}.expert_count"), EXPERTS as u32)
             .u32_kv(&format!("{arch}.expert_used_count"), USED as u32)
-            .u32_kv(&format!("{arch}.expert_feed_forward_length"), EXPERT_FFN as u32)
+            .u32_kv(
+                &format!("{arch}.expert_feed_forward_length"),
+                EXPERT_FFN as u32,
+            )
             .tensor("token_embd.weight", &[HIDDEN, VOCAB], mat(VOCAB, HIDDEN))
             .tensor("output_norm.weight", &[HIDDEN], vec![1.0; HIDDEN as usize])
             .tensor("output.weight", &[HIDDEN, VOCAB], mat(VOCAB, HIDDEN));
@@ -456,9 +473,17 @@ mod tests {
             .tensor(&n("attn_output"), &[q_dim, HIDDEN], mat(HIDDEN, q_dim))
             .tensor(&n("ffn_norm"), &[HIDDEN], vec![1.0; HIDDEN as usize])
             .tensor(&n("ffn_gate_inp"), &[HIDDEN, EXPERTS], router)
-            .tensor(&n("ffn_gate_exps"), &[HIDDEN, EXPERT_FFN, EXPERTS], gate_stack)
+            .tensor(
+                &n("ffn_gate_exps"),
+                &[HIDDEN, EXPERT_FFN, EXPERTS],
+                gate_stack,
+            )
             .tensor(&n("ffn_up_exps"), &[HIDDEN, EXPERT_FFN, EXPERTS], up_stack)
-            .tensor(&n("ffn_down_exps"), &[EXPERT_FFN, HIDDEN, EXPERTS], down_stack);
+            .tensor(
+                &n("ffn_down_exps"),
+                &[EXPERT_FFN, HIDDEN, EXPERTS],
+                down_stack,
+            );
         b.build()
     }
 

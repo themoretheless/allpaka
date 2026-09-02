@@ -15,6 +15,7 @@
 //!   `mul_mat` semantics.
 
 pub mod accel;
+pub mod capability;
 pub mod command;
 pub mod execution;
 pub mod profile;
