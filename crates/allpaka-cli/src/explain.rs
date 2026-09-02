@@ -4,6 +4,8 @@ use allpaka_backend::capability::{BackendCapabilities, Feature};
 use allpaka_backend::profile::ResolvedRuntime;
 use allpaka_model::requirements::ModelRequirements;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TensorCoverage {
@@ -95,6 +97,44 @@ impl ExecutionPlan {
         );
         lines.join("\n")
     }
+}
+
+pub fn run(path: &Path, profile: &str, json: bool) -> anyhow::Result<()> {
+    let file = allpaka_gguf::GgufFile::open(path)?;
+    let requirements = ModelRequirements::for_architecture(file.architecture())
+        .ok_or_else(|| anyhow::anyhow!("no model requirements registered for {}", file.architecture()))?;
+    let profile: allpaka_backend::profile::RuntimeProfile = profile.parse()?;
+    let mut census: BTreeMap<String, (usize, u64, bool)> = BTreeMap::new();
+    for tensor in file.tensors() {
+        let tensor_type = format!("{:?}", tensor.ggml_type);
+        let bytes = tensor.byte_size()? as u64;
+        let has_kernel = !tensor_type.starts_with("Other(");
+        let entry = census.entry(tensor_type).or_insert((0, 0, has_kernel));
+        entry.0 += 1;
+        entry.1 += bytes;
+        entry.2 &= has_kernel;
+    }
+    let tensors = census
+        .into_iter()
+        .map(|(tensor_type, (tensors, bytes, has_kernel))| TensorCoverage {
+            kernel: has_kernel.then(|| format!("metal.{}", tensor_type.to_ascii_lowercase())),
+            tensor_type,
+            tensors,
+            bytes,
+        })
+        .collect();
+    let plan = ExecutionPlan::resolve(
+        &requirements,
+        &BackendCapabilities::current_metal(),
+        &profile.resolve(),
+        tensors,
+    );
+    if json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        println!("{}", plan.render_text());
+    }
+    Ok(())
 }
 
 fn feature_step(feature: Feature, supported: bool) -> PlanStep {

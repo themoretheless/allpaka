@@ -28,6 +28,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Explain the resolved GPU execution path for one GGUF model.
+    Explain {
+        #[arg(value_name = "GGUF")]
+        engine: PathBuf,
+        #[arg(long, default_value = "auto")]
+        profile: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print an example allpaka.toml to stdout.
     Init,
 
@@ -214,6 +223,11 @@ enum Command {
 
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Command::Explain {
+            engine,
+            profile,
+            json,
+        } => explain::run(&engine, &profile, json),
         Command::Init => {
             print!("{}", config::EXAMPLE);
             Ok(())
