@@ -1015,6 +1015,33 @@ fn prepare_connection(
     ))
 }
 
+fn resolve_model_name(requested: &str, available: &[String]) -> Option<String> {
+    if available.iter().any(|name| name == requested) {
+        return Some(requested.to_owned());
+    }
+    let mut matches = available
+        .iter()
+        .filter(|name| name.starts_with(requested))
+        .cloned();
+    let candidate = matches.next()?;
+    matches.next().is_none().then_some(candidate)
+}
+
+#[cfg(test)]
+mod model_resolution_tests {
+    use super::resolve_model_name;
+
+    #[test]
+    fn aliases_must_be_unique_and_exact_names_win() {
+        let names = vec!["qwen3".into(), "qwen3-0.6b".into(), "llama-3".into()];
+
+        assert_eq!(resolve_model_name("qwen3", &names).as_deref(), Some("qwen3"));
+        assert_eq!(resolve_model_name("qwen3-0", &names).as_deref(), Some("qwen3-0.6b"));
+        assert_eq!(resolve_model_name("qwen", &names), None);
+        assert_eq!(resolve_model_name("mistral", &names), None);
+    }
+}
+
 fn dispatch_connection(
     model_name: String,
     connection: QueuedConnection,
@@ -1033,13 +1060,17 @@ fn dispatch_connection(
             &json!({"object": "list", "data": data}),
         );
     }
-    let Some(service) = runtime.model(&model_name) else {
+    let available_models = runtime.model_names();
+    let Some(model_name) = resolve_model_name(&model_name, &available_models) else {
         let mut stream = connection.stream;
         return respond(
             &mut stream,
             404,
             &json!({"error": format!("unknown model: {model_name}")}),
         );
+    };
+    let Some(service) = runtime.model(&model_name) else {
+        anyhow::bail!("resolved model disappeared from registry: {model_name}");
     };
     let mut service = service
         .lock()
