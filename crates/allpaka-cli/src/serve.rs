@@ -129,22 +129,52 @@ mod prefix_snapshot_tests {
     }
 }
 
-fn run_inference(
-    model: &Model,
-    tok: &Tokenizer,
-    template: &Template,
-    chat: &mut ChatState,
-    prefixes: &mut PrefixCache<PrefixSnap>,
+struct InferenceContext<'a> {
+    model: &'a Model<'static>,
+    tok: &'a Tokenizer,
+    template: &'a Template,
+    chat: &'a mut ChatState,
+    prefixes: &'a mut PrefixCache<PrefixSnap>,
     prefix_namespace: u32,
-    messages: &[(String, String)],
+}
+
+struct GenerationRequest<'a> {
+    messages: &'a [(String, String)],
     max_tokens: usize,
     temperature: f32,
     top_p: f32,
     repeat_penalty: f32,
     parse_tools: bool,
-    mut stream: Option<&mut TcpStream>,
+    stream: Option<&'a mut TcpStream>,
     emit_done: bool,
+}
+
+struct ServeRequestContext<'a> {
+    model_name: &'a str,
+    inference: InferenceContext<'a>,
+    rag: &'a RagTools,
+}
+
+fn run_inference(
+    context: &mut InferenceContext<'_>,
+    request: GenerationRequest<'_>,
 ) -> Result<CompletionResult> {
+    let model = context.model;
+    let tok = context.tok;
+    let template = context.template;
+    let chat = &mut *context.chat;
+    let prefixes = &mut *context.prefixes;
+    let prefix_namespace = context.prefix_namespace;
+    let GenerationRequest {
+        messages,
+        max_tokens,
+        temperature,
+        top_p,
+        repeat_penalty,
+        parse_tools,
+        mut stream,
+        emit_done,
+    } = request;
     let prompt = template.prompt(tok, messages)?;
     let stops = template.stop_tokens(tok);
     let mut sampler = Sampler::new(temperature, top_p, repeat_penalty);
@@ -1095,14 +1125,18 @@ fn dispatch_connection(
         connection.stream,
         connection.request_line,
         connection.body,
-        model,
-        tokenizer,
-        &template,
-        &model_name,
-        chat,
-        prefixes,
-        prefix_namespace,
-        rag,
+        ServeRequestContext {
+            model_name: &model_name,
+            inference: InferenceContext {
+                model,
+                tok: tokenizer,
+                template: &template,
+                chat,
+                prefixes,
+                prefix_namespace,
+            },
+            rag,
+        },
     )
 }
 
@@ -1132,15 +1166,10 @@ fn handle(
     mut stream: TcpStream,
     request_line: String,
     body: String,
-    model: &Model,
-    tok: &Tokenizer,
-    template: &Template,
-    model_name: &str,
-    chat: &mut ChatState,
-    prefixes: &mut PrefixCache<PrefixSnap>,
-    prefix_namespace: u32,
-    rag: &RagTools,
+    mut context: ServeRequestContext<'_>,
 ) -> Result<()> {
+    let model_name = context.model_name;
+    let rag = context.rag;
     if request_line.starts_with("GET /health") {
         return respond(&mut stream, 200, &json!({"status": "ok"}));
     }
@@ -1150,13 +1179,13 @@ fn handle(
             200,
             &json!({
                 "model": model_name,
-                "architecture": model.config.architecture,
-                "context_used": chat.tokens.len(),
-                "context_capacity": chat.session.capacity(),
-                "n_layers": model.config.n_layers,
-                "moe": model.config.moe.is_some(),
-                "prefix_cache_entries": prefixes.len(),
-                "prefix_cache_bytes": prefixes.resident_bytes(),
+                "architecture": context.inference.model.config.architecture,
+                "context_used": context.inference.chat.tokens.len(),
+                "context_capacity": context.inference.chat.session.capacity(),
+                "n_layers": context.inference.model.config.n_layers,
+                "moe": context.inference.model.config.moe.is_some(),
+                "prefix_cache_entries": context.inference.prefixes.len(),
+                "prefix_cache_bytes": context.inference.prefixes.resident_bytes(),
                 "batching_mode": "model-aware-admission",
                 "kernel_batching": false,
                 "gpu_fallback": "runtime-policy-controlled",
@@ -1193,8 +1222,8 @@ fn handle(
         }
         _ => None,
     };
-    let tools = tool_specs.as_ref().map(|t| t.as_slice());
-    if tools.is_some() && matches!(template, Template::Llama3 { .. }) {
+    let tools = tool_specs.as_deref();
+    if tools.is_some() && matches!(context.inference.template, Template::Llama3 { .. }) {
         // The Hermes convention below is what Qwen (ChatML) was trained on;
         // pretending Llama 3 understands it would fail silently.
         return respond(
@@ -1210,61 +1239,50 @@ fn handle(
     let repeat_penalty = req["repeat_penalty"].as_f64().unwrap_or(1.1) as f32;
     let streaming = req["stream"].as_bool().unwrap_or(false);
 
-    if streaming {
-        if tools.is_none() || !rag.cfg.enabled {
-            run_inference(
-                model,
-                tok,
-                template,
-                chat,
-                prefixes,
-                prefix_namespace,
-                &messages,
+    if streaming && (tools.is_none() || !rag.cfg.enabled) {
+        run_inference(
+            &mut context.inference,
+            GenerationRequest {
+                messages: &messages,
                 max_tokens,
                 temperature,
                 top_p,
                 repeat_penalty,
-                false,
-                Some(&mut stream),
-                true,
-            )?;
-            return Ok(());
-        }
+                parse_tools: false,
+                stream: Some(&mut stream),
+                emit_done: true,
+            },
+        )?;
+        return Ok(());
     }
 
     let completion = if tools.is_none() {
         run_inference(
-            model,
-            tok,
-            template,
-            chat,
-            prefixes,
-            prefix_namespace,
-            &messages,
-            max_tokens,
-            temperature,
-            top_p,
-            repeat_penalty,
-            false,
-            if streaming { Some(&mut stream) } else { None },
-            !streaming,
+            &mut context.inference,
+            GenerationRequest {
+                messages: &messages,
+                max_tokens,
+                temperature,
+                top_p,
+                repeat_penalty,
+                parse_tools: false,
+                stream: if streaming { Some(&mut stream) } else { None },
+                emit_done: !streaming,
+            },
         )?
     } else if !rag.cfg.enabled {
         run_inference(
-            model,
-            tok,
-            template,
-            chat,
-            prefixes,
-            prefix_namespace,
-            &messages,
-            max_tokens,
-            temperature,
-            top_p,
-            repeat_penalty,
-            true,
-            if streaming { Some(&mut stream) } else { None },
-            !streaming,
+            &mut context.inference,
+            GenerationRequest {
+                messages: &messages,
+                max_tokens,
+                temperature,
+                top_p,
+                repeat_penalty,
+                parse_tools: true,
+                stream: if streaming { Some(&mut stream) } else { None },
+                emit_done: !streaming,
+            },
         )?
     } else {
         let mut conversation = raw_messages.to_vec();
@@ -1272,20 +1290,17 @@ fn handle(
         for round in 0..rag.cfg.max_tool_rounds {
             let round_messages = render_messages(&conversation, tools);
             let mut outcome = run_inference(
-                model,
-                tok,
-                template,
-                chat,
-                prefixes,
-                prefix_namespace,
-                &round_messages,
-                max_tokens,
-                temperature,
-                top_p,
-                repeat_penalty,
-                true,
-                if streaming { Some(&mut stream) } else { None },
-                !streaming,
+                &mut context.inference,
+                GenerationRequest {
+                    messages: &round_messages,
+                    max_tokens,
+                    temperature,
+                    top_p,
+                    repeat_penalty,
+                    parse_tools: true,
+                    stream: if streaming { Some(&mut stream) } else { None },
+                    emit_done: !streaming,
+                },
             )?;
             if outcome.tool_calls.is_empty() {
                 final_outcome = Some(outcome);

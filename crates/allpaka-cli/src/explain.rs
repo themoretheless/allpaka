@@ -107,7 +107,7 @@ pub fn run(path: &Path, profile: &str, json: bool) -> anyhow::Result<()> {
     let mut census: BTreeMap<String, (usize, u64, bool)> = BTreeMap::new();
     for tensor in file.tensors() {
         let tensor_type = format!("{:?}", tensor.ggml_type);
-        let bytes = tensor.byte_size()? as u64;
+        let bytes = tensor.byte_size()?;
         let has_kernel = !tensor_type.starts_with("Other(");
         let entry = census.entry(tensor_type).or_insert((0, 0, has_kernel));
         entry.0 += 1;
