@@ -14,6 +14,7 @@ pub mod config;
 pub mod kv;
 pub mod model;
 pub mod profile;
+pub mod prefix_cache;
 pub mod requirements;
 pub mod speculate;
 pub mod tokenizer;
