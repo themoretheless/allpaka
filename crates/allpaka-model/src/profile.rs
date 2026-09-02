@@ -50,6 +50,7 @@ pub const NAMES: [&str; 13] = [
 
 const ZERO: AtomicU64 = AtomicU64::new(0);
 static NS: [AtomicU64; NAMES.len()] = [ZERO; NAMES.len()];
+static CALLS: [AtomicU64; NAMES.len()] = [ZERO; NAMES.len()];
 
 /// A running phase; adds its elapsed time when dropped.
 pub struct Span(usize, Instant);
@@ -57,6 +58,7 @@ pub struct Span(usize, Instant);
 impl Drop for Span {
     fn drop(&mut self) {
         NS[self.0].fetch_add(self.1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        CALLS[self.0].fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -67,15 +69,42 @@ pub fn span(phase: Phase) -> Span {
 
 /// Nanoseconds per phase since the last `reset`.
 pub fn take() -> [u64; NAMES.len()] {
+    take_with_counts().0
+}
+
+/// Nanoseconds and span counts per phase since the last `reset`.
+pub fn take_with_counts() -> ([u64; NAMES.len()], [u64; NAMES.len()]) {
     let mut out = [0u64; NAMES.len()];
+    let mut calls = [0u64; NAMES.len()];
     for (o, n) in out.iter_mut().zip(NS.iter()) {
         *o = n.load(Ordering::Relaxed);
     }
-    out
+    for (o, n) in calls.iter_mut().zip(CALLS.iter()) {
+        *o = n.load(Ordering::Relaxed);
+    }
+    (out, calls)
 }
 
 pub fn reset() {
     for n in NS.iter() {
         n.store(0, Ordering::Relaxed);
+    }
+    for n in CALLS.iter() {
+        n.store(0, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reset, span, take_with_counts, Phase};
+
+    #[test]
+    fn spans_record_duration_and_call_count() {
+        reset();
+        drop(span(Phase::Router));
+        drop(span(Phase::Router));
+        let (ns, calls) = take_with_counts();
+        assert_eq!(calls[Phase::Router as usize], 2);
+        assert!(ns[Phase::Router as usize] > 0);
     }
 }

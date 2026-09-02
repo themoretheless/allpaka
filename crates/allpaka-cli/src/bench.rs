@@ -781,18 +781,20 @@ fn model_fingerprint(model_path: &std::path::Path, file: &allpaka_gguf::GgufFile
 /// GPU line above; the rest is CPU work with nowhere to hide. Resets the
 /// counters for the next section.
 fn report_phases(what: &str, secs: f64, tokens: usize) -> Vec<PhaseMetric> {
-    let phases = allpaka_model::profile::take();
+    let (phases, calls) = allpaka_model::profile::take_with_counts();
     allpaka_model::profile::reset();
-    let mut rows: Vec<(&str, u64)> = allpaka_model::profile::NAMES
+    let mut rows: Vec<(&str, u64, u64)> = allpaka_model::profile::NAMES
         .iter()
         .copied()
         .zip(phases)
+        .zip(calls)
+        .map(|((name, ns), calls)| (name, ns, calls))
         .collect();
-    rows.sort_by_key(|&(_, ns)| std::cmp::Reverse(ns));
+    rows.sort_by_key(|&(_, ns, _)| std::cmp::Reverse(ns));
     let per_token = |ns: u64| ns as f64 / 1e6 / tokens as f64;
     let accounted: u64 = phases.iter().sum();
     println!("  {what} phases, ms/token:");
-    for (name, ns) in rows.iter().filter(|&&(_, ns)| ns > 0) {
+    for (name, ns, _) in rows.iter().filter(|&&(_, ns, _)| ns > 0) {
         println!(
             "    {name:<18} {:>7.1}  ({:>4.1}%)",
             per_token(*ns),
@@ -806,11 +808,11 @@ fn report_phases(what: &str, secs: f64, tokens: usize) -> Vec<PhaseMetric> {
         (secs * 1e9 - accounted as f64) / (secs * 1e9) * 100.0,
     );
     rows.into_iter()
-        .filter(|(_, ns)| *ns > 0)
-        .map(|(name, ns)| PhaseMetric {
+        .filter(|(_, ns, _)| *ns > 0)
+        .map(|(name, ns, calls)| PhaseMetric {
             name: name.to_string(),
             milliseconds: ns as f64 / 1e6,
-            calls: 0,
+            calls,
         })
         .collect()
 }
