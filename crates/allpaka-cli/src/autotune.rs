@@ -3,6 +3,9 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::process::{Command, Stdio};
+
+use crate::benchmark_report::{model_fingerprint, BenchmarkReport};
 
 pub const AUTOTUNE_SCHEMA_VERSION: u32 = 1;
 pub const KERNEL_ABI_VERSION: u32 = 1;
@@ -102,6 +105,137 @@ impl AutotuneCache {
             .with_context(|| format!("installing autotune cache {}", path.display()))?;
         Ok(())
     }
+}
+
+pub fn run(model_path: &Path, cache_path: Option<&Path>, force: bool) -> Result<()> {
+    let file = allpaka_gguf::GgufFile::open(model_path)?;
+    let fingerprint = model_fingerprint(model_path, &file);
+    let key = AutotuneKey {
+        device_registry_id: host_value("sysctl", &["-n", "machdep.cpu.brand_string"]),
+        metal_os_version: host_value("sw_vers", &["-productVersion"]),
+        model_fingerprint: fingerprint,
+        model_architecture: file.architecture().to_string(),
+        model_dimensions: format!("tensors={}", file.tensors().len()),
+        tensor_census_hash: tensor_census(&file),
+        kernel_abi_version: KERNEL_ABI_VERSION,
+    };
+    let cache_path = cache_path
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(default_cache_path);
+    let mut cache = AutotuneCache::load(&cache_path)?;
+    if !force {
+        if let Some(hit) = cache.get(&key) {
+            println!(
+                "autotune cache hit: profile={} objective={:.1} tok/s ({})",
+                hit.parameters.command_strategy,
+                hit.objective_tok_s,
+                cache_path.display()
+            );
+            return Ok(());
+        }
+    }
+
+    let executable = std::env::current_exe()?;
+    let mut best: Option<(String, BenchmarkReport)> = None;
+    for profile in ["balanced", "max-performance", "safe"] {
+        let report_path = std::env::temp_dir().join(format!(
+            "allpaka-autotune-{}-{profile}.json",
+            std::process::id()
+        ));
+        println!("autotune: measuring {profile} ...");
+        let status = Command::new(&executable)
+            .arg("bench")
+            .arg("--engine")
+            .arg(model_path)
+            .env("ALLPAKA_PROFILE", profile)
+            .env("ALLPAKA_BENCH_PP", "128")
+            .env("ALLPAKA_BENCH_REPORT", &report_path)
+            .stdout(Stdio::null())
+            .status()
+            .with_context(|| format!("running autotune candidate {profile}"))?;
+        anyhow::ensure!(status.success(), "autotune candidate {profile} failed");
+        let report: BenchmarkReport = serde_json::from_slice(&std::fs::read(&report_path)?)?;
+        std::fs::remove_file(&report_path).ok();
+        let decode = measurement(&report, "decode")?.summary.median;
+        let prefill = measurement(&report, "prefill")?.summary.median;
+        println!("  {profile}: decode={decode:.1} prefill={prefill:.1} tok/s");
+        let replace = best.as_ref().is_none_or(|(_, current)| {
+            measurement(current, "decode")
+                .map(|value| decode > value.summary.median)
+                .unwrap_or(true)
+        });
+        if replace {
+            best = Some((profile.to_string(), report));
+        }
+    }
+    let (profile, report) = best.context("autotune produced no successful candidates")?;
+    let decode = measurement(&report, "decode")?.summary.median;
+    let resolved: allpaka_backend::profile::RuntimeProfile = profile.parse()?;
+    let policy = resolved.resolve().policy;
+    let entry = AutotuneEntry {
+        parameters: TunedParameters {
+            attention_kernel: "auto".into(),
+            matmul_tile: "auto".into(),
+            rows_per_threadgroup: 0,
+            prefill_chunk: 512,
+            command_strategy: profile.clone(),
+            expert_grouping: if policy.gpu_route { "gpu" } else { "cpu" }.into(),
+            gpu_window_bytes: 0,
+            kv_block_tokens: 256,
+        },
+        objective_tok_s: decode,
+        measured_at_unix_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    };
+    cache.insert(key, entry);
+    cache.save_atomic(&cache_path)?;
+    println!(
+        "autotune selected {profile}: {decode:.1} decode tok/s; cached at {}",
+        cache_path.display()
+    );
+    Ok(())
+}
+
+fn measurement<'a>(report: &'a BenchmarkReport, name: &str) -> Result<&'a crate::benchmark_report::Measurement> {
+    report
+        .measurements
+        .iter()
+        .find(|measurement| measurement.name == name)
+        .with_context(|| format!("autotune report has no {name} measurement"))
+}
+
+fn tensor_census(file: &allpaka_gguf::GgufFile) -> String {
+    let mut rows = file
+        .tensors()
+        .iter()
+        .map(|tensor| format!("{:?}:{}", tensor.ggml_type, tensor.byte_size().unwrap_or(0)))
+        .collect::<Vec<_>>();
+    rows.sort();
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    rows.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn host_value(command: &str, args: &[&str]) -> String {
+    Command::new(command)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn default_cache_path() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".cache/allpaka/autotune.json")
 }
 
 #[cfg(test)]

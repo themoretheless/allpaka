@@ -39,6 +39,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Benchmark runtime profiles and cache the fastest compatible plan.
+    Autotune {
+        #[arg(value_name = "GGUF")]
+        engine: PathBuf,
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
+    },
     /// Print an example allpaka.toml to stdout.
     Init,
 
@@ -235,6 +244,11 @@ fn main() -> Result<()> {
             profile,
             json,
         } => explain::run(&engine, &profile, json),
+        Command::Autotune {
+            engine,
+            cache,
+            force,
+        } => autotune::run(&engine, cache.as_deref(), force),
         Command::Init => {
             print!("{}", config::EXAMPLE);
             Ok(())

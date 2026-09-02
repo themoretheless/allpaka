@@ -14,7 +14,7 @@ use allpaka_core::Link;
 use anyhow::{bail, Context, Result};
 use crate::benchmark_report::{
     BenchmarkMetadata, BenchmarkReport, FastPathStats, Measurement, PhaseMetric,
-    RegressionPolicy, SCHEMA_VERSION,
+    model_fingerprint, RegressionPolicy, SCHEMA_VERSION,
 };
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -761,19 +761,6 @@ fn write_engine_report(
     std::fs::rename(&temporary, &report_path)?;
     println!("  benchmark report: {}", report_path.display());
     Ok(())
-}
-
-fn model_fingerprint(model_path: &std::path::Path, file: &allpaka_gguf::GgufFile) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    file.architecture().hash(&mut hasher);
-    std::fs::metadata(model_path).map(|meta| meta.len()).unwrap_or(0).hash(&mut hasher);
-    for tensor in file.tensors() {
-        tensor.name.hash(&mut hasher);
-        format!("{:?}", tensor.ggml_type).hash(&mut hasher);
-        tensor.dims.hash(&mut hasher);
-    }
-    format!("{:016x}", hasher.finish())
 }
 
 /// Every phase of a forward pass, biggest first, in ms per token. Phases

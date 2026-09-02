@@ -2,8 +2,25 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::Path;
 
 pub const SCHEMA_VERSION: u32 = 1;
+
+pub fn model_fingerprint(model_path: &Path, file: &allpaka_gguf::GgufFile) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    file.architecture().hash(&mut hasher);
+    std::fs::metadata(model_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0)
+        .hash(&mut hasher);
+    for tensor in file.tensors() {
+        tensor.name.hash(&mut hasher);
+        format!("{:?}", tensor.ggml_type).hash(&mut hasher);
+        tensor.dims.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BenchmarkReport {
