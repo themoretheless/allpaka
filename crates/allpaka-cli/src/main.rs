@@ -5,6 +5,7 @@ mod bench;
 mod benchmark_report;
 mod autotune;
 mod explain;
+mod scheduler;
 mod client;
 mod config;
 use allpaka_gguf as gguf;
