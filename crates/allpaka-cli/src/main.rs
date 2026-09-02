@@ -224,6 +224,11 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    if let Ok(profile) = std::env::var("ALLPAKA_PROFILE") {
+        let profile: allpaka_backend::profile::RuntimeProfile = profile.parse()?;
+        let resolved = profile.resolve_with_env();
+        let _ = allpaka_backend::runtime::install(resolved.policy);
+    }
     match Cli::parse().command {
         Command::Explain {
             engine,

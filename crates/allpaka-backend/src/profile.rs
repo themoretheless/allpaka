@@ -61,6 +61,36 @@ impl RuntimeProfile {
             overrides: BTreeMap::new(),
         }
     }
+
+    pub fn resolve_with_env(self) -> ResolvedRuntime {
+        let mut resolved = self.resolve();
+        for (env, field) in [
+            ("ALLPAKA_NORMFLAG", "normflag"),
+            ("ALLPAKA_DECODE_SERIAL", "decode_serial"),
+            ("ALLPAKA_PF_DEFER", "prefill_defer"),
+            ("ALLPAKA_PF_ONEBUF", "prefill_one_buffer"),
+            ("ALLPAKA_GPU_ROUTE", "gpu_route"),
+            ("ALLPAKA_MM_PIPE", "mm_pipeline"),
+        ] {
+            if let Ok(value) = std::env::var(env) {
+                if let Some(value) = parse_bool(&value) {
+                    resolved = resolved.override_bool(field, value);
+                }
+            }
+        }
+        if let Ok(value) = std::env::var("ALLPAKA_ATTN_SPLIT") {
+            resolved = resolved.override_attention_split(value.parse().ok());
+        }
+        resolved
+    }
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 impl FromStr for RuntimeProfile {
