@@ -374,6 +374,7 @@ pub fn measure_engine(
     let gpu_before = allpaka_backend::gpu::stats();
     let clock_before = allpaka_backend::gpu::gpu_time_stats();
     allpaka_model::profile::reset();
+    allpaka_backend::telemetry::reset_global();
     let t1 = std::time::Instant::now();
     let decode_tokens = 32usize;
     let mut next = logits
@@ -777,9 +778,23 @@ fn report_phases(what: &str, secs: f64, tokens: usize) -> Vec<PhaseMetric> {
         .zip(calls)
         .map(|((name, ns), calls)| (name, ns, calls))
         .collect();
+    for sample in allpaka_backend::telemetry::take_global().samples() {
+        let ns = sample.duration.as_nanos().min(u64::MAX as u128) as u64;
+        if ns == 0 {
+            continue;
+        }
+        let name = sample.phase.name();
+        match rows.iter_mut().find(|(known, _, _)| *known == name) {
+            Some((_, known_ns, known_calls)) => {
+                *known_ns += ns;
+                *known_calls += sample.calls;
+            }
+            None => rows.push((name, ns, sample.calls)),
+        }
+    }
     rows.sort_by_key(|&(_, ns, _)| std::cmp::Reverse(ns));
     let per_token = |ns: u64| ns as f64 / 1e6 / tokens as f64;
-    let accounted: u64 = phases.iter().sum();
+    let accounted: u64 = rows.iter().map(|(_, ns, _)| *ns).sum();
     println!("  {what} phases, ms/token:");
     for (name, ns, _) in rows.iter().filter(|&&(_, ns, _)| ns > 0) {
         println!(

@@ -5,6 +5,7 @@
 //! GPU waits or force command-buffer completion.
 
 use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -113,9 +114,44 @@ impl PhaseTrace {
     }
 }
 
+static GLOBAL_DURATIONS_NS: [AtomicU64; Phase::ALL.len()] =
+    [const { AtomicU64::new(0) }; Phase::ALL.len()];
+static GLOBAL_CALLS: [AtomicU64; Phase::ALL.len()] =
+    [const { AtomicU64::new(0) }; Phase::ALL.len()];
+
+/// Record a completed backend phase without introducing a lock or a new
+/// synchronization point. GPU callers use this only after an existing wait.
+pub fn record_global(phase: Phase, duration: Duration) {
+    let index = phase as usize;
+    let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
+    GLOBAL_DURATIONS_NS[index].fetch_add(nanos, Ordering::Relaxed);
+    GLOBAL_CALLS[index].fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn reset_global() {
+    for index in 0..Phase::ALL.len() {
+        GLOBAL_DURATIONS_NS[index].store(0, Ordering::Relaxed);
+        GLOBAL_CALLS[index].store(0, Ordering::Relaxed);
+    }
+}
+
+/// Atomically take the process-wide backend snapshot and reset it for the
+/// next benchmark interval.
+pub fn take_global() -> PhaseTrace {
+    let mut trace = PhaseTrace::default();
+    for phase in Phase::ALL {
+        let index = phase as usize;
+        trace.durations[index] = Duration::from_nanos(
+            GLOBAL_DURATIONS_NS[index].swap(0, Ordering::Relaxed),
+        );
+        trace.calls[index] = GLOBAL_CALLS[index].swap(0, Ordering::Relaxed);
+    }
+    trace
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Phase, PhaseTrace};
+    use super::{record_global, reset_global, take_global, Phase, PhaseTrace};
     use std::time::Duration;
 
     #[test]
@@ -134,5 +170,20 @@ mod tests {
         assert_eq!(attention.duration, Duration::from_millis(7));
         assert_eq!(attention.calls, 2);
         assert_eq!(left.accounted(), Duration::from_millis(9));
+    }
+
+    #[test]
+    fn global_snapshot_is_destructive() {
+        reset_global();
+        record_global(Phase::Qkv, Duration::from_millis(2));
+        record_global(Phase::Qkv, Duration::from_millis(3));
+
+        let first = take_global()
+            .samples()
+            .find(|sample| sample.phase == Phase::Qkv)
+            .unwrap();
+        assert_eq!(first.duration, Duration::from_millis(5));
+        assert_eq!(first.calls, 2);
+        assert_eq!(take_global().accounted(), Duration::ZERO);
     }
 }

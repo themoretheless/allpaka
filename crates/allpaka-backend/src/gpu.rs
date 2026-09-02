@@ -9920,6 +9920,22 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 }
             }
             let total: f64 = split_acc.iter().map(|entry| entry.1).sum();
+            for &(label, ms) in &split_acc {
+                let phase = match label {
+                    "resnorm" => crate::telemetry::Phase::Norm,
+                    "qkv" => crate::telemetry::Phase::Qkv,
+                    "attend" | "wo" => crate::telemetry::Phase::Attention,
+                    "router" => crate::telemetry::Phase::Router,
+                    "gate_up" | "swiglu" | "down" | "combine" => {
+                        crate::telemetry::Phase::Experts
+                    }
+                    _ => crate::telemetry::Phase::Other,
+                };
+                crate::telemetry::record_global(
+                    phase,
+                    std::time::Duration::from_secs_f64(ms / 1e3),
+                );
+            }
             static PRINTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !PRINTED.swap(true, Ordering::Relaxed) {
