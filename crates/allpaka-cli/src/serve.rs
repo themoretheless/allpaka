@@ -200,7 +200,7 @@ fn run_inference(
     let mut logits: Vec<f32> = Vec::new();
     let mut skip_prefill = false;
     if prompt.len() + max_tokens + 1 > chat.session.capacity() {
-        chat.session = model.new_session(SESSION_TOKENS.max(prompt.len() + max_tokens + 1));
+        chat.session = model.new_session(prompt.len() + max_tokens + 1);
         chat.tokens.clear();
         common = 0;
     } else if chat.session.ssm.is_some() {
@@ -231,7 +231,7 @@ fn run_inference(
                 }
                 None => {
                     chat.session =
-                        model.new_session(SESSION_TOKENS.max(prompt.len() + max_tokens + 1));
+                        model.new_session(prompt.len() + max_tokens + 1);
                     chat.tokens.clear();
                     common = 0;
                 }
@@ -247,7 +247,7 @@ fn run_inference(
                 }
                 None => {
                     chat.session =
-                        model.new_session(SESSION_TOKENS.max(prompt.len() + max_tokens + 1));
+                        model.new_session(prompt.len() + max_tokens + 1);
                     chat.tokens.clear();
                     common = 0;
                 }
@@ -1006,7 +1006,7 @@ fn load_model_service(model_path: &Path) -> Result<(String, ModelService)> {
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_else(|| "allpaka".into());
     let chat = ChatState {
-        session: model.new_session(SESSION_TOKENS),
+        session: model.new_session(1),
         tokens: Vec::new(),
     };
     println!(
