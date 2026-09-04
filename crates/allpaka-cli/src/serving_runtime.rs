@@ -9,6 +9,7 @@ pub struct ServingLimits {
     pub max_batch: usize,
     pub max_batch_context_tokens: usize,
     pub model_budget_bytes: u64,
+    pub memory_budget_bytes: u64,
     pub prefix_budget_bytes: usize,
 }
 
@@ -19,6 +20,7 @@ impl Default for ServingLimits {
             max_batch: 16,
             max_batch_context_tokens: 32 * 1024,
             model_budget_bytes: u64::MAX,
+            memory_budget_bytes: u64::MAX,
             prefix_budget_bytes: 512 << 20,
         }
     }
@@ -111,6 +113,7 @@ mod tests {
             max_batch: 2,
             max_batch_context_tokens: 16,
             model_budget_bytes: 64,
+            memory_budget_bytes: u64::MAX,
             prefix_budget_bytes: 64,
         });
         runtime.install_model("target".into(), 7, 32).unwrap();

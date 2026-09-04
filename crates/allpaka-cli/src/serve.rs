@@ -29,9 +29,25 @@ use crate::serving_runtime::{ServingLimits, ServingRuntime};
 /// and the token list lets each request pay only for what is actually new -
 /// without this, turn N re-runs the forward pass over every earlier turn and
 /// the chat slows down linearly with its own length.
+mod memory;
+
 struct ChatState {
     session: Session,
     tokens: Vec<u32>,
+    memory: memory::Lease,
+}
+
+impl ChatState {
+    fn new(model: &Model<'static>, budget: &memory::Budget, capacity: usize) -> Result<Self> {
+        let memory = budget.reserve(memory::session_bytes(model, capacity)?)?;
+        Ok(Self { session: model.new_session(capacity), tokens: Vec::new(), memory })
+    }
+
+    fn reset(&mut self, model: &Model<'static>, capacity: usize) -> Result<()> {
+        // Reserve the new storage while the old storage is still alive.
+        *self = Self::new(model, &self.memory.budget(), capacity)?;
+        Ok(())
+    }
 }
 
 /// Byte-budgeted prompt-boundary snapshot shared by requests for one model.
@@ -200,7 +216,7 @@ fn run_inference(
     let mut logits: Vec<f32> = Vec::new();
     let mut skip_prefill = false;
     if prompt.len() + max_tokens + 1 > chat.session.capacity() {
-        chat.session = model.new_session(prompt.len() + max_tokens + 1);
+        chat.reset(model, prompt.len() + max_tokens + 1)?;
         chat.tokens.clear();
         common = 0;
     } else if chat.session.ssm.is_some() {
@@ -230,8 +246,7 @@ fn run_inference(
                     }
                 }
                 None => {
-                    chat.session =
-                        model.new_session(prompt.len() + max_tokens + 1);
+                    chat.reset(model, prompt.len() + max_tokens + 1)?;
                     chat.tokens.clear();
                     common = 0;
                 }
@@ -246,8 +261,7 @@ fn run_inference(
                     skip_prefill = true;
                 }
                 None => {
-                    chat.session =
-                        model.new_session(prompt.len() + max_tokens + 1);
+                    chat.reset(model, prompt.len() + max_tokens + 1)?;
                     chat.tokens.clear();
                     common = 0;
                 }
@@ -922,10 +936,14 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
         limits.model_budget_bytes as f64 / (1u64 << 30) as f64,
     );
 
+    let memory = memory::Budget::new(limits.memory_budget_bytes);
+    let _weights = memory.reserve(total_bytes)?;
+    // Reserving the whole cache ceiling also covers externally pinned entries.
+    let _prefixes = memory.reserve(u64::try_from(limits.prefix_budget_bytes)?)?;
     let mut runtime = ServerRuntime::new(limits);
     let mut default_model = String::new();
     for (path, bytes) in model_paths.iter().zip(planned_bytes) {
-        let (name, service) = load_model_service(path)?;
+        let (name, service) = load_model_service(path, &memory)?;
         if default_model.is_empty() {
             default_model.clone_from(&name);
         }
@@ -981,7 +999,7 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
     }
 }
 
-fn load_model_service(model_path: &Path) -> Result<(String, ModelService)> {
+fn load_model_service(model_path: &Path, memory: &memory::Budget) -> Result<(String, ModelService)> {
     // A serving model borrows mmap-backed tensor bytes for the process
     // lifetime. Leaking the owner is deliberate: Metal bytes-no-copy buffers
     // must remain valid until server shutdown, when the OS reclaims mappings.
@@ -1005,10 +1023,7 @@ fn load_model_service(model_path: &Path) -> Result<(String, ModelService)> {
         .file_stem()
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_else(|| "allpaka".into());
-    let chat = ChatState {
-        session: model.new_session(1),
-        tokens: Vec::new(),
-    };
+    let chat = ChatState::new(&model, memory, 1)?;
     println!(
         "  model {name}: arch {}, vocab {}, template {}",
         model.config.architecture,
@@ -1153,9 +1168,13 @@ fn dispatch_connection(
             return respond(&mut stream, 429, &json!({"error":"resident session capacity exhausted"}));
         }
         let restored = session_id.as_ref().and_then(|id| service.sessions.remove(id));
-        service.chat = restored.map(|(chat, _)| chat).unwrap_or_else(|| ChatState {
-            session: service.model.new_session(256), tokens: Vec::new(),
-        });
+        service.chat = match restored {
+            Some((chat, _)) => chat,
+            None => match ChatState::new(&service.model, &service.chat.memory.budget(), 1) {
+                Ok(chat) => chat,
+                Err(error) => return respond(&mut connection.stream.try_clone()?, 429, &json!({"error":error.to_string()})),
+            },
+        };
     }
     let ModelService {
         model,
@@ -1195,7 +1214,8 @@ fn dispatch_connection(
     );
     let succeeded = outcome.is_ok();
     if let Err(error) = outcome {
-        let status = if error.downcast_ref::<Interrupted>().is_some() { 408 } else { 500 };
+        let status = if error.downcast_ref::<Interrupted>().is_some() { 408 }
+            else if error.downcast_ref::<memory::Exhausted>().is_some() { 429 } else { 500 };
         let body = json!({"error":error.to_string(), "request_id":connection.control.id});
         if connection.control.streaming() {
             write_sse_event(&mut error_stream, &body)?;
@@ -1205,7 +1225,7 @@ fn dispatch_connection(
         }
     }
     if is_chat {
-        let empty = ChatState { session: service.model.new_session(1), tokens: Vec::new() };
+        let empty = ChatState::new(&service.model, &service.chat.memory.budget(), 1)?;
         let chat = std::mem::replace(&mut service.chat, empty);
         if succeeded {
             if let Some(id) = session_id { service.sessions.insert(id, (chat, std::time::Instant::now())); }
@@ -1261,6 +1281,7 @@ fn handle(
                 "prefix_cache_entries": context.inference.prefixes.len(),
                 "prefix_cache_bytes": context.inference.prefixes.resident_bytes(),
                 "prefix_cache_allocated_bytes": context.inference.prefixes.allocated_bytes(),
+                "memory_admission": context.inference.chat.memory.budget().snapshot(),
                 "prefix_cache_pinned_bytes": context.inference.prefixes.pinned_bytes(),
                 "batching_mode": "model-aware-admission",
                 "kernel_batching": false,

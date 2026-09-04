@@ -146,6 +146,10 @@ enum Command {
         /// Total resident model budget in GiB; zero means unlimited.
         #[arg(long, default_value_t = 0)]
         model_budget_gib: u64,
+        /// Shared weights, prefix capacity and KV/SSM admission budget; zero is unlimited.
+        /// GPU scratch and process overhead are not included yet.
+        #[arg(long, default_value_t = 0)]
+        memory_budget_mib: u64,
         /// Prefix-cache budget in MiB.
         #[arg(long, default_value_t = 512)]
         prefix_cache_mib: usize,
@@ -359,6 +363,7 @@ fn main() -> Result<()> {
             max_batch,
             batch_context_tokens,
             model_budget_gib,
+            memory_budget_mib,
             prefix_cache_mib,
         } => {
             if config.is_none() {
@@ -384,6 +389,8 @@ fn main() -> Result<()> {
                         model_budget_gib.saturating_mul(1 << 30)
                     },
                     prefix_budget_bytes: prefix_cache_mib.saturating_mul(1 << 20),
+                    memory_budget_bytes: if memory_budget_mib == 0 { u64::MAX }
+                        else { memory_budget_mib.checked_mul(1 << 20).context("memory budget overflow")? },
                 },
             )
         }

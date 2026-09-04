@@ -86,3 +86,24 @@ The combined prompt and generation reservation must fit 16384 tokens.
 `usage.prompt_tokens_details.cached_tokens` reports reused prompt tokens.
 Run `python3 scripts/test-serving-controls.py` with the local small Qwen model
 to exercise isolation, reuse, cancellation, deadlines and recovery.
+
+## Shared memory admission
+
+`--memory-budget-mib N` limits the combined reservations for mapped model
+weights, the complete configured prefix-cache capacity, and live session
+KV/SSM storage plus a conservative RoPE growth allowance. Zero means unlimited.
+The existing `--model-budget-gib` and `--prefix-cache-mib` limits still apply.
+For example, use `--memory-budget-mib 32768 --prefix-cache-mib 256` to set a
+32 GiB admission limit with a 256 MiB cache reservation.
+
+Reservations precede session allocation, remain charged while named sessions
+are retained, and account for old/new buffer overlap during replacement.
+Insufficient request capacity returns HTTP 429 before streaming; startup fails
+if model weights and cache capacity alone exceed the limit. `/stats` exposes
+`memory_admission.limit_bytes`, `reserved_bytes`, and `peak_reserved_bytes`.
+These are reservation counters, not measured RSS. GPU scratch, model-side
+auxiliary allocations, HTTP buffers, and other process overhead are not yet
+covered; this is not a hard process memory cap.
+
+Validation: `python3 scripts/test-serving-memory.py` exercises actual memory
+rejection, reservation release, and a successful request after rejection.
