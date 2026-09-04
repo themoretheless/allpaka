@@ -1281,7 +1281,7 @@ fn handle(
                 "prefix_cache_entries": context.inference.prefixes.len(),
                 "prefix_cache_bytes": context.inference.prefixes.resident_bytes(),
                 "prefix_cache_allocated_bytes": context.inference.prefixes.allocated_bytes(),
-                "memory_admission": context.inference.chat.memory.budget().snapshot(),
+                "memory_admission": memory::snapshot(&context.inference.chat.memory.budget()),
                 "prefix_cache_pinned_bytes": context.inference.prefixes.pinned_bytes(),
                 "batching_mode": "model-aware-admission",
                 "kernel_batching": false,

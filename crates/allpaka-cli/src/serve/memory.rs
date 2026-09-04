@@ -1,44 +1,11 @@
 //! Shared admission accounting. Reservations precede allocations and live with owners.
-use std::sync::{Arc, Mutex};
+pub(super) use allpaka_backend::memory::{Budget, Exhausted, Lease};
 
-#[derive(Clone)]
-pub(super) struct Budget(Arc<Mutex<State>>);
-struct State { limit: u64, used: u64, peak: u64 }
-
-#[derive(Debug)]
-pub(super) struct Exhausted { requested: u64, available: u64 }
-impl std::fmt::Display for Exhausted {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "memory admission rejected: requested {} bytes, available {} bytes", self.requested, self.available)
-    }
-}
-impl std::error::Error for Exhausted {}
-
-pub(super) struct Lease { budget: Budget, bytes: u64 }
-impl Budget {
-    pub fn new(limit: u64) -> Self {
-        Self(Arc::new(Mutex::new(State { limit, used: 0, peak: 0 })))
-    }
-    pub fn reserve(&self, bytes: u64) -> Result<Lease, Exhausted> {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let available = state.limit - state.used;
-        if bytes > available { return Err(Exhausted { requested: bytes, available }); }
-        state.used += bytes;
-        state.peak = state.peak.max(state.used);
-        Ok(Lease { budget: self.clone(), bytes })
-    }
-    pub fn snapshot(&self) -> serde_json::Value {
-        let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        serde_json::json!({"limit_bytes":state.limit, "reserved_bytes":state.used,
-            "peak_reserved_bytes":state.peak, "scope":"weights,prefix capacity,session KV/SSM/RoPE; excludes scratch and process overhead"})
-    }
-}
-impl Lease { pub fn budget(&self) -> Budget { self.budget.clone() } }
-impl Drop for Lease {
-    fn drop(&mut self) {
-        let mut state = self.budget.0.lock().unwrap_or_else(|e| e.into_inner());
-        state.used -= self.bytes;
-    }
+pub(super) fn snapshot(budget: &Budget) -> serde_json::Value {
+    let state = budget.snapshot();
+    serde_json::json!({"limit_bytes":state.limit_bytes, "reserved_bytes":state.reserved_bytes,
+        "peak_reserved_bytes":state.peak_reserved_bytes,
+        "scope":"weights,prefix capacity,session KV/SSM/RoPE; excludes scratch and process overhead"})
 }
 
 /// Matches page-rounded f16 KV and f32 recurrent storage; reserves twice the
@@ -61,12 +28,13 @@ pub(super) fn session_bytes(model: &allpaka_model::Model<'_>, capacity: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     #[test]
     fn failed_reservation_is_atomic_and_drop_releases() {
         let budget = Budget::new(100);
         let lease = budget.reserve(70).unwrap();
         assert!(budget.reserve(31).is_err());
-        assert_eq!(budget.snapshot()["reserved_bytes"], 70);
+        assert_eq!(snapshot(&budget)["reserved_bytes"], 70);
         drop(lease);
         assert!(budget.reserve(100).is_ok());
     }
@@ -92,6 +60,6 @@ mod tests {
         }).collect();
         assert_eq!(handles.into_iter().filter(|h| h.thread().id() != std::thread::current().id())
             .map(|h| usize::from(h.join().unwrap())).sum::<usize>(), 1);
-        assert_eq!(budget.snapshot()["reserved_bytes"], 0);
+        assert_eq!(snapshot(&budget)["reserved_bytes"], 0);
     }
 }
