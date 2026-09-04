@@ -298,7 +298,6 @@ pub fn measure_engine(
     model_path: &std::path::Path,
     draft_path: Option<&std::path::Path>,
 ) -> Result<()> {
-    let decode_stats_before = allpaka_backend::gpu::decode_path_stats();
     let file = allpaka_gguf::GgufFile::open(model_path)?;
     // Sequential prewarm, or the warmup forward faults tens of GiB in GPU
     // access order and the first numbers measure the SSD, not the engine.
@@ -324,18 +323,24 @@ pub fn measure_engine(
     // ALLPAKA_BENCH_PP overrides the prompt length (32 warmup + N measured);
     // PP=32 gives a decode measurement from ~zero context, matching how
     // llama-bench's tg numbers are taken.
-    let pp: u32 = std::env::var("ALLPAKA_BENCH_PP")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .map_or(512, |n: u32| n.max(32) + 32)
-        .min(1 << 15);
+    let measured_pp: u32 = std::env::var("ALLPAKA_BENCH_PP")
+        .unwrap_or_else(|_| "480".into())
+        .parse().context("ALLPAKA_BENCH_PP must be an integer")?;
+    let decode_tokens: usize = std::env::var("ALLPAKA_BENCH_TG")
+        .unwrap_or_else(|_| "32".into())
+        .parse().context("ALLPAKA_BENCH_TG must be an integer")?;
+    anyhow::ensure!((1..=32768).contains(&measured_pp), "PP must be in 1..=32768");
+    anyhow::ensure!((1..=32768).contains(&decode_tokens), "TG must be in 1..=32768");
+    let pp = measured_pp + 32;
     let prompt: Vec<u32> = (0..pp)
         .map(|i| (i * 733 + 17) % c.vocab.min(30000))
         .collect();
-    let mut session = model.new_session(prompt.len() + 64);
+    let mut session = model.new_session(prompt.len() + decode_tokens + 1);
 
     let warm = model.forward_batch(&prompt[..32], &mut session)?;
     drop(warm);
+    // Warm the kernels without leaving warmup tokens in measured KV state.
+    session = model.new_session(prompt.len() + decode_tokens + 1);
 
     let gpu_pre = allpaka_backend::gpu::stats();
     let clock_pre = allpaka_backend::gpu::gpu_time_stats();
@@ -350,9 +355,7 @@ pub fn measure_engine(
     let prefill_rate = (prompt.len() - 32) as f64 / prefill_secs;
     // A kernel reading garbage (nil buffer, bad offset) shows up here first.
     let bad = logits.iter().filter(|v| !v.is_finite()).count();
-    if bad > 0 {
-        println!("  WARNING: {bad} of {} logits are not finite", logits.len());
-    }
+    anyhow::ensure!(bad == 0 && !logits.is_empty(), "benchmark invalid: empty or non-finite logits");
     println!(
         "  prefill  {:>4} tok in {prefill_secs:>6.2} s   {prefill_rate:>7.1} tok/s",
         prompt.len() - 32
@@ -375,15 +378,17 @@ pub fn measure_engine(
     let clock_before = allpaka_backend::gpu::gpu_time_stats();
     allpaka_model::profile::reset();
     allpaka_backend::telemetry::reset_global();
-    let t1 = std::time::Instant::now();
-    let decode_tokens = 32usize;
+    let decode_stats_before = allpaka_backend::gpu::decode_path_stats();
+    let mut decode_inputs = Vec::with_capacity(decode_tokens);
     let mut next = logits
         .iter()
         .enumerate()
         .max_by(|a, b| a.1.total_cmp(b.1))
         .map(|(i, _)| i as u32)
         .unwrap_or(0);
+    let t1 = std::time::Instant::now();
     for _ in 0..decode_tokens {
+        decode_inputs.push(next);
         next = model.forward_greedy(next, &mut session)?;
     }
     let decode_secs = t1.elapsed().as_secs_f64();
@@ -400,8 +405,8 @@ pub fn measure_engine(
         "benchmark invalid: Metal GPU is not attached; refusing to report CPU fallback as GPU throughput"
     );
     anyhow::ensure!(
-        gpu_successes > 0,
-        "benchmark invalid: whole-token GPU decode never succeeded (attempts={gpu_attempts}, declines={gpu_declines})"
+        gpu_successes == decode_tokens as u64 && gpu_attempts == gpu_successes && gpu_declines == 0,
+        "benchmark invalid: incomplete GPU coverage (attempts={gpu_attempts}, successes={gpu_successes}, declines={gpu_declines})"
     );
     println!(
         "  gpu path decode: attempts={gpu_attempts} successes={gpu_successes} declines={gpu_declines}"
@@ -650,8 +655,12 @@ pub fn measure_engine(
     let mut prefill_measurement =
         Measurement::new("prefill", prompt.len() - 32, vec![prefill_rate]);
     prefill_measurement.phases = prefill_phases;
+    prefill_measurement.context_tokens = Some(0);
+    prefill_measurement.input_tokens = prompt[32..].to_vec();
     let mut decode_measurement = Measurement::new("decode", decode_tokens, vec![decode_rate]);
     decode_measurement.phases = decode_phases;
+    decode_measurement.context_tokens = Some(measured_pp as usize);
+    decode_measurement.input_tokens = decode_inputs;
     decode_measurement.fast_path = FastPathStats {
         attempts: gpu_attempts,
         successes: gpu_successes,

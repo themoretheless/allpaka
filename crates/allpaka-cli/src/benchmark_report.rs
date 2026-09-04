@@ -44,6 +44,12 @@ pub struct BenchmarkMetadata {
 pub struct Measurement {
     pub name: String,
     pub tokens: usize,
+    /// Tokens present in KV before the measured phase. Missing in legacy reports.
+    #[serde(default)]
+    pub context_tokens: Option<usize>,
+    /// Exact input stream consumed by this phase, for workload compatibility.
+    #[serde(default)]
+    pub input_tokens: Vec<u32>,
     pub samples_tok_s: Vec<f64>,
     pub summary: Distribution,
     pub fast_path: FastPathStats,
@@ -58,6 +64,8 @@ impl Measurement {
         Self {
             name: name.into(),
             tokens,
+            context_tokens: None,
+            input_tokens: Vec::new(),
             samples_tok_s,
             summary,
             fast_path: FastPathStats::default(),
@@ -156,6 +164,27 @@ impl RegressionPolicy {
             0.0
         };
         let mut reasons = Vec::new();
+        if baseline.tokens != candidate.tokens
+            || baseline.context_tokens != candidate.context_tokens
+            || baseline.input_tokens != candidate.input_tokens
+        {
+            reasons.push("incompatible token workload or starting context".into());
+        }
+        if !self.throughput_tolerance_percent.is_finite()
+            || self.throughput_tolerance_percent < 0.0
+            || self.throughput_tolerance_percent >= 100.0
+        {
+            reasons.push("invalid throughput tolerance".into());
+        }
+        for measurement in [baseline, candidate] {
+            if measurement.samples_tok_s.is_empty()
+                || measurement.samples_tok_s.iter().any(|rate| !rate.is_finite() || *rate <= 0.0)
+                || !measurement.summary.median.is_finite()
+                || measurement.summary.median <= 0.0
+            {
+                reasons.push("invalid throughput samples".into());
+            }
+        }
         if change < -self.throughput_tolerance_percent {
             reasons.push(format!(
                 "median throughput regressed by {:.2}% (limit {:.2}%)",
@@ -179,6 +208,18 @@ impl RegressionPolicy {
 #[cfg(test)]
 mod tests {
     use super::{Measurement, RegressionPolicy};
+
+    #[test]
+    fn incompatible_context_and_nonfinite_rates_fail_closed() {
+        let mut baseline = Measurement::new("decode", 32, vec![100.0]);
+        baseline.context_tokens = Some(480);
+        let mut candidate = baseline.clone();
+        candidate.context_tokens = Some(0);
+        assert!(!RegressionPolicy::default().evaluate(&baseline, &candidate).passed);
+        candidate = baseline.clone();
+        candidate.samples_tok_s = vec![f64::NAN];
+        assert!(!RegressionPolicy::default().evaluate(&baseline, &candidate).passed);
+    }
 
     #[test]
     fn report_round_trips_as_json() {

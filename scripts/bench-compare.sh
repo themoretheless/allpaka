@@ -7,54 +7,56 @@ tg=${3:-32}
 repeats=${4:-5}
 allpaka=${ALLPAKA_BIN:-./target/release/allpaka}
 llama=${LLAMA_BENCH:-llama-bench}
-delay=${BENCH_DELAY:-0}
-
+[[ "$pp" =~ ^[1-9][0-9]*$ && "$tg" =~ ^[1-9][0-9]*$ && "$repeats" =~ ^[1-9][0-9]*$ ]]
 command -v jq >/dev/null
 command -v "$llama" >/dev/null
 [[ -x "$allpaka" ]]
-[[ "$pp" =~ ^[0-9]+$ && "$tg" =~ ^[0-9]+$ && "$repeats" =~ ^[1-9][0-9]*$ ]]
+# Keep raw artifacts, including failed runs, for reproducibility.
+out=${BENCH_OUTPUT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/allpaka-bench.XXXXXX")}
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+sha=$(shasum -a 256 "$model" | awk '{print $1}')
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/allpaka-bench.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
+run_allpaka() {
+    ALLPAKA_BENCH_PP="$pp" ALLPAKA_BENCH_TG="$tg" \
+        ALLPAKA_BENCH_REPORT="$out/allpaka-$1.json" \
+        "$allpaka" bench --engine "$model" >"$out/allpaka-$1.log" 2>&1
+    jq -e --argjson pp "$pp" --argjson tg "$tg" '
+      ([.measurements[] | select(.name=="prefill")][0] |
+       .tokens==$pp and .context_tokens==0 and (.input_tokens|length)==$pp) and
+      ([.measurements[] | select(.name=="decode")][0] |
+       .tokens==$tg and .context_tokens==$pp and (.input_tokens|length)==$tg and
+       .fast_path.attempts==$tg and .fast_path.successes==$tg and .fast_path.declines==0)
+    ' "$out/allpaka-$1.json" >/dev/null
+}
 
-median() {
-    sort -n "$1" | awk '{ v[NR]=$1 } END {
-        if (NR % 2) print v[(NR+1)/2];
-        else print (v[NR/2] + v[NR/2+1]) / 2;
-    }'
+run_llama() {
+    "$llama" -m "$model" -p "$pp" -n 0 -d 0 -r 1 -ngl 99 -ctk f16 -ctv f16 -o json \
+        >"$out/llama-pp-$1.json" 2>"$out/llama-pp-$1.log"
+    "$llama" -m "$model" -p 0 -n "$tg" -d "$pp" -r 1 -ngl 99 -ctk f16 -ctv f16 -o json \
+        >"$out/llama-tg-$1.json" 2>"$out/llama-tg-$1.log"
 }
 
 for ((i=1; i<=repeats; i++)); do
-    echo "run $i/$repeats: allpaka" >&2
-    out=$(ALLPAKA_BENCH_PP="$pp" ALLPAKA_BENCH_TG="$tg" \
-        "$allpaka" bench --engine "$model" 2>&1)
-    grep -q "gpu path decode: attempts=$tg successes=$tg declines=0" <<<"$out"
-    awk '$1 == "prefill" && $3 == "tok" { print $(NF-1) }' <<<"$out" >>"$tmp/allpaka_pp"
-    awk '$1 == "decode" && $3 == "tok" { print $(NF-1) }' <<<"$out" >>"$tmp/allpaka_tg"
-
-    echo "run $i/$repeats: llama.cpp" >&2
-    "$llama" -m "$model" -p "$pp" -n "$tg" -r 1 -o json \
-        >"$tmp/llama-$i.json" 2>"$tmp/llama-$i.err"
-    jq -er --argjson n "$pp" '.[] | select(.n_prompt == $n) | .avg_ts' \
-        "$tmp/llama-$i.json" >>"$tmp/llama_pp"
-    jq -er --argjson n "$tg" '.[] | select(.n_gen == $n) | .avg_ts' \
-        "$tmp/llama-$i.json" >>"$tmp/llama_tg"
-    sleep "$delay"
+    printf 'pair %s/%s\n' "$i" "$repeats" >&2
+    if ((i % 2)); then run_allpaka "$i"; run_llama "$i";
+    else run_llama "$i"; run_allpaka "$i"; fi
 done
 
-ap=$(median "$tmp/allpaka_pp")
-at=$(median "$tmp/allpaka_tg")
-lp=$(median "$tmp/llama_pp")
-lt=$(median "$tmp/llama_tg")
-rp=$(awk -v a="$ap" -v l="$lp" 'BEGIN { printf "%.2f", a/l }')
-rt=$(awk -v a="$at" -v l="$lt" 'BEGIN { printf "%.2f", a/l }')
-
-printf '\n| Metric | llama.cpp median | allpaka median | allpaka/llama |\n'
-printf '| --- | ---: | ---: | ---: |\n'
-printf '| pp%s prefill tok/s | %.1f | %.1f | %sx |\n' "$pp" "$lp" "$ap" "$rp"
-printf '| tg%s decode tok/s | %.1f | %.1f | %sx |\n' "$tg" "$lt" "$at" "$rt"
-printf '\nRaw samples (tok/s):\n'
-printf 'allpaka pp: %s\n' "$(paste -sd, "$tmp/allpaka_pp")"
-printf 'llama.cpp pp: %s\n' "$(paste -sd, "$tmp/llama_pp")"
-printf 'allpaka tg: %s\n' "$(paste -sd, "$tmp/allpaka_tg")"
-printf 'llama.cpp tg: %s\n' "$(paste -sd, "$tmp/llama_tg")"
+jq -n --arg model "$model" --arg sha "$sha" --argjson pp "$pp" --argjson tg "$tg" \
+    --slurpfile ap <(jq -s '.' "$out"/allpaka-*.json) \
+    --slurpfile lp <(jq -s 'add' "$out"/llama-pp-*.json) \
+    --slurpfile lt <(jq -s 'add' "$out"/llama-tg-*.json) '
+  def stats: sort | {samples: ., median: (if length%2==1 then .[length/2|floor]
+    else (.[length/2-1]+.[length/2])/2 end), min: .[0], max: .[-1]};
+  {model: $model, model_sha256: $sha, pp: $pp, tg: $tg,
+   comparison_validated: false,
+   limitations: ["llama-bench generates its own token stream; MoE routing is not identical",
+                 "KV precision must be verified against the allpaka capability report"],
+   allpaka_prefill: ([$ap[0][].measurements[]|select(.name=="prefill")|.summary.median]|stats),
+   allpaka_decode: ([$ap[0][].measurements[]|select(.name=="decode")|.summary.median]|stats),
+   llama_prefill: ([$lp[0][]|select(.n_prompt==$pp and .n_gen==0 and .n_depth==0)|.samples_ts[]]|stats),
+   llama_decode: ([$lt[0][]|select(.n_prompt==0 and .n_gen==$tg and .n_depth==$pp)|.samples_ts[]]|stats)}
+' >"$out/comparison.json"
+cat "$out/comparison.json"
+printf '\nArtifacts: %s\n' "$out"
