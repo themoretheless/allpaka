@@ -6,6 +6,9 @@
 //! same route, same response shape.
 
 mod rag_tools;
+mod request_control;
+mod ingress;
+use request_control::{Interrupted, Registry as RequestRegistry, RequestControl};
 use rag_tools::{rag_default_tool_schemas, run_rag_tool, RagTools};
 
 use anyhow::{bail, Context, Result};
@@ -62,12 +65,14 @@ struct ModelService {
     tokenizer: Tokenizer,
     force_think: bool,
     chat: ChatState,
+    sessions: std::collections::HashMap<String, (ChatState, std::time::Instant)>,
 }
 
 struct QueuedConnection {
     stream: TcpStream,
     request_line: String,
     body: String,
+    control: RequestControl,
 }
 
 type ServerRuntime = ServingRuntime<Mutex<ModelService>, QueuedConnection, PrefixSnap>;
@@ -136,6 +141,7 @@ struct InferenceContext<'a> {
     chat: &'a mut ChatState,
     prefixes: &'a mut PrefixCache<PrefixSnap>,
     prefix_namespace: u32,
+    control: &'a RequestControl,
 }
 
 struct GenerationRequest<'a> {
@@ -159,6 +165,7 @@ fn run_inference(
     context: &mut InferenceContext<'_>,
     request: GenerationRequest<'_>,
 ) -> Result<CompletionResult> {
+    context.control.check()?;
     let model = context.model;
     let tok = context.tok;
     let template = context.template;
@@ -176,6 +183,8 @@ fn run_inference(
         emit_done,
     } = request;
     let prompt = template.prompt(tok, messages)?;
+    anyhow::ensure!(max_tokens <= SESSION_TOKENS && prompt.len().saturating_add(max_tokens).saturating_add(1) <= SESSION_TOKENS,
+        "request exceeds the 16384-token session limit");
     let stops = template.stop_tokens(tok);
     let mut sampler = Sampler::new(temperature, top_p, repeat_penalty);
     // Greedy without a repeat penalty can take the on-GPU argmax: one word
@@ -263,6 +272,7 @@ fn run_inference(
     let t0 = std::time::Instant::now();
     if !skip_prefill {
         for chunk in prompt[common..].chunks(prefill_chunk) {
+            context.control.check()?;
             logits = model.forward_batch(chunk, &mut chat.session)?;
             chat.tokens.extend_from_slice(chunk);
         }
@@ -291,6 +301,7 @@ fn run_inference(
     let think_prefix = template.think_prefix();
     if streaming {
         write_sse_headers(stream.as_mut().unwrap())?;
+        context.control.start_stream();
         // The primed `<think>\n` is part of the reply text but not of the
         // generated token stream; send it ahead of the first real delta.
         if !think_prefix.is_empty() {
@@ -310,6 +321,7 @@ fn run_inference(
     let mut finish = "length";
     let mut greedy_next: Option<u32> = None;
     for _ in 0..max_tokens {
+        context.control.check()?;
         let next = match greedy_next.take() {
             Some(t) => t,
             None => sampler.pick(&logits, &chat.tokens),
@@ -894,6 +906,7 @@ fn stream_safe_len(text: &str) -> usize {
 
 pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits) -> Result<()> {
     anyhow::ensure!(!model_paths.is_empty(), "at least one --model is required");
+    anyhow::ensure!(limits.max_queued > 0, "--max-queued must be positive");
     let mut planned_bytes = Vec::with_capacity(model_paths.len());
     for path in model_paths {
         let file = allpaka_gguf::GgufFile::open(path)?;
@@ -934,31 +947,22 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
         limits.prefix_budget_bytes as f64 / (1u64 << 20) as f64,
     );
     let rag_tools = RagTools::load();
+    let incoming = ingress::start(listener, default_model, limits);
 
     loop {
-        let (first, _) = listener.accept()?;
+        let first = incoming.recv().context("HTTP ingress stopped")?;
         let mut ready = vec![first];
-        listener.set_nonblocking(true)?;
         while ready.len() < limits.max_queued {
-            match listener.accept() {
-                Ok((stream, _)) => ready.push(stream),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => {
-                    listener.set_nonblocking(false)?;
-                    return Err(error.into());
-                }
+            match incoming.try_recv() {
+                Ok(request) => ready.push(request),
+                Err(_) => break,
             }
         }
-        listener.set_nonblocking(false)?;
 
-        for stream in ready {
-            match prepare_connection(stream, &default_model, limits.max_batch_context_tokens) {
-                Ok((model_name, context_tokens, connection)) => {
-                    if let Err(error) = runtime.enqueue(model_name, context_tokens, connection) {
-                        println!("request rejected by scheduler: {error:?}");
-                    }
-                }
-                Err(error) => println!("request failed before admission: {error:#}"),
+        for (model_name, context_tokens, connection) in ready {
+            let mut rejection_stream = connection.stream.try_clone()?;
+            if let Err(error) = runtime.enqueue(model_name, context_tokens, connection) {
+                respond(&mut rejection_stream, 429, &json!({"error":format!("scheduler: {error:?}")}))?;
             }
         }
 
@@ -1018,6 +1022,7 @@ fn load_model_service(model_path: &Path) -> Result<(String, ModelService)> {
             tokenizer,
             force_think,
             chat,
+            sessions: std::collections::HashMap::new(),
         },
     ))
 }
@@ -1026,23 +1031,52 @@ fn prepare_connection(
     mut stream: TcpStream,
     default_model: &str,
     max_context_tokens: usize,
-) -> Result<(String, usize, QueuedConnection)> {
+    registry: &Arc<RequestRegistry>,
+) -> Result<Option<(String, usize, QueuedConnection)>> {
     let (request_line, body) = read_request(&mut stream)?;
+    if request_line.starts_with("GET /health ") {
+        respond(&mut stream, 200, &json!({"status":"ok"}))?;
+        return Ok(None);
+    }
+    if let Some(route) = request_line.strip_prefix("POST /v1/requests/") {
+        if let Some(id) = route.strip_suffix("/cancel HTTP/1.1") {
+            let cancelled = registry.cancel(id);
+            respond(&mut stream, if cancelled { 200 } else { 404 }, &json!({"cancelled":cancelled}))?;
+            return Ok(None);
+        }
+    }
+    let request: Value = if body.is_empty() { json!({}) } else { serde_json::from_str(&body)? };
+    if let Some(id) = request.get("session_id") {
+        anyhow::ensure!(id.as_str().is_some_and(|id| !id.is_empty() && id.len() <= 128), "invalid session_id");
+    }
+    if let Some(id) = request.get("request_id") {
+        anyhow::ensure!(id.is_string(), "request_id must be a string");
+    }
+    if let Some(tokens) = request.get("max_tokens") {
+        anyhow::ensure!(tokens.as_u64().is_some_and(|n| n > 0 && n < SESSION_TOKENS as u64), "max_tokens must be in 1..16384");
+    }
+    let timeout_ms = match request.get("timeout_ms") {
+        None => 120_000,
+        Some(value) => value.as_u64().filter(|n| (1..=600_000).contains(n))
+            .context("timeout_ms must be in 1..=600000")?,
+    };
+    let control = registry.register(request["request_id"].as_str(), std::time::Duration::from_millis(timeout_ms))?;
     let requested = serde_json::from_str::<Value>(&body)
         .ok()
         .and_then(|request| request["model"].as_str().map(ToOwned::to_owned))
         .filter(|model| model != "allpaka")
         .unwrap_or_else(|| default_model.to_string());
     let context_tokens = body.len().div_ceil(4).clamp(1, max_context_tokens.max(1));
-    Ok((
+    Ok(Some((
         requested,
         context_tokens,
         QueuedConnection {
             stream,
             request_line,
             body,
+            control,
         },
-    ))
+    )))
 }
 
 fn resolve_model_name(requested: &str, available: &[String]) -> Option<String> {
@@ -1105,11 +1139,30 @@ fn dispatch_connection(
     let mut service = service
         .lock()
         .map_err(|_| anyhow::anyhow!("model service lock poisoned: {model_name}"))?;
+    let is_chat = connection.request_line.starts_with("POST /v1/chat/completions");
+    let request: Value = serde_json::from_str(&connection.body).unwrap_or(Value::Null);
+    let session_id = request.get("session_id").map(|value| {
+        value.as_str().filter(|id| !id.is_empty() && id.len() <= 128)
+            .map(str::to_owned).context("session_id must be a non-empty string of at most 128 bytes")
+    }).transpose()?;
+    let now = std::time::Instant::now();
+    service.sessions.retain(|_, (_, used)| now.duration_since(*used).as_secs() < 600);
+    if is_chat {
+        if session_id.as_ref().is_some_and(|id| !service.sessions.contains_key(id)) && service.sessions.len() >= 4 {
+            let mut stream = connection.stream;
+            return respond(&mut stream, 429, &json!({"error":"resident session capacity exhausted"}));
+        }
+        let restored = session_id.as_ref().and_then(|id| service.sessions.remove(id));
+        service.chat = restored.map(|(chat, _)| chat).unwrap_or_else(|| ChatState {
+            session: service.model.new_session(256), tokens: Vec::new(),
+        });
+    }
     let ModelService {
         model,
         tokenizer,
         force_think,
         chat,
+        ..
     } = &mut *service;
     let mut template = Template::detect(tokenizer)?;
     if let Template::ChatMl {
@@ -1121,7 +1174,8 @@ fn dispatch_connection(
     }
     let prefix_namespace = model_prefix_namespace(&model_name);
     let prefixes = runtime.prefixes();
-    handle(
+    let mut error_stream = connection.stream.try_clone()?;
+    let outcome = handle(
         connection.stream,
         connection.request_line,
         connection.body,
@@ -1134,10 +1188,30 @@ fn dispatch_connection(
                 chat,
                 prefixes,
                 prefix_namespace,
+                control: &connection.control,
             },
             rag,
         },
-    )
+    );
+    let succeeded = outcome.is_ok();
+    if let Err(error) = outcome {
+        let status = if error.downcast_ref::<Interrupted>().is_some() { 408 } else { 500 };
+        let body = json!({"error":error.to_string(), "request_id":connection.control.id});
+        if connection.control.streaming() {
+            write_sse_event(&mut error_stream, &body)?;
+            error_stream.write_all(b"data: [DONE]\n\n")?;
+        } else {
+            respond(&mut error_stream, status, &body)?;
+        }
+    }
+    if is_chat {
+        let empty = ChatState { session: service.model.new_session(1), tokens: Vec::new() };
+        let chat = std::mem::replace(&mut service.chat, empty);
+        if succeeded {
+            if let Some(id) = session_id { service.sessions.insert(id, (chat, std::time::Instant::now())); }
+        }
+    }
+    Ok(())
 }
 
 /// Touch every page of the weight mapping once, sequentially.
@@ -1368,6 +1442,7 @@ fn handle(
                 "prompt_tokens": completion.prompt_tokens,
                 "completion_tokens": completion.completion_tokens,
                 "total_tokens": completion.prompt_tokens + completion.completion_tokens,
+                "prompt_tokens_details": {"cached_tokens": completion.cached_tokens},
             },
         }),
     )
@@ -1401,6 +1476,7 @@ fn read_request(stream: &mut TcpStream) -> Result<(String, String)> {
         })
         .and_then(|(_, v)| v.trim().parse().ok())
         .unwrap_or(0);
+    anyhow::ensure!(content_length <= 4 * 1024 * 1024, "request body exceeds 4 MiB");
 
     let mut body = buf[header_end + 4..].to_vec();
     while body.len() < content_length {

@@ -59,3 +59,30 @@ The main introspection endpoints are:
 - `GET /v1/models`
 - `GET /stats`
 - `POST /v1/chat/completions`
+
+## Request lifetime and sessions
+
+HTTP admission continues while inference runs. Readers are limited to 16, with
+five-second socket timeouts and a 4 MiB body limit. Queue exhaustion returns
+HTTP 429. Inference remains owned by one thread.
+
+Chat requests may specify `request_id` (ASCII letters, digits, `-` or `_`, at
+most 128 bytes), `timeout_ms` (1..600000, default 120000), and `session_id`
+(non-empty string of at most 128 bytes). Active request ids must be unique.
+
+`POST /v1/requests/{request_id}/cancel` cancels a queued or running request.
+Cancellation and deadlines are checked between prefill chunks and decode
+steps. An already submitted GPU command is allowed to finish. Before SSE
+starts, interruption returns HTTP 408; during SSE it emits an error event and
+`[DONE]`. Completion removes the request registration.
+
+A model retains at most four named sessions. Idle sessions expire after ten
+minutes and are collected on the next model request. A request without
+`session_id` has independent KV state. Named sessions are scoped to the model
+and reuse their own state. The service has no tenant authentication; expose it
+only to trusted clients or place an authenticating proxy in front of it.
+
+The combined prompt and generation reservation must fit 16384 tokens.
+`usage.prompt_tokens_details.cached_tokens` reports reused prompt tokens.
+Run `python3 scripts/test-serving-controls.py` with the local small Qwen model
+to exercise isolation, reuse, cancellation, deadlines and recovery.

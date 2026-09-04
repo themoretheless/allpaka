@@ -5,7 +5,7 @@ Each implementation increment is tested, committed, and pushed before the next.
 | Order | Outcome | Status |
 | --- | --- | --- |
 | 1 | Comparable benchmarks with exact token replay, KV precision and matched contexts | In progress: workload metadata, strict GPU coverage and alternating context-matched runs; llama token replay pending |
-| 2 | Isolated sessions, cancellation, deadlines and explicit backpressure | Pending |
+| 2 | Isolated sessions, cancellation, deadlines and explicit backpressure | Implemented; live controls and all five plugin smoke scenarios passed |
 | 3 | Shared memory budget covering weights, KV, scratch and pinned cache leases | Pending |
 | 4 | Reusable KV block prefix cache, hit/miss and reused-token telemetry | Pending |
 | 5 | Step scheduler and chunked prefill with bounded decode latency | Pending |
