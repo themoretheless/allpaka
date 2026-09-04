@@ -57,10 +57,7 @@ impl<T> ModelRegistry<T> {
             return Err(RegistryError::CapacityPinnedByActiveRequests);
         }
         let replaced_bytes = self.entries.get(&name).map_or(0, |entry| entry.bytes);
-        let projected = self
-            .resident_bytes
-            .saturating_sub(replaced_bytes)
-            .saturating_add(bytes);
+        let projected = u128::from(self.resident_bytes - replaced_bytes) + u128::from(bytes);
         self.evict_until(projected, Some(&name))?;
         if let Some(replaced) = self.entries.remove(&name) {
             self.resident_bytes -= replaced.bytes;
@@ -80,24 +77,27 @@ impl<T> ModelRegistry<T> {
 
     fn evict_until(
         &mut self,
-        mut projected_bytes: u64,
+        mut projected_bytes: u128,
         protected_name: Option<&str>,
     ) -> Result<(), RegistryError> {
-        while projected_bytes > self.budget_bytes {
-            let candidate = self
-                .entries
-                .iter()
-                .filter(|(name, entry)| {
-                    Some(name.as_str()) != protected_name && Arc::strong_count(&entry.model) == 1
-                })
-                .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(name, _)| name.clone());
-            let Some(candidate) = candidate else {
-                return Err(RegistryError::CapacityPinnedByActiveRequests);
-            };
+        let mut candidates: Vec<_> = self.entries.iter()
+            .filter(|(name, entry)| {
+                Some(name.as_str()) != protected_name && Arc::strong_count(&entry.model) == 1
+            })
+            .map(|(name, entry)| (name.clone(), entry.bytes, entry.last_used))
+            .collect();
+        let reclaimable: u128 = candidates.iter().map(|(_, bytes, _)| u128::from(*bytes)).sum();
+        if projected_bytes.saturating_sub(reclaimable) > u128::from(self.budget_bytes) {
+            return Err(RegistryError::CapacityPinnedByActiveRequests);
+        }
+        candidates.sort_by_key(|(_, _, last_used)| *last_used);
+        for (candidate, _, _) in candidates {
+            if projected_bytes <= u128::from(self.budget_bytes) {
+                break;
+            }
             let removed = self.entries.remove(&candidate).expect("candidate existed");
             self.resident_bytes -= removed.bytes;
-            projected_bytes = projected_bytes.saturating_sub(removed.bytes);
+            projected_bytes -= u128::from(removed.bytes);
         }
         Ok(())
     }
@@ -106,6 +106,29 @@ impl<T> ModelRegistry<T> {
 #[cfg(test)]
 mod tests {
     use super::{ModelRegistry, RegistryError};
+
+    #[test]
+    fn failed_admission_preserves_evictable_models() {
+        let mut registry = ModelRegistry::new(100);
+        registry.install("idle".into(), 1, 30).unwrap();
+        registry.install("active".into(), 2, 70).unwrap();
+        let lease = registry.get("active").unwrap();
+        assert_eq!(registry.install("new".into(), 3, 80),
+            Err(RegistryError::CapacityPinnedByActiveRequests));
+        assert_eq!(registry.resident_bytes(), 100);
+        assert_eq!(*registry.get("idle").unwrap(), 1);
+        assert_eq!(*lease, 2);
+    }
+
+    #[test]
+    fn admission_does_not_saturate_projected_usage() {
+        let mut registry = ModelRegistry::new(u64::MAX);
+        registry.install("active".into(), 1, u64::MAX).unwrap();
+        let _lease = registry.get("active").unwrap();
+        assert_eq!(registry.install("new".into(), 2, 1),
+            Err(RegistryError::CapacityPinnedByActiveRequests));
+        assert_eq!(registry.resident_bytes(), u64::MAX);
+    }
 
     #[test]
     fn active_leases_prevent_eviction_and_release_allows_it() {
