@@ -1,6 +1,6 @@
 //! Byte-budgeted longest-prefix cache with ref-counted leases.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 #[derive(Debug)]
 struct Entry<V> {
@@ -22,6 +22,7 @@ pub struct PrefixCache<V> {
     budget_bytes: usize,
     resident_bytes: usize,
     clock: u64,
+    retired: Vec<(Weak<V>, usize)>,
 }
 
 impl<V> PrefixCache<V> {
@@ -31,11 +32,25 @@ impl<V> PrefixCache<V> {
             budget_bytes,
             resident_bytes: 0,
             clock: 0,
+            retired: Vec::new(),
         }
     }
 
     pub fn resident_bytes(&self) -> usize {
         self.resident_bytes
+    }
+
+    /// Declared payload bytes still alive, including evicted external leases.
+    pub fn allocated_bytes(&self) -> usize {
+        self.resident_bytes.saturating_add(self.retired.iter()
+            .filter(|(value, _)| value.strong_count() > 0)
+            .map(|(_, bytes)| *bytes).sum::<usize>())
+    }
+
+    pub fn pinned_bytes(&self) -> usize {
+        let cached = self.entries.iter().filter(|entry| Arc::strong_count(&entry.value) > 1)
+            .map(|entry| entry.bytes).sum::<usize>();
+        cached.saturating_add(self.allocated_bytes().saturating_sub(self.resident_bytes))
     }
 
     pub fn len(&self) -> usize {
@@ -64,48 +79,37 @@ impl<V> PrefixCache<V> {
     }
 
     pub fn insert(&mut self, tokens: Vec<u32>, value: V, value_bytes: usize) {
-        let bytes = value_bytes.saturating_add(tokens.len() * size_of::<u32>());
-        if bytes > self.budget_bytes {
+        let bytes = value_bytes.saturating_add(tokens.len().saturating_mul(size_of::<u32>()));
+        if self.budget_bytes == 0 || bytes > self.budget_bytes {
             return;
         }
+        self.retired.retain(|(value, _)| value.strong_count() > 0);
         self.clock = self.clock.wrapping_add(1);
         if let Some(index) = self
             .entries
             .iter()
             .position(|entry| entry.tokens.as_ref() == tokens.as_slice())
         {
-            self.resident_bytes -= self.entries[index].bytes;
-            self.entries[index] = Entry {
-                tokens: tokens.into(),
-                value: Arc::new(value),
-                bytes,
-                last_used: self.clock,
-            };
-            self.resident_bytes += bytes;
-        } else {
-            self.entries.push(Entry {
-                tokens: tokens.into(),
-                value: Arc::new(value),
-                bytes,
-                last_used: self.clock,
-            });
-            self.resident_bytes += bytes;
+            self.remove_entry(index);
         }
-        self.evict_to_budget();
+        while self.allocated_bytes().saturating_add(bytes) > self.budget_bytes {
+            let Some(index) = self.entries.iter().enumerate()
+                .min_by_key(|(_, entry)| entry.last_used).map(|(index, _)| index)
+            else { return };
+            self.remove_entry(index);
+        }
+        self.entries.push(Entry {
+            tokens: tokens.into(), value: Arc::new(value), bytes, last_used: self.clock,
+        });
+        self.resident_bytes += bytes;
     }
 
-    fn evict_to_budget(&mut self) {
-        while self.resident_bytes > self.budget_bytes {
-            let Some((index, _)) = self
-                .entries
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, entry)| entry.last_used)
-            else {
-                break;
-            };
-            let removed = self.entries.swap_remove(index);
-            self.resident_bytes -= removed.bytes;
+    fn remove_entry(&mut self, index: usize) {
+        let removed = self.entries.swap_remove(index);
+        self.resident_bytes -= removed.bytes;
+        if Arc::strong_count(&removed.value) > 1 {
+            // Conservatively retain the key charge until the value lease dies.
+            self.retired.push((Arc::downgrade(&removed.value), removed.bytes));
         }
     }
 }
@@ -113,6 +117,21 @@ impl<V> PrefixCache<V> {
 #[cfg(test)]
 mod tests {
     use super::PrefixCache;
+
+    #[test]
+    fn evicted_leases_still_consume_budget_until_the_last_drop() {
+        let mut cache = PrefixCache::new(80);
+        cache.insert(vec![1], vec![0u8; 60], 60);
+        let lease = cache.longest_prefix(&[1]).unwrap();
+        cache.insert(vec![2], vec![0u8; 60], 60);
+        assert!(cache.longest_prefix(&[2]).is_none());
+        assert_eq!(cache.allocated_bytes(), 64);
+        assert_eq!(cache.pinned_bytes(), 64);
+        drop(lease);
+        assert_eq!(cache.allocated_bytes(), 0);
+        cache.insert(vec![2], vec![0u8; 60], 60);
+        assert!(cache.longest_prefix(&[2]).is_some());
+    }
 
     #[test]
     fn longest_prefix_wins_and_survives_cache_eviction_as_a_lease() {

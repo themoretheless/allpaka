@@ -53,6 +53,9 @@ impl<T> ModelRegistry<T> {
         if bytes > self.budget_bytes {
             return Err(RegistryError::ModelExceedsBudget);
         }
+        if self.entries.get(&name).is_some_and(|entry| Arc::strong_count(&entry.model) > 1) {
+            return Err(RegistryError::CapacityPinnedByActiveRequests);
+        }
         let replaced_bytes = self.entries.get(&name).map_or(0, |entry| entry.bytes);
         let projected = self
             .resident_bytes
@@ -126,5 +129,15 @@ mod tests {
         registry.install("chat".into(), 2, 90).unwrap();
         assert_eq!(registry.resident_bytes(), 90);
         assert_eq!(*registry.get("chat").unwrap(), 2);
+    }
+
+    #[test]
+    fn hot_replacement_cannot_hide_a_live_model_lease() {
+        let mut registry = ModelRegistry::new(100);
+        registry.install("chat".into(), 1, 80).unwrap();
+        let lease = registry.get("chat").unwrap();
+        assert_eq!(registry.install("chat".into(), 2, 90), Err(RegistryError::CapacityPinnedByActiveRequests));
+        assert_eq!(registry.resident_bytes(), 80);
+        assert_eq!(*lease, 1);
     }
 }
