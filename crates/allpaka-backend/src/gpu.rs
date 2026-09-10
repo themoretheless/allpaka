@@ -245,6 +245,84 @@ kernel void matvec_q8_0(
 }
 
 
+
+// Port of llama.cpp's kernel_mul_mv_q8_0_f32 structure (MIT): 2 rows per
+// SIMD group, activations registered once (8 floats) and reused across
+// both rows. 16 threads per output row; INDEXED requires n_out % 2 == 0.
+// SWIGLU_X folds silu(gate)*up into the activation loads for MoE down.
+kernel void matvec_q8_0_mv(
+    device const uchar* w [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant uint& n_in [[buffer(3)]],
+    constant uint& n_out [[buffer(4)]],
+    constant ulong& w_off [[buffer(5)]],
+    device const uint* ids [[buffer(6)]],
+    constant IdxArgs& idx [[buffer(7)]],
+    device const float* xu [[buffer(8)]],
+    uint tid [[thread_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]])
+{
+    constexpr short NQ = 8;
+    uint ycols = INDEXED ? n_out * idx.slots : n_out;
+    uint flat = (tid / 32) * 2;
+    bool any = flat < (ROWS ? ycols * idx.n_rows : ycols);
+    if (!any) flat = 0;
+    uint tok = ROWS ? flat / ycols : 0;
+    uint fr = ROWS ? flat - tok * ycols : flat;
+    uint nrows = any ? min(2u, ycols - fr) : 0u;
+    uint slot = INDEXED ? fr / n_out : 0;
+    uint j0 = INDEXED ? fr % n_out : fr;
+    if (INDEXED) {
+        w += ids[(ROWS ? tok * idx.ids_stride : 0u) + slot] * idx.stride;
+        x += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
+        if (SWIGLU_X) {
+            xu += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
+        }
+    }
+    uint nb = n_in / 32;
+    ulong nb01 = (ulong)nb * 34;
+    device const uchar* row0 = w + w_off + (ulong)j0 * nb01;
+
+    const short ix = tiisg / 4;   // 0..7
+    const short il = tiisg % 4;   // 0..3
+    float yl[NQ];
+    float sumf[2] = {0.0f, 0.0f};
+
+    device const float* yb = x + (ulong)ix * 32u + (ulong)il * (uint)NQ;
+    device const float* ub = xu + (ulong)ix * 32u + (ulong)il * (uint)NQ;
+
+    for (uint ib = ix; ib < nb; ib += 8) {
+        for (short i = 0; i < NQ; ++i) {
+            float xv = yb[i];
+            if (SWIGLU_X) {
+                xv = sw1(xv, ub[i]);
+            }
+            yl[i] = xv;
+        }
+        device const uchar* blk = row0 + (ulong)ib * 34u;
+        for (uint row = 0; row < 2; ++row) {
+            device const char* qs = (device const char*)(blk + 2) + il * NQ;
+            float sumq = 0.0f;
+            for (short i = 0; i < NQ; ++i) {
+                sumq += (float)qs[i] * yl[i];
+            }
+            sumf[row] += sumq * half_at(blk);
+            ulong step = (row + 1 < nrows) ? nb01 : 0;
+            blk += step;
+        }
+        yb += 8 * 32;
+        ub += 8 * 32;
+    }
+
+    for (uint row = 0; row < 2; row++) {
+        float s = simd_sum(sumf[row]);
+        if (tiisg == 0 && row < nrows) {
+            y[(ROWS ? tok * idx.y_row_stride : 0u) + fr + row] = s;
+        }
+    }
+}
+
 // Q5_0: 22-byte blocks (f16 scale, 32 high bits, 16 nibble bytes); same
 // dispatch geometry as matvec_q8_0, dequantising on load like ggml's
 /// dequantize_row_q5_0 (high nibbles form the second half of the block).
@@ -1167,6 +1245,128 @@ kernel void matvec_q4_k_mv(
         float s = simd_sum(sumf[row]);
         if (tiisg == 0 && row < nrows) {
             yout[(ROWS ? tok * idx.y_row_stride : 0u) + fr + row] = s;
+        }
+    }
+}
+
+
+// Port of llama.cpp's kernel_mul_mv_q5_K_f32 structure (MIT): 2 rows per
+// SIMD group, activations registered once (yl/yh) and reused across rows,
+// with the 5th bit folded via qh masks. 16 threads per output row; INDEXED
+// requires n_out % 2 == 0. Used heavily for GLM shared gate/up (Q5_K).
+kernel void matvec_q5_k_mv(
+    device const uchar* w [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant uint& n_in [[buffer(3)]],
+    constant uint& n_out [[buffer(4)]],
+    constant ulong& w_off [[buffer(5)]],
+    device const uint* ids [[buffer(6)]],
+    constant IdxArgs& idx [[buffer(7)]],
+    uint tid [[thread_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]])
+{
+    const ushort kmask1 = 0x3f3f;
+    const ushort kmask2 = 0x0f0f;
+    const ushort kmask3 = 0xc0c0;
+
+    uint ycols = INDEXED ? n_out * idx.slots : n_out;
+    uint flat = (tid / 32) * 2;
+    bool any = flat < (ROWS ? ycols * idx.n_rows : ycols);
+    if (!any) flat = 0;
+    uint tok = ROWS ? flat / ycols : 0;
+    uint fr = ROWS ? flat - tok * ycols : flat;
+    uint nrows = any ? min(2u, ycols - fr) : 0u;
+    uint slot = INDEXED ? fr / n_out : 0;
+    uint j0 = INDEXED ? fr % n_out : fr;
+    if (INDEXED) {
+        w += ids[(ROWS ? tok * idx.ids_stride : 0u) + slot] * idx.stride;
+        x += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
+    }
+    uint nb = n_in / 256;
+    ulong nb01 = (ulong)nb * 176;
+    device const uchar* row0 = w + w_off + (ulong)j0 * nb01;
+
+    const short tid4 = tiisg / 4;
+    const short ix = tiisg % 4;
+    const short iq = tid4 / 4;
+    const short ir = tid4 % 4;
+    const short l0 = 8 * ir;
+    const short q_offset = 32 * iq + l0;
+    const short y_offset = 64 * iq + l0;
+    const uchar hm1 = (uchar)(1u << (2 * iq));
+    const uchar hm2 = (uchar)(hm1 << 1);
+    const uchar hm3 = (uchar)(hm1 << 4);
+    const uchar hm4 = (uchar)(hm2 << 4);
+
+    float yl[16];
+    float yh[16];
+    float sumf[2] = {0.0f, 0.0f};
+    ushort sc16[4];
+    thread const uchar* sc8 = (thread const uchar*)sc16;
+
+    device const float* y1 = x + (ulong)ix * 256u + y_offset;
+
+    for (uint ib = ix; ib < nb; ib += 4) {
+        device const float* y2 = y1 + 128;
+        float4 sumy = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (short l = 0; l < 8; ++l) {
+            yl[l + 0] = y1[l + 0];  sumy[0] += yl[l + 0];
+            yl[l + 8] = y1[l + 32]; sumy[1] += yl[l + 8];
+            yh[l + 0] = y2[l + 0];  sumy[2] += yh[l + 0];
+            yh[l + 8] = y2[l + 32]; sumy[3] += yh[l + 8];
+        }
+
+        device const uchar* blk = row0 + (ulong)ib * 176u;
+        device const ushort* a = (device const ushort*)(blk + 4) + iq;
+        // block_q5_K: d(2) dmin(2) scales(12) qh(32) qs(128) = 176
+        device const uchar* q1 = blk + 48 + q_offset;
+        device const uchar* qh = blk + 16 + l0;
+        device const uchar* dh = blk;
+
+        for (uint row = 0; row < 2; ++row) {
+            device const uchar* q2 = q1 + 64;
+            sc16[0] = a[0] & kmask1;
+            sc16[1] = a[2] & kmask1;
+            sc16[2] = ((a[4] >> 0) & kmask2) | ((a[0] & kmask3) >> 2);
+            sc16[3] = ((a[4] >> 4) & kmask2) | ((a[2] & kmask3) >> 2);
+
+            float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
+            float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
+            for (short l = 0; l < 8; ++l) {
+                uchar h = qh[l];
+                acc1[0] += yl[l + 0] * (float)(q1[l] & 0x0F);
+                acc1[1] += yl[l + 8] * (float)(q1[l] & 0xF0);
+                acc1[2] += yh[l + 0] * (float)(q2[l] & 0x0F);
+                acc1[3] += yh[l + 8] * (float)(q2[l] & 0xF0);
+                acc2[0] += (h & hm1) ? yl[l + 0] : 0.0f;
+                acc2[1] += (h & hm2) ? yl[l + 8] : 0.0f;
+                acc2[2] += (h & hm3) ? yh[l + 0] : 0.0f;
+                acc2[3] += (h & hm4) ? yh[l + 8] : 0.0f;
+            }
+
+            half2 dm = *(device const half2*)dh;
+            sumf[row] +=
+                (float)dm.x * (sc8[0] * (acc1[0] + 16.0f * acc2[0]) +
+                               sc8[1] * (acc1[1] / 16.0f + 16.0f * acc2[1]) +
+                               sc8[4] * (acc1[2] + 16.0f * acc2[2]) +
+                               sc8[5] * (acc1[3] / 16.0f + 16.0f * acc2[3])) -
+                (float)dm.y * (sumy[0] * sc8[2] + sumy[1] * sc8[3] +
+                               sumy[2] * sc8[6] + sumy[3] * sc8[7]);
+
+            ulong step = (row + 1 < nrows) ? nb01 : 0;
+            q1 += step;
+            qh += step;
+            a = (device const ushort*)((device const uchar*)a + step);
+            dh += step;
+        }
+        y1 += 4 * 256;
+    }
+
+    for (uint row = 0; row < 2; row++) {
+        float s = simd_sum(sumf[row]);
+        if (tiisg == 0 && row < nrows) {
+            y[(ROWS ? tok * idx.y_row_stride : 0u) + fr + row] = s;
         }
     }
 }
@@ -7086,7 +7286,9 @@ impl Gpu {
                 "matvec_q2_k_mv" => "matvec_q2_k",
                 "matvec_q3_k_mv" => "matvec_q3_k",
                 "matvec_q4_k_mv" => "matvec_q4_k",
+                "matvec_q5_k_mv" => "matvec_q5_k",
                 "matvec_q6_k_mv" => "matvec_q6_k",
+                "matvec_q8_0_mv" => "matvec_q8_0",
                 other => other,
             }
         } else {
@@ -7487,7 +7689,13 @@ fn lanes_per_row(ty: GgmlType, n_in: usize) -> usize {
     if ty == GgmlType::Q4K && q4_mv() {
         return 16;
     }
+    if ty == GgmlType::Q5K && q5_mv() {
+        return 16;
+    }
     if ty == GgmlType::Q6K && q6_mv() {
+        return 16;
+    }
+    if ty == GgmlType::Q8_0 && q8_mv() {
         return 16;
     }
     let be = ty.block_elements().unwrap_or(32) as usize;
@@ -7699,11 +7907,11 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
         // a rounding error on the CPU.
         let kernel = match r.ty {
             GgmlType::Q5_0 => Some("matvec_q5_0"),
-            GgmlType::Q8_0 => Some("matvec_q8_0"),
+            GgmlType::Q8_0 => Some(q8_kernel()),
             GgmlType::Q2K => Some(q2_kernel()),
             GgmlType::Q3K => Some(q3_kernel()),
             GgmlType::Q4K => Some(q4_kernel()),
-            GgmlType::Q5K => Some("matvec_q5_k"),
+            GgmlType::Q5K => Some(q5_kernel()),
             GgmlType::Q6K => Some(q6_kernel()),
             _ => None,
         };
@@ -8657,7 +8865,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 let mut gu_kernels = [""; 2];
                 // Kernels carrying the SWIGLU_X down-projection variant.
                 let sw_capable = |k: &str| {
-                    matches!(k, "matvec_q2_k" | "matvec_q3_k_mv" | "matvec_q4_k_mv" | "matvec_q8_0")
+                    matches!(k, "matvec_q2_k" | "matvec_q3_k_mv" | "matvec_q4_k_mv" | "matvec_q8_0" | "matvec_q8_0_mv")
                 };
                 // With a shared expert, fusion is only safe when the shared
                 // down carries the variant too - otherwise its slot would
@@ -8678,7 +8886,9 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         "matvec_q2_k_mv" if n_out % 4 != 0 => "matvec_q2_k",
                         "matvec_q3_k_mv" if n_out % 2 != 0 => "matvec_q3_k",
                         "matvec_q4_k_mv" if n_out % 2 != 0 => "matvec_q4_k",
+                        "matvec_q5_k_mv" if n_out % 2 != 0 => "matvec_q5_k",
                         "matvec_q6_k_mv" if n_out % 2 != 0 => "matvec_q6_k",
+                        "matvec_q8_0_mv" if n_out % 2 != 0 => "matvec_q8_0",
                         k => k,
                     };
                     if i < 2 {
@@ -8690,7 +8900,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     let swiglu = i == 2
                         && sw_capable(kernel)
                         && shared_down_sw
-                        && std::env::var("ALLPAKA_SWFUSE").is_ok_and(|v| v == "1");
+                        && std::env::var("ALLPAKA_SWFUSE").map_or(true, |v| v != "0");
                     if swiglu {
                         sw_fused = true;
                     }
@@ -8726,7 +8936,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     }
                 };
                 max_expert = max_expert.max(n_expert);
-                let mega = if mega_enabled() && n_expert <= 128 && shared_gate.is_none() {
+                let mega = if mega_enabled() && n_expert <= 256 && shared_gate.is_none() {
                     let gf = mega_fmt(mats[0].ty);
                     let uf = mega_fmt(mats[1].ty);
                     let df = mega_fmt(mats[2].ty);
@@ -10068,10 +10278,21 @@ fn encode_verify_tokens(
                         "matvec_q2_k_mv" if n_outs[i] % 4 != 0 => "matvec_q2_k",
                         "matvec_q3_k_mv" if n_outs[i] % 2 != 0 => "matvec_q3_k",
                         "matvec_q4_k_mv" if n_outs[i] % 2 != 0 => "matvec_q4_k",
+                        "matvec_q5_k_mv" if n_outs[i] % 2 != 0 => "matvec_q5_k",
                         "matvec_q6_k_mv" if n_outs[i] % 2 != 0 => "matvec_q6_k",
+                        "matvec_q8_0_mv" if n_outs[i] % 2 != 0 => "matvec_q8_0",
                         k => k,
                     };
-                    if !matches!(kernel, "matvec_q4_k_mv" | "matvec_q5_k" | "matvec_q6_k") {
+                    if !matches!(
+                        kernel,
+                        "matvec_q4_k_mv"
+                            | "matvec_q5_k"
+                            | "matvec_q5_k_mv"
+                            | "matvec_q6_k"
+                            | "matvec_q6_k_mv"
+                            | "matvec_q8_0"
+                            | "matvec_q8_0_mv"
+                    ) {
                         v.clear();
                         break;
                     }
@@ -12778,6 +12999,30 @@ fn q6_kernel() -> &'static str {
     if q6_mv() { "matvec_q6_k_mv" } else { "matvec_q6_k" }
 }
 
+/// The q5_k llama-structure matvec. Default ON for GLM shared gate/up and
+/// any other Q5_K decode weights; `ALLPAKA_Q5_MV=0` restores the reference
+/// block-per-lane kernel. Needs Mac A/B confirmation on glm-4.5-air shapes.
+fn q5_mv() -> bool {
+    static MV: OnceLock<bool> = OnceLock::new();
+    *MV.get_or_init(|| std::env::var("ALLPAKA_Q5_MV").map_or(true, |v| v != "0"))
+}
+
+fn q5_kernel() -> &'static str {
+    if q5_mv() { "matvec_q5_k_mv" } else { "matvec_q5_k" }
+}
+
+/// The q8_0 llama-structure matvec. Default ON: GLM expert/shared down and
+/// qwen35moe GDN/attn projections. Carries SWIGLU_X for decode fusion.
+/// `ALLPAKA_Q8_MV=0` restores the packed-load reference kernel.
+fn q8_mv() -> bool {
+    static MV: OnceLock<bool> = OnceLock::new();
+    *MV.get_or_init(|| std::env::var("ALLPAKA_Q8_MV").map_or(true, |v| v != "0"))
+}
+
+fn q8_kernel() -> &'static str {
+    if q8_mv() { "matvec_q8_0_mv" } else { "matvec_q8_0" }
+}
+
 /// Prefill attention over simdgroup MMA tiles (attend_mm, llama-style: K/V
 /// read directly by the MMAs, online softmax). Default ON: standalone
 /// 0.278 vs 0.742 ms/dispatch for attend_rows_t8 at m=480 (qwen3-30b
@@ -13740,11 +13985,11 @@ struct MatRef {
 fn resolve(gpu: &Gpu, ty: GgmlType, w: &[u8]) -> Option<MatRef> {
     let kernel = match ty {
         GgmlType::Q5_0 => "matvec_q5_0",
-        GgmlType::Q8_0 => "matvec_q8_0",
+        GgmlType::Q8_0 => q8_kernel(),
         GgmlType::Q2K => q2_kernel(),
         GgmlType::Q3K => q3_kernel(),
         GgmlType::Q4K => q4_kernel(),
-        GgmlType::Q5K => "matvec_q5_k",
+        GgmlType::Q5K => q5_kernel(),
         GgmlType::Q6K => q6_kernel(),
         _ => return None,
     };

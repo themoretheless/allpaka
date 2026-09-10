@@ -8,6 +8,8 @@
 //! in seconds without loading a 46 GiB model.
 //!
 //! Run: `cargo test -p allpaka-backend --test gpu_glm_mvbench -- --ignored --nocapture`
+//! A/B new kernels: `ALLPAKA_Q5_MV=0 ALLPAKA_Q8_MV=0` (and optionally
+//! `ALLPAKA_SWFUSE=0`) against the defaults.
 
 #![cfg(target_os = "macos")]
 

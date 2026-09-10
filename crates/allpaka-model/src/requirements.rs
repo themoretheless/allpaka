@@ -9,6 +9,7 @@ pub enum ModelFamily {
     Qwen35Moe,
     Llama3,
     Mistral,
+    Glm4Moe,
     DeepSeekMla,
 }
 
@@ -73,6 +74,15 @@ impl ModelRequirements {
                 ],
                 vec![Feature::PagedKv],
             ),
+            "glm4moe" | "glm4_moe" | "glm_moe" => (
+                ModelFamily::Glm4Moe,
+                vec![
+                    Feature::SparseMoe,
+                    Feature::GqaAttention,
+                    Feature::StandardKv,
+                ],
+                vec![Feature::PagedKv],
+            ),
             "deepseek" | "deepseek2" | "deepseek_mla" => (
                 ModelFamily::DeepSeekMla,
                 vec![
@@ -109,6 +119,17 @@ mod tests {
             .is_supported());
         assert!(!BackendCapabilities::current_metal()
             .coverage(&deepseek.required)
+            .is_supported());
+    }
+
+    #[test]
+    fn glm4moe_is_registered_as_sparse_moe_with_gqa() {
+        let glm = ModelRequirements::for_architecture("glm4moe").unwrap();
+        assert_eq!(glm.family, super::ModelFamily::Glm4Moe);
+        assert!(glm.required.contains(&Feature::SparseMoe));
+        assert!(glm.required.contains(&Feature::GqaAttention));
+        assert!(BackendCapabilities::current_metal()
+            .coverage(&glm.required)
             .is_supported());
     }
 }
