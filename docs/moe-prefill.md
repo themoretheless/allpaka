@@ -202,10 +202,10 @@ mmbench modes: `MM_ID=1` (grouped mmid, `MM_ACT`/`MM_EXP`/`MM_USED`),
   weights (MM_WSPAN 2 GB: same 11.3-11.8), and one-shot dispatch alone
   explains only 11.8 -> 8.5. The in-model mechanism is unidentified.
 - Decode gap (35.8 vs llama ~41-43 tok/s) is a separate front — see
-  `docs/decode-opts.md` for the Q5_K/Q8_0 `_mv` + default SWFUSE work
-  aimed at it (needs M4 Max remeasure).
-- MEGA with GLM `shared_gate` still gated off; expert cap raised to 256
-  for qwen35moe opt-in (`ALLPAKA_MEGA=1`).
+  `docs/decode-opts.md` for the Q5_K/Q8_0 `_mv` + default SWFUSE / ATTN_MV
+  work and MEGA `has_shared=2` (GLM / qwen35 gated shared) aimed at it
+  (needs M4 Max remeasure; `ALLPAKA_MEGA=1` still opt-in).
+- MEGA expert cap is 256 for qwen35moe opt-in (`ALLPAKA_MEGA=1`).
 
 # qwen35moe prefill (Qwen3.6-35B-A3B, same machine)
 

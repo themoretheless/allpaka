@@ -1263,6 +1263,7 @@ kernel void matvec_q5_k_mv(
     constant ulong& w_off [[buffer(5)]],
     device const uint* ids [[buffer(6)]],
     constant IdxArgs& idx [[buffer(7)]],
+    device const float* xu [[buffer(8)]],
     uint tid [[thread_position_in_grid]],
     ushort tiisg [[thread_index_in_simdgroup]])
 {
@@ -1282,6 +1283,9 @@ kernel void matvec_q5_k_mv(
     if (INDEXED) {
         w += ids[(ROWS ? tok * idx.ids_stride : 0u) + slot] * idx.stride;
         x += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
+        if (SWIGLU_X) {
+            xu += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
+        }
     }
     uint nb = n_in / 256;
     ulong nb01 = (ulong)nb * 176;
@@ -1306,15 +1310,17 @@ kernel void matvec_q5_k_mv(
     thread const uchar* sc8 = (thread const uchar*)sc16;
 
     device const float* y1 = x + (ulong)ix * 256u + y_offset;
+    device const float* u1 = xu + (ulong)ix * 256u + y_offset;
 
     for (uint ib = ix; ib < nb; ib += 4) {
         device const float* y2 = y1 + 128;
+        device const float* u2 = u1 + 128;
         float4 sumy = {0.0f, 0.0f, 0.0f, 0.0f};
         for (short l = 0; l < 8; ++l) {
-            yl[l + 0] = y1[l + 0];  sumy[0] += yl[l + 0];
-            yl[l + 8] = y1[l + 32]; sumy[1] += yl[l + 8];
-            yh[l + 0] = y2[l + 0];  sumy[2] += yh[l + 0];
-            yh[l + 8] = y2[l + 32]; sumy[3] += yh[l + 8];
+            yl[l + 0] = SWIGLU_X ? sw1(y1[l + 0], u1[l + 0]) : y1[l + 0];  sumy[0] += yl[l + 0];
+            yl[l + 8] = SWIGLU_X ? sw1(y1[l + 32], u1[l + 32]) : y1[l + 32]; sumy[1] += yl[l + 8];
+            yh[l + 0] = SWIGLU_X ? sw1(y2[l + 0], u2[l + 0]) : y2[l + 0];  sumy[2] += yh[l + 0];
+            yh[l + 8] = SWIGLU_X ? sw1(y2[l + 32], u2[l + 32]) : y2[l + 32]; sumy[3] += yh[l + 8];
         }
 
         device const uchar* blk = row0 + (ulong)ib * 176u;
@@ -1361,6 +1367,7 @@ kernel void matvec_q5_k_mv(
             dh += step;
         }
         y1 += 4 * 256;
+        u1 += 4 * 256;
     }
 
     for (uint row = 0; row < 2; row++) {
@@ -2265,10 +2272,13 @@ struct MegaArgs {
     // GLM: sigmoid gating with a selection bias (buffer 7), and an
     // always-on shared expert (buffers 8-10) riding slot n_used.
     uint sigmoid;
+    // 0 = none, 1 = always-on weight 1, 2 = gated via buffer 11 (F32[hidden]
+    // projection -> raw logit in wts[n_used], sigmoid applied at combine).
     uint has_shared;
     ulong sh_gate_off;
     ulong sh_up_off;
     ulong sh_down_off;
+    ulong sh_gout_off;
 };
 
 inline void mega_sync(device atomic_uint* ctr, uint target, uint ltid) {
@@ -2665,6 +2675,7 @@ kernel void moe_ffn_mega(
     device const uchar* sh_gate_w [[buffer(8)]],
     device const uchar* sh_up_w [[buffer(9)]],
     device const uchar* sh_down_w [[buffer(10)]],
+    device const float* sh_gout [[buffer(11)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint ltid [[thread_position_in_threadgroup]],
     ushort sg [[simdgroup_index_in_threadgroup]],
@@ -2798,6 +2809,24 @@ kernel void moe_ffn_mega(
                 }
             }
         }
+        // Gated shared expert (GLM / qwen35moe): raw gate logit into
+        // wts[n_used]; sigmoid applied at combine. One simdgroup owns the
+        // hidden-wide dot.
+        if (a.has_shared == 2 && tgid == 0 && sg == 0) {
+            device const float* h = y + a.h_at;
+            // sh_gout_off is a BYTE offset into the F32 projection buffer.
+            device const float* proj =
+                (device const float*)((device const uchar*)sh_gout + a.sh_gout_off);
+            float acc = 0.0f;
+            for (uint i = tiisg * 4; i + 3 < a.hidden; i += 128) {
+                acc += dot(*(device const float4*)(proj + i),
+                           *(device const float4*)(h + i));
+            }
+            float s = simd_sum(acc);
+            if (tiisg == 0) {
+                y[a.wts_at + a.n_used] = s;
+            }
+        }
     }
     mega_sync(ctr, base + 3 * a.n_tg, ltid);
 
@@ -2826,7 +2855,8 @@ kernel void moe_ffn_mega(
     {
         device float* g = y + a.gate_at;
         device const float* u = y + a.up_at;
-        uint n = (a.n_used + a.has_shared) * a.ffn;
+        // has_shared is 0/1/2 (tri-state); only 0/1 contributes a slot.
+        uint n = (a.n_used + (a.has_shared != 0)) * a.ffn;
         for (uint i = gthread; i < n; i += total_threads) {
             float gv = g[i];
             g[i] = u[i] * (gv / (1.0f + exp(-gv)));
@@ -2859,8 +2889,12 @@ kernel void moe_ffn_mega(
             for (uint s = 0; s < a.n_used; s++) {
                 acc += wts[s] * downo[s * a.hidden + i];
             }
-            if (a.has_shared != 0) {
+            if (a.has_shared == 1) {
                 acc += downo[a.n_used * a.hidden + i];
+            } else if (a.has_shared == 2) {
+                float g = y[a.wts_at + a.n_used];
+                float w = 1.0f / (1.0f + exp(-g));
+                acc += w * downo[a.n_used * a.hidden + i];
             }
             delta[i] = acc;
         }
@@ -8484,10 +8518,12 @@ struct GpuMegaArgs {
     up_stride: u64,
     down_stride: u64,
     sigmoid: u32,
+    /// 0 = none, 1 = always-on weight 1, 2 = gated via `sh_gout_off`.
     has_shared: u32,
     sh_gate_off: u64,
     sh_up_off: u64,
     sh_down_off: u64,
+    sh_gout_off: u64,
 }
 
 /// How many threadgroups the megakernel launches. Every TG must be RESIDENT
@@ -8865,7 +8901,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 let mut gu_kernels = [""; 2];
                 // Kernels carrying the SWIGLU_X down-projection variant.
                 let sw_capable = |k: &str| {
-                    matches!(k, "matvec_q2_k" | "matvec_q3_k_mv" | "matvec_q4_k_mv" | "matvec_q8_0" | "matvec_q8_0_mv")
+                    matches!(k, "matvec_q2_k" | "matvec_q3_k_mv" | "matvec_q4_k_mv"
+                        | "matvec_q5_k_mv" | "matvec_q8_0" | "matvec_q8_0_mv")
                 };
                 // With a shared expert, fusion is only safe when the shared
                 // down carries the variant too - otherwise its slot would
@@ -8936,7 +8973,10 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     }
                 };
                 max_expert = max_expert.max(n_expert);
-                let mega = if mega_enabled() && n_expert <= 256 && shared_gate.is_none() {
+                // shared_gate (GLM gated shared expert) is supported as
+                // has_shared=2 inside the megakernel; the old barrier that
+                // refused any shared_gate blocked the GLM decode win.
+                let mega = if mega_enabled() && n_expert <= 256 {
                     let gf = mega_fmt(mats[0].ty);
                     let uf = mega_fmt(mats[1].ty);
                     let df = mega_fmt(mats[2].ty);
@@ -9713,7 +9753,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             split_here!("wo");
             }
             // The megakernel absorbs the whole FFN half, resnorm included.
-            if let FfnRefs::Moe { mega: Some(mega_state), router, router_bias, mats, strides, n_expert, expert_ffn, n_used, sigmoid, shared, .. } = &refs.ffn {
+            if let FfnRefs::Moe { mega: Some(mega_state), router, router_bias, mats, strides, n_expert, expert_ffn, n_used, sigmoid, shared, shared_gate, .. } = &refs.ffn {
                 // The megakernel covers softmax (Qwen) and sigmoid+bias
                 // gating with a shared-expert slot (GLM) when the quant
                 // formats have cores in the kernel.
@@ -9753,18 +9793,23 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     up_stride: strides[1],
                     down_stride: strides[2],
                     sigmoid: *sigmoid as u32,
-                    has_shared: shared.is_some() as u32,
+                    has_shared: match (shared.is_some(), shared_gate.is_some()) {
+                        (false, _) => 0,
+                        (true, false) => 1,
+                        (true, true) => 2,
+                    },
                     sh_gate_off: shared.as_ref().map_or(0, |(m, _)| m[0].w_off),
                     sh_up_off: shared.as_ref().map_or(0, |(m, _)| m[1].w_off),
                     sh_down_off: shared.as_ref().map_or(0, |(m, _)| m[2].w_off),
+                    sh_gout_off: shared_gate.as_ref().map_or(0, |(m, _)| m.w_off),
                 };
                 enc.set_bytes(
                     6,
                     std::mem::size_of::<GpuMegaArgs>() as u64,
                     &margs as *const GpuMegaArgs as *const _,
                 );
-                // Buffers 7-10: router bias and the shared expert's weights;
-                // dummies when unused (the kernel skips them on the flags).
+                // Buffers 7-11: router bias, shared expert weights, optional
+                // shared-gate projection; dummies when unused.
                 match router_bias {
                     Some(rb) => enc.set_buffer(7, Some(&gpu.chunks[rb.chunk].buf), rb.off),
                     None => enc.set_buffer(7, Some(y), 0),
@@ -9780,6 +9825,10 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         enc.set_buffer(9, Some(y), 0);
                         enc.set_buffer(10, Some(y), 0);
                     }
+                }
+                match shared_gate {
+                    Some((sg, _)) => enc.set_buffer(11, Some(&gpu.chunks[sg.chunk].buf), 0),
+                    None => enc.set_buffer(11, Some(y), 0),
                 }
                 enc.dispatch_thread_groups(
                     MTLSize::new(ntg as u64, 1, 1),
@@ -13000,8 +13049,9 @@ fn q6_kernel() -> &'static str {
 }
 
 /// The q5_k llama-structure matvec. Default ON for GLM shared gate/up and
-/// any other Q5_K decode weights; `ALLPAKA_Q5_MV=0` restores the reference
-/// block-per-lane kernel. Needs Mac A/B confirmation on glm-4.5-air shapes.
+/// qwen35moe expert down (Q5_K). Carries SWIGLU_X so decode SWFUSE can fuse
+/// the down projection. `ALLPAKA_Q5_MV=0` restores the reference
+/// block-per-lane kernel. Needs Mac A/B confirmation on glm/qwen35 shapes.
 fn q5_mv() -> bool {
     static MV: OnceLock<bool> = OnceLock::new();
     *MV.get_or_init(|| std::env::var("ALLPAKA_Q5_MV").map_or(true, |v| v != "0"))
@@ -13045,11 +13095,12 @@ fn attend_rows_kernel() -> &'static str {
     }
 }
 
-/// The llama-structure decode attention: `ALLPAKA_ATTN_MV=0` reverts to the
-/// position-per-step kernel.
+/// The llama-structure decode attention. Default ON: four-position-in-flight
+/// flash-attn vec path. `ALLPAKA_ATTN_MV=0` reverts to the position-per-step
+/// kernel.
 fn attend_kernel() -> &'static str {
     static MV: OnceLock<bool> = OnceLock::new();
-    if *MV.get_or_init(|| std::env::var("ALLPAKA_ATTN_MV").is_ok_and(|v| v == "1")) {
+    if *MV.get_or_init(|| std::env::var("ALLPAKA_ATTN_MV").map_or(true, |v| v != "0")) {
         return "attend_mv";
     }
     static SG: OnceLock<usize> = OnceLock::new();

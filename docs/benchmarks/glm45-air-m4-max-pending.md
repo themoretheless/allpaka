@@ -15,12 +15,12 @@ scripts/bench-matrix.sh models/glm-4.5-air-Q4_K_M.gguf
 
 Historical note from `docs/moe-prefill.md`: prefill reached llama parity
 (~363–368 vs ~361–376); decode remained behind. This branch adds Q5_K/Q8_0
-`_mv` matvecs and default SWFUSE aimed at that decode gap — re-measure before
-claiming a win.
+`_mv` matvecs, default SWFUSE / ATTN_MV, and MEGA `has_shared=2` (gated
+shared expert) aimed at that decode gap — re-measure before claiming a win.
 
 ## Method
 
 Same fail-closed GPU bench and alternating A/B protocol as
 `docs/benchmarks/qwen3-30b-m4-max-2026-09-02.md`. Keep
-`ALLPAKA_Q5_MV` / `ALLPAKA_Q8_MV` / `ALLPAKA_SWFUSE` recorded in the report
-env dump.
+`ALLPAKA_Q5_MV` / `ALLPAKA_Q8_MV` / `ALLPAKA_SWFUSE` / `ALLPAKA_ATTN_MV` /
+`ALLPAKA_MEGA` recorded in the report env dump.
