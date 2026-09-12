@@ -203,9 +203,8 @@ mmbench modes: `MM_ID=1` (grouped mmid, `MM_ACT`/`MM_EXP`/`MM_USED`),
   explains only 11.8 -> 8.5. The in-model mechanism is unidentified.
 - Decode gap (35.8 vs llama ~41-43 tok/s) is a separate front — see
   `docs/decode-opts.md` for the Q5_K/Q8_0 `_mv` + default SWFUSE / ATTN_MV
-  work and MEGA `has_shared=2` (GLM / qwen35 gated shared) aimed at it
-  (needs M4 Max remeasure; `ALLPAKA_MEGA=1` still opt-in).
-- MEGA expert cap is 256 for qwen35moe opt-in (`ALLPAKA_MEGA=1`).
+  work (MEGA aimed at that gap is **disabled** until a non-spinning redesign;
+  do not set `ALLPAKA_MEGA`).
 
 # qwen35moe prefill (Qwen3.6-35B-A3B, same machine)
 

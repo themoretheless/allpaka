@@ -12,6 +12,7 @@ mod client;
 mod config;
 use allpaka_gguf as gguf;
 mod rag_mcp;
+mod rbench_llama;
 mod report;
 mod serve;
 mod verify;
@@ -91,6 +92,43 @@ enum Command {
         /// twice, plain and speculative, and asserts the streams match.
         #[arg(long, requires = "engine")]
         draft: Option<PathBuf>,
+    },
+
+    /// Paired allpaka vs llama.cpp throughput via rbench (AB/BA process pairs).
+    Rbench {
+        /// GGUF model path.
+        #[arg(value_name = "GGUF")]
+        model: PathBuf,
+        /// Prefill tokens (ALLPAKA_BENCH_PP / llama -p).
+        #[arg(long, default_value_t = 480)]
+        pp: u32,
+        /// Decode tokens (ALLPAKA_BENCH_TG / llama -n).
+        #[arg(long, default_value_t = 32)]
+        tg: u32,
+        /// Independent AB/BA process pairs.
+        #[arg(long, default_value_t = 5)]
+        repeats: u32,
+        /// Discarded warmup pairs before measurement (GPU clock settle).
+        #[arg(long, default_value_t = 1)]
+        warmup: u32,
+        /// Sleep between engines within a pair, milliseconds.
+        #[arg(long, default_value_t = 1500)]
+        cooldown_ms: u64,
+        /// Relative regression threshold percent for rbench compare.
+        #[arg(long, default_value_t = 5.0)]
+        threshold: f64,
+        /// allpaka binary (default: this executable / ALLPAKA_BIN).
+        #[arg(long)]
+        allpaka: Option<PathBuf>,
+        /// llama-bench binary (default: llama-bench / LLAMA_BENCH).
+        #[arg(long)]
+        llama_bench: Option<PathBuf>,
+        /// Fail with exit 1 if rbench reports a regression vs llama.
+        #[arg(long)]
+        check: bool,
+        /// Output directory for run.json / comparison.json / raw logs.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 
     /// Place several models one per memory pool, one endpoint each.
@@ -314,6 +352,31 @@ fn main() -> Result<()> {
                 bail!("pass --serve, --connect <host:port>, --mem, or --engine <model>")
             }
         },
+        Command::Rbench {
+            model,
+            pp,
+            tg,
+            repeats,
+            warmup,
+            cooldown_ms,
+            threshold,
+            allpaka,
+            llama_bench,
+            check,
+            out,
+        } => rbench_llama::run(rbench_llama::Options {
+            model,
+            pp,
+            tg,
+            repeats,
+            warmup,
+            cooldown_ms,
+            threshold_percent: threshold,
+            check,
+            allpaka_bin: rbench_llama::resolve_allpaka_bin(allpaka)?,
+            llama_bench: rbench_llama::resolve_llama_bench(llama_bench),
+            out: out.unwrap_or_else(rbench_llama::default_out_dir),
+        }),
         Command::Plan {
             model,
             config: config_path,
