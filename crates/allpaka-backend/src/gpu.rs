@@ -150,6 +150,13 @@ constant bool DUAL_GW [[function_constant(5)]];
 // y_row_stride elements apart. Off: plain indexed decode.
 constant bool ROWS [[function_constant(6)]];
 
+// Last INDEXED slot reads weights from buffer 11 / w2_off instead of
+// ids[slot]*stride. Lets the GLM shared expert's Q8_0 down ride in the
+// same dispatch as the routed experts (one more parallel slot), dropping
+// the separate shared-down launch. Must be pinned false when unused:
+// unset bool constants read as TRUE on this Metal.
+constant bool SHARED_TAIL [[function_constant(7)]];
+
 inline float4 sw4(float4 g, float4 u) {
     return u * (g / (1.0f + exp(-g)));
 }
@@ -250,6 +257,7 @@ kernel void matvec_q8_0(
 // SIMD group, activations registered once (8 floats) and reused across
 // both rows. 16 threads per output row; INDEXED requires n_out % 2 == 0.
 // SWIGLU_X folds silu(gate)*up into the activation loads for MoE down.
+// SHARED_TAIL: the last indexed slot uses w2/w2_off (GLM shared expert).
 kernel void matvec_q8_0_mv(
     device const uchar* w [[buffer(0)]],
     device const float* x [[buffer(1)]],
@@ -260,6 +268,8 @@ kernel void matvec_q8_0_mv(
     device const uint* ids [[buffer(6)]],
     constant IdxArgs& idx [[buffer(7)]],
     device const float* xu [[buffer(8)]],
+    device const uchar* w2 [[buffer(11)]],
+    constant ulong& w2_off [[buffer(12)]],
     uint tid [[thread_position_in_grid]],
     ushort tiisg [[thread_index_in_simdgroup]])
 {
@@ -273,8 +283,15 @@ kernel void matvec_q8_0_mv(
     uint nrows = any ? min(2u, ycols - fr) : 0u;
     uint slot = INDEXED ? fr / n_out : 0;
     uint j0 = INDEXED ? fr % n_out : fr;
+    device const uchar* wm = w;
+    ulong woff = w_off;
     if (INDEXED) {
-        w += ids[(ROWS ? tok * idx.ids_stride : 0u) + slot] * idx.stride;
+        if (SHARED_TAIL && slot + 1u == idx.slots) {
+            wm = w2;
+            woff = w2_off;
+        } else {
+            wm += ids[(ROWS ? tok * idx.ids_stride : 0u) + slot] * idx.stride;
+        }
         x += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
         if (SWIGLU_X) {
             xu += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
@@ -282,7 +299,7 @@ kernel void matvec_q8_0_mv(
     }
     uint nb = n_in / 32;
     ulong nb01 = (ulong)nb * 34;
-    device const uchar* row0 = w + w_off + (ulong)j0 * nb01;
+    device const uchar* row0 = wm + woff + (ulong)j0 * nb01;
 
     const short ix = tiisg / 4;   // 0..7
     const short il = tiisg % 4;   // 0..3
@@ -1103,10 +1120,10 @@ kernel void matvec_q6_k_mv(
 }
 
 // Port of llama.cpp's kernel_mul_mv_q4_K_f32 structure (MIT), same skeleton
-// as matvec_q3_k_mv: 2 rows per SIMD group, activations registered once
-// (yl low half, yh high half), nibble masks in place with 1/16 and 1/256
-// folded into the scale multipliers. 16 threads per output row; INDEXED
-// requires n_out % 2 == 0.
+// as matvec_q3_k_mv: NR0 rows per SIMD group via LPR (default NR0=2),
+// activations registered once (yl low half, yh high half), nibble masks in
+// place with 1/16 and 1/256 folded into the scale multipliers. INDEXED
+// requires n_out % NR0 == 0 so a group never straddles expert slots.
 kernel void matvec_q4_k_mv(
     device const uchar* w [[buffer(0)]],
     device const float* x [[buffer(1)]],
@@ -1139,9 +1156,10 @@ kernel void matvec_q4_k_mv(
     const ushort kmask2 = 0x0f0f;
     const ushort kmask3 = 0xc0c0;
 
+    const uint NR0 = 32 / LPR;
     uint gate_rows = INDEXED ? n_out * idx.slots : n_out;
     uint ycols = DUAL_GW ? gate_rows * 2 : gate_rows;
-    uint flat = (tid / 32) * 2;
+    uint flat = (tid / 32) * NR0;
     bool any = flat < (ROWS ? gate_rows * idx.n_rows : ycols);
     if (!any) flat = 0;
     uint tok = ROWS ? flat / gate_rows : 0;
@@ -1156,7 +1174,7 @@ kernel void matvec_q4_k_mv(
         yout = y2;
     }
     uint fr = ROWS ? flat - tok * gate_rows : flat;
-    uint nrows = any ? min(2u, gate_rows - fr) : 0u;
+    uint nrows = any ? min(NR0, gate_rows - fr) : 0u;
     uint slot = INDEXED ? fr / n_out : 0;
     uint j0 = INDEXED ? fr % n_out : fr;
     if (INDEXED) {
@@ -1177,7 +1195,7 @@ kernel void matvec_q4_k_mv(
 
     float yl[16];
     float yh[16];
-    float sumf[2] = {0.0f, 0.0f};
+    float sumf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
     device const float* y4 = x + ix * 256 + 64 * iq + 8 * ir;
     device const float* u4 = xu + ix * 256 + 64 * iq + 8 * ir;
@@ -1202,7 +1220,7 @@ kernel void matvec_q4_k_mv(
         device const ushort* q1 = (device const ushort*)(blk + 16) + 16 * iq + 4 * ir;
         device const uchar* dh = blk;
 
-        for (uint row = 0; row < 2; row++) {
+        for (uint row = 0; row < NR0; row++) {
             sc16[0] = sc[0] & kmask1;
             sc16[1] = sc[2] & kmask1;
             sc16[2] = ((sc[4] >> 0) & kmask2) | ((sc[0] & kmask3) >> 2);
@@ -1241,7 +1259,7 @@ kernel void matvec_q4_k_mv(
         u4 += 4 * 256;
     }
 
-    for (uint row = 0; row < 2; row++) {
+    for (uint row = 0; row < NR0; row++) {
         float s = simd_sum(sumf[row]);
         if (tiisg == 0 && row < nrows) {
             yout[(ROWS ? tok * idx.y_row_stride : 0u) + fr + row] = s;
@@ -1250,10 +1268,10 @@ kernel void matvec_q4_k_mv(
 }
 
 
-// Port of llama.cpp's kernel_mul_mv_q5_K_f32 structure (MIT): 2 rows per
-// SIMD group, activations registered once (yl/yh) and reused across rows,
-// with the 5th bit folded via qh masks. 16 threads per output row; INDEXED
-// requires n_out % 2 == 0. Used heavily for GLM shared gate/up (Q5_K).
+// Port of llama.cpp's kernel_mul_mv_q5_K_f32 structure (MIT): NR0 rows per
+// SIMD group via LPR (default NR0=2), activations registered once (yl/yh)
+// and reused across rows, with the 5th bit folded via qh masks. INDEXED
+// requires n_out % NR0 == 0. Used heavily for GLM shared gate/up (Q5_K).
 kernel void matvec_q5_k_mv(
     device const uchar* w [[buffer(0)]],
     device const float* x [[buffer(1)]],
@@ -1271,13 +1289,14 @@ kernel void matvec_q5_k_mv(
     const ushort kmask2 = 0x0f0f;
     const ushort kmask3 = 0xc0c0;
 
+    const uint NR0 = 32 / LPR;
     uint ycols = INDEXED ? n_out * idx.slots : n_out;
-    uint flat = (tid / 32) * 2;
+    uint flat = (tid / 32) * NR0;
     bool any = flat < (ROWS ? ycols * idx.n_rows : ycols);
     if (!any) flat = 0;
     uint tok = ROWS ? flat / ycols : 0;
     uint fr = ROWS ? flat - tok * ycols : flat;
-    uint nrows = any ? min(2u, ycols - fr) : 0u;
+    uint nrows = any ? min(NR0, ycols - fr) : 0u;
     uint slot = INDEXED ? fr / n_out : 0;
     uint j0 = INDEXED ? fr % n_out : fr;
     if (INDEXED) {
@@ -1305,7 +1324,7 @@ kernel void matvec_q5_k_mv(
 
     float yl[16];
     float yh[16];
-    float sumf[2] = {0.0f, 0.0f};
+    float sumf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     ushort sc16[4];
     thread const uchar* sc8 = (thread const uchar*)sc16;
 
@@ -1330,7 +1349,7 @@ kernel void matvec_q5_k_mv(
         device const uchar* qh = blk + 16 + l0;
         device const uchar* dh = blk;
 
-        for (uint row = 0; row < 2; ++row) {
+        for (uint row = 0; row < NR0; ++row) {
             device const uchar* q2 = q1 + 64;
             sc16[0] = a[0] & kmask1;
             sc16[1] = a[2] & kmask1;
@@ -1370,7 +1389,7 @@ kernel void matvec_q5_k_mv(
         u1 += 4 * 256;
     }
 
-    for (uint row = 0; row < 2; row++) {
+    for (uint row = 0; row < NR0; row++) {
         float s = simd_sum(sumf[row]);
         if (tiisg == 0 && row < nrows) {
             y[(ROWS ? tok * idx.y_row_stride : 0u) + fr + row] = s;
@@ -7368,10 +7387,10 @@ impl Gpu {
                 4,
             );
             // NB: an UNSET bool function constant reads as TRUE on this
-            // Metal (measured, macOS 26 / M4 Max) - DUAL_GW (5) and ROWS (6)
-            // must be pinned to false explicitly or the non-dual/non-rows
-            // specialisations silently take the variant path.
-            for index in [5u64, 6] {
+            // Metal (measured, macOS 26 / M4 Max) - DUAL_GW (5), ROWS (6),
+            // and SHARED_TAIL (7) must be pinned to false explicitly or
+            // the non-variant specialisations silently take the variant path.
+            for index in [5u64, 6, 7] {
                 let f = false;
                 consts.set_constant_value_at_index(
                     &f as *const bool as *const _,
@@ -7408,7 +7427,14 @@ impl Gpu {
                     index,
                 );
             }
-            for (index, value) in [(2u64, true), (3, false), (4, false), (5, true), (6, false)] {
+            for (index, value) in [
+                (2u64, true),
+                (3, false),
+                (4, false),
+                (5, true),
+                (6, false),
+                (7, false),
+            ] {
                 consts.set_constant_value_at_index(
                     &value as *const bool as *const _,
                     metal::MTLDataType::Bool,
@@ -7446,7 +7472,14 @@ impl Gpu {
                     index,
                 );
             }
-            for (index, value) in [(2u64, true), (3, swiglu), (4, false), (5, false), (6, true)] {
+            for (index, value) in [
+                (2u64, true),
+                (3, swiglu),
+                (4, false),
+                (5, false),
+                (6, true),
+                (7, false),
+            ] {
                 consts.set_constant_value_at_index(
                     &value as *const bool as *const _,
                     metal::MTLDataType::Bool,
@@ -7457,6 +7490,49 @@ impl Gpu {
                 .library
                 .get_function(name, Some(consts))
                 .map_err(|e| eprintln!("metal: {name}<rows, lanes {lpr}> failed: {e}"))
+                .ok()?;
+            let p = self.device.new_compute_pipeline_state_with_function(&f).ok()?;
+            self.pipelines.insert(key, p);
+        }
+        self.pipelines.get(&key)
+    }
+
+    /// INDEXED matvec with SHARED_TAIL: last slot reads w2/w2_off (GLM
+    /// shared expert down folded into the routed down launch).
+    fn pipeline_shared_tail(
+        &mut self,
+        name: &'static str,
+        lpr: usize,
+        swiglu: bool,
+    ) -> Option<&ComputePipelineState> {
+        let key = (name, 1, lpr + 32000 + if swiglu { 2000 } else { 0 });
+        if !self.pipelines.contains_key(&key) {
+            let consts = metal::FunctionConstantValues::new();
+            for (index, value) in [(0u64, 1u32), (1, lpr as u32)] {
+                consts.set_constant_value_at_index(
+                    &value as *const u32 as *const _,
+                    metal::MTLDataType::UInt,
+                    index,
+                );
+            }
+            for (index, value) in [
+                (2u64, true),
+                (3, swiglu),
+                (4, false),
+                (5, false),
+                (6, false),
+                (7, true),
+            ] {
+                consts.set_constant_value_at_index(
+                    &value as *const bool as *const _,
+                    metal::MTLDataType::Bool,
+                    index,
+                );
+            }
+            let f = self
+                .library
+                .get_function(name, Some(consts))
+                .map_err(|e| eprintln!("metal: {name}<shared_tail, lanes {lpr}> failed: {e}"))
                 .ok()?;
             let p = self.device.new_compute_pipeline_state_with_function(&f).ok()?;
             self.pipelines.insert(key, p);
@@ -7728,15 +7804,33 @@ fn lanes_per_row(ty: GgmlType, n_in: usize) -> usize {
         });
         return 32 / nr0;
     }
-    // The q3/q4 counterparts carry 2 rows per SIMD group: 16 threads per row.
+    // The q3/q4/q5/q6/q8 llama-structure kernels use NR0 rows per SIMD
+    // group via LPR (NR0 = 32/LPR). Q4/Q5 are sweepable for GLM 1408-wide
+    // expert/shared shapes; others stay at the port default (NR0=2).
     if ty == GgmlType::Q3K && q3_mv() {
         return 16;
     }
     if ty == GgmlType::Q4K && q4_mv() {
-        return 16;
+        static NR0: OnceLock<usize> = OnceLock::new();
+        let nr0 = *NR0.get_or_init(|| {
+            std::env::var("ALLPAKA_Q4_NR0")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|n: &usize| [1, 2, 4].contains(n))
+                .unwrap_or(2)
+        });
+        return 32 / nr0;
     }
     if ty == GgmlType::Q5K && q5_mv() {
-        return 16;
+        static NR0: OnceLock<usize> = OnceLock::new();
+        let nr0 = *NR0.get_or_init(|| {
+            std::env::var("ALLPAKA_Q5_NR0")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|n: &usize| [1, 2, 4].contains(n))
+                .unwrap_or(2)
+        });
+        return 32 / nr0;
     }
     if ty == GgmlType::Q6K && q6_mv() {
         return 16;
@@ -8656,6 +8750,9 @@ enum FfnRefs {
         /// gate + up as one dual-output indexed dispatch
         /// (ALLPAKA_DECODE_GUFUSE).
         gu_dual: Option<ComputePipelineState>,
+        /// Indexed down with SHARED_TAIL: routed + shared Q8_0 down in one
+        /// launch (`ALLPAKA_SHARED_TAIL=1`).
+        down_tail: Option<ComputePipelineState>,
     },
 }
 
@@ -9040,6 +9137,23 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 } else {
                     None
                 };
+                // Fold shared Q8_0 down into the indexed expert down (+1
+                // parallel slot). Same format only; gate/up stay separate
+                // (Q4 vs Q5 on GLM). Opt out: ALLPAKA_SHARED_TAIL=0.
+                let down_tail = match &shared_refs {
+                    Some((smats, _))
+                        if shared_tail()
+                            && mats[2].kernel == "matvec_q8_0_mv"
+                            && smats[2].kernel == "matvec_q8_0_mv"
+                            && mats[2].ty == smats[2].ty
+                            && (hidden * (*n_used + 1)) % 2 == 0 =>
+                    {
+                        let lpr = lanes_per_row(mats[2].ty, *expert_ffn);
+                        gpu.pipeline_shared_tail("matvec_q8_0_mv", lpr, sw_fused)
+                            .map(|p| p.to_owned())
+                    }
+                    _ => None,
+                };
                 FfnRefs::Moe {
                     router: router_ref,
                     router_state,
@@ -9069,6 +9183,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         None => None,
                     },
                     gu_dual,
+                    down_tail,
                 }
             }
         };
@@ -9881,7 +9996,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             // h = rmsnorm(x + delta) * ffn_norm. On the plain MoE path the
             // norm fuses with the router into ONE dispatch below
             // (resnorm_router), so it runs there instead.
-            // `ALLPAKA_RFUSE=0` reverts to the separate norm dispatch.
+            // `ALLPAKA_RFUSE=1` enables; kept off under default `normflag`
+            // (max-performance): fused path loses ~20–27% decode on GLM / 30B.
             let moe_plain =
                 !refs.normflag && rfuse() && matches!(&refs.ffn, FfnRefs::Moe { .. });
             if !moe_plain {
@@ -9936,6 +10052,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     shared,
                     shared_gate,
                     gu_dual,
+                    down_tail,
                 } => {
                     let n_slots = *n_used + shared.is_some() as usize;
                     let sig_last = shared_gate.is_some() as u32;
@@ -9947,6 +10064,9 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         // kernels back to back, so the boundary between them
                         // was pure launch and drain latency. Not under
                         // normflag: that path orders the norm by spin-flag.
+                        // Measured 2026-09-12: under normflag, RFUSE costs
+                        // ~20–27% decode (GLM / qwen3-30b) despite fewer
+                        // dispatches — keep gated off.
                         enc.set_compute_pipeline_state(&resnorm_router_state);
                         enc.set_buffer(0, Some(y), e(x_at));
                         enc.set_buffer(1, Some(y), e(delta_at));
@@ -10031,15 +10151,15 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     }
                     }
                     split_here!("router");
-                    // qwen35moe: the shared expert's gate projection writes
-                    // the raw logit into its combine slot; the combine
-                    // kernel applies the sigmoid.
+                    // Barrier after router/ids. shared_gate only writes
+                    // wts[n_used] and rides with gate/up (same as verify);
+                    // serial-before-barrier measured as noise on GLM (2026-09-12).
+                    bar_c(&enc, b'f');
+                    if !probe_skip("experts") {
                     if let Some((sg_mat, sg_state)) = shared_gate {
                         matvec(&enc, sg_state, sg_mat, hidden, 1, h_at, wts_at + *n_used);
                         ffn_dispatches += 1;
                     }
-                    bar_c(&enc, b'f');
-                    if !probe_skip("experts") {
                     match gu_dual {
                         // gate + up in ONE dual-output indexed dispatch.
                         Some(st) => {
@@ -10117,18 +10237,65 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         // (buffer 8) and applies swiglu on load.
                         enc.set_buffer(8, Some(y), e(up_at));
                     }
-                    matvec_idx(&enc, &states[2], &mats[2], *expert_ffn, hidden,
-                        gate_at, downo_at, strides[2], *n_used, *expert_ffn);
-                    ffn_dispatches += 1;
-                    if let Some((smats, sstates)) = shared {
-                        // The shared down reads its own raw up slot.
-                        if *sw_fused {
-                            enc.set_buffer(8, Some(y), e(up_at + *n_used * *expert_ffn));
+                    match (down_tail, shared) {
+                        (Some(tail), Some((smats, _))) => {
+                            // Routed + shared Q8_0 down in one INDEXED launch.
+                            enc.set_compute_pipeline_state(tail);
+                            enc.set_buffer(0, Some(&gpu.chunks[mats[2].chunk].buf), 0);
+                            enc.set_buffer(1, Some(y), e(gate_at));
+                            enc.set_buffer(2, Some(y), e(downo_at));
+                            let a = *expert_ffn as u32;
+                            let b = hidden as u32;
+                            enc.set_bytes(3, 4, &a as *const u32 as *const _);
+                            enc.set_bytes(4, 4, &b as *const u32 as *const _);
+                            enc.set_bytes(5, 8, &mats[2].w_off as *const u64 as *const _);
+                            enc.set_buffer(6, Some(y), e(ids_at));
+                            let slots = (*n_used + 1) as u32;
+                            let idx = GpuIdxArgs {
+                                stride: strides[2],
+                                slots,
+                                x_stride: *expert_ffn as u32,
+                                ids_stride: 0,
+                                x_row_stride: 0,
+                                y_row_stride: 0,
+                                n_rows: 0,
+                            };
+                            enc.set_bytes(
+                                7,
+                                std::mem::size_of::<GpuIdxArgs>() as u64,
+                                &idx as *const GpuIdxArgs as *const _,
+                            );
+                            if *sw_fused {
+                                enc.set_buffer(8, Some(y), e(up_at));
+                            }
+                            enc.set_buffer(11, Some(&gpu.chunks[smats[2].chunk].buf), 0);
+                            enc.set_bytes(12, 8, &smats[2].w_off as *const u64 as *const _);
+                            let lpr = lanes_per_row(mats[2].ty, *expert_ffn) as u64;
+                            enc.dispatch_thread_groups(
+                                MTLSize::new(
+                                    ((hidden * (*n_used + 1)) as u64 * lpr).div_ceil(128),
+                                    1,
+                                    1,
+                                ),
+                                MTLSize::new(128, 1, 1),
+                            );
+                            ffn_dispatches += 1;
                         }
-                        matvec(&enc, &sstates[2], &smats[2], *expert_ffn, hidden,
-                            gate_at + *n_used * *expert_ffn,
-                            downo_at + *n_used * hidden);
-                        ffn_dispatches += 1;
+                        _ => {
+                            matvec_idx(&enc, &states[2], &mats[2], *expert_ffn, hidden,
+                                gate_at, downo_at, strides[2], *n_used, *expert_ffn);
+                            ffn_dispatches += 1;
+                            if let Some((smats, sstates)) = shared {
+                                // The shared down reads its own raw up slot.
+                                if *sw_fused {
+                                    enc.set_buffer(8, Some(y), e(up_at + *n_used * *expert_ffn));
+                                }
+                                matvec(&enc, &sstates[2], &smats[2], *expert_ffn, hidden,
+                                    gate_at + *n_used * *expert_ffn,
+                                    downo_at + *n_used * hidden);
+                                ffn_dispatches += 1;
+                            }
+                        }
                     }
                     }
                     split_here!("down");
@@ -11068,6 +11235,7 @@ fn encode_verify_tokens(
                     shared,
                     shared_gate,
                     gu_dual: _,
+                    down_tail: _,
                 } => {
                     let n_slots = *n_used + shared.is_some() as usize;
                     // Stage 1: FFN resnorm + router matvec + gating top-k over
@@ -13248,12 +13416,21 @@ fn rtopk_fused() -> bool {
 }
 
 /// The decode-side fold of the FFN residual norm into the router top-k
-/// (resnorm_router). OFF by default: effect in the noise on M4 Max
-/// (qwen3-30b decode, 385 vs 382-387 ms GPU executing over 32 tokens).
-/// `ALLPAKA_RFUSE=1` enables.
+/// (resnorm_router). OFF by default: under max-performance `normflag`,
+/// enabling costs ~20–27% decode tok/s on GLM-Air / qwen3-30b (2026-09-12)
+/// despite fewer dispatches. `ALLPAKA_RFUSE=1` enables only when
+/// `normflag` is also off (`moe_plain`).
 fn rfuse() -> bool {
     static R: OnceLock<bool> = OnceLock::new();
     *R.get_or_init(|| std::env::var("ALLPAKA_RFUSE").is_ok_and(|v| v == "1"))
+}
+
+/// Fold the GLM shared expert's Q8_0 down into the indexed expert-down
+/// launch (+1 parallel slot). OFF by default until cool A/B confirms a win;
+/// `ALLPAKA_SHARED_TAIL=1` enables.
+fn shared_tail() -> bool {
+    static S: OnceLock<bool> = OnceLock::new();
+    *S.get_or_init(|| std::env::var("ALLPAKA_SHARED_TAIL").is_ok_and(|v| v == "1"))
 }
 
 /// K-step 64 for the LL mm kernels: `ALLPAKA_MM_K64=1` to enable.
