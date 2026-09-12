@@ -146,6 +146,7 @@ fn print_capability_report(model: &allpaka_model::Model<'_>, file: &allpaka_gguf
         let metal_matmul = matches!(
             tensor.ggml_type,
             allpaka_gguf::GgmlType::F32
+                | allpaka_gguf::GgmlType::Q5_0
                 | allpaka_gguf::GgmlType::Q8_0
                 | allpaka_gguf::GgmlType::Q2K
                 | allpaka_gguf::GgmlType::Q3K
@@ -537,10 +538,15 @@ pub fn measure_engine(
             let at = emitted.iter().zip(&plain).position(|(a, b)| a != b);
             anyhow::bail!("speculative stream DIVERGED from plain greedy at {at:?}");
         }
-    } else if model.config.nextn {
+    } else if model.config.nextn
+        && !std::env::var("ALLPAKA_BENCH_SKIP_MTP").is_ok_and(|v| v == "1")
+    {
         // Native MTP speculation: the draft is the model's own nextn block,
         // no second model. Same harness as the draft path - the emitted
         // stream must be a bit-exact copy of plain greedy.
+        // `ALLPAKA_BENCH_SKIP_MTP=1` skips this (rbench / paired A/B): MTP
+        // does not change measured pp/tg rates but heats the GPU and adds
+        // pair-to-pair variance.
         let k: usize = std::env::var("ALLPAKA_DRAFT_K")
             .ok()
             .and_then(|v| v.parse().ok())

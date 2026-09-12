@@ -163,6 +163,12 @@ pub mod gpu {
     pub fn decode_token(_req: &TokenReq) -> Option<Vec<f32>> {
         None
     }
+    pub struct PrefillFusion<'a> {
+        pub attn_norm: &'a [u8],
+        pub ffn_norm: &'a [u8],
+        pub router: &'a [u8],
+        pub n_expert: usize,
+    }
     pub struct PrefillAttnReq<'a> {
         pub wq: (allpaka_gguf::GgmlType, &'a [u8], usize),
         pub wk: (allpaka_gguf::GgmlType, &'a [u8], usize),
@@ -173,6 +179,9 @@ pub mod gpu {
         pub q_norm: Option<&'a [f32]>,
         pub k_norm: Option<&'a [f32]>,
         pub ropes: &'a [[f32; 2]],
+        pub rot_dim: usize,
+        pub gate_in_q: bool,
+        pub attn_bias: Option<(&'a [u8], &'a [u8], &'a [u8])>,
         pub eps: f32,
         pub cache: &'a SharedRegion,
         pub k_off: usize,
@@ -183,9 +192,56 @@ pub mod gpu {
         pub n_kv_heads: usize,
         pub base: usize,
         pub scale: f32,
+        pub fusion: Option<PrefillFusion<'a>>,
     }
     pub fn prefill_attn_block(_req: &PrefillAttnReq) -> Option<Vec<f32>> {
         None
+    }
+    pub struct PrefillGdnReq<'a> {
+        pub wqkv: (allpaka_gguf::GgmlType, &'a [u8], usize),
+        pub zgate: (allpaka_gguf::GgmlType, &'a [u8], usize),
+        pub alpha: &'a [u8],
+        pub beta: &'a [u8],
+        pub conv1d: &'a [u8],
+        pub a: &'a [f32],
+        pub dt: &'a [f32],
+        pub ssm_norm: &'a [f32],
+        pub ssm_out: (allpaka_gguf::GgmlType, &'a [u8], usize),
+        pub heads_k: usize,
+        pub heads_v: usize,
+        pub d: usize,
+        pub d_conv: usize,
+        pub hidden: usize,
+        pub m: usize,
+        pub eps: f32,
+        pub ssm: &'a SharedRegion,
+        pub ssm_slots: Option<(&'a SharedRegion, usize)>,
+        pub conv_off: usize,
+        pub state_off: usize,
+        pub fusion: Option<PrefillFusion<'a>>,
+    }
+    pub fn prefill_gdn_block(_req: &PrefillGdnReq) -> Option<Vec<f32>> {
+        None
+    }
+    pub struct GroupedCombine<'a> {
+        pub tok_off: &'a [u32],
+        pub hit_row: &'a [u32],
+        pub hit_w: &'a [f32],
+        pub m: usize,
+    }
+    pub struct GroupedRoute<'a> {
+        pub n_used: usize,
+        pub norm: bool,
+        pub scale: f32,
+        pub bias: Option<&'a [f32]>,
+        pub sigmoid: bool,
+    }
+    pub struct GroupedShared<'a> {
+        pub gate: (allpaka_gguf::GgmlType, &'a [u8]),
+        pub up: (allpaka_gguf::GgmlType, &'a [u8]),
+        pub down: (allpaka_gguf::GgmlType, &'a [u8]),
+        pub ffn: usize,
+        pub gate_out: Option<(allpaka_gguf::GgmlType, &'a [u8])>,
     }
     pub struct GroupedFfnReq<'a> {
         pub gate: (allpaka_gguf::GgmlType, &'a [u8]),
@@ -196,9 +252,21 @@ pub mod gpu {
         pub ffn: usize,
         pub groups: &'a [[u32; 3]],
         pub x: &'a [f32],
+        pub tok: &'a [u32],
         pub total_rows: usize,
+        pub fused: Option<GroupedCombine<'a>>,
+        pub shared: Option<GroupedShared<'a>>,
+        pub route: Option<GroupedRoute<'a>>,
     }
     pub fn ffn_batch_grouped(_req: &GroupedFfnReq) -> Option<Vec<f32>> {
+        None
+    }
+    pub fn attend_project(
+        _req: &AttnReq,
+        _ty: allpaka_gguf::GgmlType,
+        _w: &[u8],
+        _n_out: usize,
+    ) -> Option<Vec<f32>> {
         None
     }
     /// `(calls, dispatches, encode_ns, wait_ns)`: all zero without a GPU.

@@ -4,3 +4,4 @@
 rag.duckdb
 *.zip
 .DS_Store
+.rbench/

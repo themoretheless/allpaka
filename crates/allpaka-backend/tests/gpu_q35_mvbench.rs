@@ -5,6 +5,7 @@
 //! [2048,4096]; head Q6_K [248320,2048]. Same harness as gpu_glm_mvbench.
 //!
 //! Run: `cargo test -p allpaka-backend --test gpu_q35_mvbench -- --ignored --nocapture`
+//! A/B: `ALLPAKA_Q5_MV=0 ALLPAKA_Q8_MV=0` against defaults.
 
 #![cfg(target_os = "macos")]
 
