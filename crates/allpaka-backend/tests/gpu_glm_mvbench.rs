@@ -8,6 +8,9 @@
 //! in seconds without loading a 46 GiB model.
 //!
 //! Run: `cargo test -p allpaka-backend --test gpu_glm_mvbench -- --ignored --nocapture`
+//! A/B new kernels: `ALLPAKA_Q5_MV=0 ALLPAKA_Q8_MV=0` (and optionally
+//! `ALLPAKA_SWFUSE=0`) against the defaults.
+//! Indexed geometry A/B: default `MV_ID` on vs `ALLPAKA_MV_ID=0` (flat).
 
 #![cfg(target_os = "macos")]
 
@@ -52,6 +55,28 @@ fn bench_shape(region: &[u8], ty: GgmlType, n_out: usize, n_in: usize, label: &s
     );
 }
 
+fn bench_indexed(region: &[u8], ty: GgmlType, n_out: usize, n_in: usize, slots: usize, label: &str) {
+    let expert = n_out * block_bytes(ty, n_in);
+    let need = expert * slots;
+    if region.len() < need {
+        println!("{label:<28} SKIP: need {need} bytes");
+        return;
+    }
+    let rounds = 5u32;
+    let _ = gpu::indexed_matvec_bandwidth(&region[..need], ty, n_out, n_in, slots, 1);
+    match gpu::indexed_matvec_bandwidth(&region[..need], ty, n_out, n_in, slots, rounds) {
+        Some(gbps) => println!(
+            "{label:<28} {ty:?} [{n_out},{n_in}] x{slots} idx: {gbps:.1} GB/s GPU-clock (MV_ID={})",
+            if std::env::var("ALLPAKA_MV_ID").map_or(true, |v| v != "0") {
+                "on"
+            } else {
+                "off"
+            }
+        ),
+        None => println!("{label:<28} SKIP: indexed_matvec_bandwidth failed"),
+    }
+}
+
 #[test]
 #[ignore = "a bandwidth measurement; run explicitly"]
 fn glm_decode_matvecs_report_effective_bandwidth() {
@@ -84,4 +109,8 @@ fn glm_decode_matvecs_report_effective_bandwidth() {
     bench_shape(region, GgmlType::Q4K, 1024, 4096, "attn k");
     bench_shape(region, GgmlType::Q6K, 1024, 4096, "attn v");
     bench_shape(region, GgmlType::Q6K, 8192, 4096, "head slice");
+
+    println!("--- indexed ×8 (GLM n_used) ---");
+    bench_indexed(region, GgmlType::Q4K, 1408, 4096, 8, "idx gate/up ×8");
+    bench_indexed(region, GgmlType::Q8_0, 4096, 1408, 8, "idx down ×8");
 }
