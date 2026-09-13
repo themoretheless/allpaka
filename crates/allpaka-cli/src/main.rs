@@ -12,7 +12,7 @@ mod client;
 mod config;
 use allpaka_gguf as gguf;
 mod rag_mcp;
-mod rbench_llama;
+mod airbug_llama;
 mod report;
 mod serve;
 mod verify;
@@ -94,8 +94,8 @@ enum Command {
         draft: Option<PathBuf>,
     },
 
-    /// Paired allpaka vs llama.cpp throughput via rbench (AB/BA process pairs).
-    Rbench {
+    /// Paired allpaka vs llama.cpp throughput via airbug (AB/BA process pairs).
+    Airbug {
         /// GGUF model path.
         #[arg(value_name = "GGUF")]
         model: PathBuf,
@@ -114,7 +114,7 @@ enum Command {
         /// Sleep between engines within a pair, milliseconds.
         #[arg(long, default_value_t = 1500)]
         cooldown_ms: u64,
-        /// Relative regression threshold percent for rbench compare.
+        /// Relative regression threshold percent for airbug compare.
         #[arg(long, default_value_t = 5.0)]
         threshold: f64,
         /// allpaka binary (default: this executable / ALLPAKA_BIN).
@@ -123,7 +123,7 @@ enum Command {
         /// llama-bench binary (default: llama-bench / LLAMA_BENCH).
         #[arg(long)]
         llama_bench: Option<PathBuf>,
-        /// Fail with exit 1 if rbench reports a regression vs llama.
+        /// Fail with exit 1 if airbug reports a regression vs llama.
         #[arg(long)]
         check: bool,
         /// Output directory for run.json / comparison.json / raw logs.
@@ -352,7 +352,7 @@ fn main() -> Result<()> {
                 bail!("pass --serve, --connect <host:port>, --mem, or --engine <model>")
             }
         },
-        Command::Rbench {
+        Command::Airbug {
             model,
             pp,
             tg,
@@ -364,7 +364,7 @@ fn main() -> Result<()> {
             llama_bench,
             check,
             out,
-        } => rbench_llama::run(rbench_llama::Options {
+        } => airbug_llama::run(airbug_llama::Options {
             model,
             pp,
             tg,
@@ -373,9 +373,9 @@ fn main() -> Result<()> {
             cooldown_ms,
             threshold_percent: threshold,
             check,
-            allpaka_bin: rbench_llama::resolve_allpaka_bin(allpaka)?,
-            llama_bench: rbench_llama::resolve_llama_bench(llama_bench),
-            out: out.unwrap_or_else(rbench_llama::default_out_dir),
+            allpaka_bin: airbug_llama::resolve_allpaka_bin(allpaka)?,
+            llama_bench: airbug_llama::resolve_llama_bench(llama_bench),
+            out: out.unwrap_or_else(airbug_llama::default_out_dir),
         }),
         Command::Plan {
             model,

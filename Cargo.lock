@@ -3,6 +3,27 @@
 version = 3
 
 [[package]]
+name = "airbug-bench"
+version = "0.6.0"
+source = "git+https://github.com/themoretheless/airbug?branch=release#75b1321b5d7ff2cee983379f539c07726a7d27e5"
+dependencies = [
+ "airbug-bench-macros",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "airbug-bench-macros"
+version = "0.6.0"
+source = "git+https://github.com/themoretheless/airbug?branch=release#75b1321b5d7ff2cee983379f539c07726a7d27e5"
+dependencies = [
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "allpaka-backend"
 version = "0.1.0"
 dependencies = [
@@ -17,13 +38,13 @@ dependencies = [
 name = "allpaka-cli"
 version = "0.1.0"
 dependencies = [
+ "airbug-bench",
  "allpaka-backend",
  "allpaka-core",
  "allpaka-gguf",
  "allpaka-model",
  "anyhow",
  "clap",
- "rbench",
  "serde",
  "serde_json",
  "toml",
@@ -174,7 +195,7 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -275,7 +296,7 @@ checksum = "ea5190182e6915eb873ddbc16e23b711b6eb1f9c00a0d0a3a91b5f6228475225"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -418,16 +439,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rbench"
-version = "0.1.0"
-source = "git+https://github.com/themoretheless/rbench?branch=release#5574db15e1d0fc1265a39022eb1a14ec727abefe"
-dependencies = [
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -454,7 +465,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -498,6 +509,17 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "syn"
+version = "2.0.119"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
 version = "3.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
@@ -505,6 +527,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.5",
 ]
 
 [[package]]

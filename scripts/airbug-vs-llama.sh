@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Paired allpaka vs llama.cpp throughput via `allpaka rbench` (rbench schema).
+# Paired allpaka vs llama.cpp throughput via `allpaka airbug` (airbug schema).
 set -euo pipefail
 
-model=${1:?usage: rbench-vs-llama.sh MODEL [PP=480] [TG=32] [REPEATS=5]}
+model=${1:?usage: airbug-vs-llama.sh MODEL [PP=480] [TG=32] [REPEATS=5]}
 pp=${2:-480}
 tg=${3:-32}
 repeats=${4:-5}
 root=$(cd "$(dirname "$0")/.." && pwd)
 allpaka=${ALLPAKA_BIN:-$root/target/release/allpaka}
 llama=${LLAMA_BENCH:-llama-bench}
-out=${BENCH_OUTPUT_DIR:-$root/.rbench/llama-compare-$(date +%s)}
+out=${BENCH_OUTPUT_DIR:-$root/.airbug-bench/llama-compare-$(date +%s)}
 
 [[ -x "$allpaka" ]] || {
   echo "building release allpaka..." >&2
@@ -18,7 +18,7 @@ out=${BENCH_OUTPUT_DIR:-$root/.rbench/llama-compare-$(date +%s)}
 }
 command -v "$llama" >/dev/null || [[ -x "$llama" ]]
 
-exec "$allpaka" rbench "$model" \
+exec "$allpaka" airbug "$model" \
   --pp "$pp" \
   --tg "$tg" \
   --repeats "$repeats" \

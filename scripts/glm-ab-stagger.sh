@@ -7,7 +7,7 @@ export ALLPAKA_PROFILE=max-performance
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MODEL=${MODEL:-/Users/themoretheless/Documents/Sources/allpaka/models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf}
 BIN=${BIN:-$ROOT/target/release/allpaka}
-OUT=${OUT:-$ROOT/.rbench/glm-mvid-$(date +%Y%m%d-%H%M%S)}
+OUT=${OUT:-$ROOT/.airbug-bench/glm-mvid-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$OUT"
 
 metal=$(swift -e 'import Metal; print(MTLCreateSystemDefaultDevice()?.name ?? "nil")')

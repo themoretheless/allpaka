@@ -18,7 +18,7 @@ historical ~360 / ~41–43 ceilings).
 Decode GPU path: `32/32` successes, `25696` dispatches / 32 tok ≈ **803 / tok**
 (shared expert + MoE; no MEGA).
 
-## Process-paired rbench (high variance)
+## Process-paired airbug (high variance)
 
 `.rbench/glm45-air-20260912-172451` — warmup 1 + 5 AB/BA pairs, cooldown 2.5s.
 Medians (Inconclusive): prefill llama 81.8 / allpaka 46.8 (−38%); decode
@@ -32,7 +32,7 @@ ALLPAKA_BENCH_SKIP_MTP=1 ALLPAKA_BENCH_PP=480 ALLPAKA_BENCH_TG=32 \
 llama-bench -m models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf \
   -p 480 -n 32 -r 3 -ngl 99 -ctk f16 -ctv f16
 # Paired (noisy when hot):
-scripts/rbench-vs-llama.sh models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf
+scripts/airbug-vs-llama.sh models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf
 ```
 
 ## Notes

@@ -1,9 +1,9 @@
-//! Paired allpaka vs llama.cpp throughput benches via the `rbench` observation
+//! Paired allpaka vs llama.cpp throughput benches via the airbug observation
 //! schema. Candidate = allpaka, baseline = llama-bench; AB/BA order is balanced
 //! across independent process pairs.
 
 use anyhow::{bail, Context, Result};
-use rbench::{
+use airbug::{
     analysis::{self, Decision},
     Availability, Case, Direction, Metric, Observation, Run, Status,
 };
@@ -286,7 +286,7 @@ fn parse_llama_json(bytes: &[u8]) -> Result<Vec<LlamaRow>> {
     }
 }
 
-/// Run paired allpaka/llama throughput benches and write an rbench `Run`.
+/// Run paired allpaka/llama throughput benches and write an airbug `Run`.
 pub fn run(opts: Options) -> Result<()> {
     anyhow::ensure!((1..=32768).contains(&opts.pp), "pp must be in 1..=32768");
     anyhow::ensure!((1..=32768).contains(&opts.tg), "tg must be in 1..=32768");
@@ -312,11 +312,11 @@ pub fn run(opts: Options) -> Result<()> {
     let work = opts.out.join("raw");
     std::fs::create_dir_all(&work)?;
 
-    // Full-file SHA on 50–70 GiB GGUFs blocks rbench for minutes before any
+    // Full-file SHA on 50–70 GiB GGUFs blocks airbug for minutes before any
     // pair runs. Prefer size+mtime+inode fingerprint for provenance; override
-    // with ALLPAKA_RBENCH_HASH=1 for a real sha256 when needed.
-    let model_sha = if std::env::var("ALLPAKA_RBENCH_HASH").is_ok_and(|v| v == "1") {
-        rbench::hash_file(&opts.model).map_err(|e| anyhow::anyhow!("{e}"))?
+    // with ALLPAKA_AIRBUG_HASH=1 for a real sha256 when needed.
+    let model_sha = if std::env::var("ALLPAKA_AIRBUG_HASH").is_ok_and(|v| v == "1") {
+        airbug::hash_file(&opts.model).map_err(|e| anyhow::anyhow!("{e}"))?
     } else {
         let meta = std::fs::metadata(&opts.model)
             .with_context(|| format!("stat {}", opts.model.display()))?;
@@ -355,7 +355,7 @@ pub fn run(opts: Options) -> Result<()> {
     );
 
     for w in 1..=opts.warmup {
-        eprintln!("rbench warmup {w}/{} (discarded)", opts.warmup);
+        eprintln!("airbug warmup {w}/{} (discarded)", opts.warmup);
         let tag = 10_000 + w;
         let _ = run_allpaka(&opts, tag, &work)?;
         cooldown(&opts);
@@ -369,7 +369,7 @@ pub fn run(opts: Options) -> Result<()> {
     let mut lp_pp = Vec::new();
     let mut lp_tg = Vec::new();
     for pair in 1..=opts.repeats {
-        eprintln!("rbench pair {pair}/{}", opts.repeats);
+        eprintln!("airbug pair {pair}/{}", opts.repeats);
         let allpaka_first = pair % 2 == 1;
         let (ap, lp) = if allpaka_first {
             let ap = run_allpaka(&opts, pair, &work)?;
@@ -408,12 +408,12 @@ pub fn run(opts: Options) -> Result<()> {
     run.status = Status::Complete;
     run.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
     let run_path = opts.out.join("run.json");
-    rbench::model::write_new(&run_path, &run).map_err(|e| anyhow::anyhow!("{e}"))?;
+    airbug::model::write_new(&run_path, &run).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let comparisons = analysis::compare(&run, None, opts.threshold_percent, 0.05)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let cmp_path = opts.out.join("comparison.json");
-    rbench::model::write_new(&cmp_path, &comparisons).map_err(|e| anyhow::anyhow!("{e}"))?;
+    airbug::model::write_new(&cmp_path, &comparisons).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     fn max_of(xs: &[f64]) -> Option<f64> {
         xs.iter().copied().filter(|v| v.is_finite()).reduce(f64::max)
@@ -428,7 +428,7 @@ pub fn run(opts: Options) -> Result<()> {
         "warmup": opts.warmup,
         "cooldown_ms": opts.cooldown_ms,
         "comparison_validated": true,
-        "schema": "rbench-llama-v1",
+        "schema": "airbug-llama-v1",
         "limitations": [
             "llama-bench generates its own token stream; MoE routing is not identical",
             "KV precision must be verified against the allpaka capability report",
@@ -455,9 +455,9 @@ pub fn run(opts: Options) -> Result<()> {
         });
     }
     let summary_path = opts.out.join("summary.json");
-    rbench::model::write_new(&summary_path, &summary).map_err(|e| anyhow::anyhow!("{e}"))?;
+    airbug::model::write_new(&summary_path, &summary).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    println!("RBENCH_RESULT={}", serde_json::to_string(&run)?);
+    println!("AIRBUG_RESULT={}", serde_json::to_string(&run)?);
     println!();
     println!(
         "{:<10} {:>10} {:>10} {:>10} {:<16}",
@@ -486,7 +486,7 @@ pub fn run(opts: Options) -> Result<()> {
 
     let failed = comparisons.iter().any(|c| c.decision == Decision::Regression);
     if failed && opts.check {
-        bail!("rbench reported a regression vs llama at ±{}%", opts.threshold_percent);
+        bail!("airbug reported a regression vs llama at ±{}%", opts.threshold_percent);
     }
     if failed {
         eprintln!(
@@ -517,7 +517,7 @@ pub fn default_out_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    PathBuf::from(format!(".rbench/llama-compare-{stamp}"))
+    PathBuf::from(format!(".airbug-bench/llama-compare-{stamp}"))
 }
 
 pub fn resolve_allpaka_bin(explicit: Option<PathBuf>) -> Result<PathBuf> {

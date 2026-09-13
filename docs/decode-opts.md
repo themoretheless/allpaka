@@ -31,23 +31,23 @@ ALLPAKA_ATTN_MV=0 cargo test -p allpaka-backend --test gpu_glm_mvbench -- --igno
 ALLPAKA_Q4_NR0=1 ALLPAKA_Q5_NR0=4 cargo test -p allpaka-backend --test gpu_glm_mvbench -- --ignored --nocapture
 ```
 
-Paired end-to-end vs llama.cpp (rbench AB/BA process pairs):
+Paired end-to-end vs llama.cpp (airbug AB/BA process pairs):
 
 ```sh
 cargo build --release -p allpaka-cli
-./target/release/allpaka rbench models/glm-4.5-air-Q4_K_M.gguf --pp 480 --tg 32 --repeats 5
+./target/release/allpaka airbug models/glm-4.5-air-Q4_K_M.gguf --pp 480 --tg 32 --repeats 5
 # or:
-scripts/rbench-vs-llama.sh models/glm-4.5-air-Q4_K_M.gguf
+scripts/airbug-vs-llama.sh models/glm-4.5-air-Q4_K_M.gguf
 scripts/bench-matrix.sh \
   models/qwen3-30b-a3b-Q4_K_M.gguf \
   models/qwen3.5-35b-a3b-Q4_K_M.gguf \
   models/glm-4.5-air-Q4_K_M.gguf
 ```
 
-Artifacts land in `.rbench/llama-compare-*` (`run.json`, `comparison.json`, `raw/`).
+Artifacts land in `.airbug-bench/llama-compare-*` (`run.json`, `comparison.json`, `raw/`).
 Legacy shell A/B: `scripts/bench-compare.sh`.
 
-rbench defaults: 1 discarded warmup pair, 1.5s cooldown between engines,
+airbug defaults: 1 discarded warmup pair, 1.5s cooldown between engines,
 `ALLPAKA_BENCH_SKIP_MTP=1`, `ALLPAKA_PROFILE=max-performance` if unset.
 
 ## Measured dead ends (2026-09-12, cool machine)
@@ -96,7 +96,7 @@ Ship rule: keep `MV_ID` default ON only if cool GLM decode ≥ llama; otherwise
   are matvec throughput (geometry / ISA), not serial fusions (RFUSE/GUFUSE
   tuition). Do **not** re-enable `ALLPAKA_DECODE_GUFUSE` / multi-TG device
   sync without a Mac-safe harness. Judge progress on cool-machine sustained
-  A/B, not hot process-paired rbench.
+  A/B, not hot process-paired airbug.
 - Absolute tok/s drift with thermal state (both engines); prefer Δ% after
   warmup. GLM 2026-09-12 warm: prefill ≈ llama parity, decode ~0.82×
   (`docs/benchmarks/glm45-air-m4-max-pending.md`).
