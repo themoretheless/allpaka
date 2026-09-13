@@ -50,6 +50,96 @@ pub fn gpu_time_stats() -> (u64, u64) {
     (GPU_BUSY_NS.load(Ordering::Relaxed), SCHED_NS.load(Ordering::Relaxed))
 }
 
+/// Effective GB/s of one INDEXED matvec (slots experts × n_out rows).
+/// Used by `gpu_glm_mvbench` to A/B `ALLPAKA_MV_ID` geometry vs plain.
+/// `w` must hold at least `slots` contiguous expert matrices of shape
+/// `[n_out, n_in]` (same layout as decode expert packs).
+pub fn indexed_matvec_bandwidth(
+    w: &[u8],
+    ty: GgmlType,
+    n_out: usize,
+    n_in: usize,
+    slots: usize,
+    rounds: u32,
+) -> Option<f64> {
+    let gpu_m = GPU.get()?.as_ref()?;
+    let mut gpu = gpu_m.lock().ok()?;
+    let mat = resolve(&gpu, ty, w)?;
+    let lpr = lanes_per_row(ty, n_in);
+    let state = gpu
+        .pipeline_full(mat.kernel, 1, lpr, true, false)?
+        .to_owned();
+    let expert_bytes = match ty {
+        GgmlType::Q4K => n_out * (n_in / 256) * 144,
+        GgmlType::Q5K => n_out * (n_in / 256) * 176,
+        GgmlType::Q8_0 => n_out * (n_in / 32) * 34,
+        _ => return None,
+    };
+    if w.len() < expert_bytes.saturating_mul(slots.max(1)) {
+        return None;
+    }
+    let stride = expert_bytes as u64;
+    // Stage x / ids / y in the shared arenas.
+    let x_elems = n_in.max(slots);
+    let y_elems = n_out * slots + slots;
+    gpu.ensure_arenas(x_elems * 4, y_elems * 4);
+    unsafe {
+        let xp = gpu.x_arena.contents() as *mut f32;
+        for i in 0..n_in {
+            *xp.add(i) = 0.01;
+        }
+        let yp = gpu.y_arena.contents() as *mut u32;
+        for s in 0..slots {
+            *yp.add(s) = (s % slots.max(1)) as u32;
+        }
+    }
+    let before = gpu_time_stats();
+    objc::rc::autoreleasepool(|| {
+        for _ in 0..rounds {
+            let cmd = gpu.queue.new_command_buffer();
+            let enc = cmd.compute_command_encoder_with_dispatch_type(
+                metal::MTLDispatchType::Concurrent,
+            );
+            enc.set_compute_pipeline_state(&state);
+            enc.set_buffer(0, Some(&gpu.chunks[mat.chunk].buf), 0);
+            enc.set_buffer(1, Some(&gpu.x_arena), 0);
+            enc.set_buffer(2, Some(&gpu.y_arena), (slots * 4) as u64);
+            let a = n_in as u32;
+            let b = n_out as u32;
+            enc.set_bytes(3, 4, &a as *const u32 as *const _);
+            enc.set_bytes(4, 4, &b as *const u32 as *const _);
+            enc.set_bytes(5, 8, &mat.w_off as *const u64 as *const _);
+            enc.set_buffer(6, Some(&gpu.y_arena), 0);
+            let idx = GpuIdxArgs {
+                stride,
+                slots: slots as u32,
+                x_stride: 0,
+                ids_stride: 0,
+                x_row_stride: 0,
+                y_row_stride: 0,
+                n_rows: 0,
+            };
+            enc.set_bytes(
+                7,
+                std::mem::size_of::<GpuIdxArgs>() as u64,
+                &idx as *const GpuIdxArgs as *const _,
+            );
+            dispatch_mv_indexed(&enc, ty, n_in, n_out, slots);
+            enc.end_encoding();
+            cmd.commit();
+            cmd.wait_until_completed();
+            note_gpu_times(cmd);
+        }
+    });
+    let after = gpu_time_stats();
+    let busy = (after.0 - before.0) as f64 / 1e9;
+    if busy <= 0.0 {
+        return None;
+    }
+    let total = (expert_bytes * slots) as f64 * rounds as f64;
+    Some(total / busy / 1e9)
+}
+
 /// Read the completed buffer's own timestamps. CFTimeIntervals in seconds on
 /// a shared clock, so differences are valid; zeros (no GPU work) are skipped.
 fn note_gpu_times(cmd: &metal::CommandBufferRef) {
@@ -157,6 +247,11 @@ constant bool ROWS [[function_constant(6)]];
 // unset bool constants read as TRUE on this Metal.
 constant bool SHARED_TAIL [[function_constant(7)]];
 
+// Llama-style mul_mv_id grid for INDEXED decode: slot = tpg.z, rows on x.
+// Default ON; ALLPAKA_MV_ID=0 compiles the flat n_out*slots 1D packing.
+// Must be pinned explicitly (unset bool == TRUE on this Metal).
+constant bool MV_ID_GRID [[function_constant(8)]];
+
 inline float4 sw4(float4 g, float4 u) {
     return u * (g / (1.0f + exp(-g)));
 }
@@ -253,11 +348,11 @@ kernel void matvec_q8_0(
 
 
 
-// Port of llama.cpp's kernel_mul_mv_q8_0_f32 structure (MIT): 2 rows per
-// SIMD group, activations registered once (8 floats) and reused across
-// both rows. 16 threads per output row; INDEXED requires n_out % 2 == 0.
-// SWIGLU_X folds silu(gate)*up into the activation loads for MoE down.
-// SHARED_TAIL: the last indexed slot uses w2/w2_off (GLM shared expert).
+// Port of llama.cpp's kernel_mul_mv_q8_0_f32 structure (MIT): NR0 rows per
+// SIMD group via LPR (default NR0=2). INDEXED requires n_out % NR0 == 0.
+// Decode INDEXED uses llama mul_mv_id geometry: grid.z = slot, grid.x covers
+// n_out (ALLPAKA_MV_ID=0 keeps flat n_out*slots 1D). SWIGLU_X / SHARED_TAIL
+// as before. qs loads are packed_char4 (34-byte blocks).
 kernel void matvec_q8_0_mv(
     device const uchar* w [[buffer(0)]],
     device const float* x [[buffer(1)]],
@@ -270,19 +365,43 @@ kernel void matvec_q8_0_mv(
     device const float* xu [[buffer(8)]],
     device const uchar* w2 [[buffer(11)]],
     constant ulong& w2_off [[buffer(12)]],
-    uint tid [[thread_position_in_grid]],
+    uint3 tpg [[thread_position_in_grid]],
     ushort tiisg [[thread_index_in_simdgroup]])
 {
     constexpr short NQ = 8;
-    uint ycols = INDEXED ? n_out * idx.slots : n_out;
-    uint flat = (tid / 32) * 2;
-    bool any = flat < (ROWS ? ycols * idx.n_rows : ycols);
-    if (!any) flat = 0;
-    uint tok = ROWS ? flat / ycols : 0;
-    uint fr = ROWS ? flat - tok * ycols : flat;
-    uint nrows = any ? min(2u, ycols - fr) : 0u;
-    uint slot = INDEXED ? fr / n_out : 0;
-    uint j0 = INDEXED ? fr % n_out : fr;
+    const uint NR0 = 32 / LPR;
+    // ID grid: one expert slot per z; x walks rows within that expert.
+    // ROWS stays on the flat 1D packing (MTP verify). MV_ID_GRID opt-out
+    // restores flat INDEXED for A/B (ALLPAKA_MV_ID=0).
+    const bool id_grid = INDEXED && !ROWS && MV_ID_GRID;
+    uint tok = 0;
+    uint slot = 0;
+    uint j0 = 0;
+    uint y_base = 0;
+    uint nrows = 0;
+    bool any;
+    if (id_grid) {
+        slot = tpg.z;
+        j0 = (tpg.x / 32) * NR0;
+        any = slot < idx.slots && j0 < n_out;
+        if (!any) {
+            j0 = 0;
+            slot = 0;
+        }
+        nrows = any ? min(NR0, n_out - j0) : 0u;
+        y_base = slot * n_out + j0;
+    } else {
+        uint ycols = INDEXED ? n_out * idx.slots : n_out;
+        uint flat = (tpg.x / 32) * NR0;
+        any = flat < (ROWS ? ycols * idx.n_rows : ycols);
+        if (!any) flat = 0;
+        tok = ROWS ? flat / ycols : 0;
+        uint fr = ROWS ? flat - tok * ycols : flat;
+        nrows = any ? min(NR0, ycols - fr) : 0u;
+        slot = INDEXED ? fr / n_out : 0;
+        j0 = INDEXED ? fr % n_out : fr;
+        y_base = fr;
+    }
     device const uchar* wm = w;
     ulong woff = w_off;
     if (INDEXED) {
@@ -301,30 +420,26 @@ kernel void matvec_q8_0_mv(
     ulong nb01 = (ulong)nb * 34;
     device const uchar* row0 = wm + woff + (ulong)j0 * nb01;
 
-    const short ix = tiisg / 4;   // 0..7
-    const short il = tiisg % 4;   // 0..3
-    float yl[NQ];
-    float sumf[2] = {0.0f, 0.0f};
+    const short ix = tiisg / 4;
+    const short il = tiisg % 4;
+    float sumf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
     device const float* yb = x + (ulong)ix * 32u + (ulong)il * (uint)NQ;
     device const float* ub = xu + (ulong)ix * 32u + (ulong)il * (uint)NQ;
 
     for (uint ib = ix; ib < nb; ib += 8) {
-        for (short i = 0; i < NQ; ++i) {
-            float xv = yb[i];
-            if (SWIGLU_X) {
-                xv = sw1(xv, ub[i]);
-            }
-            yl[i] = xv;
+        float4 a0 = *(device const float4*)(yb + 0);
+        float4 a1 = *(device const float4*)(yb + 4);
+        if (SWIGLU_X) {
+            a0 = sw4(a0, *(device const float4*)(ub + 0));
+            a1 = sw4(a1, *(device const float4*)(ub + 4));
         }
         device const uchar* blk = row0 + (ulong)ib * 34u;
-        for (uint row = 0; row < 2; ++row) {
-            device const char* qs = (device const char*)(blk + 2) + il * NQ;
-            float sumq = 0.0f;
-            for (short i = 0; i < NQ; ++i) {
-                sumq += (float)qs[i] * yl[i];
-            }
-            sumf[row] += sumq * half_at(blk);
+        for (uint row = 0; row < NR0; ++row) {
+            device const packed_char4* qs =
+                (device const packed_char4*)(blk + 2 + il * NQ);
+            float sumq = dot(float4(qs[0]), a0) + dot(float4(qs[1]), a1);
+            sumf[row] += sumq * (float)(*(device const half*)blk);
             ulong step = (row + 1 < nrows) ? nb01 : 0;
             blk += step;
         }
@@ -332,10 +447,10 @@ kernel void matvec_q8_0_mv(
         ub += 8 * 32;
     }
 
-    for (uint row = 0; row < 2; row++) {
+    for (uint row = 0; row < NR0; row++) {
         float s = simd_sum(sumf[row]);
         if (tiisg == 0 && row < nrows) {
-            y[(ROWS ? tok * idx.y_row_stride : 0u) + fr + row] = s;
+            y[(ROWS ? tok * idx.y_row_stride : 0u) + y_base + row] = s;
         }
     }
 }
@@ -1139,7 +1254,7 @@ kernel void matvec_q4_k_mv(
     device const uchar* w2 [[buffer(11)]],
     constant ulong& w2_off [[buffer(12)]],
     device float* y2 [[buffer(13)]],
-    uint tid [[thread_position_in_grid]],
+    uint3 tpg [[thread_position_in_grid]],
     uint ltid [[thread_position_in_threadgroup]],
     ushort tiisg [[thread_index_in_simdgroup]])
 {
@@ -1157,26 +1272,47 @@ kernel void matvec_q4_k_mv(
     const ushort kmask3 = 0xc0c0;
 
     const uint NR0 = 32 / LPR;
-    uint gate_rows = INDEXED ? n_out * idx.slots : n_out;
-    uint ycols = DUAL_GW ? gate_rows * 2 : gate_rows;
-    uint flat = (tid / 32) * NR0;
-    bool any = flat < (ROWS ? gate_rows * idx.n_rows : ycols);
-    if (!any) flat = 0;
-    uint tok = ROWS ? flat / gate_rows : 0;
-    // The second half of the flat rows belongs to the up matrix.
+    // ID grid for plain INDEXED decode; DUAL_GW / ROWS stay flat 1D.
+    const bool id_grid = INDEXED && !ROWS && !DUAL_GW && MV_ID_GRID;
+    uint tok = 0;
+    uint slot = 0;
+    uint j0 = 0;
+    uint y_base = 0;
+    uint nrows = 0;
+    bool any;
     device const uchar* wm = w;
     ulong woff = w_off;
     device float* yout = y;
-    if (DUAL_GW && flat >= gate_rows) {
-        flat -= gate_rows;
-        wm = w2;
-        woff = w2_off;
-        yout = y2;
+    if (id_grid) {
+        slot = tpg.z;
+        j0 = (tpg.x / 32) * NR0;
+        any = slot < idx.slots && j0 < n_out;
+        if (!any) {
+            j0 = 0;
+            slot = 0;
+        }
+        nrows = any ? min(NR0, n_out - j0) : 0u;
+        y_base = slot * n_out + j0;
+    } else {
+        uint gate_rows = INDEXED ? n_out * idx.slots : n_out;
+        uint ycols = DUAL_GW ? gate_rows * 2 : gate_rows;
+        uint flat = (tpg.x / 32) * NR0;
+        any = flat < (ROWS ? gate_rows * idx.n_rows : ycols);
+        if (!any) flat = 0;
+        tok = ROWS ? flat / gate_rows : 0;
+        // The second half of the flat rows belongs to the up matrix.
+        if (DUAL_GW && flat >= gate_rows) {
+            flat -= gate_rows;
+            wm = w2;
+            woff = w2_off;
+            yout = y2;
+        }
+        uint fr = ROWS ? flat - tok * gate_rows : flat;
+        nrows = any ? min(NR0, gate_rows - fr) : 0u;
+        slot = INDEXED ? fr / n_out : 0;
+        j0 = INDEXED ? fr % n_out : fr;
+        y_base = fr;
     }
-    uint fr = ROWS ? flat - tok * gate_rows : flat;
-    uint nrows = any ? min(NR0, gate_rows - fr) : 0u;
-    uint slot = INDEXED ? fr / n_out : 0;
-    uint j0 = INDEXED ? fr % n_out : fr;
     if (INDEXED) {
         wm += ids[(ROWS ? tok * idx.ids_stride : 0u) + slot] * idx.stride;
         x += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
@@ -1204,17 +1340,40 @@ kernel void matvec_q4_k_mv(
     thread const uchar* sc8 = (thread const uchar*)sc16;
 
     for (uint ib = ix; ib < nb; ib += 4) {
-        float4 sumy = {0.0f, 0.0f, 0.0f, 0.0f};
-        for (short i = 0; i < 8; ++i) {
-            yl[i + 0] = SWIGLU_X ? sw1(y4[i + 0], u4[i + 0]) : y4[i + 0];
-            sumy[0] += yl[i + 0];
-            yl[i + 8] = SWIGLU_X ? sw1(y4[i + 32], u4[i + 32]) : y4[i + 32];
-            sumy[1] += yl[i + 8];
-            yh[i + 0] = SWIGLU_X ? sw1(y4[i + 128], u4[i + 128]) : y4[i + 128];
-            sumy[2] += yh[i + 0];
-            yh[i + 8] = SWIGLU_X ? sw1(y4[i + 160], u4[i + 160]) : y4[i + 160];
-            sumy[3] += yh[i + 8];
+        // float4 activation loads (same idea as Q8 `_mv`); weight dequant
+        // still walks yl/yh element-wise.
+        float4 yl0 = *(device const float4*)(y4 + 0);
+        float4 yl1 = *(device const float4*)(y4 + 4);
+        float4 yl2 = *(device const float4*)(y4 + 32);
+        float4 yl3 = *(device const float4*)(y4 + 36);
+        float4 yh0 = *(device const float4*)(y4 + 128);
+        float4 yh1 = *(device const float4*)(y4 + 132);
+        float4 yh2 = *(device const float4*)(y4 + 160);
+        float4 yh3 = *(device const float4*)(y4 + 164);
+        if (SWIGLU_X) {
+            yl0 = sw4(yl0, *(device const float4*)(u4 + 0));
+            yl1 = sw4(yl1, *(device const float4*)(u4 + 4));
+            yl2 = sw4(yl2, *(device const float4*)(u4 + 32));
+            yl3 = sw4(yl3, *(device const float4*)(u4 + 36));
+            yh0 = sw4(yh0, *(device const float4*)(u4 + 128));
+            yh1 = sw4(yh1, *(device const float4*)(u4 + 132));
+            yh2 = sw4(yh2, *(device const float4*)(u4 + 160));
+            yh3 = sw4(yh3, *(device const float4*)(u4 + 164));
         }
+        *((thread float4*)(yl + 0)) = yl0;
+        *((thread float4*)(yl + 4)) = yl1;
+        *((thread float4*)(yl + 8)) = yl2;
+        *((thread float4*)(yl + 12)) = yl3;
+        *((thread float4*)(yh + 0)) = yh0;
+        *((thread float4*)(yh + 4)) = yh1;
+        *((thread float4*)(yh + 8)) = yh2;
+        *((thread float4*)(yh + 12)) = yh3;
+        float4 sumy = {
+            yl0[0] + yl0[1] + yl0[2] + yl0[3] + yl1[0] + yl1[1] + yl1[2] + yl1[3],
+            yl2[0] + yl2[1] + yl2[2] + yl2[3] + yl3[0] + yl3[1] + yl3[2] + yl3[3],
+            yh0[0] + yh0[1] + yh0[2] + yh0[3] + yh1[0] + yh1[1] + yh1[2] + yh1[3],
+            yh2[0] + yh2[1] + yh2[2] + yh2[3] + yh3[0] + yh3[1] + yh3[2] + yh3[3],
+        };
         device const uchar* blk = row0 + ib * 144;
         device const ushort* sc = (device const ushort*)(blk + 4) + iq;
         device const ushort* q1 = (device const ushort*)(blk + 16) + 16 * iq + 4 * ir;
@@ -1262,7 +1421,7 @@ kernel void matvec_q4_k_mv(
     for (uint row = 0; row < NR0; row++) {
         float s = simd_sum(sumf[row]);
         if (tiisg == 0 && row < nrows) {
-            yout[(ROWS ? tok * idx.y_row_stride : 0u) + fr + row] = s;
+            yout[(ROWS ? tok * idx.y_row_stride : 0u) + y_base + row] = s;
         }
     }
 }
@@ -7357,7 +7516,8 @@ impl Gpu {
             tile,
             lpr + if indexed { 1000 } else { 0 }
                 + if swiglu { 2000 } else { 0 }
-                + if wait { 4000 } else { 0 },
+                + if wait { 4000 } else { 0 }
+                + if indexed && mv_id_grid() { 80000 } else { 0 },
         );
         if !self.pipelines.contains_key(&key) {
             let consts = metal::FunctionConstantValues::new();
@@ -7388,8 +7548,7 @@ impl Gpu {
             );
             // NB: an UNSET bool function constant reads as TRUE on this
             // Metal (measured, macOS 26 / M4 Max) - DUAL_GW (5), ROWS (6),
-            // and SHARED_TAIL (7) must be pinned to false explicitly or
-            // the non-variant specialisations silently take the variant path.
+            // SHARED_TAIL (7), and MV_ID_GRID (8) must be pinned explicitly.
             for index in [5u64, 6, 7] {
                 let f = false;
                 consts.set_constant_value_at_index(
@@ -7398,6 +7557,12 @@ impl Gpu {
                     index,
                 );
             }
+            let idg = indexed && mv_id_grid();
+            consts.set_constant_value_at_index(
+                &idg as *const bool as *const _,
+                metal::MTLDataType::Bool,
+                8,
+            );
             let f = self
                 .library
                 .get_function(name, Some(consts))
@@ -7434,6 +7599,7 @@ impl Gpu {
                 (5, true),
                 (6, false),
                 (7, false),
+                (8, false),
             ] {
                 consts.set_constant_value_at_index(
                     &value as *const bool as *const _,
@@ -7479,6 +7645,7 @@ impl Gpu {
                 (5, false),
                 (6, true),
                 (7, false),
+                (8, false),
             ] {
                 consts.set_constant_value_at_index(
                     &value as *const bool as *const _,
@@ -7505,7 +7672,8 @@ impl Gpu {
         lpr: usize,
         swiglu: bool,
     ) -> Option<&ComputePipelineState> {
-        let key = (name, 1, lpr + 32000 + if swiglu { 2000 } else { 0 });
+        let key = (name, 1, lpr + 32000 + if swiglu { 2000 } else { 0 }
+            + if mv_id_grid() { 80000 } else { 0 });
         if !self.pipelines.contains_key(&key) {
             let consts = metal::FunctionConstantValues::new();
             for (index, value) in [(0u64, 1u32), (1, lpr as u32)] {
@@ -7522,6 +7690,7 @@ impl Gpu {
                 (5, false),
                 (6, false),
                 (7, true),
+                (8, mv_id_grid()),
             ] {
                 consts.set_constant_value_at_index(
                     &value as *const bool as *const _,
@@ -7836,7 +8005,7 @@ fn lanes_per_row(ty: GgmlType, n_in: usize) -> usize {
         return 16;
     }
     if ty == GgmlType::Q8_0 && q8_mv() {
-        return 16;
+        return 32 / q8_nr0();
     }
     let be = ty.block_elements().unwrap_or(32) as usize;
     let blocks = (n_in / be.max(1)).max(1);
@@ -7863,6 +8032,61 @@ fn lanes_per_row(ty: GgmlType, n_in: usize) -> usize {
             .unwrap_or(1)
     });
     (base / div).max(1)
+}
+
+/// Threadgroup size for matvec dispatch. Default 128; sweep with
+/// `ALLPAKA_MV_TG` ∈ {64,128,256} (geometry only — NR0 stays 2).
+fn mv_tg() -> u64 {
+    static TG: OnceLock<u64> = OnceLock::new();
+    *TG.get_or_init(|| {
+        std::env::var("ALLPAKA_MV_TG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n: &u64| matches!(n, 64 | 128 | 256))
+            .unwrap_or(128)
+    })
+}
+
+/// Llama-style `mul_mv_id` grid for INDEXED decode matvecs (`grid.z = slots`).
+/// Default ON. `ALLPAKA_MV_ID=0` restores flat `n_out * slots` 1D packing.
+fn mv_id_grid() -> bool {
+    static S: OnceLock<bool> = OnceLock::new();
+    *S.get_or_init(|| std::env::var("ALLPAKA_MV_ID").map_or(true, |v| v != "0"))
+}
+
+/// Dispatch geometry for a matvec pipeline (LPR × rows, TG via `mv_tg`).
+fn dispatch_mv(
+    enc: &metal::ComputeCommandEncoderRef,
+    ty: GgmlType,
+    n_in: usize,
+    n_rows: usize,
+) {
+    let lpr = lanes_per_row(ty, n_in) as u64;
+    let tg = mv_tg();
+    enc.dispatch_thread_groups(
+        MTLSize::new((n_rows as u64 * lpr).div_ceil(tg), 1, 1),
+        MTLSize::new(tg, 1, 1),
+    );
+}
+
+/// Indexed MoE matvec: either llama `mul_mv_id` (`z = slots`) or flat 1D.
+fn dispatch_mv_indexed(
+    enc: &metal::ComputeCommandEncoderRef,
+    ty: GgmlType,
+    n_in: usize,
+    n_out: usize,
+    slots: usize,
+) {
+    if mv_id_grid() {
+        let lpr = lanes_per_row(ty, n_in) as u64;
+        let tg = mv_tg();
+        enc.dispatch_thread_groups(
+            MTLSize::new((n_out as u64 * lpr).div_ceil(tg), 1, slots as u64),
+            MTLSize::new(tg, 1, 1),
+        );
+    } else {
+        dispatch_mv(enc, ty, n_in, n_out * slots);
+    }
 }
 
 /// Batch size from which the tile-matmul kernels beat the tiled matvecs.
@@ -8179,13 +8403,8 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
                 );
             } else {
                 // One lane group per output row, threadgroups of four SIMD
-                // groups.
-                let per_group = 128u64;
-                let total_threads = r.n_out as u64 * lanes_per_row(r.ty, r.n_in) as u64;
-                enc.dispatch_thread_groups(
-                    MTLSize::new(total_threads.div_ceil(per_group), 1, 1),
-                    MTLSize::new(per_group, 1, 1),
-                );
+                // groups (see dispatch_mv).
+                dispatch_mv(&enc, r.ty, r.n_in, r.n_out);
             }
         }
         enc.end_encoding();
@@ -8729,6 +8948,8 @@ enum FfnRefs {
         mats: [MatRef; 3],
         states: [ComputePipelineState; 3],
         ffn_dim: usize,
+        /// Down reads silu(gate)*up via SWIGLU_X (same as MoE).
+        sw_fused: bool,
     },
     Moe {
         router: MatRef,
@@ -8979,16 +9200,24 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     resolve_or_decline("ffn.up", up.0, up.1, dbg, &mut gpu)?,
                     resolve_or_decline("ffn.down", down.0, down.1, dbg, &mut gpu)?,
                 ];
+                let sw_capable = |k: &str| {
+                    matches!(k, "matvec_q2_k" | "matvec_q3_k_mv" | "matvec_q4_k_mv"
+                        | "matvec_q5_k_mv" | "matvec_q8_0" | "matvec_q8_0_mv")
+                };
+                let sw_fused = sw_capable(mats[2].kernel)
+                    && std::env::var("ALLPAKA_SWFUSE").map_or(true, |v| v != "0");
                 let mut states = Vec::with_capacity(3);
-                for (mat, n_in) in mats.iter().zip([hidden, hidden, gate.2]) {
+                for (i, (mat, n_in)) in mats.iter().zip([hidden, hidden, gate.2]).enumerate() {
                     let lpr = lanes_per_row(mat.ty, n_in);
-                    states.push(gpu.pipeline(mat.kernel, 1, lpr)?.to_owned());
+                    let swiglu = i == 2 && sw_fused;
+                    states.push(gpu.pipeline_full(mat.kernel, 1, lpr, false, swiglu)?.to_owned());
                 }
                 max_ffn = max_ffn.max(gate.2);
                 FfnRefs::Dense {
                     mats,
                     states: states.try_into().ok()?,
                     ffn_dim: gate.2,
+                    sw_fused,
                 }
             }
             TokenFfn::Moe { router, router_bias, gate, up, down, expert_ffn, n_used, sigmoid, shared, shared_gate } => {
@@ -9046,7 +9275,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         "matvec_q4_k_mv" if n_out % 2 != 0 => "matvec_q4_k",
                         "matvec_q5_k_mv" if n_out % 2 != 0 => "matvec_q5_k",
                         "matvec_q6_k_mv" if n_out % 2 != 0 => "matvec_q6_k",
-                        "matvec_q8_0_mv" if n_out % 2 != 0 => "matvec_q8_0",
+                        "matvec_q8_0_mv" if n_out % q8_nr0() != 0 => "matvec_q8_0",
                         k => k,
                     };
                     if i < 2 {
@@ -9469,11 +9698,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             enc.set_bytes(3, 4, &a as *const u32 as *const _);
             enc.set_bytes(4, 4, &b as *const u32 as *const _);
             enc.set_bytes(5, 8, &mat.w_off as *const u64 as *const _);
-            let lpr = lanes_per_row(mat.ty, n_in) as u64;
-            enc.dispatch_thread_groups(
-                MTLSize::new((n_out as u64 * lpr).div_ceil(128), 1, 1),
-                MTLSize::new(128, 1, 1),
-            );
+            dispatch_mv(enc, mat.ty, n_in, n_out);
         };
         // The indexed form: n_out is per expert, the grid covers all slots.
         let matvec_idx = |enc: &metal::ComputeCommandEncoderRef,
@@ -9502,11 +9727,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 std::mem::size_of::<GpuIdxArgs>() as u64,
                 &idx as *const GpuIdxArgs as *const _,
             );
-            let lpr = lanes_per_row(mat.ty, n_in) as u64;
-            enc.dispatch_thread_groups(
-                MTLSize::new(((n_out * slots) as u64 * lpr).div_ceil(128), 1, 1),
-                MTLSize::new(128, 1, 1),
-            );
+            dispatch_mv_indexed(&enc, mat.ty, n_in, n_out, slots);
         };
         let resnorm = |enc: &metal::ComputeCommandEncoderRef, norm: &NormRef| {
             enc.set_compute_pipeline_state(&resnorm_state);
@@ -10016,25 +10237,31 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             split_here!("resnorm");
 
             match &refs.ffn {
-                FfnRefs::Dense { mats, states, ffn_dim } => {
+                FfnRefs::Dense { mats, states, ffn_dim, sw_fused } => {
                     matvec(&enc, &states[0], &mats[0], hidden, *ffn_dim, h_at, gate_at);
                     matvec(&enc, &states[1], &mats[1], hidden, *ffn_dim, h_at, up_at);
                     split_here!("gate_up");
                     bar(&enc);
-                    enc.set_compute_pipeline_state(&swiglu_state);
-                    enc.set_buffer(0, Some(y), e(gate_at));
-                    enc.set_buffer(1, Some(y), e(up_at));
-                    let n = *ffn_dim as u32;
-                    enc.set_bytes(2, 4, &n as *const u32 as *const _);
-                    enc.dispatch_thread_groups(
-                        MTLSize::new((n as u64).div_ceil(256), 1, 1),
-                        MTLSize::new(256, 1, 1),
-                    );
-                    split_here!("swiglu");
-                    bar(&enc);
-                    matvec(&enc, &states[2], &mats[2], *ffn_dim, hidden, gate_at, delta_at);
+                    if !*sw_fused {
+                        enc.set_compute_pipeline_state(&swiglu_state);
+                        enc.set_buffer(0, Some(y), e(gate_at));
+                        enc.set_buffer(1, Some(y), e(up_at));
+                        let n = *ffn_dim as u32;
+                        enc.set_bytes(2, 4, &n as *const u32 as *const _);
+                        enc.dispatch_thread_groups(
+                            MTLSize::new((n as u64).div_ceil(256), 1, 1),
+                            MTLSize::new(256, 1, 1),
+                        );
+                        split_here!("swiglu");
+                        bar(&enc);
+                        matvec(&enc, &states[2], &mats[2], *ffn_dim, hidden, gate_at, delta_at);
+                        dispatched += 4;
+                    } else {
+                        enc.set_buffer(8, Some(y), e(up_at));
+                        matvec(&enc, &states[2], &mats[2], *ffn_dim, hidden, gate_at, delta_at);
+                        dispatched += 3;
+                    }
                     split_here!("down");
-                    dispatched += 4;
                 }
                 FfnRefs::Moe {
                     router,
@@ -10191,13 +10418,14 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                             enc.set_bytes(12, 8, &mats[1].w_off as *const u64 as *const _);
                             enc.set_buffer(13, Some(y), e(up_at));
                             let lpr = lanes_per_row(mats[0].ty, hidden) as u64;
+                            let tg = mv_tg();
                             enc.dispatch_thread_groups(
                                 MTLSize::new(
-                                    ((*expert_ffn * *n_used * 2) as u64 * lpr).div_ceil(128),
+                                    ((*expert_ffn * *n_used * 2) as u64 * lpr).div_ceil(tg),
                                     1,
                                     1,
                                 ),
-                                MTLSize::new(128, 1, 1),
+                                MTLSize::new(tg, 1, 1),
                             );
                             ffn_dispatches += 1;
                         }
@@ -10209,21 +10437,31 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                             ffn_dispatches += 2;
                         }
                     }
-                    // The shared expert is a plain matvec into the extra slot.
+                    // Default: shared gate/up concurrent with expert gate/up.
+                    // Stagger (GLM): defer shared Q5 until after the barrier so
+                    // it rides with expert Q8 down instead of fighting Q4 BW.
+                    let stagger = shared.is_some()
+                        && shared_stagger()
+                        && down_tail.is_none();
                     if let Some((smats, sstates)) = shared {
-                        matvec(&enc, &sstates[0], &smats[0], hidden, *expert_ffn,
-                            h_at, gate_at + *n_used * *expert_ffn);
-                        matvec(&enc, &sstates[1], &smats[1], hidden, *expert_ffn,
-                            h_at, up_at + *n_used * *expert_ffn);
-                        ffn_dispatches += 2;
+                        if !stagger {
+                            matvec(&enc, &sstates[0], &smats[0], hidden, *expert_ffn,
+                                h_at, gate_at + *n_used * *expert_ffn);
+                            matvec(&enc, &sstates[1], &smats[1], hidden, *expert_ffn,
+                                h_at, up_at + *n_used * *expert_ffn);
+                            ffn_dispatches += 2;
+                        }
                     }
                     split_here!("gate_up");
                     bar_c(&enc, b'f');
                     if !*sw_fused {
+                        // Under stagger the shared gate/up slots are still
+                        // empty here — only silu the routed experts.
+                        let swiglu_n = if stagger { *n_used } else { n_slots };
                         enc.set_compute_pipeline_state(&swiglu_state);
                         enc.set_buffer(0, Some(y), e(gate_at));
                         enc.set_buffer(1, Some(y), e(up_at));
-                        let n32 = (n_slots * *expert_ffn) as u32;
+                        let n32 = (swiglu_n * *expert_ffn) as u32;
                         enc.set_bytes(2, 4, &n32 as *const u32 as *const _);
                         enc.dispatch_thread_groups(
                             MTLSize::new((n32 as u64).div_ceil(256), 1, 1),
@@ -10270,14 +10508,12 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                             }
                             enc.set_buffer(11, Some(&gpu.chunks[smats[2].chunk].buf), 0);
                             enc.set_bytes(12, 8, &smats[2].w_off as *const u64 as *const _);
-                            let lpr = lanes_per_row(mats[2].ty, *expert_ffn) as u64;
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(
-                                    ((hidden * (*n_used + 1)) as u64 * lpr).div_ceil(128),
-                                    1,
-                                    1,
-                                ),
-                                MTLSize::new(128, 1, 1),
+                            dispatch_mv_indexed(
+                                &enc,
+                                mats[2].ty,
+                                *expert_ffn,
+                                hidden,
+                                *n_used + 1,
                             );
                             ffn_dispatches += 1;
                         }
@@ -10286,6 +10522,39 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                                 gate_at, downo_at, strides[2], *n_used, *expert_ffn);
                             ffn_dispatches += 1;
                             if let Some((smats, sstates)) = shared {
+                                if stagger {
+                                    // Shared Q5 gate/up overlaps expert Q8 down
+                                    // (disjoint slots of gate/up / different
+                                    // weight chunks).
+                                    matvec(&enc, &sstates[0], &smats[0], hidden, *expert_ffn,
+                                        h_at, gate_at + *n_used * *expert_ffn);
+                                    matvec(&enc, &sstates[1], &smats[1], hidden, *expert_ffn,
+                                        h_at, up_at + *n_used * *expert_ffn);
+                                    ffn_dispatches += 2;
+                                    split_here!("shared_gu");
+                                    bar_c(&enc, b'f');
+                                    if !*sw_fused {
+                                        enc.set_compute_pipeline_state(&swiglu_state);
+                                        enc.set_buffer(
+                                            0,
+                                            Some(y),
+                                            e(gate_at + *n_used * *expert_ffn),
+                                        );
+                                        enc.set_buffer(
+                                            1,
+                                            Some(y),
+                                            e(up_at + *n_used * *expert_ffn),
+                                        );
+                                        let n32 = *expert_ffn as u32;
+                                        enc.set_bytes(2, 4, &n32 as *const u32 as *const _);
+                                        enc.dispatch_thread_groups(
+                                            MTLSize::new((n32 as u64).div_ceil(256), 1, 1),
+                                            MTLSize::new(256, 1, 1),
+                                        );
+                                        ffn_dispatches += 1;
+                                        bar_c(&enc, b'f');
+                                    }
+                                }
                                 // The shared down reads its own raw up slot.
                                 if *sw_fused {
                                     enc.set_buffer(8, Some(y), e(up_at + *n_used * *expert_ffn));
@@ -10551,7 +10820,7 @@ fn encode_verify_tokens(
                         "matvec_q4_k_mv" if n_outs[i] % 2 != 0 => "matvec_q4_k",
                         "matvec_q5_k_mv" if n_outs[i] % 2 != 0 => "matvec_q5_k",
                         "matvec_q6_k_mv" if n_outs[i] % 2 != 0 => "matvec_q6_k",
-                        "matvec_q8_0_mv" if n_outs[i] % 2 != 0 => "matvec_q8_0",
+                        "matvec_q8_0_mv" if n_outs[i] % q8_nr0() != 0 => "matvec_q8_0",
                         k => k,
                     };
                     if !matches!(
@@ -10726,11 +10995,7 @@ fn encode_verify_tokens(
             enc.set_bytes(3, 4, &a as *const u32 as *const _);
             enc.set_bytes(4, 4, &b as *const u32 as *const _);
             enc.set_bytes(5, 8, &mat.w_off as *const u64 as *const _);
-            let lpr = lanes_per_row(mat.ty, n_in) as u64;
-            enc.dispatch_thread_groups(
-                MTLSize::new((n_out as u64 * lpr).div_ceil(128), 1, 1),
-                MTLSize::new(128, 1, 1),
-            );
+            dispatch_mv(enc, mat.ty, n_in, n_out);
         };
         // Single-row matvec for the per-token expert/shared projections.
         let resnorm = |enc: &metal::ComputeCommandEncoderRef, norm: &NormRef, i: usize| {
@@ -10760,11 +11025,7 @@ fn encode_verify_tokens(
             enc.set_bytes(3, 4, &a as *const u32 as *const _);
             enc.set_bytes(4, 4, &b as *const u32 as *const _);
             enc.set_bytes(5, 8, &mat.w_off as *const u64 as *const _);
-            let lpr = lanes_per_row(mat.ty, n_in) as u64;
-            enc.dispatch_thread_groups(
-                MTLSize::new((n_out as u64 * lpr).div_ceil(128), 1, 1),
-                MTLSize::new(128, 1, 1),
-            );
+            dispatch_mv(enc, mat.ty, n_in, n_out);
         };
 
         let mut dispatched = 0u64;
@@ -11196,27 +11457,34 @@ fn encode_verify_tokens(
                 continue;
             }
             match &refs.ffn {
-                FfnRefs::Dense { mats, states, ffn_dim } => {
+                FfnRefs::Dense { mats, states, ffn_dim, sw_fused } => {
                     for i in 0..m {
                         matvec_row(enc, &states[0], &mats[0], hidden, *ffn_dim,
                             h_at + i * hidden, gate_at);
                         matvec_row(enc, &states[1], &mats[1], hidden, *ffn_dim,
                             h_at + i * hidden, up_at);
                         bar(enc);
-                        enc.set_compute_pipeline_state(&swiglu_state);
-                        enc.set_buffer(0, Some(y), e(gate_at));
-                        enc.set_buffer(1, Some(y), e(up_at));
-                        let n = *ffn_dim as u32;
-                        enc.set_bytes(2, 4, &n as *const u32 as *const _);
-                        enc.dispatch_thread_groups(
-                            MTLSize::new((n as u64).div_ceil(256), 1, 1),
-                            MTLSize::new(256, 1, 1),
-                        );
+                        if !*sw_fused {
+                            enc.set_compute_pipeline_state(&swiglu_state);
+                            enc.set_buffer(0, Some(y), e(gate_at));
+                            enc.set_buffer(1, Some(y), e(up_at));
+                            let n = *ffn_dim as u32;
+                            enc.set_bytes(2, 4, &n as *const u32 as *const _);
+                            enc.dispatch_thread_groups(
+                                MTLSize::new((n as u64).div_ceil(256), 1, 1),
+                                MTLSize::new(256, 1, 1),
+                            );
+                            bar(enc);
+                            matvec_row(enc, &states[2], &mats[2], *ffn_dim, hidden,
+                                gate_at, delta_at + i * hidden);
+                            dispatched += 4;
+                        } else {
+                            enc.set_buffer(8, Some(y), e(up_at));
+                            matvec_row(enc, &states[2], &mats[2], *ffn_dim, hidden,
+                                gate_at, delta_at + i * hidden);
+                            dispatched += 3;
+                        }
                         bar(enc);
-                        matvec_row(enc, &states[2], &mats[2], *ffn_dim, hidden,
-                            gate_at, delta_at + i * hidden);
-                        bar(enc);
-                        dispatched += 4;
                     }
                 }
                 FfnRefs::Moe {
@@ -11335,13 +11603,7 @@ fn encode_verify_tokens(
                         let idx = GpuIdxArgs { stride: strides[0], slots: *n_used as u32, x_stride: 0, ids_stride: 0, x_row_stride: 0, y_row_stride: 0, n_rows: 0 };
                         enc.set_bytes(7, std::mem::size_of::<GpuIdxArgs>() as u64,
                             &idx as *const GpuIdxArgs as *const _);
-                        enc.dispatch_thread_groups(
-                            MTLSize::new(
-                                ((*expert_ffn * *n_used) as u64 * lanes_per_row(mats[0].ty, hidden) as u64).div_ceil(128),
-                                1, 1,
-                            ),
-                            MTLSize::new(128, 1, 1),
-                        );
+                        dispatch_mv_indexed(enc, mats[0].ty, hidden, *expert_ffn, *n_used);
                         enc.set_compute_pipeline_state(&states[1]);
                         enc.set_buffer(0, Some(&gpu.chunks[mats[1].chunk].buf), 0);
                         enc.set_buffer(1, Some(y), e(x_off));
@@ -11353,13 +11615,7 @@ fn encode_verify_tokens(
                         let idx = GpuIdxArgs { stride: strides[1], slots: *n_used as u32, x_stride: 0, ids_stride: 0, x_row_stride: 0, y_row_stride: 0, n_rows: 0 };
                         enc.set_bytes(7, std::mem::size_of::<GpuIdxArgs>() as u64,
                             &idx as *const GpuIdxArgs as *const _);
-                        enc.dispatch_thread_groups(
-                            MTLSize::new(
-                                ((*expert_ffn * *n_used) as u64 * lanes_per_row(mats[1].ty, hidden) as u64).div_ceil(128),
-                                1, 1,
-                            ),
-                            MTLSize::new(128, 1, 1),
-                        );
+                        dispatch_mv_indexed(enc, mats[1].ty, hidden, *expert_ffn, *n_used);
                     }
                     }
                     bar(enc);
@@ -11441,13 +11697,7 @@ fn encode_verify_tokens(
                         let idx = GpuIdxArgs { stride: strides[2], slots: *n_used as u32, x_stride: *expert_ffn as u32, ids_stride: 0, x_row_stride: 0, y_row_stride: 0, n_rows: 0 };
                         enc.set_bytes(7, std::mem::size_of::<GpuIdxArgs>() as u64,
                             &idx as *const GpuIdxArgs as *const _);
-                        enc.dispatch_thread_groups(
-                            MTLSize::new(
-                                ((hidden * *n_used) as u64 * lanes_per_row(mats[2].ty, *expert_ffn) as u64).div_ceil(128),
-                                1, 1,
-                            ),
-                            MTLSize::new(128, 1, 1),
-                        );
+                        dispatch_mv_indexed(enc, mats[2].ty, *expert_ffn, hidden, *n_used);
                     }
                     }
                     // The shared expert's down projection as one TILE matvec
@@ -13431,6 +13681,30 @@ fn rfuse() -> bool {
 fn shared_tail() -> bool {
     static S: OnceLock<bool> = OnceLock::new();
     *S.get_or_init(|| std::env::var("ALLPAKA_SHARED_TAIL").is_ok_and(|v| v == "1"))
+}
+
+/// Stagger GLM shared Q5 gate/up out of the expert Q4 window: expert
+/// gate/up → barrier → expert Q8 down ∥ shared Q5 gate/up → barrier →
+/// shared Q8 down. OFF by default until cool Terminal A/B
+/// (`scripts/glm-ab-stagger.sh`) confirms a win; `ALLPAKA_SHARED_STAGGER=1`
+/// enables. Disabled automatically when `SHARED_TAIL` folds shared down
+/// into the indexed expert-down launch (shared gate/up must finish first).
+fn shared_stagger() -> bool {
+    static S: OnceLock<bool> = OnceLock::new();
+    *S.get_or_init(|| std::env::var("ALLPAKA_SHARED_STAGGER").is_ok_and(|v| v == "1"))
+}
+
+/// Rows per SIMD group for `matvec_q8_0_mv` (NR0 = 32/LPR). Default 2;
+/// sweep with `ALLPAKA_Q8_NR0` ∈ {1,2,4} (GLM expert down is the hot shape).
+fn q8_nr0() -> usize {
+    static NR0: OnceLock<usize> = OnceLock::new();
+    *NR0.get_or_init(|| {
+        std::env::var("ALLPAKA_Q8_NR0")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n: &usize| [1, 2, 4].contains(n))
+            .unwrap_or(2)
+    })
 }
 
 /// K-step 64 for the LL mm kernels: `ALLPAKA_MM_K64=1` to enable.
