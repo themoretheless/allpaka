@@ -5,9 +5,25 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Tensor operations for the allpaka engine; CPU reference first, accelerators checked against it"
 
+[features]
+default = []
+# CUDA runtime for Windows/Linux. Metal remains the macOS path and ignores this.
+cuda = ["dep:cudarc", "dep:half"]
+
 [dependencies]
 allpaka-gguf.workspace = true
 anyhow.workspace = true
+half = { version = "2", optional = true }
+cudarc = { version = "0.19", optional = true, default-features = false, features = [
+    "std",
+    "cuda-13030",
+    "dynamic-loading",
+    "driver",
+    "cublas",
+    "cublaslt",
+    "nvrtc",
+    "f16",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.29"

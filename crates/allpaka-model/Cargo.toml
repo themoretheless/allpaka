@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Llama-family forward pass for the allpaka engine, parameterised by GGUF metadata"
 
+[features]
+default = []
+cuda = ["allpaka-backend/cuda"]
+
 [dependencies]
 allpaka-backend.workspace = true
 allpaka-gguf.workspace = true

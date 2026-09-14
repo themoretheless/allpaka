@@ -8,11 +8,15 @@ rust-version.workspace = true
 name = "allpaka"
 path = "src/main.rs"
 
+[features]
+default = ["cuda"]
+cuda = ["allpaka-backend/cuda", "allpaka-model/cuda"]
+
 [dependencies]
 allpaka-core.workspace = true
 allpaka-gguf.workspace = true
-allpaka-backend.workspace = true
-allpaka-model.workspace = true
+allpaka-backend = { workspace = true }
+allpaka-model = { workspace = true }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

@@ -292,14 +292,8 @@ impl<'a> QuantMat<'a> {
     /// Returns None when the GPU declines (no device, a head width the kernel
     /// is not written for, foreign bytes), and the caller then runs the CPU
     /// attention and an ordinary matmul.
-    #[cfg(target_os = "macos")]
     pub fn attend_project(&self, req: &crate::gpu::AttnReq) -> Option<Vec<f32>> {
         crate::gpu::attend_project(req, self.ty, self.data, self.n_out)
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    pub fn attend_project(&self, _req: &crate::gpu::AttnReq) -> Option<Vec<f32>> {
-        None
     }
 
     /// The raw quantised bytes and их формат - what the GPU paths address.

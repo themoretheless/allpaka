@@ -98,7 +98,7 @@ allpaka bench --connect 192.168.1.50:9797
 
 ### Локальный inference (`serve`)
 
-Свой движок (Rust + Metal, GGUF) с OpenAI-совместимым API:
+Свой движок (Rust + Metal на macOS / CUDA на Windows·Linux, GGUF) с OpenAI-совместимым API:
 
 ```bash
 allpaka serve --model models/qwen3-0.6b-Q8_0.gguf --bind 127.0.0.1:8099
@@ -129,10 +129,19 @@ allpaka rag-test                   # smoke-тест RAG tool-loop; exit != 0 п�
 
 ```powershell
 cd allpaka
+# CUDA Toolkit 12.8+/13.x + MSVC Build Tools required for the engine GPU path.
+# Feature `cuda` is on by default for the CLI on this platform.
+$env:CUDA_PATH = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4"
 cargo build --release
-.\target\release\allpaka.exe bench --mem      # реальная скорость DDR4
-.\target\release\allpaka.exe bench --serve    # затем ждать клиента
+.\target\release\allpaka.exe bench --mem
+.\target\release\allpaka.exe bench --engine path\to\model.gguf   # RTX GPU, fail-closed
+.\target\release\allpaka.exe bench --serve
 ```
+
+CUDA notes: weights are uploaded to VRAM at attach; `ALLPAKA_NO_GPU=1` forces
+the CPU path. Blackwell (RTX 50-series) needs a toolkit that can compile
+`compute_120` (NVRTC at runtime). On CUDA 13.x Windows installs, add
+`%CUDA_PATH%\bin\x64` to `PATH` so `nvrtc64_*.dll` / `cublasLt64_*.dll` load.
 
 Первый запуск `--serve` спросит разрешение в Windows Firewall - разрешить для
 частной сети, иначе клиент не подключится. Порт по умолчанию 9797.

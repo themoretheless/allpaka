@@ -125,7 +125,7 @@ pub fn run(path: &Path, profile: &str, json: bool) -> anyhow::Result<()> {
         .collect();
     let plan = ExecutionPlan::resolve(
         &requirements,
-        &BackendCapabilities::current_metal(),
+        &BackendCapabilities::current(),
         &profile.resolve(),
         tensors,
     );
@@ -169,7 +169,7 @@ mod tests {
         let requirements = ModelRequirements::for_architecture("deepseek_mla").unwrap();
         let plan = ExecutionPlan::resolve(
             &requirements,
-            &BackendCapabilities::current_metal(),
+            &BackendCapabilities::current(),
             &RuntimeProfile::Safe.resolve(),
             vec![TensorCoverage {
                 tensor_type: "Q4_K".into(),

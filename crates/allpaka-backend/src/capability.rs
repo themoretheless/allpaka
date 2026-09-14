@@ -39,6 +39,31 @@ impl BackendCapabilities {
         ])
     }
 
+    /// CUDA runtime coverage (Windows/Linux). Matches Metal for the dense /
+    /// MoE / GQA / GDN surface the engine exposes through `gpu::`.
+    pub fn current_cuda() -> Self {
+        Self::current_metal()
+    }
+
+    /// Active accelerator profile for this build/host.
+    pub fn current() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::current_metal()
+        }
+        #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+        {
+            if crate::gpu::is_attached() {
+                return Self::current_cuda();
+            }
+            Self::current_cuda()
+        }
+        #[cfg(not(any(target_os = "macos", feature = "cuda")))]
+        {
+            Self::new([])
+        }
+    }
+
     pub fn supports(&self, feature: Feature) -> bool {
         self.features.contains(&feature)
     }

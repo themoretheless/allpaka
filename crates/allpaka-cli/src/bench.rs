@@ -122,12 +122,24 @@ fn print_capability_report(model: &allpaka_model::Model<'_>, file: &allpaka_gguf
         "    profile: {}",
         std::env::var("ALLPAKA_PROFILE").unwrap_or_else(|_| "auto".into())
     );
+    let accel = if allpaka_backend::gpu::is_attached() {
+        #[cfg(target_os = "macos")]
+        {
+            "metal"
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            "cuda"
+        }
+    } else {
+        "none"
+    };
     println!(
-        "    metal: attached={}",
+        "    gpu: backend={accel} attached={}",
         allpaka_backend::gpu::is_attached()
     );
     println!(
-        "    weights: metal-mapped={}",
+        "    weights: gpu-resident={}",
         allpaka_backend::gpu::is_attached()
     );
     let (weight_windows, residency_set) = allpaka_backend::gpu::residency_status();
@@ -402,7 +414,7 @@ pub fn measure_engine(
     let gpu_declines = decode_stats_after.declines - decode_stats_before.declines;
     anyhow::ensure!(
         allpaka_backend::gpu::is_attached(),
-        "benchmark invalid: Metal GPU is not attached; refusing to report CPU fallback as GPU throughput"
+        "benchmark invalid: GPU is not attached; refusing to report CPU fallback as GPU throughput"
     );
     anyhow::ensure!(
         gpu_successes == decode_tokens as u64 && gpu_attempts == gpu_successes && gpu_declines == 0,
@@ -692,7 +704,14 @@ fn write_engine_report(
             model: model_path.display().to_string(),
             model_fingerprint: model_fingerprint(model_path, file),
             device: if allpaka_backend::gpu::is_attached() {
-                "metal".into()
+                #[cfg(target_os = "macos")]
+                {
+                    "metal".into()
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    "cuda".into()
+                }
             } else {
                 "cpu".into()
             },
