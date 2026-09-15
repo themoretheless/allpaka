@@ -66,7 +66,6 @@ impl Speculation {
     /// this is why speculative decoding can never be slower than one token per
     /// pass, and why it is lossless rather than an approximation.
     #[inline]
-    #[inline]
     pub fn expected_accepted(&self) -> f64 {
         let a = self.acceptance_rate.clamp(0.0, 1.0);
         let k = self.draft_tokens;
