@@ -9,6 +9,7 @@
 use crate::ops::dot;
 use allpaka_gguf::{dequant, GgmlType};
 use anyhow::{bail, Result};
+use std::sync::Arc;
 
 /// A `[n_out, n_in]` weight matrix over quantised bytes, borrowed straight
 /// from the GGUF mmap.
@@ -117,7 +118,7 @@ impl<'a> QuantMat<'a> {
             return y;
         }
         let acts = self.quantized_acts(x);
-        let acts = acts.as_ref();
+        let acts = acts.as_ref().map(|acts| acts.row(0, self.n_in));
         // Threading pays for itself only on big matrices. A MoE decodes
         // through hundreds of small expert matvecs per token, and spawning a
         // thread team for each costs more than the arithmetic; those run
@@ -127,7 +128,7 @@ impl<'a> QuantMat<'a> {
         if self.n_out * self.n_in < PARALLEL_THRESHOLD_ELEMENTS {
             let mut y = vec![0f32; self.n_out];
             for (j, out) in y.iter_mut().enumerate() {
-                *out = self.row_dot_dispatch(j, x, acts);
+                *out = self.row_dot_dispatch(j, x, acts.as_ref());
             }
             return y;
         }
@@ -141,7 +142,7 @@ impl<'a> QuantMat<'a> {
                 let first_row = chunk_index * rows_per;
                 scope.spawn(move || {
                     for (i, out) in y_chunk.iter_mut().enumerate() {
-                        *out = self.row_dot_dispatch(first_row + i, x, acts);
+                        *out = self.row_dot_dispatch(first_row + i, x, acts.as_ref());
                     }
                 });
             }
@@ -160,7 +161,7 @@ impl<'a> QuantMat<'a> {
         }
     }
 
-    fn row_dot_dispatch(&self, j: usize, x: &[f32], acts: Option<&Q8Acts>) -> f32 {
+    fn row_dot_dispatch(&self, j: usize, x: &[f32], acts: Option<&Q8ActsSlice<'_>>) -> f32 {
         match acts {
             Some(a) => {
                 let bytes = &self.data[j * self.row_bytes..(j + 1) * self.row_bytes];
@@ -205,17 +206,41 @@ impl<'a> QuantMat<'a> {
             }
         }
         // CPU fallback: one thread per item, rows expanded once per batch.
+        // FFN gate/up projections commonly share the same activation slice,
+        // so retain one quantised copy for those items instead of repeating
+        // the activation quantisation for every projection.
+        let mut cached_acts: Vec<(usize, usize, usize, Arc<Q8Acts>)> = Vec::new();
+        let acts: Vec<Option<Arc<Q8Acts>>> = items
+            .iter()
+            .map(|(mat, x)| {
+                let quantized = mat.quantized_acts(x);
+                let Some(quantized) = quantized else {
+                    return None;
+                };
+                let key = (x.as_ptr() as usize, x.len(), mat.n_in);
+                if let Some((_, _, _, acts)) = cached_acts
+                    .iter()
+                    .find(|(ptr, len, n_in, _)| (*ptr, *len, *n_in) == key)
+                {
+                    return Some(Arc::clone(acts));
+                }
+                let acts = Arc::new(quantized);
+                cached_acts.push((key.0, key.1, key.2, Arc::clone(&acts)));
+                Some(acts)
+            })
+            .collect();
         let mut out: Vec<Vec<f32>> = vec![Vec::new(); items.len()];
         std::thread::scope(|scope| {
-            for ((mat, x), slot) in items.iter().zip(out.iter_mut()) {
+            for (((mat, x), slot), acts) in items.iter().zip(out.iter_mut()).zip(acts) {
                 scope.spawn(move || {
                     let rows = x.len() / mat.n_in;
                     let mut y = vec![0f32; rows * mat.n_out];
                     for i in 0..rows {
                         let xi = &x[i * mat.n_in..(i + 1) * mat.n_in];
-                        let acts = mat.quantized_acts(xi);
+                        let row_acts = acts.as_deref().map(|acts| acts.row(i, mat.n_in));
                         for j in 0..mat.n_out {
-                            y[i * mat.n_out + j] = mat.row_dot_dispatch(j, xi, acts.as_ref());
+                            y[i * mat.n_out + j] =
+                                mat.row_dot_dispatch(j, xi, row_acts.as_ref());
                         }
                     }
                     *slot = y;
@@ -674,6 +699,13 @@ struct Q8Acts {
     q: Vec<i8>,
 }
 
+#[derive(Clone, Copy)]
+struct Q8ActsSlice<'a> {
+    d: &'a [f32],
+    sum: &'a [f32],
+    q: &'a [i8],
+}
+
 impl Q8Acts {
     fn from_f32(x: &[f32]) -> Self {
         debug_assert_eq!(x.len() % 32, 0);
@@ -696,13 +728,26 @@ impl Q8Acts {
     }
 
     #[inline]
+    fn row(&self, row: usize, n_in: usize) -> Q8ActsSlice<'_> {
+        let blocks = n_in / 32;
+        let first = row * blocks;
+        Q8ActsSlice {
+            d: &self.d[first..first + blocks],
+            sum: &self.sum[first..first + blocks],
+            q: &self.q[first * 32..(first + blocks) * 32],
+        }
+    }
+}
+
+impl Q8ActsSlice<'_> {
+    #[inline]
     fn block(&self, b: usize) -> &[i8] {
         &self.q[b * 32..b * 32 + 32]
     }
 }
 
 /// Q8_0 × Q8 activations: `Σ_blocks d_w * d_x * Σ q_w · q_x`.
-fn dot_q8_0_i8(row: &[u8], acts: &Q8Acts) -> f32 {
+fn dot_q8_0_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
     let mut total = 0f32;
     for (bi, block) in row.chunks_exact(34).enumerate() {
         let d = dequant::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
@@ -715,7 +760,7 @@ fn dot_q8_0_i8(row: &[u8], acts: &Q8Acts) -> f32 {
 
 /// Q4_K × Q8 activations, same sub-block walk as `dot_q4_k` with the q·x
 /// reduction done in integers and the min term taken off the exact block sum.
-fn dot_q4_k_i8(row: &[u8], acts: &Q8Acts) -> f32 {
+fn dot_q4_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
     let mut total = 0f32;
     for (bi, block) in row.chunks_exact(144).enumerate() {
         let d = dequant::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
@@ -748,7 +793,7 @@ fn dot_q4_k_i8(row: &[u8], acts: &Q8Acts) -> f32 {
 /// Q6_K × Q8 activations. Scales cover 16 elements, so each quarter's
 /// 32-value dot splits into two 16-lane integer dots against the halves of
 /// one activation block.
-fn dot_q6_k_i8(row: &[u8], acts: &Q8Acts) -> f32 {
+fn dot_q6_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
     let mut total = 0f32;
     for (bi, block) in row.chunks_exact(210).enumerate() {
         let ql = &block[0..128];
@@ -910,8 +955,7 @@ mod tests {
         // The matvec path quantises activations to Q8, so the comparison
         // against the f32 reference carries that quantisation error too.
         assert!(
-            (fused - reference).abs()
-                < q8_act_error_bound(&row, &x) + 1e-3 * (1.0 + reference.abs()),
+            (fused - reference).abs() < q8_act_error_bound(&row, &x) + 1e-3 * (1.0 + reference.abs()),
             "{fused} vs {reference}"
         );
     }
@@ -969,7 +1013,8 @@ mod tests {
         let row = mat.row(0).unwrap();
         let reference: f32 = row.iter().zip(&x).map(|(a, b)| a * b).sum();
         assert!(
-            (fused - reference).abs() < q8_act_error_bound(&row, &x) + 1e-3 * (1.0 + reference.abs()),
+            (fused - reference).abs()
+                < q8_act_error_bound(&row, &x) + 1e-3 * (1.0 + reference.abs()),
             "{fused} vs {reference}"
         );
     }
