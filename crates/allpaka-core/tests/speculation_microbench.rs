@@ -1,9 +1,9 @@
 use std::time::Instant;
 
 #[test]
-fn speculation_microbench_10_rounds() {
-    const ITERATIONS: usize = 10;
-    const LOOPS: usize = 1_000_000;
+fn speculation_microbench_100_rounds() {
+    const ITERATIONS: usize = 100;
+    const LOOPS: usize = 200_000;
 
     let mut expected_ns = Vec::with_capacity(ITERATIONS);
     let mut argmax_ns = Vec::with_capacity(ITERATIONS);
@@ -48,16 +48,16 @@ fn speculation_microbench_10_rounds() {
     let argmax_avg_ns = argmax_ns.iter().sum::<u128>() as f64 / argmax_ns.len() as f64;
 
     println!(
-        "speculation.expected_accepted avg: {:.2} ns/iter, 10 rounds",
+        "speculation.expected_accepted avg: {:.2} ns/iter, 100 rounds",
         expected_avg_ns / LOOPS as f64
     );
     println!(
-        "speculation.argmax avg: {:.2} ns/iter, 10 rounds",
+        "speculation.argmax avg: {:.2} ns/iter, 100 rounds",
         argmax_avg_ns / LOOPS as f64
     );
 }
 
-#[inline]
+#[inline(always)]
 fn argmax_manual(logits: &[f32]) -> u32 {
     let mut best_idx = 0usize;
     let mut best_value = logits[0];
