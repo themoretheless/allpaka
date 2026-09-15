@@ -18,7 +18,11 @@ pub fn matmul_f32(x: &[f32], w: &[f32], m: usize, k: usize, n: usize) -> Vec<f32
         let xi = &x[i * k..(i + 1) * k];
         for j in 0..n {
             let wj = &w[j * k..(j + 1) * k];
-            y[i * n + j] = xi.iter().zip(wj).map(|(a, b)| a * b).sum();
+            let mut sum = 0.0f32;
+            for l in 0..k {
+                sum += xi[l] * wj[l];
+            }
+            y[i * n + j] = sum;
         }
     }
     y
