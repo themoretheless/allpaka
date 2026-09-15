@@ -65,18 +65,28 @@ impl Speculation {
     /// token the verification pass itself produces, which is always correct -
     /// this is why speculative decoding can never be slower than one token per
     /// pass, and why it is lossless rather than an approximation.
+    #[inline]
+    #[inline]
     pub fn expected_accepted(&self) -> f64 {
         let a = self.acceptance_rate.clamp(0.0, 1.0);
-        let k = self.draft_tokens as f64;
-        if a >= 1.0 {
-            return k + 1.0;
+        let k = self.draft_tokens;
+        if k == 0 || a <= 0.0 {
+            return 1.0;
         }
-        (1.0 - a.powf(k + 1.0)) / (1.0 - a)
+        if a >= 1.0 {
+            return (k + 1) as f64;
+        }
+
+        // `draft_tokens` is an integer count, so the geometric-series exponent
+        // stays on the integer `powi` path, which is materially cheaper than the
+        // generic `powf` path in the planning loop.
+        (1.0 - a.powi(k as i32 + 1)) / (1.0 - a)
     }
 
     /// Positions carried through the verification pass, `K + 1`.
+    #[inline]
     pub fn verify_batch(&self) -> u32 {
-        self.draft_tokens + 1
+        self.draft_tokens.saturating_add(1)
     }
 }
 
