@@ -115,13 +115,21 @@ impl Speculator<'_> {
     }
 }
 
+#[inline]
 fn argmax(logits: &[f32]) -> u32 {
-    logits
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1.total_cmp(b.1))
-        .map(|(i, _)| i as u32)
-        .unwrap_or(0)
+    if logits.is_empty() {
+        return 0;
+    }
+
+    let mut best_idx = 0usize;
+    let mut best_value = logits[0];
+    for (idx, &value) in logits.iter().enumerate().skip(1) {
+        if value > best_value {
+            best_value = value;
+            best_idx = idx;
+        }
+    }
+    best_idx as u32
 }
 
 /// MTP (nextn) speculation: the draft is the target model's own MTP block,
