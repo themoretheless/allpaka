@@ -2,7 +2,7 @@
 //!
 //! Skips when `ALLPAKA_NO_GPU` is set or no CUDA device is available.
 
-#![cfg(feature = "cuda")]
+#![cfg(all(feature = "cuda", not(target_os = "macos")))]
 
 use allpaka_backend::gpu;
 use allpaka_gguf::GgmlType;
