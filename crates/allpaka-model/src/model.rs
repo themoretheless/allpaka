@@ -666,6 +666,8 @@ impl Session {
         let needed_positions = start + count;
         let have = self.rope_cache.len() / self.rope_cache_pairs;
         if have < needed_positions {
+            self.rope_cache
+                .reserve((needed_positions - have) * self.rope_cache_pairs);
             for pos in have..needed_positions {
                 for &freq in rope_inv_freq {
                     self.rope_cache.push((pos as f32 * freq).sin_cos().into());
