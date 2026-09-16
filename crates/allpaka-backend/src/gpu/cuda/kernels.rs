@@ -543,6 +543,7 @@ extern "C" __global__ void rmsnorm_rope_qk_store_table_dpos(
     float* xh = (is_k ? k : q) + (size_t)h * head_dim;
     const float* w = is_k ? kw : qw;
     __shared__ float buf[256];
+    __shared__ float kbuf[256];
     float local = 0.f;
     for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
         float v = xh[i];
@@ -563,7 +564,7 @@ extern "C" __global__ void rmsnorm_rope_qk_store_table_dpos(
     float scale = rsqrtf(buf[0] / (float)head_dim + eps);
     for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
         float v = xh[i] * scale * w[i];
-        if (is_k) buf[i] = v;
+        if (is_k) kbuf[i] = v;
         else xh[i] = v;
     }
     __syncthreads();
@@ -576,8 +577,8 @@ extern "C" __global__ void rmsnorm_rope_qk_store_table_dpos(
     for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
         float sinv = rope[2 * i];
         float cosv = rope[2 * i + 1];
-        float a = is_k ? buf[i] : xh[i];
-        float b = is_k ? buf[i + half_n] : xh[i + half_n];
+        float a = is_k ? kbuf[i] : xh[i];
+        float b = is_k ? kbuf[i + half_n] : xh[i + half_n];
         float r0 = a * cosv - b * sinv;
         float r1 = a * sinv + b * cosv;
         if (is_k) {
@@ -590,7 +591,7 @@ extern "C" __global__ void rmsnorm_rope_qk_store_table_dpos(
     }
     if (is_k) {
         for (unsigned i = rot_dim + threadIdx.x; i < head_dim; i += blockDim.x) {
-            cache[dst + i] = f32_to_half_bits(buf[i]);
+            cache[dst + i] = f32_to_half_bits(kbuf[i]);
         }
     }
 }
