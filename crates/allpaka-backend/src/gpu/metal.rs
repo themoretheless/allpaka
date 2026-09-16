@@ -151,6 +151,15 @@ constant bool DUAL_GW [[function_constant(5)]];
 // y_row_stride elements apart. Off: plain indexed decode.
 constant bool ROWS [[function_constant(6)]];
 
+// COMBINE (decode MoE down projection): one threadgroup per output row
+// pair, one simdgroup per routed expert (threadgroup = 32 * idx.slots
+// threads), so y[j] = sum_s wts[s] * dot(W[ids[s]][j], act_s) reduces through
+// threadgroup memory directly into the residual delta. Removes the per-slot
+// down buffer, the standalone combine dispatch and one barrier per layer,
+// and stays deterministic: the slot order is fixed, no atomics. INDEXED
+// only; idx.slots <= 32.
+constant bool COMBINE [[function_constant(7)]];
+
 inline float4 sw4(float4 g, float4 u) {
     return u * (g / (1.0f + exp(-g)));
 }
@@ -948,25 +957,28 @@ kernel void matvec_q6_k_mv(
     constant ulong& w_off [[buffer(5)]],
     device const uint* ids [[buffer(6)]],
     constant IdxArgs& idx [[buffer(7)]],
+    device const float* xu [[buffer(8)]],
+    device const float* wts [[buffer(14)]],
     uint tid [[thread_position_in_grid]],
+    uint tgpig [[threadgroup_position_in_grid]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]],
     ushort tiisg [[thread_index_in_simdgroup]])
 {
     const uchar kmask1 = 0x03, kmask2 = 0x0C, kmask3 = 0x30, kmask4 = 0xC0;
 
-    uint ycols = INDEXED ? n_out * idx.slots : n_out;
-    uint flat = (tid / 32) * 2;
+    // COMBINE: one threadgroup per output row pair, one simdgroup per routed
+    // slot (threadgroup = 32 * slots threads); the slots reduce through
+    // threadgroup memory below. Otherwise the flat row space covers
+    // n_out * slots and the slot comes from the row index.
+    uint ycols = (INDEXED && !COMBINE) ? n_out * idx.slots : n_out;
+    uint flat = COMBINE ? tgpig * 2 : (tid / 32) * 2;
     bool any = flat < ycols;
     if (!any) flat = 0;
     uint nrows = any ? min(2u, ycols - flat) : 0u;
-    uint slot = INDEXED ? flat / n_out : 0;
-    uint j0 = INDEXED ? flat % n_out : flat;
-    if (INDEXED) {
-        w += ids[slot] * idx.stride;
-        x += (ulong)slot * idx.x_stride;
-    }
+    uint slot = COMBINE ? sgitg : ((INDEXED && !COMBINE) ? flat / n_out : 0);
+    uint j0 = (INDEXED && !COMBINE) ? flat % n_out : flat;
     uint nb = n_in / 256;
     ulong nb01 = (ulong)nb * 210;
-    device const uchar* row0 = w + w_off + (ulong)j0 * nb01;
 
     const short t = tiisg / 2;
     const short ix = tiisg % 2;
@@ -981,40 +993,77 @@ kernel void matvec_q6_k_mv(
     float yl[16];
     float sumf[2] = {0.0f, 0.0f};
 
-    for (uint ib = ix; ib < nb; ib += 2) {
-        device const uchar* blk = row0 + ib * 210;
-        device const uchar* q1 = blk + q_offset_l;
-        device const uchar* q2 = q1 + 32;
-        device const uchar* qh = blk + 128 + q_offset_h;
-        device const char* sc = (device const char*)(blk + 192) + is;
-        device const uchar* dh = blk + 208;
-
-        device const float* yv = x + ib * 256 + y_offset;
-        for (short l = 0; l < 4; ++l) {
-            yl[4 * l + 0] = yv[l + 0];
-            yl[4 * l + 1] = yv[l + 32];
-            yl[4 * l + 2] = yv[l + 64];
-            yl[4 * l + 3] = yv[l + 96];
-        }
-
-        for (uint row = 0; row < 2; ++row) {
-            float4 sums = {0.0f, 0.0f, 0.0f, 0.0f};
-            for (short l = 0; l < 4; ++l) {
-                sums[0] += yl[4 * l + 0] * ((char)((q1[l] & 0xF) | ((qh[l] & kmask1) << 4)) - 32);
-                sums[1] += yl[4 * l + 1] * ((char)((q2[l] & 0xF) | ((qh[l] & kmask2) << 2)) - 32);
-                sums[2] += yl[4 * l + 2] * ((char)((q1[l] >> 4) | ((qh[l] & kmask3) << 0)) - 32);
-                sums[3] += yl[4 * l + 3] * ((char)((q2[l] >> 4) | ((qh[l] & kmask4) >> 2)) - 32);
+    {
+        device const uchar* wm = w;
+        device const float* xs = x;
+        device const float* us = xu;
+        if (INDEXED) {
+            wm += ids[slot] * idx.stride;
+            xs += (ulong)slot * idx.x_stride;
+            if (SWIGLU_X) {
+                us += (ulong)slot * idx.x_stride;
             }
-            sumf[row] += half_at(dh) *
-                (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);
-
-            ulong step = (row + 1 < nrows) ? nb01 : 0;
-            q1 += step;
-            q2 += step;
-            qh += step;
-            sc += step;
-            dh += step;
         }
+        device const uchar* row0 = wm + w_off + (ulong)j0 * nb01;
+        thread float* part = sumf;
+
+        for (uint ib = ix; ib < nb; ib += 2) {
+            device const uchar* blk = row0 + ib * 210;
+            device const uchar* q1 = blk + q_offset_l;
+            device const uchar* q2 = q1 + 32;
+            device const uchar* qh = blk + 128 + q_offset_h;
+            device const char* sc = (device const char*)(blk + 192) + is;
+            device const uchar* dh = blk + 208;
+
+            device const float* yv = xs + ib * 256 + y_offset;
+            device const float* uv = us + ib * 256 + y_offset;
+            for (short l = 0; l < 4; ++l) {
+                yl[4 * l + 0] = SWIGLU_X ? sw1(yv[l + 0], uv[l + 0]) : yv[l + 0];
+                yl[4 * l + 1] = SWIGLU_X ? sw1(yv[l + 32], uv[l + 32]) : yv[l + 32];
+                yl[4 * l + 2] = SWIGLU_X ? sw1(yv[l + 64], uv[l + 64]) : yv[l + 64];
+                yl[4 * l + 3] = SWIGLU_X ? sw1(yv[l + 96], uv[l + 96]) : yv[l + 96];
+            }
+
+            for (uint row = 0; row < 2; ++row) {
+                float4 sums = {0.0f, 0.0f, 0.0f, 0.0f};
+                for (short l = 0; l < 4; ++l) {
+                    sums[0] += yl[4 * l + 0] * ((char)((q1[l] & 0xF) | ((qh[l] & kmask1) << 4)) - 32);
+                    sums[1] += yl[4 * l + 1] * ((char)((q2[l] & 0xF) | ((qh[l] & kmask2) << 2)) - 32);
+                    sums[2] += yl[4 * l + 2] * ((char)((q1[l] >> 4) | ((qh[l] & kmask3) << 0)) - 32);
+                    sums[3] += yl[4 * l + 3] * ((char)((q2[l] >> 4) | ((qh[l] & kmask4) >> 2)) - 32);
+                }
+                part[row] += half_at(dh) *
+                    (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);
+
+                ulong step = (row + 1 < nrows) ? nb01 : 0;
+                q1 += step;
+                q2 += step;
+                qh += step;
+                sc += step;
+                dh += step;
+            }
+        }
+    }
+
+    if (COMBINE) {
+        // Weighted slot sum in fixed slot order: the same arithmetic the
+        // standalone combine kernel performed on the per-slot down output.
+        threadgroup float red[64];
+        float s0 = simd_sum(sumf[0]);
+        float s1 = simd_sum(sumf[1]);
+        if (tiisg == 0) {
+            red[2 * sgitg + 0] = wts[slot] * s0;
+            red[2 * sgitg + 1] = wts[slot] * s1;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sgitg == 0 && tiisg < nrows) {
+            float acc = 0.0f;
+            for (uint s = 0; s < idx.slots; ++s) {
+                acc += red[2 * s + tiisg];
+            }
+            y[flat + tiisg] = acc;
+        }
+        return;
     }
 
     for (uint row = 0; row < 2; row++) {
@@ -1045,8 +1094,11 @@ kernel void matvec_q4_k_mv(
     device const uchar* w2 [[buffer(11)]],
     constant ulong& w2_off [[buffer(12)]],
     device float* y2 [[buffer(13)]],
+    device const float* wts [[buffer(14)]],
     uint tid [[thread_position_in_grid]],
     uint ltid [[thread_position_in_threadgroup]],
+    uint tgpig [[threadgroup_position_in_grid]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]],
     ushort tiisg [[thread_index_in_simdgroup]])
 {
     if (WAIT_X) {
@@ -1062,9 +1114,12 @@ kernel void matvec_q4_k_mv(
     const ushort kmask2 = 0x0f0f;
     const ushort kmask3 = 0xc0c0;
 
-    uint gate_rows = INDEXED ? n_out * idx.slots : n_out;
+    // COMBINE: one threadgroup per output row pair, one simdgroup per routed
+    // slot (threadgroup = 32 * slots threads), reduced through threadgroup
+    // memory at the end. Otherwise the flat row space covers n_out * slots.
+    uint gate_rows = (INDEXED && !COMBINE) ? n_out * idx.slots : n_out;
     uint ycols = DUAL_GW ? gate_rows * 2 : gate_rows;
-    uint flat = (tid / 32) * 2;
+    uint flat = COMBINE ? tgpig * 2 : (tid / 32) * 2;
     bool any = flat < (ROWS ? gate_rows * idx.n_rows : ycols);
     if (!any) flat = 0;
     uint tok = ROWS ? flat / gate_rows : 0;
@@ -1080,18 +1135,10 @@ kernel void matvec_q4_k_mv(
     }
     uint fr = ROWS ? flat - tok * gate_rows : flat;
     uint nrows = any ? min(2u, gate_rows - fr) : 0u;
-    uint slot = INDEXED ? fr / n_out : 0;
-    uint j0 = INDEXED ? fr % n_out : fr;
-    if (INDEXED) {
-        wm += ids[(ROWS ? tok * idx.ids_stride : 0u) + slot] * idx.stride;
-        x += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
-        if (SWIGLU_X) {
-            xu += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
-        }
-    }
+    uint slot = COMBINE ? sgitg : ((INDEXED && !COMBINE) ? fr / n_out : 0);
+    uint j0 = (INDEXED && !COMBINE) ? fr % n_out : fr;
     uint nb = n_in / 256;
     ulong nb01 = (ulong)nb * 144;
-    device const uchar* row0 = wm + woff + (ulong)j0 * nb01;
 
     const short ix = tiisg / 8;
     const short it = tiisg % 8;
@@ -1102,66 +1149,101 @@ kernel void matvec_q4_k_mv(
     float yh[16];
     float sumf[2] = {0.0f, 0.0f};
 
-    device const float* y4 = x + ix * 256 + 64 * iq + 8 * ir;
-    device const float* u4 = xu + ix * 256 + 64 * iq + 8 * ir;
-
     ushort sc16[4];
     thread const uchar* sc8 = (thread const uchar*)sc16;
 
-    for (uint ib = ix; ib < nb; ib += 4) {
-        float4 sumy = {0.0f, 0.0f, 0.0f, 0.0f};
-        for (short i = 0; i < 8; ++i) {
-            yl[i + 0] = SWIGLU_X ? sw1(y4[i + 0], u4[i + 0]) : y4[i + 0];
-            sumy[0] += yl[i + 0];
-            yl[i + 8] = SWIGLU_X ? sw1(y4[i + 32], u4[i + 32]) : y4[i + 32];
-            sumy[1] += yl[i + 8];
-            yh[i + 0] = SWIGLU_X ? sw1(y4[i + 128], u4[i + 128]) : y4[i + 128];
-            sumy[2] += yh[i + 0];
-            yh[i + 8] = SWIGLU_X ? sw1(y4[i + 160], u4[i + 160]) : y4[i + 160];
-            sumy[3] += yh[i + 8];
-        }
-        device const uchar* blk = row0 + ib * 144;
-        device const ushort* sc = (device const ushort*)(blk + 4) + iq;
-        device const ushort* q1 = (device const ushort*)(blk + 16) + 16 * iq + 4 * ir;
-        device const uchar* dh = blk;
-
-        for (uint row = 0; row < 2; row++) {
-            sc16[0] = sc[0] & kmask1;
-            sc16[1] = sc[2] & kmask1;
-            sc16[2] = ((sc[4] >> 0) & kmask2) | ((sc[0] & kmask3) >> 2);
-            sc16[3] = ((sc[4] >> 4) & kmask2) | ((sc[2] & kmask3) >> 2);
-
-            device const ushort* q2 = q1 + 32;
-
-            float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
-            float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
-            for (short i = 0; i < 4; ++i) {
-                acc1[0] += yl[2 * i + 0] * (q1[i] & 0x000F);
-                acc1[1] += yl[2 * i + 1] * (q1[i] & 0x0F00);
-                acc1[2] += yl[2 * i + 8] * (q1[i] & 0x00F0);
-                acc1[3] += yl[2 * i + 9] * (q1[i] & 0xF000);
-                acc2[0] += yh[2 * i + 0] * (q2[i] & 0x000F);
-                acc2[1] += yh[2 * i + 1] * (q2[i] & 0x0F00);
-                acc2[2] += yh[2 * i + 8] * (q2[i] & 0x00F0);
-                acc2[3] += yh[2 * i + 9] * (q2[i] & 0xF000);
+    {
+        device const uchar* ws = wm;
+        device const float* xs = x;
+        device const float* us = xu;
+        if (INDEXED) {
+            ws += ids[(ROWS ? tok * idx.ids_stride : 0u) + slot] * idx.stride;
+            xs += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
+            if (SWIGLU_X) {
+                us += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
             }
-
-            half2 dm = *(device const half2*)dh;
-            sumf[row] +=
-                (float)dm.x * ((acc1[0] + (1.0f / 256.0f) * acc1[1]) * sc8[0] +
-                               (acc1[2] + (1.0f / 256.0f) * acc1[3]) * sc8[1] * (1.0f / 16.0f) +
-                               (acc2[0] + (1.0f / 256.0f) * acc2[1]) * sc8[4] +
-                               (acc2[2] + (1.0f / 256.0f) * acc2[3]) * sc8[5] * (1.0f / 16.0f)) -
-                (float)dm.y * (sumy[0] * sc8[2] + sumy[1] * sc8[3] +
-                               sumy[2] * sc8[6] + sumy[3] * sc8[7]);
-
-            ulong step = (row + 1 < nrows) ? nb01 : 0;
-            q1 = (device const ushort*)((device const uchar*)q1 + step);
-            sc = (device const ushort*)((device const uchar*)sc + step);
-            dh += step;
         }
-        y4 += 4 * 256;
-        u4 += 4 * 256;
+        device const uchar* row0 = ws + woff + (ulong)j0 * nb01;
+        device const float* y4 = xs + ix * 256 + 64 * iq + 8 * ir;
+        device const float* u4 = us + ix * 256 + 64 * iq + 8 * ir;
+        thread float* part = sumf;
+
+        for (uint ib = ix; ib < nb; ib += 4) {
+            float4 sumy = {0.0f, 0.0f, 0.0f, 0.0f};
+            for (short i = 0; i < 8; ++i) {
+                yl[i + 0] = SWIGLU_X ? sw1(y4[i + 0], u4[i + 0]) : y4[i + 0];
+                sumy[0] += yl[i + 0];
+                yl[i + 8] = SWIGLU_X ? sw1(y4[i + 32], u4[i + 32]) : y4[i + 32];
+                sumy[1] += yl[i + 8];
+                yh[i + 0] = SWIGLU_X ? sw1(y4[i + 128], u4[i + 128]) : y4[i + 128];
+                sumy[2] += yh[i + 0];
+                yh[i + 8] = SWIGLU_X ? sw1(y4[i + 160], u4[i + 160]) : y4[i + 160];
+                sumy[3] += yh[i + 8];
+            }
+            device const uchar* blk = row0 + ib * 144;
+            device const ushort* sc = (device const ushort*)(blk + 4) + iq;
+            device const ushort* q1 = (device const ushort*)(blk + 16) + 16 * iq + 4 * ir;
+            device const uchar* dh = blk;
+
+            for (uint row = 0; row < 2; row++) {
+                sc16[0] = sc[0] & kmask1;
+                sc16[1] = sc[2] & kmask1;
+                sc16[2] = ((sc[4] >> 0) & kmask2) | ((sc[0] & kmask3) >> 2);
+                sc16[3] = ((sc[4] >> 4) & kmask2) | ((sc[2] & kmask3) >> 2);
+
+                device const ushort* q2 = q1 + 32;
+
+                float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
+                float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
+                for (short i = 0; i < 4; ++i) {
+                    acc1[0] += yl[2 * i + 0] * (q1[i] & 0x000F);
+                    acc1[1] += yl[2 * i + 1] * (q1[i] & 0x0F00);
+                    acc1[2] += yl[2 * i + 8] * (q1[i] & 0x00F0);
+                    acc1[3] += yl[2 * i + 9] * (q1[i] & 0xF000);
+                    acc2[0] += yh[2 * i + 0] * (q2[i] & 0x000F);
+                    acc2[1] += yh[2 * i + 1] * (q2[i] & 0x0F00);
+                    acc2[2] += yh[2 * i + 8] * (q2[i] & 0x00F0);
+                    acc2[3] += yh[2 * i + 9] * (q2[i] & 0xF000);
+                }
+
+                half2 dm = *(device const half2*)dh;
+                part[row] +=
+                    (float)dm.x * ((acc1[0] + (1.0f / 256.0f) * acc1[1]) * sc8[0] +
+                                   (acc1[2] + (1.0f / 256.0f) * acc1[3]) * sc8[1] * (1.0f / 16.0f) +
+                                   (acc2[0] + (1.0f / 256.0f) * acc2[1]) * sc8[4] +
+                                   (acc2[2] + (1.0f / 256.0f) * acc2[3]) * sc8[5] * (1.0f / 16.0f)) -
+                    (float)dm.y * (sumy[0] * sc8[2] + sumy[1] * sc8[3] +
+                                   sumy[2] * sc8[6] + sumy[3] * sc8[7]);
+
+                ulong step = (row + 1 < nrows) ? nb01 : 0;
+                q1 = (device const ushort*)((device const uchar*)q1 + step);
+                sc = (device const ushort*)((device const uchar*)sc + step);
+                dh += step;
+            }
+            y4 += 4 * 256;
+            u4 += 4 * 256;
+        }
+    }
+
+    if (COMBINE) {
+        // Weighted slot sum in fixed slot order: the same arithmetic the
+        // standalone combine kernel performed on the per-slot down output.
+        threadgroup float red[64];
+        float s0 = simd_sum(sumf[0]);
+        float s1 = simd_sum(sumf[1]);
+        if (tiisg == 0) {
+            red[2 * sgitg + 0] = wts[slot] * s0;
+            red[2 * sgitg + 1] = wts[slot] * s1;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sgitg == 0 && tiisg < nrows) {
+            float acc = 0.0f;
+            for (uint s = 0; s < idx.slots; ++s) {
+                acc += red[2 * s + tiisg];
+            }
+            yout[fr + tiisg] = acc;
+        }
+        return;
     }
 
     for (uint row = 0; row < 2; row++) {
@@ -1833,6 +1915,173 @@ kernel void resnorm_router(
                 wts[kk] /= total;
             }
         }
+    }
+}
+
+// resnorm + router matvec + gating top-k in ONE dispatch spread over MANY
+// threadgroups. The single-threadgroup fusions (router_topk, resnorm_router)
+// are latency-bound: one group streams the whole router matrix (1 MB on
+// qwen3-30b) through its own load queue. Here threadgroup g owns experts
+// g*8+sg, one per simdgroup, and recomputes the norm scale itself from the
+// cache-resident x/delta/normw rows, so the matrix streams in parallel.
+// Every group writes its logits and bumps an arrival counter; the LAST
+// group to arrive is the only one still running, so it alone publishes
+// x += delta and h, runs the top-k, and resets the counter for the next
+// layer. No group waits on another: co-residency is never required.
+kernel void resnorm_router_mt(
+    device float* x [[buffer(0)]],
+    device const float* delta [[buffer(1)]],
+    device float* h [[buffer(2)]],
+    device const float* normw [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    device const uchar* rw [[buffer(6)]],
+    constant ulong& rw_off [[buffer(7)]],
+    device uint* ids [[buffer(8)]],
+    device float* wts [[buffer(9)]],
+    constant uint& n [[buffer(10)]],
+    constant uint& k [[buffer(11)]],
+    device const float* rbias [[buffer(12)]],
+    constant uint& sigmoid [[buffer(13)]],
+    constant uint& has_bias [[buffer(14)]],
+    device float* logits_out [[buffer(15)]],
+    device atomic_uint* ctr [[buffer(16)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint tg [[threadgroup_position_in_grid]],
+    uint n_tg [[threadgroups_per_grid]])
+{
+    threadgroup float partial[8];
+    threadgroup uint last;
+    float acc = 0.0f;
+    for (uint i = tid; i < hidden; i += 256) {
+        float v = x[i] + delta[i];
+        acc += v * v;
+    }
+    float s = simd_sum(acc);
+    if (lane == 0) {
+        partial[sg] = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = 0.0f;
+    for (uint i = 0; i < 8; i++) {
+        total += partial[i];
+    }
+    float scale = rsqrt(total / (float)hidden + eps);
+
+    device const float* wr = (device const float*)(rw + rw_off);
+    uint e = tg * 8 + sg;
+    if (e < n) {
+        device const float* row = wr + (ulong)e * hidden;
+        float a = 0.0f;
+        for (uint i = lane * 4; i + 3 < hidden; i += 128) {
+            float4 w4 = *(device const float4*)(row + i);
+            float4 xv = *(device const float4*)(x + i) + *(device const float4*)(delta + i);
+            float4 nw = *(device const float4*)(normw + i);
+            a += dot(w4, xv * nw);
+        }
+        float sum = simd_sum(a);
+        if (lane == 0) {
+            logits_out[e] = sum * scale;
+        }
+    }
+    // Publish this group's logits, then count the arrival. Only the last
+    // group to arrive continues past here.
+    threadgroup_barrier(mem_flags::mem_device);
+    if (tid == 0) {
+        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+        uint prev = atomic_fetch_add_explicit(ctr, 1u, memory_order_relaxed);
+        last = (prev + 1 == n_tg) ? 1u : 0u;
+        if (last != 0) {
+            atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (last == 0) {
+        return;
+    }
+    // Every other group has finished reading x and delta: fold the residual
+    // and write the normed h the expert matvecs read.
+    for (uint i = tid; i < hidden; i += 256) {
+        float v = x[i] + delta[i];
+        x[i] = v;
+        h[i] = v * scale * normw[i];
+    }
+    threadgroup float logits[256];
+    for (uint i = tid; i < n; i += 256) {
+        logits[i] = logits_out[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg != 0) {
+        return;
+    }
+    float v[8];
+    uint vid[8];
+    for (uint t = 0; t < 8; t++) {
+        uint idx = lane + t * 32;
+        if (idx < n) {
+            // Sigmoid gating selects by sigmoid(l) + rbias (llama.cpp
+            // `selection_probs`); softmax selects by the raw logit.
+            v[t] = sigmoid != 0
+                ? 1.0f / (1.0f + exp(-logits[idx])) +
+                      (has_bias != 0 ? rbias[idx] : 0.0f)
+                : logits[idx];
+        } else {
+            v[t] = -INFINITY;
+        }
+        vid[t] = idx;
+    }
+    for (uint kk = 0; kk < k; kk++) {
+        float lm = -INFINITY;
+        uint li = 0xFFFFFFFF;
+        for (uint t = 0; t < 8; t++) {
+            if (v[t] > lm) {
+                lm = v[t];
+                li = vid[t];
+            }
+        }
+        float m = simd_max(lm);
+        uint who = simd_min(lm == m ? li : 0xFFFFFFFF);
+        if (lane == 0) {
+            ids[kk] = who;
+        }
+        for (uint t = 0; t < 8; t++) {
+            if (vid[t] == who) {
+                v[t] = -INFINITY;
+            }
+        }
+    }
+    if (lane == 0) {
+        if (sigmoid != 0) {
+            // Weights are the UNBIASED sigmoid renormalised over the picks.
+            float total = 0.0f;
+            for (uint kk = 0; kk < k; kk++) {
+                float s = 1.0f / (1.0f + exp(-logits[ids[kk]]));
+                wts[kk] = s;
+                total += s;
+            }
+            for (uint kk = 0; kk < k; kk++) {
+                wts[kk] /= total;
+            }
+        } else {
+            float mx = -INFINITY;
+            for (uint kk = 0; kk < k; kk++) {
+                mx = max(mx, logits[ids[kk]]);
+            }
+            float total = 0.0f;
+            for (uint kk = 0; kk < k; kk++) {
+                float e = exp(logits[ids[kk]] - mx);
+                wts[kk] = e;
+                total += e;
+            }
+            for (uint kk = 0; kk < k; kk++) {
+                wts[kk] /= total;
+            }
+        }
+        // Reset for the next layer: no other group touches the counter
+        // until the host's stage barrier orders the next dispatch.
+        atomic_store_explicit(ctr, 0u, memory_order_relaxed);
     }
 }
 
@@ -6870,6 +7119,7 @@ fn init_device() -> Option<Gpu> {
         "moe_combine_rows",
         "combine_resnorm",
         "resnorm_router",
+        "resnorm_router_mt",
         "resnorm_router_rows",
         "mmllr64_q4_k",
         "mmllp_q4_k",
@@ -7171,10 +7421,10 @@ impl Gpu {
                 4,
             );
             // NB: an UNSET bool function constant reads as TRUE on this
-            // Metal (measured, macOS 26 / M4 Max) - DUAL_GW (5) and ROWS (6)
-            // must be pinned to false explicitly or the non-dual/non-rows
-            // specialisations silently take the variant path.
-            for index in [5u64, 6] {
+            // Metal (measured, macOS 26 / M4 Max) - DUAL_GW (5), ROWS (6)
+            // and COMBINE (7) must be pinned to false explicitly or the
+            // plain specialisations silently take the variant path.
+            for index in [5u64, 6, 7] {
                 let f = false;
                 consts.set_constant_value_at_index(
                     &f as *const bool as *const _,
@@ -7214,7 +7464,14 @@ impl Gpu {
                     index,
                 );
             }
-            for (index, value) in [(2u64, true), (3, false), (4, false), (5, true), (6, false)] {
+            for (index, value) in [
+                (2u64, true),
+                (3, false),
+                (4, false),
+                (5, true),
+                (6, false),
+                (7, false),
+            ] {
                 consts.set_constant_value_at_index(
                     &value as *const bool as *const _,
                     metal::MTLDataType::Bool,
@@ -7225,6 +7482,55 @@ impl Gpu {
                 .library
                 .get_function(name, Some(consts))
                 .map_err(|e| eprintln!("metal: {name}<dual, lanes {lpr}> failed: {e}"))
+                .ok()?;
+            let p = self
+                .device
+                .new_compute_pipeline_state_with_function(&f)
+                .ok()?;
+            self.pipelines.insert(key, p);
+        }
+        self.pipelines.get(&key)
+    }
+
+    /// The COMBINE variant of an INDEXED down matvec (decode MoE): function
+    /// constant 7 with SWIGLU_X on, so one dispatch reads raw gate/up, loops
+    /// the routed slots in-simdgroup and writes the weighted sum straight
+    /// into the residual delta. Only matvec_q4_k_mv and matvec_q6_k_mv carry
+    /// the variant.
+    fn pipeline_combine(
+        &mut self,
+        name: &'static str,
+        lpr: usize,
+        swiglu_x: bool,
+    ) -> Option<&ComputePipelineState> {
+        let key = (name, 1, lpr + if swiglu_x { 32000 } else { 33000 });
+        if !self.pipelines.contains_key(&key) {
+            let consts = metal::FunctionConstantValues::new();
+            for (index, value) in [(0u64, 1u32), (1, lpr as u32)] {
+                consts.set_constant_value_at_index(
+                    &value as *const u32 as *const _,
+                    metal::MTLDataType::UInt,
+                    index,
+                );
+            }
+            for (index, value) in [
+                (2u64, true),
+                (3, swiglu_x),
+                (4, false),
+                (5, false),
+                (6, false),
+                (7, true),
+            ] {
+                consts.set_constant_value_at_index(
+                    &value as *const bool as *const _,
+                    metal::MTLDataType::Bool,
+                    index,
+                );
+            }
+            let f = self
+                .library
+                .get_function(name, Some(consts))
+                .map_err(|e| eprintln!("metal: {name}<combine, lanes {lpr}> failed: {e}"))
                 .ok()?;
             let p = self
                 .device
@@ -7255,7 +7561,14 @@ impl Gpu {
                     index,
                 );
             }
-            for (index, value) in [(2u64, true), (3, swiglu), (4, false), (5, false), (6, true)] {
+            for (index, value) in [
+                (2u64, true),
+                (3, swiglu),
+                (4, false),
+                (5, false),
+                (6, true),
+                (7, false),
+            ] {
                 consts.set_constant_value_at_index(
                     &value as *const bool as *const _,
                     metal::MTLDataType::Bool,
@@ -8471,6 +8784,9 @@ enum FfnRefs {
         /// gate + up as one dual-output indexed dispatch
         /// (ALLPAKA_DECODE_GUFUSE).
         gu_dual: Option<ComputePipelineState>,
+        /// down + combine as ONE indexed dispatch writing the
+        /// residual delta (COMBINE function constant).
+        down_combine: Option<ComputePipelineState>,
     },
 }
 
@@ -8910,6 +9226,26 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 } else {
                     None
                 };
+                // down + combine as ONE dispatch into delta: the per-slot
+                // down buffer, the combine dispatch and a barrier drop out
+                // of every MoE layer. Routed
+                // experts only - a shared expert's slot comes from another
+                // matrix - and the 2-row simdgroup pairs need an even
+                // hidden. `ALLPAKA_DCOMB=0` reverts to the separate stages.
+                let down_kernel = match mats[2].kernel {
+                    k @ ("matvec_q4_k_mv" | "matvec_q6_k_mv") => Some(k),
+                    _ => None,
+                };
+                let down_combine = match down_kernel {
+                    Some(k) if dcomb() && shared.is_none() && hidden % 2 == 0 && *n_used <= 32 => {
+                        gpu.pipeline_combine(k, lanes_per_row(mats[2].ty, *expert_ffn), dcomb_sw())
+                            .filter(|p| {
+                                p.max_total_threads_per_threadgroup() >= 32 * *n_used as u64
+                            })
+                            .map(|p| p.to_owned())
+                    }
+                    _ => None,
+                };
                 FfnRefs::Moe {
                     router: router_ref,
                     router_state,
@@ -8945,6 +9281,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         None => None,
                     },
                     gu_dual,
+                    down_combine,
                 }
             }
         };
@@ -9013,6 +9350,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     let combine_state = gpu.pipelines[&("moe_combine", 1, 1)].to_owned();
     let combine_resnorm_state = gpu.pipelines[&("combine_resnorm", 1, 1)].to_owned();
     let resnorm_router_state = gpu.pipelines[&("resnorm_router", 1, 1)].to_owned();
+    let resnorm_router_mt_state = gpu.pipelines[&("resnorm_router_mt", 1, 1)].to_owned();
     let argmax_state = gpu.pipelines[&("argmax_f32", 1, 1)].to_owned();
     let argmax_final_state = gpu.pipelines[&("argmax_final", 1, 1)].to_owned();
 
@@ -9066,6 +9404,9 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     let out_logits_at = downo_at + align(max_slots * hidden);
     let flag_at = out_logits_at + align(vocab);
     let ctr_at = flag_at + align(1);
+    // Arrival counter of the multi-threadgroup resnorm_router_mt kernel;
+    // the kernel's last group resets it, so one word serves every layer.
+    let rctr_at = ctr_at + align(1);
     // Flash-decoding split fan-out: past a few hundred cached positions one
     // threadgroup per q head walks the KV cache too serially (measured 86 us
     // per layer at 544 tokens against ~2 us of cache bytes). Split the
@@ -9080,7 +9421,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         .unwrap_or_else(|| (n_pos / 128).clamp(1, 12))
         .clamp(1, 16)
         .min(n_pos);
-    let sp_acc_at = ctr_at + align(1);
+    let sp_acc_at = rctr_at + align(1);
     let sp_md_at = sp_acc_at + align(req.n_heads * nsplit * hd);
     // The greedy argmax: 64 (value, index) partial pairs plus the winner.
     let amax_at = sp_md_at + align(req.n_heads * nsplit * 2);
@@ -9094,6 +9435,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         std::ptr::write_bytes(yp.add(delta_at), 0, hidden);
         std::ptr::write_bytes(yp.add(flag_at), 0, 1);
         std::ptr::write_bytes(yp.add(ctr_at), 0, 1);
+        std::ptr::write_bytes(yp.add(rctr_at), 0, 1);
         // The shared expert's combine weight is a constant 1 in the slot past
         // the router-written ones - unless the layer carries qwen35moe's
         // gate projection, whose matvec overwrites it during the token.
@@ -9850,7 +10192,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             // norm fuses with the router into ONE dispatch below
             // (resnorm_router), so it runs there instead.
             // `ALLPAKA_RFUSE=0` reverts to the separate norm dispatch.
-            let moe_plain = !refs.normflag && rfuse() && matches!(&refs.ffn, FfnRefs::Moe { .. });
+            let moe_plain =
+                !refs.normflag && (rmt() || rfuse()) && matches!(&refs.ffn, FfnRefs::Moe { .. });
             if !moe_plain {
                 if refs.normflag {
                     resnorm_sig(&enc, &refs.ffn_norm, ep_ffn);
@@ -9909,6 +10252,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     shared,
                     shared_gate,
                     gu_dual,
+                    down_combine,
                 } => {
                     let n_slots = *n_used + shared.is_some() as usize;
                     let sig_last = shared_gate.is_some() as u32;
@@ -9916,11 +10260,18 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     if !probe_skip("router") {
                         if moe_plain {
                             // FFN residual norm + router matvec + gating + top-k
-                            // in ONE dispatch: both halves are single-threadgroup
-                            // kernels back to back, so the boundary between them
-                            // was pure launch and drain latency. Not under
-                            // normflag: that path orders the norm by spin-flag.
-                            enc.set_compute_pipeline_state(&resnorm_router_state);
+                            // in ONE dispatch. `ALLPAKA_RMT=1`: the
+                            // multi-threadgroup kernel (one group per 8
+                            // experts, last arrival does the top-k);
+                            // `ALLPAKA_RFUSE=1`: the single-threadgroup
+                            // original. Not under normflag: that path orders
+                            // the norm by spin-flag.
+                            let mt = rmt();
+                            enc.set_compute_pipeline_state(if mt {
+                                &resnorm_router_mt_state
+                            } else {
+                                &resnorm_router_state
+                            });
                             enc.set_buffer(0, Some(y), e(x_at));
                             enc.set_buffer(1, Some(y), e(delta_at));
                             enc.set_buffer(2, Some(y), e(h_at));
@@ -9950,10 +10301,19 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                             let hb = router_bias.is_some() as u32;
                             enc.set_bytes(13, 4, &sg as *const u32 as *const _);
                             enc.set_bytes(14, 4, &hb as *const u32 as *const _);
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(1, 1, 1),
-                                MTLSize::new(256, 1, 1),
-                            );
+                            if mt {
+                                enc.set_buffer(15, Some(y), e(logits_at));
+                                enc.set_buffer(16, Some(y), e(rctr_at));
+                                enc.dispatch_thread_groups(
+                                    MTLSize::new((*n_expert as u64).div_ceil(8), 1, 1),
+                                    MTLSize::new(256, 1, 1),
+                                );
+                            } else {
+                                enc.dispatch_thread_groups(
+                                    MTLSize::new(1, 1, 1),
+                                    MTLSize::new(256, 1, 1),
+                                );
+                            }
                             ffn_dispatches += 1;
                         } else if !refs.normflag && rtopk_fused() {
                             // Router matvec + gating + top-k in ONE dispatch: the
@@ -10029,14 +10389,18 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         }
                     }
                     split_here!("router");
+                    bar_c(&enc, b'f');
                     // qwen35moe: the shared expert's gate projection writes
                     // the raw logit into its combine slot; the combine
-                    // kernel applies the sigmoid.
+                    // kernel applies the sigmoid. It runs alongside the
+                    // expert matvecs, AFTER the barrier: on the fused
+                    // resnorm_router paths h is written by the router
+                    // dispatch itself, and nothing reads this slot before
+                    // the down barrier.
                     if let Some((sg_mat, sg_state)) = shared_gate {
                         matvec(&enc, sg_state, sg_mat, hidden, 1, h_at, wts_at + *n_used);
                         ffn_dispatches += 1;
                     }
-                    bar_c(&enc, b'f');
                     if !probe_skip("experts") {
                         match gu_dual {
                             // gate + up in ONE dual-output indexed dispatch.
@@ -10131,64 +10495,125 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         }
                         split_here!("gate_up");
                         bar_c(&enc, b'f');
-                        if !*sw_fused {
-                            enc.set_compute_pipeline_state(&swiglu_state);
-                            enc.set_buffer(0, Some(y), e(gate_at));
-                            enc.set_buffer(1, Some(y), e(up_at));
-                            let n32 = (n_slots * *expert_ffn) as u32;
-                            enc.set_bytes(2, 4, &n32 as *const u32 as *const _);
+                        if let Some(dc) = down_combine {
+                            if !dcomb_sw() {
+                                enc.set_compute_pipeline_state(&swiglu_state);
+                                enc.set_buffer(0, Some(y), e(gate_at));
+                                enc.set_buffer(1, Some(y), e(up_at));
+                                let n32 = (n_slots * *expert_ffn) as u32;
+                                enc.set_bytes(2, 4, &n32 as *const u32 as *const _);
+                                enc.dispatch_thread_groups(
+                                    MTLSize::new((n32 as u64).div_ceil(256), 1, 1),
+                                    MTLSize::new(256, 1, 1),
+                                );
+                                ffn_dispatches += 1;
+                                split_here!("swiglu");
+                                bar_c(&enc, b'f');
+                            }
+                            // down + combine in ONE dispatch: swiglu'd gate
+                            // (x; raw gate + up in buffer 8 under DCOMB_SW),
+                            // one simdgroup per routed slot, router weights
+                            // in buffer 14, the weighted sum written straight
+                            // to delta. The grid covers hidden rows only.
+                            enc.set_compute_pipeline_state(dc);
+                            enc.set_buffer(0, Some(&gpu.chunks[mats[2].chunk].buf), 0);
+                            enc.set_buffer(1, Some(y), e(gate_at));
+                            enc.set_buffer(2, Some(y), e(delta_at));
+                            let a = *expert_ffn as u32;
+                            let b = hidden as u32;
+                            enc.set_bytes(3, 4, &a as *const u32 as *const _);
+                            enc.set_bytes(4, 4, &b as *const u32 as *const _);
+                            enc.set_bytes(5, 8, &mats[2].w_off as *const u64 as *const _);
+                            enc.set_buffer(6, Some(y), e(ids_at));
+                            let idx = GpuIdxArgs {
+                                stride: strides[2],
+                                slots: *n_used as u32,
+                                x_stride: *expert_ffn as u32,
+                                ids_stride: 0,
+                                x_row_stride: 0,
+                                y_row_stride: 0,
+                                n_rows: 0,
+                            };
+                            enc.set_bytes(
+                                7,
+                                std::mem::size_of::<GpuIdxArgs>() as u64,
+                                &idx as *const GpuIdxArgs as *const _,
+                            );
+                            enc.set_buffer(8, Some(y), e(up_at));
+                            enc.set_buffer(14, Some(y), e(wts_at));
+                            // One threadgroup per row pair, one simdgroup
+                            // per routed slot.
                             enc.dispatch_thread_groups(
-                                MTLSize::new((n32 as u64).div_ceil(256), 1, 1),
-                                MTLSize::new(256, 1, 1),
+                                MTLSize::new((hidden as u64).div_ceil(2), 1, 1),
+                                MTLSize::new(32 * *n_used as u64, 1, 1),
                             );
                             ffn_dispatches += 1;
-                            split_here!("swiglu");
-                            bar_c(&enc, b'f');
                         } else {
-                            // The down kernel reads raw gate (x) and raw up
-                            // (buffer 8) and applies swiglu on load.
-                            enc.set_buffer(8, Some(y), e(up_at));
-                        }
-                        matvec_idx(
-                            &enc,
-                            &states[2],
-                            &mats[2],
-                            *expert_ffn,
-                            hidden,
-                            gate_at,
-                            downo_at,
-                            strides[2],
-                            *n_used,
-                            *expert_ffn,
-                        );
-                        ffn_dispatches += 1;
-                        if let Some((smats, sstates)) = shared {
-                            // The shared down reads its own raw up slot.
-                            if *sw_fused {
-                                enc.set_buffer(8, Some(y), e(up_at + *n_used * *expert_ffn));
+                            if !*sw_fused {
+                                enc.set_compute_pipeline_state(&swiglu_state);
+                                enc.set_buffer(0, Some(y), e(gate_at));
+                                enc.set_buffer(1, Some(y), e(up_at));
+                                let n32 = (n_slots * *expert_ffn) as u32;
+                                enc.set_bytes(2, 4, &n32 as *const u32 as *const _);
+                                enc.dispatch_thread_groups(
+                                    MTLSize::new((n32 as u64).div_ceil(256), 1, 1),
+                                    MTLSize::new(256, 1, 1),
+                                );
+                                ffn_dispatches += 1;
+                                split_here!("swiglu");
+                                bar_c(&enc, b'f');
+                            } else {
+                                // The down kernel reads raw gate (x) and raw up
+                                // (buffer 8) and applies swiglu on load.
+                                enc.set_buffer(8, Some(y), e(up_at));
                             }
-                            matvec(
+                            matvec_idx(
                                 &enc,
-                                &sstates[2],
-                                &smats[2],
+                                &states[2],
+                                &mats[2],
                                 *expert_ffn,
                                 hidden,
-                                gate_at + *n_used * *expert_ffn,
-                                downo_at + *n_used * hidden,
+                                gate_at,
+                                downo_at,
+                                strides[2],
+                                *n_used,
+                                *expert_ffn,
                             );
                             ffn_dispatches += 1;
+                            if let Some((smats, sstates)) = shared {
+                                // The shared down reads its own raw up slot.
+                                if *sw_fused {
+                                    enc.set_buffer(8, Some(y), e(up_at + *n_used * *expert_ffn));
+                                }
+                                matvec(
+                                    &enc,
+                                    &sstates[2],
+                                    &smats[2],
+                                    *expert_ffn,
+                                    hidden,
+                                    gate_at + *n_used * *expert_ffn,
+                                    downo_at + *n_used * hidden,
+                                );
+                                ffn_dispatches += 1;
+                            }
                         }
                     }
                     split_here!("down");
-                    bar_c(&enc, b'f');
-                    if cfuse() {
-                        // No standalone combine: it folds into the next
-                        // residual norm (combine_resnorm), which the barrier
-                        // above already orders against the down writes.
-                        pending_combine = Some((n_slots as u32, sig_last));
+                    if down_combine.is_some() {
+                        // delta is complete: the layer-end drain below is
+                        // the only barrier this stage needs.
                     } else {
-                        combine(&enc, n_slots as u32, sig_last);
-                        ffn_dispatches += 1;
+                        bar_c(&enc, b'f');
+                        if cfuse() {
+                            // No standalone combine: it folds into the next
+                            // residual norm (combine_resnorm), which the
+                            // barrier above already orders against the down
+                            // writes.
+                            pending_combine = Some((n_slots as u32, sig_last));
+                        } else {
+                            combine(&enc, n_slots as u32, sig_last);
+                            ffn_dispatches += 1;
+                        }
                     }
                     split_here!("combine");
                     dispatched += ffn_dispatches;
@@ -11218,6 +11643,7 @@ fn encode_verify_tokens(
                     shared,
                     shared_gate,
                     gu_dual: _,
+                    down_combine: _,
                 } => {
                     let n_slots = *n_used + shared.is_some() as usize;
                     // Stage 1: FFN resnorm + router matvec + gating top-k over
@@ -13573,6 +13999,38 @@ fn rtopk_fused() -> bool {
 fn rfuse() -> bool {
     static R: OnceLock<bool> = OnceLock::new();
     *R.get_or_init(|| std::env::var("ALLPAKA_RFUSE").is_ok_and(|v| v == "1"))
+}
+
+/// The multi-threadgroup resnorm + router + top-k dispatch
+/// (resnorm_router_mt): replaces the separate FFN norm, router matvec and
+/// top-k dispatches - three launches and two barrier drains per MoE layer -
+/// with one launch that still streams the router matrix in parallel.
+/// Correct (greedy tokens identical) but measured neutral on M4 Max /
+/// Qwen3-30B-A3B: the saved drains are paid back by the device-scope fence
+/// and the serial last-group tail, so it stays opt-in. `ALLPAKA_RMT=1`.
+fn rmt() -> bool {
+    static R: OnceLock<bool> = OnceLock::new();
+    *R.get_or_init(|| std::env::var("ALLPAKA_RMT").is_ok_and(|v| v == "1"))
+}
+
+/// The decode-side down + combine dispatch (COMBINE function constant on
+/// the q4_k/q6_k mv kernels): one simdgroup per routed slot in a shared
+/// threadgroup, the weighted slot sum reduced through threadgroup memory
+/// straight into delta. The per-slot down buffer, the combine dispatch and
+/// one barrier drain leave every MoE layer (~0.3 ms/token on Qwen3-30B-A3B).
+/// Default ON; `ALLPAKA_DCOMB=0` reverts to the separate stages.
+/// Apply swiglu on load inside the fused down+combine kernel instead of the
+/// standalone swiglu dispatch. Measured OFF: every row pair re-evaluates the
+/// exp for its slot's 768 activations, ~0.8 ms/token on Qwen3-30B-A3B versus
+/// 0.13 ms for the dedicated pass plus its barrier. `ALLPAKA_DCOMB_SW=1`.
+fn dcomb_sw() -> bool {
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| std::env::var("ALLPAKA_DCOMB_SW").is_ok_and(|v| v == "1"))
+}
+
+fn dcomb() -> bool {
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| std::env::var("ALLPAKA_DCOMB").map_or(true, |v| v != "0"))
 }
 
 /// K-step 64 for the LL mm kernels: `ALLPAKA_MM_K64=1` to enable.
