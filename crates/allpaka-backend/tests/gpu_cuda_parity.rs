@@ -250,12 +250,12 @@ fn gemm_q4k_q6k_parity() {
         .unwrap();
         assert_eq!(got.len(), m * n_out);
         let w_f32 = allpaka_gguf::dequant::dequant(ty, w, n_out * n_in).unwrap();
-        // Q8 activation paths match Q8·W, not float·W.
-        // Near-cancelling dots can differ from float by >2e-2 abs — compare via
-        // Q8 reconstruction when those paths are active.
-        // ALLPAKA_MMQ=tile uses float-X tiled smem MMQ; =1/=nvcc use Q8·W.
-        let mmq = std::env::var("ALLPAKA_MMQ").unwrap_or_default();
-        let q8_path = matches!(ty, GgmlType::Q4K) && (mmq == "1" || mmq == "nvcc");
+        // Q8 activation paths match Q8*W, not float*W.
+        // Near-cancelling dots can differ from float by more than 2e-2 abs.
+        let q8_path = matches!(ty, GgmlType::Q4K | GgmlType::Q6K)
+            && std::env::var("ALLPAKA_Q8")
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(true);
         for row in 0..m {
             let xr = &x[row * n_in..(row + 1) * n_in];
             let recon: Vec<f32> = if q8_path {
