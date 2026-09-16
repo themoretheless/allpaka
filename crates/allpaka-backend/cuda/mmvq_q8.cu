@@ -1,5 +1,5 @@
 ﻿// Q4_K / Q6_K MMVQ - nvcc -ptx -arch=sm_120 -O3
-// Y = packed block_q8_1 (44 B): half d/s, int8 qs[32], four Q4_K partial sums.
+// Y = packed block_q8_1 (44 B): float d, int8 qs[32], four Q4_K partial sums.
 
 extern "C" {
 
@@ -10,8 +10,7 @@ typedef signed char int8_t;
 typedef signed short int16_t;
 
 struct block_q8_1 {
-    uint16_t d;
-    uint16_t s;
+    float d;
     int8_t qs[32];
     int16_t ps[4];
 };
@@ -39,15 +38,13 @@ __device__ __forceinline__ void store_q8_meta(
         b->ps[lane >> 2] = (int16_t)ps;
     }
     if (lane == 0) {
-        b->d = f32_to_f16_bits(d);
-        b->s = 0;
+        b->d = d;
     }
 }
 
 __device__ __forceinline__ void store_q8_scale(block_q8_1* b, unsigned lane, float d) {
     if (lane == 0) {
-        b->d = f32_to_f16_bits(d);
-        b->s = 0;
+        b->d = d;
     }
 }
 
@@ -126,7 +123,7 @@ __device__ __forceinline__ float vec_dot_q4_k_q8(
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         const block_q8_1* bq8i = bq8 + bq8_offset + i;
-        float d8 = half_bits_to_f32(__ldg(&bq8i->d));
+        float d8 = __ldg(&bq8i->d);
         const int* q8 = (const int*)bq8i->qs + ((iqs / 2) % 4);
         int u0 = q8[0];
         int u1 = q8[4];
@@ -158,7 +155,7 @@ __device__ __forceinline__ float vec_dot_q6_k_q8(
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         const block_q8_1* bq8i = bq8 + bq8_offset + 2 * i;
-        float d8 = half_bits_to_f32(__ldg(&bq8i->d));
+        float d8 = __ldg(&bq8i->d);
         const int* q8 = (const int*)bq8i->qs + (iqs % 8);
         int u = q8[0];
         int sc = (int)scales[4 * i];
@@ -189,7 +186,7 @@ __device__ __forceinline__ float vec_dot_q6_k_q8_smem(
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         const block_q8_1* bq8i = bq8 + bq8_offset + 2 * i;
-        float d8 = half_bits_to_f32(bq8i->d);
+        float d8 = bq8i->d;
         const int* q8 = (const int*)bq8i->qs + (iqs % 8);
         int u = q8[0];
         int sc = (int)scales[4 * i];
@@ -283,6 +280,47 @@ __global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q4_k_q8(
     float acc = 0.f;
     for (unsigned kbx = tid / 16u; kbx < nb; kbx += 8u) {
         int iqs = (int)(2u * (tid % 16u));
+        acc += vec_dot_q4_k_q8(wrow + kbx * 144u, xr + kbx * 8u, iqs);
+    }
+    pdl_lc();
+    acc = warp_sum_f(acc);
+    __shared__ float wacc[MMVQ_NWARPS];
+    if (lane == 0) wacc[warp] = acc;
+    __syncthreads();
+    if (warp == 0 && lane == 0) {
+        float s = 0.f;
+        #pragma unroll
+        for (unsigned i = 0; i < MMVQ_NWARPS; i++) s += wacc[i];
+        float* yr = y + (size_t)row * n_out;
+        if (add) yr[out] += s;
+        else yr[out] = s;
+    }
+}
+
+__global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q4_k_q8_k8192(
+    const uint8_t* __restrict__ w,
+    const block_q8_1* __restrict__ x,
+    float* __restrict__ y,
+    unsigned n_in, unsigned n_out, unsigned long long w_off, unsigned m,
+    unsigned add)
+{
+    unsigned lane = threadIdx.x;
+    unsigned warp = threadIdx.y;
+    unsigned tid = warp * 32u + lane;
+    unsigned out = blockIdx.x;
+    unsigned row = blockIdx.y;
+    pdl_sync();
+    if (out >= n_out || row >= m) { pdl_lc(); return; }
+    (void)n_in;
+
+    const block_q8_1* xr = x + (size_t)row * 256u;
+    const uint8_t* wrow = (w + w_off) + (size_t)out * 4608u;
+    unsigned kbx = tid / 16u;
+    int iqs = (int)(2u * (tid % 16u));
+
+    float acc = 0.f;
+    #pragma unroll
+    for (unsigned i = 0; i < 4u; i++, kbx += 8u) {
         acc += vec_dot_q4_k_q8(wrow + kbx * 144u, xr + kbx * 8u, iqs);
     }
     pdl_lc();
@@ -837,7 +875,7 @@ __global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q4_k_q8_qkv(
 }
 
 // Q4_K_M GQA: Q/K are Q4_K, V is Q6_K (210 B/block).
-__global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q4_q4_q6_q8_qkv(
+__global__ void __launch_bounds__(MMVQ_NWARPS * 32, 8) matvec_q4_q4_q6_q8_qkv(
     const uint8_t* __restrict__ wq,
     const uint8_t* __restrict__ wk,
     const uint8_t* __restrict__ wv,

@@ -37,10 +37,9 @@ __device__ __forceinline__ uint16_t f32_to_f16_bits(float f) {
     return f32_to_half_bits(f);
 }
 
-// Packed Q8 activation block with four Q4_K partial sums.
+// Packed Q8 activation block with float scale and four Q4_K partial sums.
 struct block_q8_1 {
-    uint16_t d;
-    uint16_t s;
+    float d;
     int8_t qs[32];
     int16_t ps[4];
 };
@@ -56,15 +55,13 @@ __device__ __forceinline__ void store_q8_meta(
         b->ps[lane >> 2] = (int16_t)ps;
     }
     if (lane == 0) {
-        b->d = f32_to_f16_bits(d);
-        b->s = 0;
+        b->d = d;
     }
 }
 
 __device__ __forceinline__ void store_q8_scale(block_q8_1* b, unsigned lane, float d) {
     if (lane == 0) {
-        b->d = f32_to_f16_bits(d);
-        b->s = 0;
+        b->d = d;
     }
 }
 
@@ -1657,7 +1654,7 @@ __device__ __forceinline__ float vec_dot_q4_k_q8(
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         const block_q8_1* bq8i = bq8 + bq8_offset + i;
-        float d8 = half_bits_to_f32(__ldg(&bq8i->d));
+        float d8 = __ldg(&bq8i->d);
         const int* q8 = (const int*)bq8i->qs + ((iqs / 2) % 4);
         int u0 = q8[0];
         int u1 = q8[4];
@@ -1690,7 +1687,7 @@ __device__ __forceinline__ float vec_dot_q6_k_q8(
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         const block_q8_1* bq8i = bq8 + bq8_offset + 2 * i;
-        float d8 = half_bits_to_f32(__ldg(&bq8i->d));
+        float d8 = __ldg(&bq8i->d);
         const int* q8 = (const int*)bq8i->qs + (iqs % 8);
         int u = q8[0];
         int sc = (int)scales[4 * i];

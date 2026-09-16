@@ -162,6 +162,7 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
                     y_off,
                     i > 0,
                     false,
+                    None,
                 )?;
                 offs.push((y_off, r.m * r.n_out));
                 y_off += r.m * r.n_out;
@@ -1727,7 +1728,7 @@ fn decode_token_one_fused(
             if q8_on && n % 256 == 0 {
                 gpu.ensure_q8(n, rows)?;
                 let f = gpu.func_owned("rmsnorm_into_f32_q8")?;
-                let mut q = gpu.q8_q.slice_mut(0..(n / 32) * 36 * rows);
+                let mut q = gpu.q8_q.slice_mut(0..(n / 32) * 44 * rows);
                 unsafe {
                     stream
                         .launch_builder_pdl(&f)
@@ -3237,6 +3238,7 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
         gpu.pf_active = true;
         gpu.pf_len = xs.len();
         gpu.pf_ffn_done = false;
+        gpu.pf_rope_n = 0;
         Some(())
     })
 }
@@ -3313,12 +3315,15 @@ fn try_prefill_attn_fused_dev(
             let w = norm_f32_bytes(fusion.attn_norm, hidden)?;
             rmsnorm_pf_x_into_hs(gpu, &w, hidden, m, req.eps)?;
         }
-        gpu.stream
-            .memcpy_htod(
-                rope_host,
-                &mut gpu.x_arena.slice_mut(rope_at..rope_at + rope_host.len()),
-            )
-            .ok()?;
+        if gpu.pf_rope_n != rope_host.len() {
+            gpu.stream
+                .memcpy_htod(
+                    rope_host,
+                    &mut gpu.x_arena.slice_mut(rope_at..rope_at + rope_host.len()),
+                )
+                .ok()?;
+            gpu.pf_rope_n = rope_host.len();
+        }
 
         let (wq_c, wq_o) = resolve_w(gpu, req.wq.1)?;
         let (wk_c, wk_o) = resolve_w(gpu, req.wk.1)?;
@@ -3337,6 +3342,7 @@ fn try_prefill_attn_fused_dev(
             q_at,
             false,
             true,
+            None,
         )?;
         launch_gemm_dequant(
             gpu,
@@ -3351,6 +3357,7 @@ fn try_prefill_attn_fused_dev(
             k_at,
             true,
             true,
+            None,
         )?;
         launch_gemm_dequant(
             gpu,
@@ -3365,8 +3372,10 @@ fn try_prefill_attn_fused_dev(
             v_at,
             true,
             true,
+            None,
         )?;
 
+        crate::gpu::cuda::ggml::prepare_for_cudarc();
         let stream = Arc::clone(&gpu.stream);
         // Stage head-norm weights before taking device ptrs (borrowck).
         if let Some(wn) = req.q_norm {
@@ -3606,25 +3615,13 @@ fn try_prefill_attn_fused_dev(
                     crate::gpu::cuda::ggml::mark_cudarc_dirty();
                 }
             }
-            // attn -> x_arena via raw ptrs (avoid mut borrow vs DevicePtr)
-            {
-                let f_copy = gpu.func_owned("copy_f32")?;
-                let n = (m * q_dim) as u32;
-                let cfg = CudaGpu::cfg_1d(n, 256);
-                let sp = ybase + (attn_at * 4) as u64;
-                let dp = xbase;
-                unsafe {
-                    stream
-                        .launch_builder_pdl(&f_copy)
-                        .arg(&dp)
-                        .arg(&sp)
-                        .arg(&n)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-            }
         } // drop DevicePtr guards
 
+        let attn_dev = {
+            let (p, g) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
+            drop(g);
+            p + (attn_at * 4) as u64
+        };
         launch_gemm_dequant(
             gpu,
             req.wo.0,
@@ -3638,7 +3635,9 @@ fn try_prefill_attn_fused_dev(
             proj_at,
             false,
             false,
+            Some(attn_dev),
         )?;
+        crate::gpu::cuda::ggml::prepare_for_cudarc();
         // residual into pf_x
         {
             let f_add = gpu.func_owned("residual_add")?;
@@ -3727,6 +3726,7 @@ fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             gate_at,
             false,
             true,
+            None,
         )?;
         launch_gemm_dequant(
             gpu,
@@ -3741,11 +3741,12 @@ fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             up_at,
             true,
             true,
+            None,
         )?;
+        crate::gpu::cuda::ggml::prepare_for_cudarc();
         let stream = Arc::clone(&gpu.stream);
         {
             let (ybase, _yg) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
-            let (xbase, _xg) = DevicePtr::device_ptr(&gpu.x_arena, &stream);
             {
                 let f = gpu.func_owned("swiglu")?;
                 let n = (m * ffn) as u32;
@@ -3762,23 +3763,13 @@ fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 }
                 .ok()?;
             }
-            {
-                let f_copy = gpu.func_owned("copy_f32")?;
-                let n = (m * ffn) as u32;
-                let cfg = CudaGpu::cfg_1d(n, 256);
-                let sp = ybase + (gate_at * 4) as u64;
-                let dp = xbase;
-                unsafe {
-                    stream
-                        .launch_builder_pdl(&f_copy)
-                        .arg(&dp)
-                        .arg(&sp)
-                        .arg(&n)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-            }
         }
+        crate::gpu::cuda::ggml::mark_cudarc_dirty();
+        let gate_dev = {
+            let (p, g) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
+            drop(g);
+            p + (gate_at * 4) as u64
+        };
         launch_gemm_dequant(
             gpu,
             req.down.0,
@@ -3792,7 +3783,9 @@ fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             down_at,
             false,
             false,
+            Some(gate_dev),
         )?;
+        crate::gpu::cuda::ggml::prepare_for_cudarc();
         {
             let f_add = gpu.func_owned("residual_add")?;
             let n = (m * hidden) as u32;

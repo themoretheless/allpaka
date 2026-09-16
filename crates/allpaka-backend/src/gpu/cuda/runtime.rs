@@ -1,4 +1,4 @@
-//! CUDA device runtime: context, streams, weight residency, scratch arenas.
+﻿//! CUDA device runtime: context, streams, weight residency, scratch arenas.
 
 use crate::gpu::cuda::kernels::{EMBED_KERNELS, KERNELS};
 use crate::gpu::cuda::pdl::{LaunchArgsPdl, StreamPdlExt};
@@ -301,6 +301,7 @@ fn init_device() -> Option<CudaGpu> {
             let mut n = 0usize;
             for name in [
                 "matvec_q4_k_q8",
+                "matvec_q4_k_q8_k8192",
                 "matvec_q4_k_q8_n2",
                 "matvec_q4_k_q8_r2",
                 "matvec_q4_k_q8_n8",
@@ -580,7 +581,7 @@ impl CudaGpu {
     }
 
     pub fn ensure_q8(&mut self, n: usize, rows: usize) -> Option<()> {
-        // Packed Q8 block: d/s + 32 quants + four Q4_K partial sums.
+        // Packed Q8 block: float scale + 32 quants + four Q4_K partial sums.
         self.ensure_q8_bytes((n / 32) * 44 * rows)
     }
 
@@ -899,6 +900,7 @@ pub fn launch_gemm_dequant(
     y_off: usize,
     reuse_x_f16: bool,
     x_from_pf_hs: bool,
+    x_dev_override: Option<u64>,
 ) -> Option<()> {
     gpu.ensure_arenas(m * n_in * 4, (y_off + m * n_out) * 4)?;
     if !x_already_in_arena {
@@ -919,7 +921,9 @@ pub fn launch_gemm_dequant(
                 let (wp, wg) = DevicePtr::device_ptr(&gpu.chunks[chunk].buf, &stream);
                 drop(wg);
                 let w_dev = wp + w_off;
-                let x_dev = if x_from_pf_hs {
+                let x_dev = if let Some(p) = x_dev_override {
+                    p
+                } else if x_from_pf_hs {
                     let (p, g) = DevicePtr::device_ptr(&gpu.pf_hs, &stream);
                     drop(g);
                     p
@@ -936,6 +940,9 @@ pub fn launch_gemm_dequant(
                 }
             }
         }
+    }
+    if x_dev_override.is_some() {
+        return None;
     }
 
     crate::gpu::cuda::ggml::prepare_for_cudarc();
@@ -1230,7 +1237,7 @@ pub fn gemm_dequant(
 ) -> Option<Vec<f32>> {
     let t0 = Instant::now();
     launch_gemm_dequant(
-        gpu, ty, chunk, w_off, n_in, n_out, m, false, x_elems, 0, false, false,
+        gpu, ty, chunk, w_off, n_in, n_out, m, false, x_elems, 0, false, false, None,
     )?;
     let encode_ns = t0.elapsed().as_nanos() as u64;
     let t1 = Instant::now();
@@ -1589,6 +1596,14 @@ fn launch_qk_q8_matvec_on(
         }
         (GgmlType::Q4K, true, _, _) => ("matvec_q4_k_q8_n8", 8u32, n_out as u32),
         (GgmlType::Q4K, false, true, _) => ("matvec_q4_k_q8_n2", 2u32, n_out as u32),
+        (GgmlType::Q4K, false, false, false)
+            if n_in == 8192
+                && std::env::var("ALLPAKA_K8192")
+                    .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                    .unwrap_or(true) =>
+        {
+            ("matvec_q4_k_q8_k8192", 4u32, n_out as u32)
+        }
         (GgmlType::Q4K, false, false, false) => ("matvec_q4_k_q8", 4u32, n_out as u32),
         (GgmlType::Q6K, true, _, _) => ("matvec_q6_k_q8_n8", 8u32, n_out as u32),
         (GgmlType::Q6K, _, _, _) => ("matvec_q6_k_q8", 4u32, n_out as u32),
