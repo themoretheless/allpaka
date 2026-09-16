@@ -8,12 +8,13 @@ description = "Tensor operations for the allpaka engine; CPU reference first, ac
 [features]
 default = []
 # CUDA runtime for Windows/Linux. Metal remains the macOS path and ignores this.
-cuda = ["dep:cudarc", "dep:half"]
+cuda = ["dep:cudarc", "dep:half", "dep:libloading"]
 
 [dependencies]
 allpaka-gguf.workspace = true
 anyhow.workspace = true
 half = { version = "2", optional = true }
+libloading = { version = "0.8", optional = true }
 cudarc = { version = "0.19", optional = true, default-features = false, features = [
     "std",
     "cuda-13030",

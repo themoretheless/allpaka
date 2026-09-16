@@ -104,9 +104,7 @@ fn attach_and_matvec_parity() {
     {
         let row_bytes = q8_in / 32 * 34;
         let w = &region[q8_off..q8_off + q8_out * row_bytes];
-        let x: Vec<f32> = (0..q8_in)
-            .map(|i| ((i % 13) as f32 - 6.0) * 0.1)
-            .collect();
+        let x: Vec<f32> = (0..q8_in).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
         let got = gpu::matvec(GgmlType::Q8_0, w, q8_in, q8_out, &x).expect("cuda q8_0 matvec");
         assert_eq!(got.len(), q8_out);
         for j in 0..q8_out {
@@ -197,15 +195,40 @@ fn gemm_q4k_q6k_parity() {
         (GgmlType::Q6K, q6_off, q6_rb),
     ] {
         let w = &region[off..off + n_out * rb];
-        let x1: Vec<f32> = (0..n_in)
-            .map(|i| ((i % 11) as f32 - 5.0) * 0.05)
-            .collect();
+        let x1: Vec<f32> = (0..n_in).map(|i| ((i % 11) as f32 - 5.0) * 0.05).collect();
         let got1 = gpu::matvec(ty, w, n_in, n_out, &x1).expect("cuda matvec m=1");
         let w_f32 = allpaka_gguf::dequant::dequant(ty, w, n_out * n_in).unwrap();
+        let q8_m1 = matches!(ty, GgmlType::Q4K | GgmlType::Q6K)
+            && std::env::var("ALLPAKA_Q8")
+                .map_or(true, |v| v != "0" && !v.eq_ignore_ascii_case("false"));
+        let recon1: Vec<f32> = if q8_m1 {
+            let mut q = vec![0i8; n_in];
+            let mut qd = vec![0f32; n_in / 32];
+            for blk in 0..n_in / 32 {
+                let base = blk * 32;
+                let mut amax = 0f32;
+                for j in 0..32 {
+                    amax = amax.max(x1[base + j].abs());
+                }
+                let scale = if amax < 1e-8 * 127.0 {
+                    1.0
+                } else {
+                    amax / 127.0
+                };
+                qd[blk] = scale;
+                for j in 0..32 {
+                    let qi = (x1[base + j] / scale).round().clamp(-127.0, 127.0) as i32;
+                    q[base + j] = qi as i8;
+                }
+            }
+            (0..n_in).map(|i| q[i] as f32 * qd[i / 32]).collect()
+        } else {
+            x1.clone()
+        };
         for j in 0..n_out {
             let mut want = 0f32;
             for k in 0..n_in {
-                want += x1[k] * w_f32[j * n_in + k];
+                want += recon1[k] * w_f32[j * n_in + k];
             }
             let g = got1[j];
             let tol = 2e-2 + 2e-2 * want.abs();
@@ -227,11 +250,42 @@ fn gemm_q4k_q6k_parity() {
         .unwrap();
         assert_eq!(got.len(), m * n_out);
         let w_f32 = allpaka_gguf::dequant::dequant(ty, w, n_out * n_in).unwrap();
+        // Q8 activation paths match Q8·W, not float·W.
+        // Near-cancelling dots can differ from float by >2e-2 abs — compare via
+        // Q8 reconstruction when those paths are active.
+        // ALLPAKA_MMQ=tile uses float-X tiled smem MMQ; =1/=nvcc use Q8·W.
+        let mmq = std::env::var("ALLPAKA_MMQ").unwrap_or_default();
+        let q8_path = matches!(ty, GgmlType::Q4K) && (mmq == "1" || mmq == "nvcc");
         for row in 0..m {
+            let xr = &x[row * n_in..(row + 1) * n_in];
+            let recon: Vec<f32> = if q8_path {
+                let mut q = vec![0i8; n_in];
+                let mut qd = vec![0f32; n_in / 32];
+                for blk in 0..n_in / 32 {
+                    let base = blk * 32;
+                    let mut amax = 0f32;
+                    for j in 0..32 {
+                        amax = amax.max(xr[base + j].abs());
+                    }
+                    let scale = if amax < 1e-8 * 127.0 {
+                        1.0
+                    } else {
+                        amax / 127.0
+                    };
+                    qd[blk] = scale;
+                    for j in 0..32 {
+                        let qi = (xr[base + j] / scale).round().clamp(-127.0, 127.0) as i32;
+                        q[base + j] = qi as i8;
+                    }
+                }
+                (0..n_in).map(|i| q[i] as f32 * qd[i / 32]).collect()
+            } else {
+                xr.to_vec()
+            };
             for j in 0..n_out {
                 let mut want = 0f32;
                 for k in 0..n_in {
-                    want += x[row * n_in + k] * w_f32[j * n_in + k];
+                    want += recon[k] * w_f32[j * n_in + k];
                 }
                 let g = got[row * n_out + j];
                 let tol = 2e-2 + 2e-2 * want.abs();

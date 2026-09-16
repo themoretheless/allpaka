@@ -10,12 +10,12 @@
 //! * **Throughput**, paid when shipping prompt activations, which are large but
 //!   sent once.
 
+use crate::benchmark_report::{
+    model_fingerprint, BenchmarkMetadata, BenchmarkReport, FastPathStats, Measurement, PhaseMetric,
+    RegressionPolicy, SCHEMA_VERSION,
+};
 use allpaka_core::Link;
 use anyhow::{bail, Context, Result};
-use crate::benchmark_report::{
-    BenchmarkMetadata, BenchmarkReport, FastPathStats, Measurement, PhaseMetric,
-    model_fingerprint, RegressionPolicy, SCHEMA_VERSION,
-};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -337,12 +337,20 @@ pub fn measure_engine(
     // llama-bench's tg numbers are taken.
     let measured_pp: u32 = std::env::var("ALLPAKA_BENCH_PP")
         .unwrap_or_else(|_| "480".into())
-        .parse().context("ALLPAKA_BENCH_PP must be an integer")?;
+        .parse()
+        .context("ALLPAKA_BENCH_PP must be an integer")?;
     let decode_tokens: usize = std::env::var("ALLPAKA_BENCH_TG")
         .unwrap_or_else(|_| "32".into())
-        .parse().context("ALLPAKA_BENCH_TG must be an integer")?;
-    anyhow::ensure!((1..=32768).contains(&measured_pp), "PP must be in 1..=32768");
-    anyhow::ensure!((1..=32768).contains(&decode_tokens), "TG must be in 1..=32768");
+        .parse()
+        .context("ALLPAKA_BENCH_TG must be an integer")?;
+    anyhow::ensure!(
+        (1..=32768).contains(&measured_pp),
+        "PP must be in 1..=32768"
+    );
+    anyhow::ensure!(
+        (1..=32768).contains(&decode_tokens),
+        "TG must be in 1..=32768"
+    );
     let pp = measured_pp + 32;
     let prompt: Vec<u32> = (0..pp)
         .map(|i| (i * 733 + 17) % c.vocab.min(30000))
@@ -367,7 +375,10 @@ pub fn measure_engine(
     let prefill_rate = (prompt.len() - 32) as f64 / prefill_secs;
     // A kernel reading garbage (nil buffer, bad offset) shows up here first.
     let bad = logits.iter().filter(|v| !v.is_finite()).count();
-    anyhow::ensure!(bad == 0 && !logits.is_empty(), "benchmark invalid: empty or non-finite logits");
+    anyhow::ensure!(
+        bad == 0 && !logits.is_empty(),
+        "benchmark invalid: empty or non-finite logits"
+    );
     println!(
         "  prefill  {:>4} tok in {prefill_secs:>6.2} s   {prefill_rate:>7.1} tok/s",
         prompt.len() - 32
@@ -386,23 +397,34 @@ pub fn measure_engine(
     );
     let prefill_phases = report_phases("prefill", prefill_secs, prompt.len() - 32);
 
+    // Decode from near-empty KV, matching llama-bench tg (n_prompt=0, n_depth=0).
+    // Prefill above is a separate metric; chaining decode after pp480 makes tg
+    // look bandwidth-heavier than the llama baseline we compare against.
+    session = model.new_session(decode_tokens + 4);
+    let seed = [1u32];
+    let seed_logits = model.forward_batch(&seed, &mut session)?;
     let gpu_before = allpaka_backend::gpu::stats();
     let clock_before = allpaka_backend::gpu::gpu_time_stats();
     allpaka_model::profile::reset();
     allpaka_backend::telemetry::reset_global();
     let decode_stats_before = allpaka_backend::gpu::decode_path_stats();
     let mut decode_inputs = Vec::with_capacity(decode_tokens);
-    let mut next = logits
+    let mut next = seed_logits
         .iter()
         .enumerate()
         .max_by(|a, b| a.1.total_cmp(b.1))
         .map(|(i, _)| i as u32)
         .unwrap_or(0);
     let t1 = std::time::Instant::now();
-    for _ in 0..decode_tokens {
-        decode_inputs.push(next);
-        next = model.forward_greedy(next, &mut session)?;
-    }
+    let outs = model.forward_greedy_n(next, &mut session, decode_tokens)?;
+    anyhow::ensure!(
+        outs.len() == decode_tokens,
+        "forward_greedy_n returned {} tokens, expected {decode_tokens}",
+        outs.len()
+    );
+    decode_inputs.push(next);
+    decode_inputs.extend_from_slice(&outs[..decode_tokens.saturating_sub(1)]);
+    let _last = outs.last().copied();
     let decode_secs = t1.elapsed().as_secs_f64();
     let decode_rate = decode_tokens as f64 / decode_secs;
     println!(
@@ -671,7 +693,7 @@ pub fn measure_engine(
     prefill_measurement.input_tokens = prompt[32..].to_vec();
     let mut decode_measurement = Measurement::new("decode", decode_tokens, vec![decode_rate]);
     decode_measurement.phases = decode_phases;
-    decode_measurement.context_tokens = Some(measured_pp as usize);
+    decode_measurement.context_tokens = Some(1);
     decode_measurement.input_tokens = decode_inputs;
     decode_measurement.fast_path = FastPathStats {
         attempts: gpu_attempts,
@@ -700,7 +722,9 @@ fn write_engine_report(
         schema_version: SCHEMA_VERSION,
         metadata: BenchmarkMetadata {
             generated_at_unix_ms,
-            git_commit: option_env!("ALLPAKA_GIT_COMMIT").unwrap_or("unknown").into(),
+            git_commit: option_env!("ALLPAKA_GIT_COMMIT")
+                .unwrap_or("unknown")
+                .into(),
             model: model_path.display().to_string(),
             model_fingerprint: model_fingerprint(model_path, file),
             device: if allpaka_backend::gpu::is_attached() {
@@ -723,7 +747,10 @@ fn write_engine_report(
 
     if let Some(baseline_path) = std::env::var_os("ALLPAKA_BENCH_BASELINE") {
         let baseline_bytes = std::fs::read(&baseline_path).with_context(|| {
-            format!("reading benchmark baseline {}", std::path::Path::new(&baseline_path).display())
+            format!(
+                "reading benchmark baseline {}",
+                std::path::Path::new(&baseline_path).display()
+            )
         })?;
         let baseline: BenchmarkReport = serde_json::from_slice(&baseline_bytes)?;
         anyhow::ensure!(
@@ -758,15 +785,11 @@ fn write_engine_report(
         }
     }
 
-    let default_name = model_path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let default_name = model_path.file_stem().unwrap_or_default().to_string_lossy();
     let report_path = std::env::var_os("ALLPAKA_BENCH_REPORT")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::PathBuf::from("target/allpaka-bench")
-                .join(format!("{default_name}.json"))
+            std::path::PathBuf::from("target/allpaka-bench").join(format!("{default_name}.json"))
         });
     if let Some(parent) = report_path.parent() {
         std::fs::create_dir_all(parent)?;

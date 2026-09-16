@@ -62,7 +62,13 @@ fn trace(name: &str, li: usize, v: &[f32]) {
     if std::env::var_os("ALLPAKA_TRACE").is_some() {
         let sum: f64 = v.iter().map(|&x| x as f64).sum();
         let head: Vec<String> = v.iter().take(3).map(|x| format!("{x:.6}")).collect();
-        let tail: Vec<String> = v.iter().rev().take(3).rev().map(|x| format!("{x:.6}")).collect();
+        let tail: Vec<String> = v
+            .iter()
+            .rev()
+            .take(3)
+            .rev()
+            .map(|x| format!("{x:.6}"))
+            .collect();
         eprintln!(
             "trace {name}-{li} sum={sum:.6} head=[{}] tail=[{}]",
             head.join(" "),
@@ -100,14 +106,15 @@ impl SharedFfn<'_> {
     /// The shared FFN over `m` normed rows; borrow rules keep it out of
     /// [`Ffn`]'s match arms.
     fn forward_batch(&self, hs: &[f32], m: usize) -> Result<Vec<f32>> {
-        let mut out = if let Some(mut outs) = QuantMat::ffn_many(&[(&self.gate, &self.up, &self.down, hs)]) {
-            return self.gate_out(outs.pop().expect("one fused item"), hs, m);
-        } else {
-            let mut gate = self.gate.matmul(hs, m)?;
-            let up = self.up.matmul(hs, m)?;
-            ops::swiglu(&mut gate, &up);
-            self.down.matmul(&gate, m)?
-        };
+        let mut out =
+            if let Some(mut outs) = QuantMat::ffn_many(&[(&self.gate, &self.up, &self.down, hs)]) {
+                return self.gate_out(outs.pop().expect("one fused item"), hs, m);
+            } else {
+                let mut gate = self.gate.matmul(hs, m)?;
+                let up = self.up.matmul(hs, m)?;
+                ops::swiglu(&mut gate, &up);
+                self.down.matmul(&gate, m)?
+            };
         self.gate_out(out, hs, m)
     }
 
@@ -119,7 +126,8 @@ impl SharedFfn<'_> {
                 // scales that token's whole shared-expert row.
                 let g = w.matmul(hs, m)?;
                 if std::env::var_os("ALLPAKA_TRACE").is_some() {
-                    static L: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                    static L: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
                     let li = L.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     trace("shexp_gate", li, &g[..1]);
                     trace("shexp_out", li, &out[..out.len() / m]);
@@ -169,7 +177,11 @@ impl Ffn<'_> {
     /// the residual stream out.
     fn forward_batch(&self, hs: &[f32], m: usize, hidden: usize) -> Result<Vec<f32>> {
         match self {
-            Ffn::Dense { w_gate, w_up, w_down } => {
+            Ffn::Dense {
+                w_gate,
+                w_up,
+                w_down,
+            } => {
                 // One command buffer for the whole FFN when the GPU takes it.
                 if let Some(mut outs) = QuantMat::ffn_many(&[(w_gate, w_up, w_down, hs)]) {
                     return Ok(outs.pop().expect("one fused item"));
@@ -253,7 +265,14 @@ impl Ffn<'_> {
                 for (o, chunk) in routed.chunks_mut(per).zip(probs_all.chunks(per * n_expert)) {
                     scope.spawn(move || {
                         for (dst, row) in o.iter_mut().zip(chunk.chunks(n_expert)) {
-                            *dst = route_gated(row, *n_used, *gating, *weights_norm, *weights_scale, rbias);
+                            *dst = route_gated(
+                                row,
+                                *n_used,
+                                *gating,
+                                *weights_norm,
+                                *weights_scale,
+                                rbias,
+                            );
                         }
                     });
                 }
@@ -267,11 +286,16 @@ impl Ffn<'_> {
             }
         }
         if trace_on {
-            let ids: Vec<String> =
-                routed[0].iter().map(|&(e, w)| format!("{e}:{w:.6}")).collect();
+            let ids: Vec<String> = routed[0]
+                .iter()
+                .map(|&(e, w)| format!("{e}:{w:.6}"))
+                .collect();
             let id_sum: usize = routed[0].iter().map(|&(e, _)| e).sum();
             let w_sum: f32 = routed[0].iter().map(|&(_, w)| w).sum();
-            eprintln!("trace moe_topk id_sum={id_sum} w_sum={w_sum:.6} [{}]", ids.join(" "));
+            eprintln!(
+                "trace moe_topk id_sum={id_sum} w_sum={w_sum:.6} [{}]",
+                ids.join(" ")
+            );
         }
         let used: Vec<usize> = (0..n_expert).filter(|&e| !groups[e].is_empty()).collect();
         drop(router_span);
@@ -302,9 +326,19 @@ impl Ffn<'_> {
             // The gather itself happens inside the gate/up kernels via the
             // token table - no CPU-side activation copy at all.
             QuantMat::ffn_grouped(
-                gate_exps, up_exps, down_exps,
-                n_expert, hidden, *expert_ffn,
-                &table, hs, &tok, total_rows, None, None, None,
+                gate_exps,
+                up_exps,
+                down_exps,
+                n_expert,
+                hidden,
+                *expert_ffn,
+                &table,
+                hs,
+                &tok,
+                total_rows,
+                None,
+                None,
+                None,
             )
             .map(|flat| (flat, table))
         };
@@ -362,7 +396,14 @@ impl Ffn<'_> {
         // Every expert's whole FFN in one command buffer when the GPU takes
         // it; otherwise the two-batch matmul_many path with CPU swiglu.
         let fused_items: Vec<(&QuantMat, &QuantMat, &QuantMat, &[f32])> = (0..used.len())
-            .map(|gi| (&gate_mats[gi], &up_mats[gi], &down_mats[gi], gathered[gi].as_slice()))
+            .map(|gi| {
+                (
+                    &gate_mats[gi],
+                    &up_mats[gi],
+                    &down_mats[gi],
+                    gathered[gi].as_slice(),
+                )
+            })
             .collect();
         let downs = match QuantMat::ffn_many(&fused_items) {
             Some(d) => d,
@@ -418,7 +459,11 @@ impl Ffn<'_> {
     /// stream out.
     fn forward(&self, h: &[f32]) -> Result<Vec<f32>> {
         match self {
-            Ffn::Dense { w_gate, w_up, w_down } => {
+            Ffn::Dense {
+                w_gate,
+                w_up,
+                w_down,
+            } => {
                 if let Some(mut outs) = QuantMat::ffn_many(&[(w_gate, w_up, w_down, h)]) {
                     return Ok(outs.pop().expect("one fused item"));
                 }
@@ -471,8 +516,7 @@ impl Ffn<'_> {
 
                 // All routed experts' FFNs in one command buffer when the
                 // GPU takes it; the two-batch path otherwise.
-                let fused_items: Vec<(&QuantMat, &QuantMat, &QuantMat, &[f32])> = (0..picked
-                    .len())
+                let fused_items: Vec<(&QuantMat, &QuantMat, &QuantMat, &[f32])> = (0..picked.len())
                     .map(|i| (&gate_mats[i], &up_mats[i], &down_mats[i], h))
                     .collect();
                 let ffn_span = profile::span(profile::Phase::Ffn);
@@ -593,7 +637,16 @@ pub fn route(probs: &[f32], k: usize) -> Vec<(usize, f32)> {
     let total: f32 = order.iter().map(|&e| probs[e]).sum();
     order
         .into_iter()
-        .map(|e| (e, if total > 0.0 { probs[e] / total } else { 1.0 / k as f32 }))
+        .map(|e| {
+            (
+                e,
+                if total > 0.0 {
+                    probs[e] / total
+                } else {
+                    1.0 / k as f32
+                },
+            )
+        })
         .collect()
 }
 
@@ -738,7 +791,12 @@ impl<'a> Model<'a> {
                         .tensor(&name("attn_q"))
                         .is_some_and(|t| t.dims.len() == 2 && t.dims[1] == 2 * q_dim as u64);
                     Some(AttnWeights {
-                        wq: qmat(f, &name("attn_q"), if gate_in_q { 2 * q_dim } else { q_dim }, hidden)?,
+                        wq: qmat(
+                            f,
+                            &name("attn_q"),
+                            if gate_in_q { 2 * q_dim } else { q_dim },
+                            hidden,
+                        )?,
                         wk: qmat(f, &name("attn_k"), kv_dim, hidden)?,
                         wv: qmat(f, &name("attn_v"), kv_dim, hidden)?,
                         wo: qmat(f, &name("attn_output"), hidden, q_dim)?,
@@ -749,11 +807,20 @@ impl<'a> Model<'a> {
                     let s = config.ssm.as_ref().expect("is_gdn implies ssm");
                     let value_dim = (s.dt_rank * s.d_state) as usize;
                     Some(GdnLayer {
-                        wqkv: qmat(f, &name("attn_qkv"), s.d_inner as usize + 2 * (s.n_group * s.d_state) as usize, hidden)?,
+                        wqkv: qmat(
+                            f,
+                            &name("attn_qkv"),
+                            s.d_inner as usize + 2 * (s.n_group * s.d_state) as usize,
+                            hidden,
+                        )?,
                         zgate: qmat(f, &name("attn_gate"), value_dim, hidden)?,
                         alpha: qmat(f, &name("ssm_alpha"), s.dt_rank as usize, hidden)?,
                         beta: qmat(f, &name("ssm_beta"), s.dt_rank as usize, hidden)?,
-                        conv1d: norm_vec(f, &name("ssm_conv1d"), (s.d_conv * (s.d_inner + 2 * (s.n_group * s.d_state))) as usize)?,
+                        conv1d: norm_vec(
+                            f,
+                            &name("ssm_conv1d"),
+                            (s.d_conv * (s.d_inner + 2 * (s.n_group * s.d_state))) as usize,
+                        )?,
                         conv1d_raw: norm_raw(f, &name("ssm_conv1d")),
                         // ssm_a is the rare tensor with no `.weight` suffix.
                         a: norm_vec(f, &format!("blk.{i}.ssm_a"), s.dt_rank as usize)?,
@@ -814,7 +881,12 @@ impl<'a> Model<'a> {
                 .tensor(&name("attn_q"))
                 .is_some_and(|t| t.dims.len() == 2 && t.dims[1] == 2 * q_dim as u64);
             let attn = AttnWeights {
-                wq: qmat(f, &name("attn_q"), if gate_in_q { 2 * q_dim } else { q_dim }, hidden)?,
+                wq: qmat(
+                    f,
+                    &name("attn_q"),
+                    if gate_in_q { 2 * q_dim } else { q_dim },
+                    hidden,
+                )?,
                 wk: qmat(f, &name("attn_k"), kv_dim, hidden)?,
                 wv: qmat(f, &name("attn_v"), kv_dim, hidden)?,
                 wo: qmat(f, &name("attn_output"), hidden, q_dim)?,
@@ -858,7 +930,7 @@ impl<'a> Model<'a> {
             None
         };
 
-        Ok(Model {
+        let model = Model {
             embd: qmat(f, "token_embd.weight", config.vocab as usize, hidden)?,
             output_norm: norm_vec(f, "output_norm.weight", hidden)?,
             output_norm_raw: norm_raw(f, "output_norm.weight"),
@@ -867,7 +939,10 @@ impl<'a> Model<'a> {
             output,
             rope_inv_freq: ops::rope_inv_freq(config.rope_dim as usize, config.rope_freq_base),
             config,
-        })
+        };
+        // Device-side RoPE freqs: decode skips per-token sin/cos H2D.
+        let _ = allpaka_backend::gpu::set_rope_inv_freq(&model.rope_inv_freq);
+        Ok(model)
     }
 
     /// A session whose KV cache has one extra layer for the MTP block
@@ -1110,7 +1185,13 @@ impl<'a> Model<'a> {
     /// steps take the previous step's h_out). The step writes only the MTP
     /// layer's KV slot (index n_layers) at `pos` - the shared position
     /// counter stays with the trunk's verify batch.
-    pub fn mtp_step(&self, h_prev: &[f32], token: u32, pos: usize, s: &mut Session) -> Result<(Vec<f32>, Vec<f32>)> {
+    pub fn mtp_step(
+        &self,
+        h_prev: &[f32],
+        token: u32,
+        pos: usize,
+        s: &mut Session,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
         let c = &self.config;
         let m = self.mtp.as_ref().expect("mtp_step without an mtp block");
         let head_dim = c.head_dim as usize;
@@ -1175,9 +1256,14 @@ impl<'a> Model<'a> {
             for (kv_head, out_group) in attn_out.chunks_mut(group_span).enumerate() {
                 scope.spawn(move || {
                     attend_group(
-                        c, kv, li, pos,
+                        c,
+                        kv,
+                        li,
+                        pos,
                         &q_ref[kv_head * group_span..(kv_head + 1) * group_span],
-                        kv_head, out_group, scale,
+                        kv_head,
+                        out_group,
+                        scale,
                     );
                 });
             }
@@ -1289,7 +1375,10 @@ impl<'a> Model<'a> {
                 trace("l_out", li, &xs[..hidden]);
                 continue;
             }
-            let aw = layer.attn.as_ref().expect("attention layer without weights");
+            let aw = layer
+                .attn
+                .as_ref()
+                .expect("attention layer without weights");
             // The whole attention half - qkv, per-row norm+rope, cache
             // store, causal attention, output projection - as one command
             // buffer, mirroring the decode token buffer. Declines fall to
@@ -1300,8 +1389,12 @@ impl<'a> Model<'a> {
                     let scale = 1.0 / (head_dim as f32).sqrt();
                     s.kv.gpu_view(li).and_then(|(cache, k_off, v_off)| {
                         QuantMat::prefill_attn_block(
-                            &aw.wq, &aw.wk, &aw.wv, &aw.wo,
-                            hs, m,
+                            &aw.wq,
+                            &aw.wk,
+                            &aw.wv,
+                            &aw.wo,
+                            hs,
+                            m,
                             layer.q_norm.as_deref(),
                             layer.k_norm.as_deref(),
                             &rope_flat,
@@ -1311,7 +1404,12 @@ impl<'a> Model<'a> {
                             c.rms_eps,
                             cache,
                             (k_off, v_off),
-                            (c.kv_dim(), head_dim, c.n_heads as usize, c.n_kv_heads as usize),
+                            (
+                                c.kv_dim(),
+                                head_dim,
+                                c.n_heads as usize,
+                                c.n_kv_heads as usize,
+                            ),
                             base,
                             scale,
                             None,
@@ -1341,11 +1439,8 @@ impl<'a> Model<'a> {
             // one command buffer and one wait instead of three independent
             // decode passes, which matters a lot for prefill throughput.
             let qkv_span = profile::span(profile::Phase::Qkv);
-            let mut qkv = QuantMat::matmul_many(&[
-                (&aw.wq, &hs[..]),
-                (&aw.wk, &hs[..]),
-                (&aw.wv, &hs[..]),
-            ])?;
+            let mut qkv =
+                QuantMat::matmul_many(&[(&aw.wq, &hs[..]), (&aw.wk, &hs[..]), (&aw.wv, &hs[..])])?;
             drop(qkv_span);
             let mut v = qkv.pop().expect("v");
             let mut k = qkv.pop().expect("k");
@@ -1358,7 +1453,9 @@ impl<'a> Model<'a> {
                 for row in q.chunks(2 * c.q_dim()) {
                     for h in 0..c.n_heads as usize {
                         gq.extend_from_slice(&row[h * 2 * head_dim..h * 2 * head_dim + head_dim]);
-                        gg.extend_from_slice(&row[h * 2 * head_dim + head_dim..(h + 1) * 2 * head_dim]);
+                        gg.extend_from_slice(
+                            &row[h * 2 * head_dim + head_dim..(h + 1) * 2 * head_dim],
+                        );
                     }
                 }
                 q = gq;
@@ -1417,23 +1514,25 @@ impl<'a> Model<'a> {
             let cpu_only = std::env::var_os("ALLPAKA_CPU_ATTN").is_some();
             let on_gpu = {
                 let kv = &mut s.kv;
-                kv.gpu_view(li).filter(|_| !cpu_only).and_then(|(cache, k_off, v_off)| {
-                    let reqs: Vec<allpaka_backend::gpu::AttnReq> = (0..m)
-                        .map(|i| allpaka_backend::gpu::AttnReq {
-                            cache,
-                            k_off,
-                            v_off,
-                            q: &q_ref[i * c.q_dim()..(i + 1) * c.q_dim()],
-                            kv_dim: c.kv_dim(),
-                            head_dim,
-                            n_q_heads: c.n_heads as usize,
-                            group: c.group_size(),
-                            n_pos: base + i + 1,
-                            scale,
-                        })
-                        .collect();
-                    allpaka_backend::gpu::attend_batch(&reqs)
-                })
+                kv.gpu_view(li)
+                    .filter(|_| !cpu_only)
+                    .and_then(|(cache, k_off, v_off)| {
+                        let reqs: Vec<allpaka_backend::gpu::AttnReq> = (0..m)
+                            .map(|i| allpaka_backend::gpu::AttnReq {
+                                cache,
+                                k_off,
+                                v_off,
+                                q: &q_ref[i * c.q_dim()..(i + 1) * c.q_dim()],
+                                kv_dim: c.kv_dim(),
+                                head_dim,
+                                n_q_heads: c.n_heads as usize,
+                                group: c.group_size(),
+                                n_pos: base + i + 1,
+                                scale,
+                            })
+                            .collect();
+                        allpaka_backend::gpu::attend_batch(&reqs)
+                    })
             };
             match on_gpu {
                 Some(rows) => {
@@ -1442,24 +1541,24 @@ impl<'a> Model<'a> {
                     }
                 }
                 None => {
-                    let threads =
-                        std::thread::available_parallelism().map_or(1, |n| n.get());
+                    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
                     let rows_per = m.div_ceil(threads).max(1);
                     let kv = &s.kv;
                     std::thread::scope(|scope| {
-                        for (ci, out_chunk) in
-                            attn_out.chunks_mut(rows_per * c.q_dim()).enumerate()
+                        for (ci, out_chunk) in attn_out.chunks_mut(rows_per * c.q_dim()).enumerate()
                         {
                             let first = ci * rows_per;
                             scope.spawn(move || {
-                                for (i, out_row) in
-                                    out_chunk.chunks_mut(c.q_dim()).enumerate()
-                                {
+                                for (i, out_row) in out_chunk.chunks_mut(c.q_dim()).enumerate() {
                                     let row = first + i;
                                     attend_one(
-                                        c, kv, li, base + row,
+                                        c,
+                                        kv,
+                                        li,
+                                        base + row,
                                         &q_ref[row * c.q_dim()..(row + 1) * c.q_dim()],
-                                        out_row, scale,
+                                        out_row,
+                                        scale,
                                     );
                                 }
                             });
@@ -1527,7 +1626,10 @@ impl<'a> Model<'a> {
         allpaka_backend::gpu::prefill_begin(xs)?;
         // Deferred buffers of earlier layers may still be in flight when a
         // layer declines; wait them out before the CPU fallback runs.
-        if self.forward_batch_fused_layers(xs, rope_flat, m, base, s).is_none() {
+        if self
+            .forward_batch_fused_layers(xs, rope_flat, m, base, s)
+            .is_none()
+        {
             allpaka_backend::gpu::prefill_abort();
             return None;
         }
@@ -1585,36 +1687,58 @@ impl<'a> Model<'a> {
                 let sc = c.ssm.as_ref().expect("gdn arch");
                 let _s = profile::span(profile::Phase::Attend);
                 QuantMat::prefill_gdn_block(
-                    &g.wqkv, &g.zgate, &g.alpha, &g.beta,
-                    g.conv1d_raw, &g.a, &g.dt, &g.ssm_norm, &g.ssm_out,
-                    (sc.n_group as usize, sc.dt_rank as usize,
-                     sc.d_state as usize, sc.d_conv as usize),
-                    hidden, m, c.rms_eps,
+                    &g.wqkv,
+                    &g.zgate,
+                    &g.alpha,
+                    &g.beta,
+                    g.conv1d_raw,
+                    &g.a,
+                    &g.dt,
+                    &g.ssm_norm,
+                    &g.ssm_out,
+                    (
+                        sc.n_group as usize,
+                        sc.dt_rank as usize,
+                        sc.d_state as usize,
+                        sc.d_conv as usize,
+                    ),
+                    hidden,
+                    m,
+                    c.rms_eps,
                     region,
                     slots,
                     (conv_off, state_off),
                     fusion,
                 )?
             } else {
-            let aw = layer.attn.as_ref().expect("attn weights");
-            let _s = profile::span(profile::Phase::Attend);
-            QuantMat::prefill_attn_block(
-                &aw.wq, &aw.wk, &aw.wv, &aw.wo,
-                xs, m,
-                layer.q_norm.as_deref(),
-                layer.k_norm.as_deref(),
-                rope_flat,
-                c.rope_dim as usize,
-                aw.gate_in_q,
-                layer.bias.as_ref().map(|b| (b.q.1, b.k.1, b.v.1)),
-                c.rms_eps,
-                cache,
-                (k_off, v_off),
-                (c.kv_dim(), head_dim, c.n_heads as usize, c.n_kv_heads as usize),
-                base,
-                scale,
-                fusion,
-            )?
+                let aw = layer.attn.as_ref().expect("attn weights");
+                let _s = profile::span(profile::Phase::Attend);
+                QuantMat::prefill_attn_block(
+                    &aw.wq,
+                    &aw.wk,
+                    &aw.wv,
+                    &aw.wo,
+                    xs,
+                    m,
+                    layer.q_norm.as_deref(),
+                    layer.k_norm.as_deref(),
+                    rope_flat,
+                    c.rope_dim as usize,
+                    aw.gate_in_q,
+                    layer.bias.as_ref().map(|b| (b.q.1, b.k.1, b.v.1)),
+                    c.rms_eps,
+                    cache,
+                    (k_off, v_off),
+                    (
+                        c.kv_dim(),
+                        head_dim,
+                        c.n_heads as usize,
+                        c.n_kv_heads as usize,
+                    ),
+                    base,
+                    scale,
+                    fusion,
+                )?
             };
 
             // CPU routing between the two command buffers: gating + top-k
@@ -1625,16 +1749,25 @@ impl<'a> Model<'a> {
             let mut gpu_route = None;
             let (table, tok, total_rows, hits_per_token) = match &layer.ffn {
                 Ffn::Moe {
-                    gate_exps, up_exps, down_exps, shared, expert_ffn, n_used,
-                    gating, weights_norm, weights_scale, router_bias, ..
+                    gate_exps,
+                    up_exps,
+                    down_exps,
+                    shared,
+                    expert_ffn,
+                    n_used,
+                    gating,
+                    weights_norm,
+                    weights_scale,
+                    router_bias,
+                    ..
                 } => {
                     gate_m = gate_exps;
                     up_m = up_exps;
                     down_m = down_exps;
                     ffn_w = *expert_ffn;
-                    sh_m = shared.as_ref().map(|sh| {
-                        (&sh.gate, &sh.up, &sh.down, sh.gate_out.as_ref())
-                    });
+                    sh_m = shared
+                        .as_ref()
+                        .map(|sh| (&sh.gate, &sh.up, &sh.down, sh.gate_out.as_ref()));
                     if logits.is_empty() {
                         // GPU routing: the attention block left the logits in
                         // y_arena; route_pick/scan/scatter build everything
@@ -1660,55 +1793,64 @@ impl<'a> Model<'a> {
                         });
                         (Vec::new(), Vec::new(), m * *n_used, Vec::new())
                     } else {
-                    // CPU routing can't evaluate qwen35moe's shared-expert
-                    // gate (the normed activations live on the GPU); the
-                    // per-layer CPU path takes the layer instead.
-                    if shared.as_ref().is_some_and(|sh| sh.gate_out.is_some()) {
-                        return None;
-                    }
-                    let mut groups: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n_expert];
-                    for i in 0..m {
-                        let row = &logits[i * n_expert..(i + 1) * n_expert];
-                        for (e, weight) in route_gated(
-                            row, *n_used, *gating, *weights_norm, *weights_scale,
-                            router_bias.as_ref().map(|b| b.0.as_slice()),
-                        ) {
-                            groups[e].push((i, weight));
+                        // CPU routing can't evaluate qwen35moe's shared-expert
+                        // gate (the normed activations live on the GPU); the
+                        // per-layer CPU path takes the layer instead.
+                        if shared.as_ref().is_some_and(|sh| sh.gate_out.is_some()) {
+                            return None;
                         }
-                    }
-                    let used: Vec<usize> =
-                        (0..n_expert).filter(|&e| !groups[e].is_empty()).collect();
-                    let mut table = Vec::with_capacity(used.len());
-                    let mut tok = Vec::new();
-                    let mut row0 = 0u32;
-                    for &e in &used {
-                        let rows = groups[e].len() as u32;
-                        table.push([e as u32, row0, rows]);
-                        for &(i, _) in &groups[e] {
-                            tok.push(i as u32);
+                        let mut groups: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n_expert];
+                        for i in 0..m {
+                            let row = &logits[i * n_expert..(i + 1) * n_expert];
+                            for (e, weight) in route_gated(
+                                row,
+                                *n_used,
+                                *gating,
+                                *weights_norm,
+                                *weights_scale,
+                                router_bias.as_ref().map(|b| b.0.as_slice()),
+                            ) {
+                                groups[e].push((i, weight));
+                            }
                         }
-                        row0 += rows;
-                    }
-                    let total_rows = row0 as usize;
-                    // CSR hits per token for the GPU-side combine. GLM's
-                    // shared expert adds one weight-1 hit per token pointing
-                    // at the rows right after the expert rows.
-                    let mut hits: Vec<Vec<(u32, f32)>> = vec![Vec::new(); m];
-                    for (gi, &e) in used.iter().enumerate() {
-                        let r0 = table[gi][1];
-                        for (ri, &(i, weight)) in groups[e].iter().enumerate() {
-                            hits[i].push((r0 + ri as u32, weight));
+                        let used: Vec<usize> =
+                            (0..n_expert).filter(|&e| !groups[e].is_empty()).collect();
+                        let mut table = Vec::with_capacity(used.len());
+                        let mut tok = Vec::new();
+                        let mut row0 = 0u32;
+                        for &e in &used {
+                            let rows = groups[e].len() as u32;
+                            table.push([e as u32, row0, rows]);
+                            for &(i, _) in &groups[e] {
+                                tok.push(i as u32);
+                            }
+                            row0 += rows;
                         }
-                    }
-                    if shared.is_some() {
-                        for (i, h) in hits.iter_mut().enumerate() {
-                            h.push(((total_rows + i) as u32, 1.0));
+                        let total_rows = row0 as usize;
+                        // CSR hits per token for the GPU-side combine. GLM's
+                        // shared expert adds one weight-1 hit per token pointing
+                        // at the rows right after the expert rows.
+                        let mut hits: Vec<Vec<(u32, f32)>> = vec![Vec::new(); m];
+                        for (gi, &e) in used.iter().enumerate() {
+                            let r0 = table[gi][1];
+                            for (ri, &(i, weight)) in groups[e].iter().enumerate() {
+                                hits[i].push((r0 + ri as u32, weight));
+                            }
                         }
-                    }
-                    (table, tok, total_rows, hits)
+                        if shared.is_some() {
+                            for (i, h) in hits.iter_mut().enumerate() {
+                                h.push(((total_rows + i) as u32, 1.0));
+                            }
+                        }
+                        (table, tok, total_rows, hits)
                     }
                 }
-                Ffn::Dense { w_gate, w_up, w_down, .. } => {
+                Ffn::Dense {
+                    w_gate,
+                    w_up,
+                    w_down,
+                    ..
+                } => {
                     gate_m = w_gate;
                     up_m = w_up;
                     down_m = w_down;
@@ -1738,9 +1880,16 @@ impl<'a> Model<'a> {
 
             let _f = profile::span(profile::Phase::Ffn);
             QuantMat::ffn_grouped(
-                gate_m, up_m, down_m,
-                n_expert.max(1), hidden, ffn_w,
-                &table, &[], &tok, total_rows,
+                gate_m,
+                up_m,
+                down_m,
+                n_expert.max(1),
+                hidden,
+                ffn_w,
+                &table,
+                &[],
+                &tok,
+                total_rows,
                 Some(allpaka_backend::gpu::GroupedCombine {
                     tok_off: &tok_off,
                     hit_row: &hit_row,
@@ -1804,18 +1953,34 @@ impl<'a> Model<'a> {
         let c = &self.config;
         let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
         if self.output_norm_raw.is_empty() {
-            if dbg { eprintln!("tokenbuf declined: output norm not raw F32"); }
+            if dbg {
+                eprintln!("tokenbuf declined: output norm not raw F32");
+            }
             return Ok(None);
         }
-        let rope_table = s.rope_cache(&self.rope_inv_freq, pos, 1).to_vec();
+        // Keep host rope table by default; skip only when explicitly opted in.
+        // Device freq rope still used inside CUDA when d_rope_freq is set.
+        let skip_host_rope = allpaka_backend::gpu::has_device_rope_freq()
+            && std::env::var("ALLPAKA_SKIP_HOST_ROPE")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+        let rope_table = if skip_host_rope {
+            Vec::new()
+        } else {
+            s.rope_cache(&self.rope_inv_freq, pos, 1).to_vec()
+        };
         let Some(layers) = self.token_layers(s)? else {
-            if dbg { eprintln!("tokenbuf declined: token_layers"); }
+            if dbg {
+                eprintln!("tokenbuf declined: token_layers");
+            }
             return Ok(None);
         };
         let (cache, _, _) = match s.kv.gpu_view_checked(0) {
             Ok(view) => view,
             Err(reason) => {
-                if dbg { eprintln!("tokenbuf declined: stage=kv-cache reason={reason}"); }
+                if dbg {
+                    eprintln!("tokenbuf declined: stage=kv-cache reason={reason}");
+                }
                 return Ok(None);
             }
         };
@@ -1825,16 +1990,25 @@ impl<'a> Model<'a> {
             Some(ssm) => match ssm.gpu_view() {
                 Some(r) => Some(r),
                 None => {
-                    if dbg { eprintln!("tokenbuf declined: no gpu ssm region"); }
+                    if dbg {
+                        eprintln!("tokenbuf declined: no gpu ssm region");
+                    }
                     return Ok(None);
                 }
             },
             None => None,
         };
-        let x = self.embd.row(token as usize)?;
+        let (embd_ty, embd_bytes) = self.embd.raw();
+        let use_gpu_embed = allpaka_backend::gpu::prefer_gpu_embed();
+        let x_host = if use_gpu_embed {
+            None
+        } else {
+            Some(self.embd.row(token as usize)?)
+        };
+        let x: &[f32] = x_host.as_deref().unwrap_or(&[]);
         let (out_ty, out_bytes) = self.output.raw();
         let request = TokenReq {
-            x: &x,
+            x,
             m: 1,
             layers: &layers,
             cache,
@@ -1852,11 +2026,15 @@ impl<'a> Model<'a> {
             output_norm: self.output_norm_raw,
             output: (out_ty, out_bytes, self.output.n_out),
             argmax,
+            embd: Some((embd_ty, embd_bytes, self.embd.n_in)),
+            token_id: Some(token),
         };
         match allpaka_backend::gpu::decode_token_checked(&request) {
             Ok(out) => Ok(Some(out)),
             Err(reason) => {
-                if dbg { eprintln!("tokenbuf declined: {reason}"); }
+                if dbg {
+                    eprintln!("tokenbuf declined: {reason}");
+                }
                 Ok(None)
             }
         }
@@ -1883,13 +2061,17 @@ impl<'a> Model<'a> {
         let pos = s.pos();
         let rope_table = s.rope_cache(&self.rope_inv_freq, pos, m).to_vec();
         let Some(layers) = self.token_layers(s)? else {
-            if dbg { eprintln!("tokenbuf declined: verify token_layers"); }
+            if dbg {
+                eprintln!("tokenbuf declined: verify token_layers");
+            }
             return Ok(None);
         };
         let (cache, _, _) = match s.kv.gpu_view_checked(0) {
             Ok(view) => view,
             Err(reason) => {
-                if dbg { eprintln!("tokenbuf declined: stage=verify-kv-cache reason={reason}"); }
+                if dbg {
+                    eprintln!("tokenbuf declined: stage=verify-kv-cache reason={reason}");
+                }
                 return Ok(None);
             }
         };
@@ -1924,6 +2106,8 @@ impl<'a> Model<'a> {
             output_norm: self.output_norm_raw,
             output: (out_ty, out_bytes, self.output.n_out),
             argmax: true,
+            embd: None,
+            token_id: None,
         };
         match allpaka_backend::gpu::decode_token_checked(&request) {
             Ok(TokenOut::Rows { argmax, hidden }) => {
@@ -1932,7 +2116,9 @@ impl<'a> Model<'a> {
             }
             Ok(_) => Ok(None),
             Err(reason) => {
-                if dbg { eprintln!("tokenbuf declined: verify {reason}"); }
+                if dbg {
+                    eprintln!("tokenbuf declined: verify {reason}");
+                }
                 Ok(None)
             }
         }
@@ -1950,23 +2136,33 @@ impl<'a> Model<'a> {
         let c = &self.config;
         let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
         let ssm_offsets: Option<Vec<(usize, usize)>> = s.ssm.as_ref().map(|ssm| {
-            (0..self.layers.len()).map(|li| (ssm.conv_off(li), ssm.state_off(li))).collect()
+            (0..self.layers.len())
+                .map(|li| (ssm.conv_off(li), ssm.state_off(li)))
+                .collect()
         });
         let mut layers = Vec::with_capacity(self.layers.len());
         for (li, layer) in self.layers.iter().enumerate() {
             if layer.attn_norm_raw.is_empty() || layer.ffn_norm_raw.is_empty() {
-                if dbg { eprintln!("tokenbuf declined: layer {li} norm not raw F32"); }
+                if dbg {
+                    eprintln!("tokenbuf declined: layer {li} norm not raw F32");
+                }
                 return Ok(None);
             }
             let (_, k_off, v_off) = match s.kv.gpu_view_checked(li) {
                 Ok(view) => view,
                 Err(reason) => {
-                    if dbg { eprintln!("tokenbuf declined: stage=token-layers reason={reason}"); }
+                    if dbg {
+                        eprintln!("tokenbuf declined: stage=token-layers reason={reason}");
+                    }
                     return Ok(None);
                 }
             };
             let ffn = match &layer.ffn {
-                Ffn::Dense { w_gate, w_up, w_down } => {
+                Ffn::Dense {
+                    w_gate,
+                    w_up,
+                    w_down,
+                } => {
                     let (gt, gb) = w_gate.raw();
                     let (ut, ub) = w_up.raw();
                     let (dt, db) = w_down.raw();
@@ -1976,7 +2172,20 @@ impl<'a> Model<'a> {
                         down: (dt, db, w_down.n_out),
                     }
                 }
-                Ffn::Moe { router, router_bias, gate_exps, up_exps, down_exps, shared, gating, weights_norm, weights_scale, expert_ffn, n_used, .. } => {
+                Ffn::Moe {
+                    router,
+                    router_bias,
+                    gate_exps,
+                    up_exps,
+                    down_exps,
+                    shared,
+                    gating,
+                    weights_norm,
+                    weights_scale,
+                    expert_ffn,
+                    n_used,
+                    ..
+                } => {
                     let (rt, rb) = router.raw();
                     let (gt, gb) = gate_exps.raw();
                     let (ut, ub) = up_exps.raw();
@@ -1985,19 +2194,22 @@ impl<'a> Model<'a> {
                     // The GPU top-k kernels only implement renormalized
                     // weights with scale 1; anything else stays on the CPU.
                     if sigmoid && (!*weights_norm || *weights_scale != 1.0) {
-                        if dbg { eprintln!("tokenbuf declined: sigmoid gating with norm/scale"); }
+                        if dbg {
+                            eprintln!("tokenbuf declined: sigmoid gating with norm/scale");
+                        }
                         return Ok(None);
                     }
                     // qwen35moe: the shared expert's sigmoid gate
                     // (ffn_gate_inp_shexp), F32 [hidden] in the mmap.
-                    let shared_gate = shared
-                        .as_ref()
-                        .and_then(|sh| sh.gate_out.as_ref())
-                        .map(|g| {
-                            let (t, b) = g.raw();
-                            debug_assert_eq!(t, allpaka_gguf::GgmlType::F32);
-                            b
-                        });
+                    let shared_gate =
+                        shared
+                            .as_ref()
+                            .and_then(|sh| sh.gate_out.as_ref())
+                            .map(|g| {
+                                let (t, b) = g.raw();
+                                debug_assert_eq!(t, allpaka_gguf::GgmlType::F32);
+                                b
+                            });
                     let shared = shared.as_ref().map(|sh| {
                         let (gt, gb) = sh.gate.raw();
                         let (ut, ub) = sh.up.raw();
@@ -2031,7 +2243,8 @@ impl<'a> Model<'a> {
                 debug_assert_eq!(at, allpaka_gguf::GgmlType::F32);
                 debug_assert_eq!(bt, allpaka_gguf::GgmlType::F32);
                 let _ = (at, bt);
-                let (conv_off, state_off) = ssm_offsets.as_ref().expect("gdn layer without ssm cache")[li];
+                let (conv_off, state_off) =
+                    ssm_offsets.as_ref().expect("gdn layer without ssm cache")[li];
                 TokenGdn {
                     wqkv: (qt, qb, g.wqkv.n_out),
                     zgate: (zt, zb, g.zgate.n_out),
@@ -2159,7 +2372,10 @@ impl<'a> Model<'a> {
                 }
                 continue;
             }
-            let aw = layer.attn.as_ref().expect("attention layer without weights");
+            let aw = layer
+                .attn
+                .as_ref()
+                .expect("attention layer without weights");
 
             // The whole attention half - qkv, norms, rope, cache store,
             // attention, output projection - as one GPU command buffer. By
@@ -2173,7 +2389,10 @@ impl<'a> Model<'a> {
                     let _s = profile::span(profile::Phase::Attend);
                     s.kv.gpu_view(li).and_then(|(cache, k_off, v_off)| {
                         QuantMat::attn_block(
-                            &aw.wq, &aw.wk, &aw.wv, &aw.wo,
+                            &aw.wq,
+                            &aw.wk,
+                            &aw.wv,
+                            &aw.wo,
                             &h,
                             layer.q_norm.as_deref(),
                             layer.k_norm.as_deref(),
@@ -2181,7 +2400,12 @@ impl<'a> Model<'a> {
                             c.rms_eps,
                             cache,
                             (k_off, v_off),
-                            (c.kv_dim(), head_dim, c.n_heads as usize, c.n_kv_heads as usize),
+                            (
+                                c.kv_dim(),
+                                head_dim,
+                                c.n_heads as usize,
+                                c.n_kv_heads as usize,
+                            ),
                             pos,
                             scale,
                         )
@@ -2278,20 +2502,22 @@ impl<'a> Model<'a> {
             } else {
                 let _s = profile::span(profile::Phase::Attend);
                 let cpu_only = std::env::var_os("ALLPAKA_CPU_ATTN").is_some();
-                kv.gpu_view_ref(li).filter(|_| !cpu_only).and_then(|(cache, k_off, v_off)| {
-                    aw.wo.attend_project(&allpaka_backend::gpu::AttnReq {
-                        cache,
-                        k_off,
-                        v_off,
-                        q: q_ref,
-                        kv_dim: c.kv_dim(),
-                        head_dim,
-                        n_q_heads: c.n_heads as usize,
-                        group: c.group_size(),
-                        n_pos: pos + 1,
-                        scale,
+                kv.gpu_view_ref(li)
+                    .filter(|_| !cpu_only)
+                    .and_then(|(cache, k_off, v_off)| {
+                        aw.wo.attend_project(&allpaka_backend::gpu::AttnReq {
+                            cache,
+                            k_off,
+                            v_off,
+                            q: q_ref,
+                            kv_dim: c.kv_dim(),
+                            head_dim,
+                            n_q_heads: c.n_heads as usize,
+                            group: c.group_size(),
+                            n_pos: pos + 1,
+                            scale,
+                        })
                     })
-                })
             };
             let projected = match fused {
                 Some(projected) => projected,
@@ -2299,14 +2525,18 @@ impl<'a> Model<'a> {
                     {
                         let _s = profile::span(profile::Phase::Attend);
                         std::thread::scope(|scope| {
-                            for (kv_head, out_group) in
-                                attn_out.chunks_mut(group_span).enumerate()
+                            for (kv_head, out_group) in attn_out.chunks_mut(group_span).enumerate()
                             {
                                 scope.spawn(move || {
                                     attend_group(
-                                        c, kv, li, pos,
+                                        c,
+                                        kv,
+                                        li,
+                                        pos,
                                         &q_ref[kv_head * group_span..(kv_head + 1) * group_span],
-                                        kv_head, out_group, scale,
+                                        kv_head,
+                                        out_group,
+                                        scale,
                                     );
                                 });
                             }
@@ -2385,6 +2615,121 @@ impl<'a> Model<'a> {
         Ok((0..logits.len())
             .max_by(|&a, &b| logits[a].total_cmp(&logits[b]))
             .unwrap_or(0) as u32)
+    }
+
+    /// Greedy decode of `n` tokens starting from `token`. Prefers an on-device
+    /// CUDA chain (one sync) when graphs + embed kernels are available.
+    pub fn forward_greedy_n(&self, token: u32, s: &mut Session, n: usize) -> Result<Vec<u32>> {
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let chain = std::env::var("ALLPAKA_GREEDY_CHAIN")
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
+        if chain && n > 1 {
+            if let Some(out) = self.try_forward_greedy_chain(token, s, n)? {
+                return Ok(out);
+            }
+        }
+        let mut out = Vec::with_capacity(n);
+        let mut t = token;
+        for _ in 0..n {
+            t = self.forward_greedy(t, s)?;
+            out.push(t);
+        }
+        Ok(out)
+    }
+
+    fn try_forward_greedy_chain(
+        &self,
+        token: u32,
+        s: &mut Session,
+        n: usize,
+    ) -> Result<Option<Vec<u32>>> {
+        let c = &self.config;
+        let pos = s.pos();
+        if token >= c.vocab
+            || !matches!(c.rope_style, RopeStyle::Neox)
+            || pos + n > s.kv.capacity()
+            || std::env::var_os("ALLPAKA_CPU_ATTN").is_some()
+            || std::env::var_os("ALLPAKA_NO_TOKENBUF").is_some()
+            || std::env::var_os("ALLPAKA_NO_ARGMAX").is_some()
+        {
+            return Ok(None);
+        }
+        // First token: normal GPU greedy (captures/replays graph, syncs).
+        let Some(allpaka_backend::gpu::TokenOut::Argmax(first)) =
+            self.forward_token_gpu(token, s, pos, true)?
+        else {
+            return Ok(None);
+        };
+        s.kv.advance();
+        if n == 1 {
+            return Ok(Some(vec![first]));
+        }
+        // Remaining tokens stay on GPU: embed(d_argmax) + d_pos++ + graph.
+        let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
+        if self.output_norm_raw.is_empty() {
+            return Ok(None);
+        }
+        let Some(layers) = self.token_layers(s)? else {
+            return Ok(None);
+        };
+        let (cache, _, _) = match s.kv.gpu_view_checked(0) {
+            Ok(view) => view,
+            Err(_) => return Ok(None),
+        };
+        let (embd_ty, embd_bytes) = self.embd.raw();
+        let (out_ty, out_bytes) = self.output.raw();
+        let empty_x: &[f32] = &[];
+        let empty_rope: &[[f32; 2]] = &[];
+        let request = allpaka_backend::gpu::TokenReq {
+            x: empty_x,
+            m: 1,
+            layers: &layers,
+            cache,
+            ssm: None,
+            ssm_slots: None,
+            kv_dim: c.kv_dim(),
+            head_dim: c.head_dim as usize,
+            n_heads: c.n_heads as usize,
+            n_kv_heads: c.n_kv_heads as usize,
+            pos: pos + 1,
+            scale: 1.0 / (c.head_dim as f32).sqrt(),
+            rope: empty_rope,
+            rot_dim: c.rope_dim as usize,
+            eps: c.rms_eps,
+            output_norm: self.output_norm_raw,
+            output: (out_ty, out_bytes, self.output.n_out),
+            argmax: true,
+            embd: Some((embd_ty, embd_bytes, self.embd.n_in)),
+            token_id: Some(first),
+        };
+        match allpaka_backend::gpu::decode_greedy_continue(&request, n - 1) {
+            Some(rest) => {
+                for _ in 0..(n - 1) {
+                    s.kv.advance();
+                }
+                let mut out = Vec::with_capacity(n);
+                out.push(first);
+                out.extend(rest);
+                Ok(Some(out))
+            }
+            None => {
+                if dbg {
+                    eprintln!("tokenbuf: greedy chain continue declined; falling back");
+                }
+                // First token already committed; finish the rest one-by-one.
+                let mut out = Vec::with_capacity(n);
+                out.push(first);
+                let mut t = first;
+                for _ in 1..n {
+                    t = self.forward_greedy(t, s)?;
+                    out.push(t);
+                }
+                Ok(Some(out))
+            }
+        }
     }
 
     /// Rotate one head by a per-position table from [`ops::rope_sin_cos`].
@@ -2482,7 +2827,10 @@ fn attend_one(
     for kv_head in 0..c.n_kv_heads as usize {
         let at = kv_head * group * head_dim;
         attend_group(
-            c, kv, layer, pos,
+            c,
+            kv,
+            layer,
+            pos,
             &q_row[at..at + group * head_dim],
             kv_head,
             &mut out_row[at..at + group * head_dim],
@@ -2512,7 +2860,11 @@ fn attend_head(
     let mut scores: Vec<f32> = (0..=pos)
         .map(|t| {
             let kt = kv.k_at(layer, t, kv_head, head_dim);
-            qh.iter().zip(kt).map(|(a, &b)| a * ops::f16::to_f32(b)).sum::<f32>() * scale
+            qh.iter()
+                .zip(kt)
+                .map(|(a, &b)| a * ops::f16::to_f32(b))
+                .sum::<f32>()
+                * scale
         })
         .collect();
     ops::softmax(&mut scores);
@@ -2686,7 +3038,10 @@ mod attention_tests {
         let mut want = vec![0f32; c.q_dim()];
         for qi in 0..n_heads as usize {
             attend_head(
-                &c, &kv, 0, pos,
+                &c,
+                &kv,
+                0,
+                pos,
                 &q[qi * head_dim..(qi + 1) * head_dim],
                 qi,
                 &mut want[qi * head_dim..(qi + 1) * head_dim],
@@ -2694,7 +3049,10 @@ mod attention_tests {
             );
         }
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
-            assert!((g - w).abs() < 1e-5 * (1.0 + w.abs()), "element {i}: {g} vs {w}");
+            assert!(
+                (g - w).abs() < 1e-5 * (1.0 + w.abs()),
+                "element {i}: {g} vs {w}"
+            );
         }
     }
 }
@@ -2797,7 +3155,9 @@ fn qmat3<'a>(
     n_in: usize,
     n_expert: usize,
 ) -> Result<QuantMat<'a>> {
-    let t = f.tensor(name).with_context(|| format!("GGUF has no tensor {name:?}"))?;
+    let t = f
+        .tensor(name)
+        .with_context(|| format!("GGUF has no tensor {name:?}"))?;
     if t.dims.len() != 3
         || t.dims[0] != n_in as u64
         || t.dims[1] != n_out as u64
@@ -2815,9 +3175,14 @@ fn qmat3<'a>(
 /// graph expects. A silently transposed tensor produces plausible garbage;
 /// a named shape error produces a fix.
 fn qmat<'a>(f: &'a GgufFile, name: &str, n_out: usize, n_in: usize) -> Result<QuantMat<'a>> {
-    let t = f.tensor(name).with_context(|| format!("GGUF has no tensor {name:?}"))?;
+    let t = f
+        .tensor(name)
+        .with_context(|| format!("GGUF has no tensor {name:?}"))?;
     if t.dims.len() != 2 || t.dims[0] != n_in as u64 || t.dims[1] != n_out as u64 {
-        bail!("tensor {name:?} has shape {:?}, expected [{n_in}, {n_out}]", t.dims);
+        bail!(
+            "tensor {name:?} has shape {:?}, expected [{n_in}, {n_out}]",
+            t.dims
+        );
     }
     QuantMat::new(f.data(t)?, t.ggml_type, n_out, n_in)
 }
@@ -2833,9 +3198,14 @@ fn norm_raw<'a>(f: &'a GgufFile, name: &str) -> &'a [u8] {
 }
 
 fn norm_vec(f: &GgufFile, name: &str, len: usize) -> Result<Vec<f32>> {
-    let t = f.tensor(name).with_context(|| format!("GGUF has no tensor {name:?}"))?;
+    let t = f
+        .tensor(name)
+        .with_context(|| format!("GGUF has no tensor {name:?}"))?;
     if t.elements() != len as u64 {
-        bail!("tensor {name:?} has {} elements, expected {len}", t.elements());
+        bail!(
+            "tensor {name:?} has {} elements, expected {len}",
+            t.elements()
+        );
     }
     f.dequant(t)
 }

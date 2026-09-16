@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "metadata": {
-    "generated_at_unix_ms": 1789392658522,
+    "generated_at_unix_ms": 1789550537013,
     "git_commit": "unknown",
     "model": "C:\\Users\\domez\\.cache\\huggingface\\hub\\models--unsloth--Qwen3-32B-GGUF\\snapshots\\931c84066f88693a02ab8de820cfcd066d913241\\Qwen3-32B-Q4_K_M.gguf",
     "model_fingerprint": "db1dbcd284b48fed",
@@ -9,12 +9,18 @@
     "runtime_profile": "auto",
     "resolved_overrides": {
       "ALLPAKA_BENCH_PP": "480",
-      "ALLPAKA_BENCH_REPORT": "D:\\Source\\allpaka\\docs\\benchmarks\\qwen3-32b-rtx5090-allpaka-cuda-fused-2026-09-14.json",
+      "ALLPAKA_BENCH_REPORT": "D:\\Source\\allpaka\\docs\\benchmarks\\qwen3-32b-rtx5090-allpaka-cuda-rope-table-r3-2026-09-16.json",
       "ALLPAKA_BENCH_TG": "32",
-      "ALLPAKA_CUDA_NO_GRAPH": "1",
+      "ALLPAKA_CUDA_GRAPH": "1",
+      "ALLPAKA_CUDA_PDL": "1",
+      "ALLPAKA_FA_DIRECT": "1",
+      "ALLPAKA_FA_INLINE": "1",
+      "ALLPAKA_FA_KV_FLOOR": "256",
       "ALLPAKA_GGML": "1",
       "ALLPAKA_GGML_DIR": "D:\\Source\\allpaka\\third_party\\allpaka_ggml\\bin",
-      "ALLPAKA_PROFILE": "auto"
+      "ALLPAKA_GREEDY_CHAIN": "1",
+      "ALLPAKA_PROFILE": "auto",
+      "ALLPAKA_QK_THREADS": "128"
     }
   },
   "measurements": [
@@ -505,14 +511,14 @@
         14580
       ],
       "samples_tok_s": [
-        2437.7287275157614
+        3076.71204603274
       ],
       "summary": {
-        "median": 2437.7287275157614,
-        "p10": 2437.7287275157614,
-        "p90": 2437.7287275157614,
-        "min": 2437.7287275157614,
-        "max": 2437.7287275157614
+        "median": 3076.71204603274,
+        "p10": 3076.71204603274,
+        "p90": 3076.71204603274,
+        "min": 3076.71204603274,
+        "max": 3076.71204603274
       },
       "fast_path": {
         "attempts": 0,
@@ -522,22 +528,22 @@
       "phases": [
         {
           "name": "attention",
-          "milliseconds": 133.4796,
+          "milliseconds": 73.2556,
           "calls": 64
         },
         {
           "name": "ffn (experts)",
-          "milliseconds": 4.0707,
+          "milliseconds": 4.6835,
           "calls": 64
         },
         {
           "name": "embed",
-          "milliseconds": 3.7703,
+          "milliseconds": 2.9571,
           "calls": 1
         },
         {
           "name": "router",
-          "milliseconds": 0.613,
+          "milliseconds": 0.624,
           "calls": 64
         }
       ],
@@ -547,63 +553,57 @@
     {
       "name": "decode",
       "tokens": 32,
-      "context_tokens": 480,
+      "context_tokens": 1,
       "input_tokens": [
-        102145,
-        103106,
-        101374,
-        104096,
-        104096,
-        118069,
-        114652,
-        116075,
-        42716,
-        101579,
-        120713,
-        120713,
-        120713,
-        41362,
-        41362,
-        41362,
-        271,
-        2146,
-        2146,
-        87036,
-        87036,
-        87036,
-        87036,
-        87036,
-        87036,
-        87036,
-        87036,
-        87036,
-        87036,
-        87036,
-        87036,
-        87036
+        0,
+        16338,
+        82,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654
       ],
       "samples_tok_s": [
-        14.471767593904474
+        69.5301046884367
       ],
       "summary": {
-        "median": 14.471767593904474,
-        "p10": 14.471767593904474,
-        "p90": 14.471767593904474,
-        "min": 14.471767593904474,
-        "max": 14.471767593904474
+        "median": 69.5301046884367,
+        "p10": 69.5301046884367,
+        "p90": 69.5301046884367,
+        "min": 69.5301046884367,
+        "max": 69.5301046884367
       },
       "fast_path": {
         "attempts": 32,
         "successes": 32,
         "declines": 0
       },
-      "phases": [
-        {
-          "name": "attention",
-          "milliseconds": 0.0074,
-          "calls": 32
-        }
-      ],
+      "phases": [],
       "peak_memory_bytes": null,
       "kv_bytes_per_token": null
     }

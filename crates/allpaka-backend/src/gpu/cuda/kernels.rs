@@ -11,6 +11,7 @@ typedef unsigned int uint32_t;
 typedef unsigned long long uint64_t;
 typedef signed char int8_t;
 typedef int int32_t;
+typedef signed short int16_t;
 
 // ---- helpers ----------------------------------------------------------------
 
@@ -32,6 +33,41 @@ __device__ __forceinline__ uint16_t f32_to_half_bits(float f) {
     return h;
 }
 
+__device__ __forceinline__ uint16_t f32_to_f16_bits(float f) {
+    return f32_to_half_bits(f);
+}
+
+// Packed Q8 activation block with four Q4_K partial sums.
+struct block_q8_1 {
+    uint16_t d;
+    uint16_t s;
+    int8_t qs[32];
+    int16_t ps[4];
+};
+
+__device__ __forceinline__ void store_q8_meta(
+    block_q8_1* b, unsigned lane, int qi, float d)
+{
+    int ps = qi;
+    ps += __shfl_xor_sync(0xffffffffu, ps, 2);
+    ps += __shfl_xor_sync(0xffffffffu, ps, 1);
+    ps += __shfl_xor_sync(0xffffffffu, ps, 16);
+    if (lane < 16 && (lane & 3u) == 0) {
+        b->ps[lane >> 2] = (int16_t)ps;
+    }
+    if (lane == 0) {
+        b->d = f32_to_f16_bits(d);
+        b->s = 0;
+    }
+}
+
+__device__ __forceinline__ void store_q8_scale(block_q8_1* b, unsigned lane, float d) {
+    if (lane == 0) {
+        b->d = f32_to_f16_bits(d);
+        b->s = 0;
+    }
+}
+
 __device__ __forceinline__ float scale_min_k4(int j, const uint8_t* packed, float* mn_out) {
     float sc, mn;
     if (j < 4) {
@@ -43,6 +79,19 @@ __device__ __forceinline__ float scale_min_k4(int j, const uint8_t* packed, floa
     }
     *mn_out = mn;
     return sc;
+}
+
+// Keep griddepcontrol on sm_90+ — nopdl-dev A/B regressed ~57 vs ~63 tok/s.
+__device__ __forceinline__ void pdl_sync() {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+}
+
+__device__ __forceinline__ void pdl_lc() {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
 }
 
 __device__ __forceinline__ float warp_sum_f(float v) {
@@ -94,11 +143,13 @@ extern "C" __global__ void rmsnorm_into_f32(
     unsigned rows)
 {
     unsigned row = blockIdx.x;
+    pdl_lc();
     if (row >= rows) return;
     const float* sr = src + (size_t)row * n;
     float* dr = dst + (size_t)row * n;
     __shared__ float buf[256];
     float local = 0.f;
+    pdl_sync();
     for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
         float v = sr[i];
         local += v * v;
@@ -113,6 +164,62 @@ extern "C" __global__ void rmsnorm_into_f32(
     float scale = rsqrtf(mean + eps);
     for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
         dr[i] = sr[i] * scale * w[i];
+    }
+}
+
+// RMSNorm into dst, then pack dst as block_q8_1 for mmvq reuse.
+extern "C" __global__ void rmsnorm_into_f32_q8(
+    float* __restrict__ dst,
+    const float* __restrict__ src,
+    const float* __restrict__ w,
+    block_q8_1* __restrict__ y,
+    unsigned n,
+    float eps,
+    unsigned rows)
+{
+    unsigned row = blockIdx.x;
+    pdl_lc();
+    if (row >= rows) return;
+    const float* sr = src + (size_t)row * n;
+    float* dr = dst + (size_t)row * n;
+    __shared__ float buf[256];
+    float local = 0.f;
+    pdl_sync();
+    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
+        float v = sr[i];
+        local += v * v;
+    }
+    buf[threadIdx.x] = local;
+    __syncthreads();
+    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) buf[threadIdx.x] += buf[threadIdx.x + s];
+        __syncthreads();
+    }
+    float mean = buf[0] / (float)n;
+    float scale = rsqrtf(mean + eps);
+    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
+        dr[i] = sr[i] * scale * w[i];
+    }
+    __syncthreads();
+    // One warp-worth of lanes quantize 32-groups (blockDim.x should be 256).
+    unsigned nblk = n / 32u;
+    block_q8_1* yr = y + (size_t)row * nblk;
+    for (unsigned blk = threadIdx.x / 32u; blk < nblk; blk += blockDim.x / 32u) {
+        unsigned lane = threadIdx.x & 31u;
+        unsigned base = blk * 32u;
+        float v = dr[base + lane];
+        float amax = fabsf(v);
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+        }
+        float d = amax / 127.f;
+        if (d < 1e-8f) d = 1.f;
+        int qi = __float2int_rn(v / d);
+        if (qi > 127) qi = 127;
+        if (qi < -127) qi = -127;
+        yr[blk].qs[lane] = (int8_t)qi;
+        store_q8_meta(&yr[blk], lane, qi, d);
     }
 }
 
@@ -134,6 +241,37 @@ extern "C" __global__ void swiglu(
     if (i < n) gate[i] = silu_f(gate[i]) * up[i];
 }
 
+// SwiGLU + block_q8_1 pack in one pass (decode down-proj avoids a separate quantize).
+extern "C" __global__ void swiglu_into_q8(
+    float* __restrict__ gate,
+    const float* __restrict__ up,
+    block_q8_1* __restrict__ y,
+    unsigned n, unsigned rows)
+{
+    unsigned row = blockIdx.y;
+    unsigned blk = blockIdx.x;
+    unsigned lane = threadIdx.x;
+    if (row >= rows) return;
+    unsigned base = blk * 32u;
+    if (base >= n) return;
+    size_t idx = (size_t)row * n + base + lane;
+    float v = silu_f(gate[idx]) * up[idx];
+    gate[idx] = v;
+    float amax = fabsf(v);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+    }
+    float scale = amax / 127.f;
+    if (scale < 1e-8f) scale = 1.f;
+    int qi = __float2int_rn(v / scale);
+    if (qi > 127) qi = 127;
+    if (qi < -127) qi = -127;
+    block_q8_1* b = y + (size_t)row * (n / 32u) + blk;
+    b->qs[lane] = (int8_t)qi;
+    store_q8_meta(b, lane, qi, scale);
+}
+
 extern "C" __global__ void copy_f32(
     float* __restrict__ dst,
     const float* __restrict__ src,
@@ -152,7 +290,7 @@ extern "C" __global__ void cast_f32_to_f16(
     if (i < n) dst[i] = f32_to_half_bits(src[i]);
 }
 
-// RoPE NeoX: pairs (x[i], x[i+uint16_t]) with table[i] = {sin, cos}.
+// RoPE NeoX: pairs (x[i], x[i+half]) with table[i] = {sin, cos}.
 // Applies to `heads` contiguous heads of dimension `head_dim`, only first
 // `rot_dim` elements of each head (partial rotary when rot_dim < head_dim).
 extern "C" __global__ void rope_neox(
@@ -170,6 +308,310 @@ extern "C" __global__ void rope_neox(
     for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
         float sinv = rh[2 * i];
         float cosv = rh[2 * i + 1];
+        float a = xh[i];
+        float b = xh[i + half_n];
+        xh[i] = a * cosv - b * sinv;
+        xh[i + half_n] = a * sinv + b * cosv;
+    }
+}
+
+// Per-head RMSNorm (weight w[head_dim]) then NeoX RoPE. One block per head.
+extern "C" __global__ void rmsnorm_rope_neox(
+    float* __restrict__ x,
+    const float* __restrict__ w,
+    const float* __restrict__ rope,
+    unsigned heads,
+    unsigned head_dim,
+    unsigned rot_dim,
+    float eps)
+{
+    unsigned h = blockIdx.x;
+    if (h >= heads) return;
+    float* xh = x + (size_t)h * head_dim;
+    __shared__ float buf[256];
+    float local = 0.f;
+    for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        float v = xh[i];
+        local += v * v;
+    }
+    buf[threadIdx.x] = local;
+    __syncthreads();
+    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) buf[threadIdx.x] += buf[threadIdx.x + s];
+        __syncthreads();
+    }
+    float scale = rsqrtf(buf[0] / (float)head_dim + eps);
+    for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        xh[i] = xh[i] * scale * w[i];
+    }
+    __syncthreads();
+    unsigned half_n = rot_dim / 2;
+    const float* rh = rope + (size_t)h * half_n * 2;
+    for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
+        float sinv = rh[2 * i];
+        float cosv = rh[2 * i + 1];
+        float a = xh[i];
+        float b = xh[i + half_n];
+        xh[i] = a * cosv - b * sinv;
+        xh[i + half_n] = a * sinv + b * cosv;
+    }
+}
+
+// Per-head RMSNorm + NeoX RoPE, then store this head's slice into KV cache (K path).
+extern "C" __global__ void rmsnorm_rope_store_dpos(
+    float* __restrict__ x,
+    const float* __restrict__ w,
+    const float* __restrict__ rope,
+    uint16_t* __restrict__ cache,
+    unsigned long long base_off,
+    const unsigned* __restrict__ d_pos,
+    unsigned heads,
+    unsigned head_dim,
+    unsigned rot_dim,
+    unsigned kv_dim,
+    float eps)
+{
+    unsigned h = blockIdx.x;
+    if (h >= heads) return;
+    float* xh = x + (size_t)h * head_dim;
+    __shared__ float buf[256];
+    float local = 0.f;
+    for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        float v = xh[i];
+        local += v * v;
+    }
+    buf[threadIdx.x] = local;
+    __syncthreads();
+    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) buf[threadIdx.x] += buf[threadIdx.x + s];
+        __syncthreads();
+    }
+    float scale = rsqrtf(buf[0] / (float)head_dim + eps);
+    for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        xh[i] = xh[i] * scale * w[i];
+    }
+    __syncthreads();
+    unsigned half_n = rot_dim / 2;
+    const float* rh = rope + (size_t)h * half_n * 2;
+    for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
+        float sinv = rh[2 * i];
+        float cosv = rh[2 * i + 1];
+        float a = xh[i];
+        float b = xh[i + half_n];
+        xh[i] = a * cosv - b * sinv;
+        xh[i + half_n] = a * sinv + b * cosv;
+    }
+    __syncthreads();
+    unsigned pos = d_pos[0];
+    unsigned long long dst = base_off + (unsigned long long)pos * kv_dim + (unsigned long long)h * head_dim;
+    for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        cache[dst + i] = f32_to_half_bits(xh[i]);
+    }
+}
+
+// Per-head RMSNorm + NeoX RoPE. RoPE angles from inv_freq[i]*d_pos (no H2D table).
+extern "C" __global__ void rmsnorm_rope_freq_dpos(
+    float* __restrict__ x,
+    const float* __restrict__ w,
+    const float* __restrict__ inv_freq,
+    const unsigned* __restrict__ d_pos,
+    unsigned heads,
+    unsigned head_dim,
+    unsigned rot_dim,
+    float eps)
+{
+    unsigned h = blockIdx.x;
+    if (h >= heads) return;
+    float* xh = x + (size_t)h * head_dim;
+    __shared__ float buf[256];
+    float local = 0.f;
+    for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        float v = xh[i];
+        local += v * v;
+    }
+    buf[threadIdx.x] = local;
+    __syncthreads();
+    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) buf[threadIdx.x] += buf[threadIdx.x + s];
+        __syncthreads();
+    }
+    float scale = rsqrtf(buf[0] / (float)head_dim + eps);
+    for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        xh[i] = xh[i] * scale * w[i];
+    }
+    __syncthreads();
+    unsigned half_n = rot_dim / 2;
+    float pos = (float)d_pos[0];
+    for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
+        float angle = pos * inv_freq[i];
+        float sinv, cosv;
+        __sincosf(angle, &sinv, &cosv);
+        float a = xh[i];
+        float b = xh[i + half_n];
+        xh[i] = a * cosv - b * sinv;
+        xh[i + half_n] = a * sinv + b * cosv;
+    }
+}
+
+// RMSNorm + freq RoPE + store K into f16 cache.
+extern "C" __global__ void rmsnorm_rope_store_freq_dpos(
+    float* __restrict__ x,
+    const float* __restrict__ w,
+    const float* __restrict__ inv_freq,
+    uint16_t* __restrict__ cache,
+    unsigned long long base_off,
+    const unsigned* __restrict__ d_pos,
+    unsigned heads,
+    unsigned head_dim,
+    unsigned rot_dim,
+    unsigned kv_dim,
+    float eps)
+{
+    unsigned h = blockIdx.x;
+    if (h >= heads) return;
+    float* xh = x + (size_t)h * head_dim;
+    __shared__ float buf[256];
+    float local = 0.f;
+    for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        float v = xh[i];
+        local += v * v;
+    }
+    buf[threadIdx.x] = local;
+    __syncthreads();
+    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) buf[threadIdx.x] += buf[threadIdx.x + s];
+        __syncthreads();
+    }
+    float scale = rsqrtf(buf[0] / (float)head_dim + eps);
+    for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        xh[i] = xh[i] * scale * w[i];
+    }
+    __syncthreads();
+    unsigned half_n = rot_dim / 2;
+    float posf = (float)d_pos[0];
+    for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
+        float angle = posf * inv_freq[i];
+        float sinv, cosv;
+        __sincosf(angle, &sinv, &cosv);
+        float a = xh[i];
+        float b = xh[i + half_n];
+        xh[i] = a * cosv - b * sinv;
+        xh[i + half_n] = a * sinv + b * cosv;
+    }
+    __syncthreads();
+    unsigned pos = d_pos[0];
+    unsigned long long dst = base_off + (unsigned long long)pos * kv_dim + (unsigned long long)h * head_dim;
+    for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        cache[dst + i] = f32_to_half_bits(xh[i]);
+    }
+}
+
+extern "C" __global__ void build_rope_freq_dpos(
+    float* __restrict__ rope,
+    const float* __restrict__ inv_freq,
+    const unsigned* __restrict__ d_pos,
+    unsigned pairs)
+{
+    unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= pairs) return;
+    float sinv, cosv;
+    __sincosf((float)d_pos[0] * inv_freq[i], &sinv, &cosv);
+    rope[2 * i] = sinv;
+    rope[2 * i + 1] = cosv;
+}
+
+extern "C" __global__ void rmsnorm_rope_qk_store_table_dpos(
+    float* __restrict__ q,
+    float* __restrict__ k,
+    const float* __restrict__ qw,
+    const float* __restrict__ kw,
+    const float* __restrict__ rope,
+    uint16_t* __restrict__ cache,
+    unsigned long long base_off,
+    const unsigned* __restrict__ d_pos,
+    unsigned q_heads,
+    unsigned kv_heads,
+    unsigned head_dim,
+    unsigned rot_dim,
+    unsigned kv_dim,
+    float eps)
+{
+    unsigned gh = blockIdx.x;
+    bool is_k = gh >= q_heads;
+    unsigned h = is_k ? gh - q_heads : gh;
+    if ((!is_k && h >= q_heads) || (is_k && h >= kv_heads)) return;
+    float* xh = (is_k ? k : q) + (size_t)h * head_dim;
+    const float* w = is_k ? kw : qw;
+    __shared__ float buf[256];
+    float local = 0.f;
+    for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        float v = xh[i];
+        local += v * v;
+    }
+    local = warp_sum_f(local);
+    unsigned lane = threadIdx.x & 31u;
+    unsigned warp = threadIdx.x >> 5;
+    if (lane == 0) buf[warp] = local;
+    __syncthreads();
+    if (warp == 0) {
+        unsigned nwarps = blockDim.x >> 5;
+        local = lane < nwarps ? buf[lane] : 0.f;
+        local = warp_sum_f(local);
+        if (lane == 0) buf[0] = local;
+    }
+    __syncthreads();
+    float scale = rsqrtf(buf[0] / (float)head_dim + eps);
+    for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        float v = xh[i] * scale * w[i];
+        if (is_k) buf[i] = v;
+        else xh[i] = v;
+    }
+    __syncthreads();
+    unsigned half_n = rot_dim / 2;
+    unsigned long long dst = 0;
+    if (is_k) {
+        unsigned pos = d_pos[0];
+        dst = base_off + (unsigned long long)pos * kv_dim + (unsigned long long)h * head_dim;
+    }
+    for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
+        float sinv = rope[2 * i];
+        float cosv = rope[2 * i + 1];
+        float a = is_k ? buf[i] : xh[i];
+        float b = is_k ? buf[i + half_n] : xh[i + half_n];
+        float r0 = a * cosv - b * sinv;
+        float r1 = a * sinv + b * cosv;
+        if (is_k) {
+            cache[dst + i] = f32_to_half_bits(r0);
+            cache[dst + i + half_n] = f32_to_half_bits(r1);
+        } else {
+            xh[i] = r0;
+            xh[i + half_n] = r1;
+        }
+    }
+    if (is_k) {
+        for (unsigned i = rot_dim + threadIdx.x; i < head_dim; i += blockDim.x) {
+            cache[dst + i] = f32_to_half_bits(buf[i]);
+        }
+    }
+}
+
+extern "C" __global__ void rope_neox_freq_dpos(
+    float* __restrict__ x,
+    const float* __restrict__ inv_freq,
+    const unsigned* __restrict__ d_pos,
+    unsigned heads,
+    unsigned head_dim,
+    unsigned rot_dim)
+{
+    unsigned h = blockIdx.x;
+    if (h >= heads) return;
+    unsigned half_n = rot_dim / 2;
+    float* xh = x + (size_t)h * head_dim;
+    float pos = (float)d_pos[0];
+    for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
+        float angle = pos * inv_freq[i];
+        float sinv, cosv;
+        __sincosf(angle, &sinv, &cosv);
         float a = xh[i];
         float b = xh[i + half_n];
         xh[i] = a * cosv - b * sinv;
@@ -231,6 +673,25 @@ extern "C" __global__ void store_kv_f16_dpos(
     if (i >= n) return;
     unsigned pos = d_pos[0];
     cache[base_off + (unsigned long long)pos * kv_dim + i] = f32_to_half_bits(src[i]);
+}
+
+// Store K and V for one token in one launch (same d_pos / kv_dim).
+extern "C" __global__ void store_kv_pair_f16_dpos(
+    uint16_t* __restrict__ cache,
+    const float* __restrict__ k_src,
+    const float* __restrict__ v_src,
+    unsigned long long k_off,
+    unsigned long long v_off,
+    const unsigned* __restrict__ d_pos,
+    unsigned kv_dim,
+    unsigned n)
+{
+    unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    unsigned pos = d_pos[0];
+    unsigned long long row = (unsigned long long)pos * kv_dim + i;
+    cache[k_off + row] = f32_to_half_bits(k_src[i]);
+    cache[v_off + row] = f32_to_half_bits(v_src[i]);
 }
 
 // Store m consecutive KV rows: src[row, kv_dim] → cache[base + (pos0+row)*kv_dim].
@@ -464,6 +925,279 @@ extern "C" __global__ void attend_gqa_batch(
     }
 }
 
+// Prefill GQA-fused: block=(32, group) per (row, kv_head). K/V tiled into smem
+// so each position is loaded once; sync only at tile boundaries.
+extern "C" __global__ void attend_gqa_batch_kv(
+    const float* __restrict__ q,
+    const uint16_t* __restrict__ cache,
+    float* __restrict__ out,
+    unsigned long long k_off,
+    unsigned long long v_off,
+    unsigned kv_dim,
+    unsigned head_dim,
+    unsigned n_q_heads,
+    unsigned group,
+    unsigned m,
+    unsigned base,
+    float scale)
+{
+    unsigned kvh = blockIdx.x;
+    unsigned row = blockIdx.y;
+    unsigned lane = threadIdx.x;
+    unsigned warp = threadIdx.y;
+    unsigned n_kv = n_q_heads / group;
+    if (kvh >= n_kv || row >= m) return;
+    unsigned qh = kvh * group + warp;
+    unsigned tid = warp * 32u + lane;
+    unsigned nthreads = group * 32u;
+    unsigned n_pos = base + row + 1u;
+    unsigned nreg = head_dim >> 5;
+
+    extern __shared__ uint16_t smem[];
+    // Layout: [TILE][head_dim] K then [TILE][head_dim] V. TILE=64.
+    const unsigned TILE = 64u;
+    uint16_t* k_s = smem;
+    uint16_t* v_s = smem + TILE * head_dim;
+
+    const float* qh_ptr = q + ((size_t)row * n_q_heads + qh) * head_dim;
+    float q_r[8], acc_r[8];
+    #pragma unroll
+    for (unsigned i = 0; i < 8; i++) {
+        if (i < nreg) {
+            q_r[i] = qh_ptr[i * 32u + lane];
+            acc_r[i] = 0.f;
+        }
+    }
+    float m_i = (-1.0f/0.0f);
+    float l_i = 0.f;
+
+    for (unsigned p0 = 0; p0 < n_pos; p0 += TILE) {
+        unsigned ntile = n_pos - p0;
+        if (ntile > TILE) ntile = TILE;
+        unsigned tile_elems = ntile * head_dim;
+        for (unsigned i = tid; i < tile_elems; i += nthreads) {
+            unsigned ti = i / head_dim;
+            unsigned di = i - ti * head_dim;
+            unsigned p = p0 + ti;
+            const uint16_t* krow = cache + k_off + (size_t)p * kv_dim + (size_t)kvh * head_dim;
+            const uint16_t* vrow = cache + v_off + (size_t)p * kv_dim + (size_t)kvh * head_dim;
+            k_s[i] = krow[di];
+            v_s[i] = vrow[di];
+        }
+        __syncthreads();
+
+        for (unsigned ti = 0; ti < ntile; ti++) {
+            const uint16_t* krow = k_s + ti * head_dim;
+            float partial = 0.f;
+            #pragma unroll
+            for (unsigned i = 0; i < 8; i++) {
+                if (i < nreg) partial += q_r[i] * half_bits_to_f32(krow[i * 32u + lane]);
+            }
+            float score = warp_sum_f(partial) * scale;
+            score = __shfl_sync(0xffffffffu, score, 0);
+            float m_new = fmaxf(m_i, score);
+            float alpha = expf(m_i - m_new);
+            float w = expf(score - m_new);
+            float l_new = alpha * l_i + w;
+            const uint16_t* vrow = v_s + ti * head_dim;
+            #pragma unroll
+            for (unsigned i = 0; i < 8; i++) {
+                if (i < nreg) {
+                    acc_r[i] = acc_r[i] * alpha + w * half_bits_to_f32(vrow[i * 32u + lane]);
+                }
+            }
+            m_i = m_new;
+            l_i = l_new;
+        }
+        __syncthreads();
+    }
+
+    float inv_l = 1.0f / l_i;
+    float* out_h = out + ((size_t)row * n_q_heads + qh) * head_dim;
+    #pragma unroll
+    for (unsigned i = 0; i < 8; i++) {
+        if (i < nreg) out_h[i * 32u + lane] = acc_r[i] * inv_l;
+    }
+}
+
+extern "C" __global__ void attend_gqa_kv(
+    const float* __restrict__ q,
+    const uint16_t* __restrict__ cache,
+    float* __restrict__ out,
+    unsigned long long k_off,
+    unsigned long long v_off,
+    unsigned kv_dim,
+    unsigned head_dim,
+    unsigned n_q_heads,
+    unsigned group,
+    unsigned n_pos,
+    float scale)
+{
+    unsigned kvh = blockIdx.x;
+    unsigned lane = threadIdx.x;
+    unsigned warp = threadIdx.y;
+    unsigned n_kv = n_q_heads / group;
+    if (kvh >= n_kv) return;
+    unsigned qh = kvh * group + warp;
+    unsigned tid = warp * 32u + lane;
+    unsigned nthreads = group * 32u;
+    unsigned nreg = head_dim >> 5;
+
+    extern __shared__ uint16_t smem[];
+    const unsigned TILE = 64u;
+    uint16_t* k_s = smem;
+    uint16_t* v_s = smem + TILE * head_dim;
+
+    const float* qh_ptr = q + (size_t)qh * head_dim;
+    float q_r[8], acc_r[8];
+    #pragma unroll
+    for (unsigned i = 0; i < 8; i++) {
+        if (i < nreg) {
+            q_r[i] = qh_ptr[i * 32u + lane];
+            acc_r[i] = 0.f;
+        }
+    }
+    float m_i = (-1.0f/0.0f);
+    float l_i = 0.f;
+
+    for (unsigned p0 = 0; p0 < n_pos; p0 += TILE) {
+        unsigned ntile = n_pos - p0;
+        if (ntile > TILE) ntile = TILE;
+        unsigned tile_elems = ntile * head_dim;
+        for (unsigned i = tid; i < tile_elems; i += nthreads) {
+            unsigned ti = i / head_dim;
+            unsigned di = i - ti * head_dim;
+            unsigned p = p0 + ti;
+            const uint16_t* krow = cache + k_off + (size_t)p * kv_dim + (size_t)kvh * head_dim;
+            const uint16_t* vrow = cache + v_off + (size_t)p * kv_dim + (size_t)kvh * head_dim;
+            k_s[i] = krow[di];
+            v_s[i] = vrow[di];
+        }
+        __syncthreads();
+
+        for (unsigned ti = 0; ti < ntile; ti++) {
+            const uint16_t* krow = k_s + ti * head_dim;
+            float partial = 0.f;
+            #pragma unroll
+            for (unsigned i = 0; i < 8; i++) {
+                if (i < nreg) partial += q_r[i] * half_bits_to_f32(krow[i * 32u + lane]);
+            }
+            float score = warp_sum_f(partial) * scale;
+            score = __shfl_sync(0xffffffffu, score, 0);
+            float m_new = fmaxf(m_i, score);
+            float alpha = expf(m_i - m_new);
+            float w = expf(score - m_new);
+            float l_new = alpha * l_i + w;
+            const uint16_t* vrow = v_s + ti * head_dim;
+            #pragma unroll
+            for (unsigned i = 0; i < 8; i++) {
+                if (i < nreg) {
+                    acc_r[i] = acc_r[i] * alpha + w * half_bits_to_f32(vrow[i * 32u + lane]);
+                }
+            }
+            m_i = m_new;
+            l_i = l_new;
+        }
+        __syncthreads();
+    }
+
+    float inv_l = 1.0f / l_i;
+    float* out_h = out + (size_t)qh * head_dim;
+    #pragma unroll
+    for (unsigned i = 0; i < 8; i++) {
+        if (i < nreg) out_h[i * 32u + lane] = acc_r[i] * inv_l;
+    }
+}
+
+extern "C" __global__ void attend_gqa_dpos_kv(
+    const float* __restrict__ q,
+    const uint16_t* __restrict__ cache,
+    float* __restrict__ out,
+    unsigned long long k_off,
+    unsigned long long v_off,
+    unsigned kv_dim,
+    unsigned head_dim,
+    unsigned n_q_heads,
+    unsigned group,
+    const unsigned* __restrict__ d_pos,
+    float scale)
+{
+    unsigned kvh = blockIdx.x;
+    unsigned lane = threadIdx.x;
+    unsigned warp = threadIdx.y;
+    unsigned n_kv = n_q_heads / group;
+    if (kvh >= n_kv) return;
+    unsigned qh = kvh * group + warp;
+    unsigned tid = warp * 32u + lane;
+    unsigned nthreads = group * 32u;
+    unsigned n_pos = d_pos[0] + 1u;
+    unsigned nreg = head_dim >> 5;
+
+    extern __shared__ uint16_t smem[];
+    const unsigned TILE = 64u;
+    uint16_t* k_s = smem;
+    uint16_t* v_s = smem + TILE * head_dim;
+
+    const float* qh_ptr = q + (size_t)qh * head_dim;
+    float q_r[8], acc_r[8];
+    #pragma unroll
+    for (unsigned i = 0; i < 8; i++) {
+        if (i < nreg) {
+            q_r[i] = qh_ptr[i * 32u + lane];
+            acc_r[i] = 0.f;
+        }
+    }
+    float m_i = (-1.0f/0.0f);
+    float l_i = 0.f;
+
+    for (unsigned p0 = 0; p0 < n_pos; p0 += TILE) {
+        unsigned ntile = n_pos - p0;
+        if (ntile > TILE) ntile = TILE;
+        unsigned tile_elems = ntile * head_dim;
+        for (unsigned i = tid; i < tile_elems; i += nthreads) {
+            unsigned ti = i / head_dim;
+            unsigned di = i - ti * head_dim;
+            unsigned p = p0 + ti;
+            const uint16_t* krow = cache + k_off + (size_t)p * kv_dim + (size_t)kvh * head_dim;
+            const uint16_t* vrow = cache + v_off + (size_t)p * kv_dim + (size_t)kvh * head_dim;
+            k_s[i] = krow[di];
+            v_s[i] = vrow[di];
+        }
+        __syncthreads();
+
+        for (unsigned ti = 0; ti < ntile; ti++) {
+            const uint16_t* krow = k_s + ti * head_dim;
+            float partial = 0.f;
+            #pragma unroll
+            for (unsigned i = 0; i < 8; i++) {
+                if (i < nreg) partial += q_r[i] * half_bits_to_f32(krow[i * 32u + lane]);
+            }
+            float score = warp_sum_f(partial) * scale;
+            score = __shfl_sync(0xffffffffu, score, 0);
+            float m_new = fmaxf(m_i, score);
+            float alpha = expf(m_i - m_new);
+            float w = expf(score - m_new);
+            float l_new = alpha * l_i + w;
+            const uint16_t* vrow = v_s + ti * head_dim;
+            #pragma unroll
+            for (unsigned i = 0; i < 8; i++) {
+                if (i < nreg) {
+                    acc_r[i] = acc_r[i] * alpha + w * half_bits_to_f32(vrow[i * 32u + lane]);
+                }
+            }
+            m_i = m_new;
+            l_i = l_new;
+        }
+        __syncthreads();
+    }
+
+    float inv_l = 1.0f / l_i;
+    float* out_h = out + (size_t)qh * head_dim;
+    #pragma unroll
+    for (unsigned i = 0; i < 8; i++) {
+        if (i < nreg) out_h[i * 32u + lane] = acc_r[i] * inv_l;
+    }
+}
 // ---- MoE helpers ------------------------------------------------------------
 
 extern "C" __global__ void softmax_topk(
@@ -652,6 +1386,7 @@ extern "C" __global__ void matvec_q5_0(
     yr[out] = acc;
 }
 
+// Metal-style Q4_K mmvq: one warp owns 4 output rows; X stays in registers.
 extern "C" __global__ void matvec_q4_k(
     const uint8_t* __restrict__ w,
     const float* __restrict__ x,
@@ -659,56 +1394,101 @@ extern "C" __global__ void matvec_q4_k(
     unsigned n_in, unsigned n_out, unsigned long long w_off, unsigned m,
     unsigned add)
 {
-    // llama.cpp mmvq layout: one output row per block, several warps split K
-    // so Q4_K block loads are coalesced (vs one warp per row in a fat block).
     unsigned lane = threadIdx.x;
     unsigned warp = threadIdx.y;
-    unsigned nwarps = blockDim.y;
-    unsigned out = blockIdx.x;
     unsigned row = blockIdx.y;
-    if (out >= n_out || row >= m) return;
+    if (row >= m) return;
+    // 4 warps × 4 rows = 16 output rows per block (best measured ~17.9 tok/s).
+    unsigned pair0 = blockIdx.x * 16u + warp * 4u;
+    if (pair0 >= n_out) return;
+    unsigned nrows = n_out - pair0;
+    if (nrows > 4u) nrows = 4u;
+
     const float* xr = x + (size_t)row * n_in;
-    const uint8_t* wrow = (w + w_off) + (size_t)out * (n_in / 256) * 144;
     unsigned nb = n_in / 256;
-    float acc = 0.f;
-    for (unsigned b = warp; b < nb; b += nwarps) {
-        const uint8_t* blk = wrow + b * 144;
-        float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
-        float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
-        const uint8_t* packed = blk + 4;
-        const uint8_t* qs = blk + 16;
-        const float* xb = xr + b * 256;
-        float partial = 0.f;
+    unsigned rb = nb * 144u;
+    const uint8_t* row0 = (w + w_off) + (size_t)pair0 * rb;
+
+    unsigned ix = lane / 8u;
+    unsigned it = lane % 8u;
+    unsigned iq = it / 4u;
+    unsigned ir = it % 4u;
+
+    float sumf[4] = {0.f, 0.f, 0.f, 0.f};
+    const float* y4 = xr + ix * 256u + 64u * iq + 8u * ir;
+
+    for (unsigned ib = ix; ib < nb; ib += 4u) {
+        float yl[16], yh[16];
+        float sumy0 = 0.f, sumy1 = 0.f, sumy2 = 0.f, sumy3 = 0.f;
         #pragma unroll
-        for (unsigned pair = 0; pair < 4; pair++) {
-            float mn1, mn2;
-            float sc1 = scale_min_k4((int)pair * 2, packed, &mn1);
-            float sc2 = scale_min_k4((int)pair * 2 + 1, packed, &mn2);
-            uint8_t qq = qs[pair * 32 + lane];
-            float xl = xb[pair * 64u + lane];
-            float xh = xb[pair * 64u + 32u + lane];
-            partial += (d * sc1 * (float)(qq & 0xf) - dmin * mn1) * xl;
-            partial += (d * sc2 * (float)(qq >> 4) - dmin * mn2) * xh;
+        for (int i = 0; i < 8; i++) {
+            yl[i] = y4[i];
+            sumy0 += yl[i];
+            yl[i + 8] = y4[i + 32];
+            sumy1 += yl[i + 8];
+            yh[i] = y4[i + 128];
+            sumy2 += yh[i];
+            yh[i + 8] = y4[i + 160];
+            sumy3 += yh[i + 8];
         }
-        acc += warp_sum_f(partial);
+
+        for (unsigned r = 0; r < nrows; r++) {
+            const uint8_t* blk = row0 + r * rb + ib * 144u;
+            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+            float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+            const uint16_t* sc = (const uint16_t*)(blk + 4) + iq;
+            const uint16_t* q1 = (const uint16_t*)(blk + 16) + 16u * iq + 4u * ir;
+            const uint16_t* q2 = q1 + 32;
+
+            uint16_t sc16[4];
+            sc16[0] = (uint16_t)(sc[0] & 0x3f3f);
+            sc16[1] = (uint16_t)(sc[2] & 0x3f3f);
+            sc16[2] = (uint16_t)(((sc[4] >> 0) & 0x0f0f) | ((sc[0] & 0xc0c0) >> 2));
+            sc16[3] = (uint16_t)(((sc[4] >> 4) & 0x0f0f) | ((sc[2] & 0xc0c0) >> 2));
+            const uint8_t* sc8 = (const uint8_t*)sc16;
+
+            float acc1[4] = {0.f, 0.f, 0.f, 0.f};
+            float acc2[4] = {0.f, 0.f, 0.f, 0.f};
+            #pragma unroll
+            for (int i = 0; i < 4; i++) {
+                uint16_t qq1 = q1[i];
+                uint16_t qq2 = q2[i];
+                acc1[0] += yl[2 * i + 0] * (float)(qq1 & 0x000F);
+                acc1[1] += yl[2 * i + 1] * (float)(qq1 & 0x0F00);
+                acc1[2] += yl[2 * i + 8] * (float)(qq1 & 0x00F0);
+                acc1[3] += yl[2 * i + 9] * (float)(qq1 & 0xF000);
+                acc2[0] += yh[2 * i + 0] * (float)(qq2 & 0x000F);
+                acc2[1] += yh[2 * i + 1] * (float)(qq2 & 0x0F00);
+                acc2[2] += yh[2 * i + 8] * (float)(qq2 & 0x00F0);
+                acc2[3] += yh[2 * i + 9] * (float)(qq2 & 0xF000);
+            }
+
+            sumf[r] +=
+                d * ((acc1[0] + (1.f / 256.f) * acc1[1]) * (float)sc8[0] +
+                     (acc1[2] + (1.f / 256.f) * acc1[3]) * (float)sc8[1] * (1.f / 16.f) +
+                     (acc2[0] + (1.f / 256.f) * acc2[1]) * (float)sc8[4] +
+                     (acc2[2] + (1.f / 256.f) * acc2[3]) * (float)sc8[5] * (1.f / 16.f))
+                - dmin * (sumy0 * (float)sc8[2] + sumy1 * (float)sc8[3] +
+                          sumy2 * (float)sc8[6] + sumy3 * (float)sc8[7]);
+        }
+        y4 += 4 * 256;
     }
-    __shared__ float wacc[16];
-    if (lane == 0) wacc[warp] = acc;
-    __syncthreads();
-    if (warp == 0 && lane == 0) {
-        float s = 0.f;
-        for (unsigned i = 0; i < nwarps; i++) s += wacc[i];
+
+    #pragma unroll
+    for (int r = 0; r < 4; r++) sumf[r] = warp_sum_f(sumf[r]);
+    if (lane == 0) {
         float* yr = y + (size_t)row * n_out;
-        if (add) yr[out] += s;
-        else yr[out] = s;
+        for (unsigned r = 0; r < nrows; r++) {
+            if (add) yr[pair0 + r] += sumf[r];
+            else yr[pair0 + r] = sumf[r];
+        }
     }
 }
 
-// Pack activations to Q8_1 (32-wide amax scale). One warp per 32-group.
+// Pack activations to block_q8_1 (32-wide amax scale). One warp per 32-group.
 extern "C" __global__ void quantize_q8_1(
     const float* __restrict__ x,
-    int8_t* __restrict__ q,
-    float* __restrict__ d,
+    block_q8_1* __restrict__ y,
     unsigned n, unsigned rows)
 {
     unsigned row = blockIdx.y;
@@ -725,70 +1505,413 @@ extern "C" __global__ void quantize_q8_1(
     }
     float scale = amax / 127.f;
     if (scale < 1e-8f) scale = 1.f;
-    if (lane == 0) d[(size_t)row * (n / 32u) + blk] = scale;
     int qi = __float2int_rn(v / scale);
     if (qi > 127) qi = 127;
     if (qi < -127) qi = -127;
-    q[(size_t)row * n + base + lane] = (int8_t)qi;
+    block_q8_1* b = y + (size_t)row * (n / 32u) + blk;
+    b->qs[lane] = (int8_t)qi;
+    store_q8_meta(b, lane, qi, scale);
 }
 
-// Q4_K × Q8_1 mmvq: 8 warps split superblocks; int8 X from quantize_q8_1.
-extern "C" __global__ void matvec_q4_k_q8(
+extern "C" __global__ void quantize_q8_1_q6(
+    const float* __restrict__ x,
+    block_q8_1* __restrict__ y,
+    unsigned n, unsigned rows)
+{
+    unsigned row = blockIdx.y;
+    unsigned blk = blockIdx.x;
+    unsigned lane = threadIdx.x;
+    if (row >= rows) return;
+    unsigned base = blk * 32u;
+    if (base >= n) return;
+    float v = x[(size_t)row * n + base + lane];
+    float amax = fabsf(v);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+    }
+    float scale = amax / 127.f;
+    if (scale < 1e-8f) scale = 1.f;
+    int qi = __float2int_rn(v / scale);
+    if (qi > 127) qi = 127;
+    if (qi < -127) qi = -127;
+    block_q8_1* b = y + (size_t)row * (n / 32u) + blk;
+    b->qs[lane] = (int8_t)qi;
+    store_q8_scale(b, lane, scale);
+}
+
+// Decode FA [hd,n_q] -> out [n_q,hd] + pack Q8 (replaces permute + quantize_q8_1).
+extern "C" __global__ void permute_q8_m1(
+    const float* __restrict__ in,
+    float* __restrict__ out,
+    block_q8_1* __restrict__ yq,
+    unsigned hd, unsigned n_q)
+{
+    unsigned blk = blockIdx.x;
+    unsigned lane = threadIdx.x;
+    unsigned n = hd * n_q;
+    unsigned base = blk * 32u;
+    if (base >= n) return;
+    unsigned out_i = base + lane;
+    unsigned d = out_i % hd;
+    unsigned h = out_i / hd;
+    float v = in[(size_t)d + (size_t)h * hd];
+    out[out_i] = v;
+    float amax = fabsf(v);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+    }
+    float scale = amax / 127.f;
+    if (scale < 1e-8f) scale = 1.f;
+    int qi = __float2int_rn(v / scale);
+    if (qi > 127) qi = 127;
+    if (qi < -127) qi = -127;
+    block_q8_1* b = yq + blk;
+    b->qs[lane] = (int8_t)qi;
+    store_q8_meta(b, lane, qi, scale);
+}
+
+extern "C" __global__ void permute_q8_m1_qonly(
+    const float* __restrict__ in,
+    block_q8_1* __restrict__ yq,
+    unsigned hd, unsigned n_q)
+{
+    unsigned blk = blockIdx.x;
+    unsigned lane = threadIdx.x;
+    unsigned n = hd * n_q;
+    unsigned base = blk * 32u;
+    if (base >= n) return;
+    unsigned out_i = base + lane;
+    unsigned d = out_i % hd;
+    unsigned h = out_i / hd;
+    float v = in[(size_t)d + (size_t)h * hd];
+    float amax = fabsf(v);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+    }
+    float scale = amax / 127.f;
+    if (scale < 1e-8f) scale = 1.f;
+    int qi = __float2int_rn(v / scale);
+    if (qi > 127) qi = 127;
+    if (qi < -127) qi = -127;
+    block_q8_1* b = yq + blk;
+    b->qs[lane] = (int8_t)qi;
+    store_q8_meta(b, lane, qi, scale);
+}
+
+// llama.cpp ggml_cuda_dp4a — INT8×INT8→INT32 SIMD dot.
+__device__ __forceinline__ int dp4a_s32(int a, int b, int c) {
+    int out;
+    asm volatile("dp4a.s32.s32 %0, %1, %2, %3;" : "=r"(out) : "r"(a), "r"(b), "r"(c));
+    return out;
+}
+
+__device__ __forceinline__ int get_int_b2(const void* x, int i32) {
+    const uint16_t* x16 = (const uint16_t*)x;
+    return (int)x16[2 * i32] | ((int)x16[2 * i32 + 1] << 16);
+}
+
+__device__ __forceinline__ int get_int_b4(const void* x, int i32) {
+    return ((const int*)x)[i32];
+}
+
+// Per-byte saturating subtract (CUDA __vsubss4), no special PTX opcode needed.
+__device__ __forceinline__ int vsubss4(int a, int b) {
+    (void)b;
+    return (a + 0x60606060) ^ 0x80808080;
+}
+
+// Port of llama vec_dot_q4_K_q8_1 (MMVQ). iqs ∈ {0,2,…,30}.
+// X is packed block_q8_1*; partial qs sums via dp4a (do not use block s).
+__device__ __forceinline__ float vec_dot_q4_k_q8(
+    const uint8_t* __restrict__ blk,
+    const block_q8_1* __restrict__ bq8,
+    int iqs)
+{
+    const int bq8_offset = 2 * ((iqs / 2) / 4); // 0,2,4,6
+    const int* q4 = (const int*)(blk + 16 + 16 * bq8_offset + 4 * ((iqs / 2) % 4));
+    int v0 = __ldg(q4);
+    int v1 = __ldg(q4 + 4);
+
+    const uint16_t* scales = (const uint16_t*)(blk + 4);
+    const int j = bq8_offset / 2;
+    const int jm = j & 1;
+    const uint32_t s0 = scales[jm + 0];
+    const uint32_t s2 = scales[jm + 2];
+    const uint32_t s4 = scales[jm + 4];
+    const uint32_t hi = (uint32_t)-(int32_t)(j >= 2);
+    uint16_t aux[2];
+    aux[0] = (uint16_t)(((s0 & 0x3f3f) & ~hi) | ((((s4 >> 0) & 0x0f0f) | ((s0 & 0xc0c0) >> 2)) & hi));
+    aux[1] = (uint16_t)(((s2 & 0x3f3f) & ~hi) | ((((s4 >> 4) & 0x0f0f) | ((s2 & 0xc0c0) >> 2)) & hi));
+    const uint8_t* sc = (const uint8_t*)aux;
+    const uint8_t* mn = sc + 2;
+
+    float d = half_bits_to_f32(__ldg((const uint16_t*)blk));
+    float dmin = half_bits_to_f32(__ldg((const uint16_t*)blk + 1));
+
+    float sumf_d = 0.f;
+    float sumf_m = 0.f;
+    #pragma unroll
+    for (int i = 0; i < 2; i++) {
+        const block_q8_1* bq8i = bq8 + bq8_offset + i;
+        float d8 = half_bits_to_f32(__ldg(&bq8i->d));
+        const int* q8 = (const int*)bq8i->qs + ((iqs / 2) % 4);
+        int u0 = q8[0];
+        int u1 = q8[4];
+        int v0i = (v0 >> (4 * i)) & 0x0F0F0F0F;
+        int v1i = (v1 >> (4 * i)) & 0x0F0F0F0F;
+        int dot1 = dp4a_s32(v1i, u1, dp4a_s32(v0i, u0, 0));
+        int dot2 = (int)bq8i->ps[(iqs / 2) % 4];
+        sumf_d += d8 * (float)(dot1 * (int)sc[i]);
+        sumf_m += d8 * (float)(dot2 * (int)mn[i]);
+    }
+    return d * sumf_d - dmin * sumf_m;
+}
+
+// Port of llama vec_dot_q6_K_q8_1 (MMVQ). iqs ∈ {0..31}, VDR=1.
+__device__ __forceinline__ float vec_dot_q6_k_q8(
+    const uint8_t* __restrict__ blk,
+    const block_q8_1* __restrict__ bq8,
+    int iqs)
+{
+    const int bq8_offset = 4 * (iqs / 16) + (iqs % 16) / 8;
+    const int scale_offset = 8 * (iqs / 16) + (iqs % 16) / 4;
+    const int vh_shift = 2 * ((iqs % 16) / 8);
+
+    const int vl = get_int_b2(blk, iqs);
+    const int vh = get_int_b2(blk + 128, 8 * (iqs / 16) + iqs % 8) >> vh_shift;
+    const int8_t* scales = (const int8_t*)(blk + 192) + scale_offset;
+    float d = half_bits_to_f32((uint16_t)blk[208] | ((uint16_t)blk[209] << 8));
+
+    float sumf = 0.f;
+    #pragma unroll
+    for (int i = 0; i < 2; i++) {
+        const block_q8_1* bq8i = bq8 + bq8_offset + 2 * i;
+        float d8 = half_bits_to_f32(__ldg(&bq8i->d));
+        const int* q8 = (const int*)bq8i->qs + (iqs % 8);
+        int u = q8[0];
+        int sc = (int)scales[4 * i];
+        int vil = (vl >> (4 * i)) & 0x0F0F0F0F;
+        int vih = ((vh >> (4 * i)) << 4) & 0x30303030;
+        int vi = vsubss4(vil | vih, 0x20202020);
+        sumf += d8 * (float)(dp4a_s32(vi, u, 0) * sc);
+    }
+    return d * sumf;
+}
+
+// llama.cpp GENERIC MMVQ on Blackwell: nwarps=4, rows_per_block=1.
+// blocks_per_iter = vdr * nwarps * 32 / qi; Q4_K: vdr=2,qi=32 -> 8.
+#define MMVQ_NWARPS 4u
+
+extern "C" __global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q4_k_q8(
     const uint8_t* __restrict__ w,
-    const int8_t* __restrict__ xq,
-    const float* __restrict__ xd,
+    const block_q8_1* __restrict__ x,
     float* __restrict__ y,
     unsigned n_in, unsigned n_out, unsigned long long w_off, unsigned m,
     unsigned add)
 {
     unsigned lane = threadIdx.x;
     unsigned warp = threadIdx.y;
-    unsigned nwarps = blockDim.y;
+    unsigned tid = warp * 32u + lane;
     unsigned out = blockIdx.x;
     unsigned row = blockIdx.y;
-    if (out >= n_out || row >= m) return;
-    const int8_t* xr = xq + (size_t)row * n_in;
-    const float* xdr = xd + (size_t)row * (n_in / 32u);
-    const uint8_t* wrow = (w + w_off) + (size_t)out * (n_in / 256) * 144;
-    unsigned nb = n_in / 256;
+    pdl_sync();
+    if (out >= n_out || row >= m) { pdl_lc(); return; }
+
+    const block_q8_1* xr = x + (size_t)row * (n_in / 32u);
+    const uint8_t* wrow = (w + w_off) + (size_t)out * (n_in / 256u) * 144u;
+    unsigned nb = n_in / 256u;
+
     float acc = 0.f;
-    for (unsigned b = warp; b < nb; b += nwarps) {
-        const uint8_t* blk = wrow + b * 144;
-        float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
-        float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
-        const uint8_t* packed = blk + 4;
-        const uint8_t* qs = blk + 16;
-        const int8_t* xb = xr + b * 256;
-        const float* db = xdr + b * 8u;
-        float partial = 0.f;
-        #pragma unroll
-        for (unsigned pair = 0; pair < 4; pair++) {
-            float mn1, mn2;
-            float sc1 = scale_min_k4((int)pair * 2, packed, &mn1);
-            float sc2 = scale_min_k4((int)pair * 2 + 1, packed, &mn2);
-            uint8_t qq = qs[pair * 32 + lane];
-            int xl = (int)xb[pair * 64u + lane];
-            int xh = (int)xb[pair * 64u + 32u + lane];
-            float d0 = db[pair * 2u];
-            float d1 = db[pair * 2u + 1u];
-            int qlo = (int)(qq & 0xf);
-            int qhi = (int)(qq >> 4);
-            int dot_lo = qlo * xl;
-            int dot_hi = qhi * xh;
-            partial += (d * sc1 * (float)dot_lo - dmin * mn1 * (float)xl) * d0;
-            partial += (d * sc2 * (float)dot_hi - dmin * mn2 * (float)xh) * d1;
-        }
-        acc += warp_sum_f(partial);
+    for (unsigned kbx = tid / 16u; kbx < nb; kbx += 8u) {
+        int iqs = (int)(2u * (tid % 16u));
+        acc += vec_dot_q4_k_q8(wrow + kbx * 144u, xr + kbx * 8u, iqs);
     }
-    __shared__ float wacc[16];
+    pdl_lc();
+    acc = warp_sum_f(acc);
+
+    __shared__ float wacc[MMVQ_NWARPS];
     if (lane == 0) wacc[warp] = acc;
     __syncthreads();
     if (warp == 0 && lane == 0) {
         float s = 0.f;
-        for (unsigned i = 0; i < nwarps; i++) s += wacc[i];
+        #pragma unroll
+        for (unsigned i = 0; i < MMVQ_NWARPS; i++) s += wacc[i];
         float* yr = y + (size_t)row * n_out;
         if (add) yr[out] += s;
         else yr[out] = s;
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q6_k_q8(
+    const uint8_t* __restrict__ w,
+    const block_q8_1* __restrict__ x,
+    float* __restrict__ y,
+    unsigned n_in, unsigned n_out, unsigned long long w_off, unsigned m,
+    unsigned add)
+{
+    unsigned lane = threadIdx.x;
+    unsigned warp = threadIdx.y;
+    unsigned tid = warp * 32u + lane;
+    unsigned out = blockIdx.x;
+    unsigned row = blockIdx.y;
+    pdl_sync();
+    if (out >= n_out || row >= m) { pdl_lc(); return; }
+
+    const block_q8_1* xr = x + (size_t)row * (n_in / 32u);
+    const uint8_t* wrow = (w + w_off) + (size_t)out * (n_in / 256u) * 210u;
+    unsigned nb = n_in / 256u;
+
+    float acc = 0.f;
+    for (unsigned kbx = tid / 32u; kbx < nb; kbx += 4u) {
+        int iqs = (int)(tid % 32u);
+        acc += vec_dot_q6_k_q8(wrow + kbx * 210u, xr + kbx * 8u, iqs);
+    }
+    pdl_lc();
+    acc = warp_sum_f(acc);
+
+    __shared__ float wacc[MMVQ_NWARPS];
+    if (lane == 0) wacc[warp] = acc;
+    __syncthreads();
+    if (warp == 0 && lane == 0) {
+        float s = 0.f;
+        #pragma unroll
+        for (unsigned i = 0; i < MMVQ_NWARPS; i++) s += wacc[i];
+        float* yr = y + (size_t)row * n_out;
+        if (add) yr[out] += s;
+        else yr[out] = s;
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q4_k_q8_2(
+    const uint8_t* __restrict__ w0,
+    const uint8_t* __restrict__ w1,
+    const block_q8_1* __restrict__ x,
+    float* __restrict__ y0,
+    float* __restrict__ y1,
+    unsigned n_in, unsigned n_out,
+    unsigned long long w_off0, unsigned long long w_off1, unsigned m)
+{
+    unsigned lane = threadIdx.x;
+    unsigned warp = threadIdx.y;
+    unsigned tid = warp * 32u + lane;
+    unsigned out = blockIdx.x;
+    unsigned row = blockIdx.y;
+    pdl_sync();
+    if (out >= n_out || row >= m) { pdl_lc(); return; }
+    (void)y1;
+
+    const block_q8_1* xr = x + (size_t)row * (n_in / 32u);
+    unsigned rb = (n_in / 256u) * 144u;
+    const uint8_t* row0 = (w0 + w_off0) + (size_t)out * rb;
+    const uint8_t* row1 = (w1 + w_off1) + (size_t)out * rb;
+    unsigned nb = n_in / 256u;
+
+    float acc0 = 0.f, acc1 = 0.f;
+    for (unsigned kbx = tid / 16u; kbx < nb; kbx += 8u) {
+        int iqs = (int)(2u * (tid % 16u));
+        const block_q8_1* xb = xr + kbx * 8u;
+        acc0 += vec_dot_q4_k_q8(row0 + kbx * 144u, xb, iqs);
+        acc1 += vec_dot_q4_k_q8(row1 + kbx * 144u, xb, iqs);
+    }
+    pdl_lc();
+    acc0 = warp_sum_f(acc0);
+    acc1 = warp_sum_f(acc1);
+
+    __shared__ float wacc0[MMVQ_NWARPS], wacc1[MMVQ_NWARPS];
+    if (lane == 0) {
+        wacc0[warp] = acc0;
+        wacc1[warp] = acc1;
+    }
+    __syncthreads();
+    if (warp == 0 && lane == 0) {
+        float s0 = 0.f, s1 = 0.f;
+        #pragma unroll
+        for (unsigned i = 0; i < MMVQ_NWARPS; i++) {
+            s0 += wacc0[i];
+            s1 += wacc1[i];
+        }
+        float* yr = y0 + (size_t)row * n_out;
+        yr[out] = silu_f(s0) * s1;
+    }
+}
+
+// Fused Q/K/V Q8 mmvq: one X quant, three weight rows (n_q may exceed n_kv).
+extern "C" __global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q4_k_q8_qkv(
+    const uint8_t* __restrict__ wq,
+    const uint8_t* __restrict__ wk,
+    const uint8_t* __restrict__ wv,
+    const block_q8_1* __restrict__ x,
+    float* __restrict__ q,
+    float* __restrict__ k,
+    float* __restrict__ v,
+    unsigned n_in, unsigned n_q, unsigned n_kv,
+    unsigned long long oq, unsigned long long ok, unsigned long long ov, unsigned m,
+    uint16_t* __restrict__ cache,
+    unsigned long long v_cache_off,
+    const unsigned* __restrict__ d_pos,
+    unsigned kv_dim)
+{
+    unsigned lane = threadIdx.x;
+    unsigned warp = threadIdx.y;
+    unsigned tid = warp * 32u + lane;
+    unsigned out = blockIdx.x;
+    unsigned row = blockIdx.y;
+    pdl_sync();
+    if (row >= m) { pdl_lc(); return; }
+    bool do_q = out < n_q;
+    bool do_kv = out < n_kv;
+    if (!do_q && !do_kv) { pdl_lc(); return; }
+
+    const block_q8_1* xr = x + (size_t)row * (n_in / 32u);
+    unsigned nb = n_in / 256u;
+    unsigned rb = nb * 144u;
+    const uint8_t* wrow_q = do_q ? (wq + oq) + (size_t)out * rb : nullptr;
+    const uint8_t* wrow_k = do_kv ? (wk + ok) + (size_t)out * rb : nullptr;
+    const uint8_t* wrow_v = do_kv ? (wv + ov) + (size_t)out * rb : nullptr;
+
+    float acc_q = 0.f, acc_k = 0.f, acc_v = 0.f;
+    for (unsigned kbx = tid / 16u; kbx < nb; kbx += 8u) {
+        int iqs = (int)(2u * (tid % 16u));
+        const block_q8_1* xb = xr + kbx * 8u;
+        if (do_q) acc_q += vec_dot_q4_k_q8(wrow_q + kbx * 144u, xb, iqs);
+        if (do_kv) {
+            acc_k += vec_dot_q4_k_q8(wrow_k + kbx * 144u, xb, iqs);
+            acc_v += vec_dot_q4_k_q8(wrow_v + kbx * 144u, xb, iqs);
+        }
+    }
+    pdl_lc();
+    acc_q = warp_sum_f(acc_q);
+    acc_k = warp_sum_f(acc_k);
+    acc_v = warp_sum_f(acc_v);
+
+    __shared__ float sq[MMVQ_NWARPS], sk[MMVQ_NWARPS], sv[MMVQ_NWARPS];
+    if (lane == 0) {
+        sq[warp] = acc_q;
+        sk[warp] = acc_k;
+        sv[warp] = acc_v;
+    }
+    __syncthreads();
+    if (warp == 0 && lane == 0) {
+        float aq = 0.f, ak = 0.f, av = 0.f;
+        #pragma unroll
+        for (unsigned i = 0; i < MMVQ_NWARPS; i++) {
+            aq += sq[i];
+            ak += sk[i];
+            av += sv[i];
+        }
+        if (do_q) q[(size_t)row * n_q + out] = aq;
+        if (do_kv) {
+            k[(size_t)row * n_kv + out] = ak;
+            v[(size_t)row * n_kv + out] = av;
+            if (cache && m == 1u && d_pos) {
+                unsigned pos = d_pos[0];
+                cache[v_cache_off + (unsigned long long)pos * kv_dim + out] =
+                    f32_to_half_bits(av);
+            }
+        }
     }
 }
 
@@ -842,6 +1965,7 @@ extern "C" __global__ void matvec_q5_k(
     if (lane == 0 && active) yr[out] = acc;
 }
 
+// Metal-style Q6_K mmvq: 4 output rows per warp, X in registers.
 extern "C" __global__ void matvec_q6_k(
     const uint8_t* __restrict__ w,
     const float* __restrict__ x,
@@ -851,52 +1975,71 @@ extern "C" __global__ void matvec_q6_k(
 {
     unsigned lane = threadIdx.x;
     unsigned warp = threadIdx.y;
-    unsigned nwarps = blockDim.y;
-    unsigned out = blockIdx.x;
     unsigned row = blockIdx.y;
-    if (out >= n_out || row >= m) return;
+    if (row >= m) return;
+    // 4 warps × 4 rows = 16 output rows per block.
+    unsigned pair0 = blockIdx.x * 16u + warp * 4u;
+    if (pair0 >= n_out) return;
+    unsigned nrows = n_out - pair0;
+    if (nrows > 4u) nrows = 4u;
+
     const float* xr = x + (size_t)row * n_in;
-    const uint8_t* wrow = (w + w_off) + (size_t)out * (n_in / 256) * 210;
     unsigned nb = n_in / 256;
-    float acc = 0.f;
-    for (unsigned b = warp; b < nb; b += nwarps) {
-        const uint8_t* blk = wrow + b * 210;
-        const uint8_t* ql = blk;
-        const uint8_t* qh = blk + 128;
-        const int8_t* scales = (const int8_t*)(blk + 192);
-        float d = half_bits_to_f32((uint16_t)blk[208] | ((uint16_t)blk[209] << 8));
-        const float* xb = xr + b * 256;
-        float partial = 0.f;
-        for (unsigned hi = 0; hi < 2; hi++) {
-            const uint8_t* ql_h = ql + hi * 64;
-            const uint8_t* qh_h = qh + hi * 32;
-            const int8_t* sc = scales + hi * 8;
-            unsigned l = lane;
-            unsigned is = l / 16;
-            int q1 = (int)((ql_h[l] & 0xf) | ((qh_h[l] & 3) << 4)) - 32;
-            int q2 = (int)((ql_h[l + 32] & 0xf) | (((qh_h[l] >> 2) & 3) << 4)) - 32;
-            int q3 = (int)((ql_h[l] >> 4) | (((qh_h[l] >> 4) & 3) << 4)) - 32;
-            int q4 = (int)((ql_h[l + 32] >> 4) | (((qh_h[l] >> 6) & 3) << 4)) - 32;
-            float x0 = xb[hi * 128 + l];
-            float x1 = xb[hi * 128 + 32 + l];
-            float x2 = xb[hi * 128 + 64 + l];
-            float x3 = xb[hi * 128 + 96 + l];
-            partial += d * (float)sc[is] * (float)q1 * x0;
-            partial += d * (float)sc[is + 2] * (float)q2 * x1;
-            partial += d * (float)sc[is + 4] * (float)q3 * x2;
-            partial += d * (float)sc[is + 6] * (float)q4 * x3;
+    unsigned rb = nb * 210u;
+    const uint8_t* row0 = (w + w_off) + (size_t)pair0 * rb;
+
+    unsigned t = lane / 2u;
+    unsigned ix = lane % 2u;
+    unsigned ip = t / 8u;
+    unsigned il = t % 8u;
+    unsigned l0 = 4u * il;
+    unsigned is = 8u * ip + l0 / 16u;
+    unsigned y_offset = 128u * ip + l0;
+    unsigned q_offset_l = 64u * ip + l0;
+    unsigned q_offset_h = 32u * ip + l0;
+
+    float sumf[4] = {0.f, 0.f, 0.f, 0.f};
+
+    for (unsigned ib = ix; ib < nb; ib += 2u) {
+        float yl[16];
+        const float* yv = xr + ib * 256u + y_offset;
+        #pragma unroll
+        for (int l = 0; l < 4; l++) {
+            yl[4 * l + 0] = yv[l + 0];
+            yl[4 * l + 1] = yv[l + 32];
+            yl[4 * l + 2] = yv[l + 64];
+            yl[4 * l + 3] = yv[l + 96];
         }
-        acc += warp_sum_f(partial);
+
+        for (unsigned r = 0; r < nrows; r++) {
+            const uint8_t* blk = row0 + r * rb + ib * 210u;
+            const uint8_t* q1 = blk + q_offset_l;
+            const uint8_t* q2 = q1 + 32;
+            const uint8_t* qh = blk + 128 + q_offset_h;
+            const int8_t* sc = (const int8_t*)(blk + 192) + is;
+            float d = half_bits_to_f32((uint16_t)blk[208] | ((uint16_t)blk[209] << 8));
+
+            float s0 = 0.f, s1 = 0.f, s2 = 0.f, s3 = 0.f;
+            #pragma unroll
+            for (int l = 0; l < 4; l++) {
+                s0 += yl[4 * l + 0] * (float)((int)((q1[l] & 0xF) | ((qh[l] & 0x03) << 4)) - 32);
+                s1 += yl[4 * l + 1] * (float)((int)((q2[l] & 0xF) | ((qh[l] & 0x0C) << 2)) - 32);
+                s2 += yl[4 * l + 2] * (float)((int)((q1[l] >> 4) | ((qh[l] & 0x30) << 0)) - 32);
+                s3 += yl[4 * l + 3] * (float)((int)((q2[l] >> 4) | ((qh[l] & 0xC0) >> 2)) - 32);
+            }
+            sumf[r] += d * (s0 * (float)sc[0] + s1 * (float)sc[2]
+                          + s2 * (float)sc[4] + s3 * (float)sc[6]);
+        }
     }
-    __shared__ float wacc[16];
-    if (lane == 0) wacc[warp] = acc;
-    __syncthreads();
-    if (warp == 0 && lane == 0) {
-        float s = 0.f;
-        for (unsigned i = 0; i < nwarps; i++) s += wacc[i];
+
+    #pragma unroll
+    for (int r = 0; r < 4; r++) sumf[r] = warp_sum_f(sumf[r]);
+    if (lane == 0) {
         float* yr = y + (size_t)row * n_out;
-        if (add) yr[out] += s;
-        else yr[out] = s;
+        for (unsigned r = 0; r < nrows; r++) {
+            if (add) yr[pair0 + r] += sumf[r];
+            else yr[pair0 + r] = sumf[r];
+        }
     }
 }
 
@@ -1183,7 +2326,7 @@ extern "C" __global__ void dequant_rows_f16(
     unsigned row_bytes,
     unsigned fmt)
 {
-    const unsigned ROWS = 8u;
+    const unsigned ROWS = 16u;
     unsigned r = blockIdx.x * ROWS + threadIdx.y;
     unsigned lane = threadIdx.x;
     if (r >= n_out) return;
@@ -1326,8 +2469,349 @@ extern "C" __global__ void gemm_f16_f32(
     c[(size_t)row * n + col] = acc;
 }
 
-// Tiled Q4_K × int8(X) GEMM with dp4a — never materializes full W in f16.
-// blockDim=(32,1): one warp = 32 output columns; grid=(ceil(n_out/32), ceil(m/BM)).
+// ---- int8 Tensor Core MMQ for Q4_K (m16n8k32) --------------------------------
+// Host pre-quantizes X to Q8 once (avoids ~n_out/BN redundant amax passes).
+// Block: 8 warps × 8 cols = 16×64 output tile. Opt-in via ALLPAKA_MMQ=1.
+
+__device__ __forceinline__ unsigned pack_i8x4(int8_t a, int8_t b, int8_t c, int8_t d) {
+    return (unsigned)(uint8_t)a
+        | ((unsigned)(uint8_t)b << 8)
+        | ((unsigned)(uint8_t)c << 16)
+        | ((unsigned)(uint8_t)d << 24);
+}
+
+__device__ __forceinline__ void mma_m16n8k32_s8(
+    int& d0, int& d1, int& d2, int& d3,
+    unsigned a0, unsigned a1, unsigned a2, unsigned a3,
+    unsigned b0, unsigned b1)
+{
+    asm volatile(
+        "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+        : "+r"(d0), "+r"(d1), "+r"(d2), "+r"(d3)
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+
+extern "C" __global__ void mm_q4_k_mma(
+    const uint8_t* __restrict__ w,
+    const int8_t* __restrict__ xq,
+    const float* __restrict__ xd,
+    float* __restrict__ y,
+    unsigned n_in, unsigned n_out, unsigned long long w_off, unsigned m)
+{
+    // grid (ceil(n_out/64), ceil(m/16)), block (32, 8) — 8 warps × 8 cols.
+    const unsigned warp = threadIdx.y;
+    const unsigned lane = threadIdx.x;
+    const unsigned tid = warp * 32u + lane;
+    const unsigned col0 = blockIdx.x * 64u + warp * 8u;
+    const unsigned row0 = blockIdx.y * 16u;
+    if (row0 >= m) return;
+
+    const unsigned group = lane >> 2;
+    const unsigned tig = lane & 3u;
+    const unsigned nb = n_in / 256u;
+    const unsigned rb = nb * 144u;
+    const unsigned nd = n_in / 32u;
+    const uint8_t* wb = w + w_off;
+
+    float acc0 = 0.f, acc1 = 0.f, acc2 = 0.f, acc3 = 0.f;
+
+    __shared__ int8_t As[16 * 256];
+    __shared__ float Xd[16 * 8];
+    __shared__ float Xsum[16 * 8];
+    __shared__ uint8_t Wtile[64 * 144];
+    __shared__ int8_t Bs[8 * 32 * 8];
+    __shared__ float Wd[64], Wdmin[64], Wsc[64 * 8], Wmn[64 * 8];
+
+    for (unsigned b = 0; b < nb; b++) {
+        for (unsigned rg = tid; rg < 16u * 8u; rg += 256u) {
+            unsigned r = rg / 8u;
+            unsigned g = rg - r * 8u;
+            unsigned gr = row0 + r;
+            bool ok = gr < m;
+            float d = ok ? xd[(size_t)gr * nd + b * 8u + g] : 1.f;
+            if (d < 1e-8f) d = 1.f;
+            Xd[r * 8u + g] = d;
+            int sumq = 0;
+            const int8_t* src = ok ? (xq + (size_t)gr * n_in + b * 256u + g * 32u) : 0;
+            #pragma unroll
+            for (int i = 0; i < 32; i++) {
+                int8_t qi = ok ? src[i] : (int8_t)0;
+                As[r * 256u + g * 32u + (unsigned)i] = qi;
+                sumq += (int)qi;
+            }
+            Xsum[r * 8u + g] = d * (float)sumq;
+        }
+
+        {
+            unsigned base_c = blockIdx.x * 64u;
+            for (unsigned off = tid; off < 64u * 144u; off += 256u) {
+                unsigned c = off / 144u;
+                unsigned o = off - c * 144u;
+                unsigned gc = base_c + c;
+                Wtile[off] = (gc < n_out) ? wb[(size_t)gc * rb + b * 144u + o] : (uint8_t)0;
+            }
+        }
+        __syncthreads();
+
+        for (unsigned c = tid; c < 64u; c += 256u) {
+            const uint8_t* blk = Wtile + c * 144u;
+            Wd[c] = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+            Wdmin[c] = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+            #pragma unroll
+            for (int g = 0; g < 8; g++) {
+                float mn;
+                float sc = scale_min_k4(g, blk + 4, &mn);
+                Wsc[c * 8 + g] = sc;
+                Wmn[c * 8 + g] = mn;
+            }
+        }
+        __syncthreads();
+
+        int8_t* Bsw = Bs + warp * 32u * 8u;
+        const unsigned wc_base = warp * 8u;
+        #pragma unroll
+        for (unsigned g = 0; g < 8u; g++) {
+            unsigned pair = g / 2u;
+            unsigned shift = (g & 1u) * 4u;
+            #pragma unroll
+            for (unsigned c = 0; c < 8u; c++) {
+                const uint8_t* blk = Wtile + (wc_base + c) * 144u;
+                uint8_t qq = blk[16 + pair * 32u + lane];
+                Bsw[lane * 8u + c] = (int8_t)((qq >> shift) & 0xf);
+            }
+            __syncwarp();
+
+            const int8_t* Asg = As + g * 32u;
+            int dot0 = 0, dot1 = 0, dot2 = 0, dot3 = 0;
+            {
+                unsigned a0 = pack_i8x4(
+                    Asg[group * 256u + 4u * tig + 0],
+                    Asg[group * 256u + 4u * tig + 1],
+                    Asg[group * 256u + 4u * tig + 2],
+                    Asg[group * 256u + 4u * tig + 3]);
+                unsigned a1 = pack_i8x4(
+                    Asg[(group + 8u) * 256u + 4u * tig + 0],
+                    Asg[(group + 8u) * 256u + 4u * tig + 1],
+                    Asg[(group + 8u) * 256u + 4u * tig + 2],
+                    Asg[(group + 8u) * 256u + 4u * tig + 3]);
+                unsigned a2 = pack_i8x4(
+                    Asg[group * 256u + 4u * tig + 16],
+                    Asg[group * 256u + 4u * tig + 17],
+                    Asg[group * 256u + 4u * tig + 18],
+                    Asg[group * 256u + 4u * tig + 19]);
+                unsigned a3 = pack_i8x4(
+                    Asg[(group + 8u) * 256u + 4u * tig + 16],
+                    Asg[(group + 8u) * 256u + 4u * tig + 17],
+                    Asg[(group + 8u) * 256u + 4u * tig + 18],
+                    Asg[(group + 8u) * 256u + 4u * tig + 19]);
+                unsigned b0 = pack_i8x4(
+                    Bsw[(4u * tig + 0) * 8u + group],
+                    Bsw[(4u * tig + 1) * 8u + group],
+                    Bsw[(4u * tig + 2) * 8u + group],
+                    Bsw[(4u * tig + 3) * 8u + group]);
+                unsigned b1 = pack_i8x4(
+                    Bsw[(4u * tig + 16) * 8u + group],
+                    Bsw[(4u * tig + 17) * 8u + group],
+                    Bsw[(4u * tig + 18) * 8u + group],
+                    Bsw[(4u * tig + 19) * 8u + group]);
+                mma_m16n8k32_s8(dot0, dot1, dot2, dot3, a0, a1, a2, a3, b0, b1);
+            }
+
+            {
+                float xd0 = Xd[group * 8u + g], xd1 = Xd[(group + 8u) * 8u + g];
+                float xs0 = Xsum[group * 8u + g], xs1 = Xsum[(group + 8u) * 8u + g];
+                unsigned wc0 = wc_base + 2u * tig;
+                unsigned wc1 = wc_base + 2u * tig + 1u;
+                acc0 += (Wd[wc0] * Wsc[wc0 * 8u + g] * xd0) * (float)dot0
+                    - (Wdmin[wc0] * Wmn[wc0 * 8u + g]) * xs0;
+                acc1 += (Wd[wc1] * Wsc[wc1 * 8u + g] * xd0) * (float)dot1
+                    - (Wdmin[wc1] * Wmn[wc1 * 8u + g]) * xs0;
+                acc2 += (Wd[wc0] * Wsc[wc0 * 8u + g] * xd1) * (float)dot2
+                    - (Wdmin[wc0] * Wmn[wc0 * 8u + g]) * xs1;
+                acc3 += (Wd[wc1] * Wsc[wc1 * 8u + g] * xd1) * (float)dot3
+                    - (Wdmin[wc1] * Wmn[wc1 * 8u + g]) * xs1;
+            }
+            __syncwarp();
+        }
+        __syncthreads();
+    }
+
+    if (col0 < n_out) {
+        unsigned r0 = row0 + group;
+        unsigned r1 = row0 + group + 8u;
+        unsigned c0 = col0 + 2u * tig;
+        unsigned c1 = col0 + 2u * tig + 1u;
+        if (r0 < m && c0 < n_out) y[(size_t)r0 * n_out + c0] = acc0;
+        if (r0 < m && c1 < n_out) y[(size_t)r0 * n_out + c1] = acc1;
+        if (r1 < m && c0 < n_out) y[(size_t)r1 * n_out + c0] = acc2;
+        if (r1 < m && c1 < n_out) y[(size_t)r1 * n_out + c1] = acc3;
+    }
+}
+
+// Metal-style tiled Q4_K GEMM: dequant W tiles into smem (never full f16 W in HBM).
+// Tile BM=32 × BN=64 × BK=32; half staging, float accum. Opt-in ALLPAKA_MMQ=1.
+extern "C" __global__ void mm_q4_k_tile(
+    const uint8_t* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    unsigned n_in, unsigned n_out, unsigned long long w_off, unsigned m)
+{
+    constexpr unsigned BM = 32u, BN = 64u, BK = 32u;
+    const unsigned tid = threadIdx.y * 32u + threadIdx.x;
+    const unsigned row0 = blockIdx.y * BM;
+    const unsigned col0 = blockIdx.x * BN;
+    if (row0 >= m) return;
+
+    const unsigned nb = n_in / 256u;
+    const unsigned rb = nb * 144u;
+    const uint8_t* wb = w + w_off;
+
+    __shared__ float As[BM * BK];
+    __shared__ float Bs[BN * BK];
+
+    float acc[8];
+    #pragma unroll
+    for (int t = 0; t < 8; t++) acc[t] = 0.f;
+
+    for (unsigned k0 = 0; k0 < n_in; k0 += BK) {
+        for (unsigned off = tid; off < BM * BK; off += 256u) {
+            unsigned i = off / BK;
+            unsigned kk = off - i * BK;
+            unsigned gr = row0 + i;
+            As[off] = (gr < m && (k0 + kk) < n_in) ? x[(size_t)gr * n_in + k0 + kk] : 0.f;
+        }
+
+        {
+            unsigned g = (k0 / 32u) & 7u;
+            unsigned b = k0 / 256u;
+            unsigned pair = g / 2u;
+            unsigned shift = (g & 1u) * 4u;
+            for (unsigned off = tid; off < BN * BK; off += 256u) {
+                unsigned c = off / BK;
+                unsigned kk = off - c * BK;
+                unsigned gc = col0 + c;
+                float v = 0.f;
+                if (gc < n_out && b < nb) {
+                    const uint8_t* blk = wb + (size_t)gc * rb + b * 144u;
+                    float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+                    float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+                    float mn;
+                    float sc = scale_min_k4((int)g, blk + 4, &mn);
+                    uint8_t qq = blk[16 + pair * 32u + kk];
+                    int qv = (int)((qq >> shift) & 0xf);
+                    v = d * sc * (float)qv - dmin * mn;
+                }
+                Bs[off] = v;
+            }
+        }
+        __syncthreads();
+
+        #pragma unroll
+        for (int t = 0; t < 8; t++) {
+            unsigned idx = tid + (unsigned)t * 256u;
+            unsigned i = idx / BN;
+            unsigned j = idx - i * BN;
+            if (i < BM) {
+                float sum = acc[t];
+                #pragma unroll
+                for (unsigned kk = 0; kk < BK; kk++) {
+                    sum += As[i * BK + kk] * Bs[j * BK + kk];
+                }
+                acc[t] = sum;
+            }
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int t = 0; t < 8; t++) {
+        unsigned idx = tid + (unsigned)t * 256u;
+        unsigned i = idx / BN;
+        unsigned j = idx - i * BN;
+        unsigned gr = row0 + i;
+        unsigned gc = col0 + j;
+        if (i < BM && gr < m && gc < n_out) {
+            y[(size_t)gr * n_out + gc] = acc[t];
+        }
+    }
+}
+
+// Tiled Q4_K × Q8(X) GEMM (dp4a, no TC). Kept for debugging; slower than cuBLAS.
+extern "C" __global__ void mm_q4_k_q8(
+    const uint8_t* __restrict__ w,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    unsigned n_in, unsigned n_out, unsigned long long w_off, unsigned m)
+{
+    const unsigned BM = 16u;
+    unsigned lane = threadIdx.x;
+    unsigned warp = threadIdx.y;
+    unsigned tid = warp * 32u + lane;
+    unsigned col = blockIdx.x * 32u + lane;
+    unsigned row0 = blockIdx.y * BM;
+    unsigned gr = row0 + warp;
+    const uint8_t* wb = w + w_off;
+    unsigned nb = n_in / 256u;
+    unsigned row_bytes = nb * 144u;
+
+    // 32 Q4_K blocks (one per output col) + BM rows × 8 block_q8_1.
+    __shared__ uint8_t wtile[32 * 144];
+    __shared__ block_q8_1 xq[16 * 8];
+
+    float acc = 0.f;
+    bool row_ok = gr < m;
+    bool col_ok = col < n_out;
+
+    for (unsigned b = 0; b < nb; b++) {
+        // Cooperative W load: 32 cols × 144 bytes.
+        for (unsigned off = tid; off < 32u * 144u; off += BM * 32u) {
+            unsigned c = off / 144u;
+            unsigned o = off - c * 144u;
+            unsigned gcol = blockIdx.x * 32u + c;
+            wtile[off] = (gcol < n_out)
+                ? wb[(size_t)gcol * row_bytes + b * 144u + o]
+                : 0;
+        }
+        // Each warp quantizes its X row for this 256-block into block_q8_1.
+        if (warp < BM) {
+            #pragma unroll
+            for (unsigned g = 0; g < 8u; g++) {
+                float v = row_ok ? x[(size_t)gr * n_in + b * 256u + g * 32u + lane] : 0.f;
+                float amax = fabsf(v);
+                #pragma unroll
+                for (int off = 16; off > 0; off >>= 1) {
+                    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+                }
+                float d = amax / 127.f;
+                if (d < 1e-8f) d = 1.f;
+                int qi = __float2int_rn(v / d);
+                if (qi > 127) qi = 127;
+                if (qi < -127) qi = -127;
+                block_q8_1* bq = &xq[warp * 8u + g];
+                bq->qs[lane] = (int8_t)qi;
+                store_q8_meta(bq, lane, qi, d);
+            }
+        }
+        __syncthreads();
+
+        if (row_ok && col_ok) {
+            const uint8_t* blk = wtile + lane * 144u;
+            const block_q8_1* xb = xq + warp * 8u;
+            #pragma unroll
+            for (int iqs = 0; iqs < 32; iqs += 2) {
+                acc += vec_dot_q4_k_q8(blk, xb, iqs);
+            }
+        }
+        __syncthreads();
+    }
+
+    if (row_ok && col_ok) {
+        y[(size_t)gr * n_out + col] = acc;
+    }
+}
+
+// Float-X tiled Q4_K GEMM (accurate, slower than cuBLAS). Kept for debugging.
 extern "C" __global__ void mm_q4_k(
     const uint8_t* __restrict__ w,
     const float* __restrict__ x,
@@ -1336,103 +2820,254 @@ extern "C" __global__ void mm_q4_k(
 {
     const unsigned BM = 8u;
     unsigned lane = threadIdx.x;
+    unsigned warp = threadIdx.y;
     unsigned col = blockIdx.x * 32u + lane;
     unsigned row0 = blockIdx.y * BM;
-    bool col_ok = col < n_out;
-
-    __shared__ int8_t xq[8 * 256];
-    __shared__ float xd[8 * 8];
-
-    float accs[8];
-    #pragma unroll
-    for (int i = 0; i < 8; i++) accs[i] = 0.f;
-
+    unsigned gr = row0 + warp;
     const uint8_t* wb = w + w_off;
-    unsigned nb = n_in / 256;
+    unsigned nb = n_in / 256u;
+    unsigned row_bytes = nb * 144u;
+
+    __shared__ float xs[8 * 256];
+
+    float acc = 0.f;
 
     for (unsigned b = 0; b < nb; b++) {
-        for (unsigned r = 0; r < BM; r++) {
-            unsigned gr = row0 + r;
-            #pragma unroll
-            for (int t = 0; t < 8; t++) {
-                unsigned i = (unsigned)t * 32u + lane;
-                float v = (gr < m) ? x[(size_t)gr * n_in + b * 256u + i] : 0.f;
-                float amax = fabsf(v);
-                #pragma unroll
-                for (int off = 16; off > 0; off >>= 1) {
-                    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
-                }
-                float d = amax / 127.f;
-                if (d < 1e-8f) d = 1.f;
-                if (lane == 0) xd[r * 8 + (unsigned)t] = d;
-                int q = __float2int_rn(v / d);
-                if (q > 127) q = 127;
-                if (q < -127) q = -127;
-                xq[r * 256 + i] = (int8_t)q;
-            }
+        #pragma unroll
+        for (unsigned g = 0; g < 8u; g++) {
+            xs[warp * 256u + g * 32u + lane] =
+                (gr < m) ? x[(size_t)gr * n_in + b * 256u + g * 32u + lane] : 0.f;
         }
         __syncthreads();
 
-        if (col_ok) {
-            const uint8_t* blk = wb + (size_t)col * nb * 144u + b * 144u;
+        if (col < n_out && gr < m) {
+            const uint8_t* blk = wb + (size_t)col * row_bytes + b * 144u;
+            const float* xr = xs + warp * 256u;
             float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
             float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
             const uint8_t* packed = blk + 4;
             const uint8_t* qs = blk + 16;
+            float partial = 0.f;
             #pragma unroll
-            for (unsigned r = 0; r < BM; r++) {
-                float local = 0.f;
-                for (unsigned pair = 0; pair < 4u; pair++) {
-                    float mn1, mn2;
-                    float sc1 = scale_min_k4((int)pair * 2, packed, &mn1);
-                    float sc2 = scale_min_k4((int)pair * 2 + 1, packed, &mn2);
-                    const uint8_t* q = qs + pair * 32u;
-                    const int8_t* xr = xq + r * 256 + pair * 64u;
-                    float d0 = xd[r * 8 + pair * 2];
-                    float d1 = xd[r * 8 + pair * 2 + 1];
-                    int dot_lo = 0, dot_hi = 0, sum_lo = 0, sum_hi = 0;
-                    #pragma unroll
-                    for (unsigned l = 0; l < 32u; l += 4u) {
-                        int x4lo = ((int)(int8_t)xr[l] & 0xff)
-                            | (((int)(int8_t)xr[l + 1] & 0xff) << 8)
-                            | (((int)(int8_t)xr[l + 2] & 0xff) << 16)
-                            | (((int)(int8_t)xr[l + 3] & 0xff) << 24);
-                        int x4hi = ((int)(int8_t)xr[l + 32] & 0xff)
-                            | (((int)(int8_t)xr[l + 33] & 0xff) << 8)
-                            | (((int)(int8_t)xr[l + 34] & 0xff) << 16)
-                            | (((int)(int8_t)xr[l + 35] & 0xff) << 24);
-                        int qpack = (int)q[l] | ((int)q[l + 1] << 8)
-                            | ((int)q[l + 2] << 16) | ((int)q[l + 3] << 24);
-                        int qlo = qpack & 0x0f0f0f0f;
-                        int qhi = (qpack >> 4) & 0x0f0f0f0f;
-                        int one = 0x01010101;
-                        asm volatile("dp4a.s32.s32 %0, %1, %2, %3;"
-                                     : "=r"(dot_lo)
-                                     : "r"(qlo), "r"(x4lo), "r"(dot_lo));
-                        asm volatile("dp4a.s32.s32 %0, %1, %2, %3;"
-                                     : "=r"(dot_hi)
-                                     : "r"(qhi), "r"(x4hi), "r"(dot_hi));
-                        asm volatile("dp4a.s32.s32 %0, %1, %2, %3;"
-                                     : "=r"(sum_lo)
-                                     : "r"(one), "r"(x4lo), "r"(sum_lo));
-                        asm volatile("dp4a.s32.s32 %0, %1, %2, %3;"
-                                     : "=r"(sum_hi)
-                                     : "r"(one), "r"(x4hi), "r"(sum_hi));
-                    }
-                    local += d * sc1 * d0 * (float)dot_lo - dmin * mn1 * d0 * (float)sum_lo
-                           + d * sc2 * d1 * (float)dot_hi - dmin * mn2 * d1 * (float)sum_hi;
+            for (unsigned pair = 0; pair < 4u; pair++) {
+                float mn1, mn2;
+                float sc1 = scale_min_k4((int)pair * 2, packed, &mn1);
+                float sc2 = scale_min_k4((int)pair * 2 + 1, packed, &mn2);
+                #pragma unroll
+                for (unsigned l = 0; l < 32u; l++) {
+                    uint8_t qq = qs[pair * 32u + l];
+                    float xl = xr[pair * 64u + l];
+                    float xh = xr[pair * 64u + 32u + l];
+                    partial += (d * sc1 * (float)(qq & 0xf) - dmin * mn1) * xl;
+                    partial += (d * sc2 * (float)(qq >> 4) - dmin * mn2) * xh;
                 }
-                accs[r] += local;
             }
+            acc += partial;
         }
         __syncthreads();
     }
 
-    if (col_ok) {
+    if (col < n_out && gr < m) {
+        y[(size_t)gr * n_out + col] = acc;
+    }
+}
+
+// Fused gate+up: Metal-style 16 outs/block, X loaded once for both W matrices.
+extern "C" __global__ void matvec_q4_k_2(
+    const uint8_t* __restrict__ w0,
+    const uint8_t* __restrict__ w1,
+    const float* __restrict__ x,
+    float* __restrict__ y0,
+    float* __restrict__ y1,
+    unsigned n_in, unsigned n_out,
+    unsigned long long w_off0, unsigned long long w_off1, unsigned m)
+{
+    unsigned lane = threadIdx.x;
+    unsigned warp = threadIdx.y;
+    unsigned row = blockIdx.y;
+    if (row >= m) return;
+    (void)y1; // SwiGLU fused into y0; keep arg for launch ABI.
+    unsigned pair0 = blockIdx.x * 16u + warp * 4u;
+    if (pair0 >= n_out) return;
+    unsigned nrows = n_out - pair0;
+    if (nrows > 4u) nrows = 4u;
+
+    const float* xr = x + (size_t)row * n_in;
+    unsigned nb = n_in / 256;
+    unsigned rb = nb * 144u;
+    const uint8_t* row0 = (w0 + w_off0) + (size_t)pair0 * rb;
+    const uint8_t* row1 = (w1 + w_off1) + (size_t)pair0 * rb;
+
+    unsigned ix = lane / 8u;
+    unsigned it = lane % 8u;
+    unsigned iq = it / 4u;
+    unsigned ir = it % 4u;
+
+    float sum0[4] = {0.f, 0.f, 0.f, 0.f};
+    float sum1[4] = {0.f, 0.f, 0.f, 0.f};
+    const float* y4 = xr + ix * 256u + 64u * iq + 8u * ir;
+
+    for (unsigned ib = ix; ib < nb; ib += 4u) {
+        float yl[16], yh[16];
+        float sumy0 = 0.f, sumy1 = 0.f, sumy2 = 0.f, sumy3 = 0.f;
         #pragma unroll
-        for (unsigned r = 0; r < BM; r++) {
-            unsigned gr = row0 + r;
-            if (gr < m) y[(size_t)gr * n_out + col] = accs[r];
+        for (int i = 0; i < 8; i++) {
+            yl[i] = y4[i];
+            sumy0 += yl[i];
+            yl[i + 8] = y4[i + 32];
+            sumy1 += yl[i + 8];
+            yh[i] = y4[i + 128];
+            sumy2 += yh[i];
+            yh[i + 8] = y4[i + 160];
+            sumy3 += yh[i + 8];
+        }
+
+        for (unsigned r = 0; r < nrows; r++) {
+            #pragma unroll
+            for (int pass = 0; pass < 2; pass++) {
+                const uint8_t* blk = (pass == 0 ? row0 : row1) + r * rb + ib * 144u;
+                float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+                float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+                const uint16_t* sc = (const uint16_t*)(blk + 4) + iq;
+                const uint16_t* q1 = (const uint16_t*)(blk + 16) + 16u * iq + 4u * ir;
+                const uint16_t* q2 = q1 + 32;
+
+                uint16_t sc16[4];
+                sc16[0] = (uint16_t)(sc[0] & 0x3f3f);
+                sc16[1] = (uint16_t)(sc[2] & 0x3f3f);
+                sc16[2] = (uint16_t)(((sc[4] >> 0) & 0x0f0f) | ((sc[0] & 0xc0c0) >> 2));
+                sc16[3] = (uint16_t)(((sc[4] >> 4) & 0x0f0f) | ((sc[2] & 0xc0c0) >> 2));
+                const uint8_t* sc8 = (const uint8_t*)sc16;
+
+                float acc1[4] = {0.f, 0.f, 0.f, 0.f};
+                float acc2[4] = {0.f, 0.f, 0.f, 0.f};
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    uint16_t qq1 = q1[i];
+                    uint16_t qq2 = q2[i];
+                    acc1[0] += yl[2 * i + 0] * (float)(qq1 & 0x000F);
+                    acc1[1] += yl[2 * i + 1] * (float)(qq1 & 0x0F00);
+                    acc1[2] += yl[2 * i + 8] * (float)(qq1 & 0x00F0);
+                    acc1[3] += yl[2 * i + 9] * (float)(qq1 & 0xF000);
+                    acc2[0] += yh[2 * i + 0] * (float)(qq2 & 0x000F);
+                    acc2[1] += yh[2 * i + 1] * (float)(qq2 & 0x0F00);
+                    acc2[2] += yh[2 * i + 8] * (float)(qq2 & 0x00F0);
+                    acc2[3] += yh[2 * i + 9] * (float)(qq2 & 0xF000);
+                }
+
+                float contrib =
+                    d * ((acc1[0] + (1.f / 256.f) * acc1[1]) * (float)sc8[0] +
+                         (acc1[2] + (1.f / 256.f) * acc1[3]) * (float)sc8[1] * (1.f / 16.f) +
+                         (acc2[0] + (1.f / 256.f) * acc2[1]) * (float)sc8[4] +
+                         (acc2[2] + (1.f / 256.f) * acc2[3]) * (float)sc8[5] * (1.f / 16.f))
+                    - dmin * (sumy0 * (float)sc8[2] + sumy1 * (float)sc8[3] +
+                              sumy2 * (float)sc8[6] + sumy3 * (float)sc8[7]);
+                if (pass == 0) sum0[r] += contrib;
+                else sum1[r] += contrib;
+            }
+        }
+        y4 += 4 * 256;
+    }
+
+    #pragma unroll
+    for (int r = 0; r < 4; r++) {
+        sum0[r] = warp_sum_f(sum0[r]);
+        sum1[r] = warp_sum_f(sum1[r]);
+    }
+    if (lane == 0) {
+        float* a = y0 + (size_t)row * n_out;
+        for (unsigned r = 0; r < nrows; r++) {
+            a[pair0 + r] = silu_f(sum0[r]) * sum1[r];
+        }
+    }
+}
+
+// Fused Q/K/V: one X stream, three outputs (n_q may exceed n_kv).
+extern "C" __global__ void matvec_q4_k_qkv(
+    const uint8_t* __restrict__ wq,
+    const uint8_t* __restrict__ wk,
+    const uint8_t* __restrict__ wv,
+    const float* __restrict__ x,
+    float* __restrict__ q,
+    float* __restrict__ k,
+    float* __restrict__ v,
+    unsigned n_in, unsigned n_q, unsigned n_kv,
+    unsigned long long oq, unsigned long long ok, unsigned long long ov, unsigned m)
+{
+    unsigned lane = threadIdx.x;
+    unsigned warp = threadIdx.y;
+    unsigned nwarps = blockDim.y;
+    unsigned out = blockIdx.x;
+    unsigned row = blockIdx.y;
+    if (row >= m) return;
+    bool do_q = out < n_q;
+    bool do_kv = out < n_kv;
+    if (!do_q && !do_kv) return;
+    const float* xr = x + (size_t)row * n_in;
+    unsigned nb = n_in / 256;
+    unsigned rb = nb * 144u;
+    const uint8_t* wrow_q = do_q ? (wq + oq) + (size_t)out * rb : nullptr;
+    const uint8_t* wrow_k = do_kv ? (wk + ok) + (size_t)out * rb : nullptr;
+    const uint8_t* wrow_v = do_kv ? (wv + ov) + (size_t)out * rb : nullptr;
+    float acc_q = 0.f, acc_k = 0.f, acc_v = 0.f;
+    for (unsigned b = warp; b < nb; b += nwarps) {
+        const float* xb = xr + b * 256;
+        float pq = 0.f, pk = 0.f, pv = 0.f;
+        #pragma unroll
+        for (unsigned pair = 0; pair < 4; pair++) {
+            float xl = xb[pair * 64u + lane];
+            float xh = xb[pair * 64u + 32u + lane];
+            if (do_q) {
+                const uint8_t* blk = wrow_q + b * 144;
+                float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+                float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+                float mn1, mn2;
+                float sc1 = scale_min_k4((int)pair * 2, blk + 4, &mn1);
+                float sc2 = scale_min_k4((int)pair * 2 + 1, blk + 4, &mn2);
+                uint8_t qq = blk[16 + pair * 32 + lane];
+                pq += (d * sc1 * (float)(qq & 0xf) - dmin * mn1) * xl;
+                pq += (d * sc2 * (float)(qq >> 4) - dmin * mn2) * xh;
+            }
+            if (do_kv) {
+                {
+                    const uint8_t* blk = wrow_k + b * 144;
+                    float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+                    float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+                    float mn1, mn2;
+                    float sc1 = scale_min_k4((int)pair * 2, blk + 4, &mn1);
+                    float sc2 = scale_min_k4((int)pair * 2 + 1, blk + 4, &mn2);
+                    uint8_t qq = blk[16 + pair * 32 + lane];
+                    pk += (d * sc1 * (float)(qq & 0xf) - dmin * mn1) * xl;
+                    pk += (d * sc2 * (float)(qq >> 4) - dmin * mn2) * xh;
+                }
+                {
+                    const uint8_t* blk = wrow_v + b * 144;
+                    float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+                    float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+                    float mn1, mn2;
+                    float sc1 = scale_min_k4((int)pair * 2, blk + 4, &mn1);
+                    float sc2 = scale_min_k4((int)pair * 2 + 1, blk + 4, &mn2);
+                    uint8_t qq = blk[16 + pair * 32 + lane];
+                    pv += (d * sc1 * (float)(qq & 0xf) - dmin * mn1) * xl;
+                    pv += (d * sc2 * (float)(qq >> 4) - dmin * mn2) * xh;
+                }
+            }
+        }
+        if (do_q) acc_q += warp_sum_f(pq);
+        if (do_kv) { acc_k += warp_sum_f(pk); acc_v += warp_sum_f(pv); }
+    }
+    __shared__ float sq[16], sk[16], sv[16];
+    if (lane == 0) { sq[warp] = acc_q; sk[warp] = acc_k; sv[warp] = acc_v; }
+    __syncthreads();
+    if (warp == 0 && lane == 0) {
+        float aq = 0.f, ak = 0.f, av = 0.f;
+        for (unsigned i = 0; i < nwarps; i++) {
+            aq += sq[i]; ak += sk[i]; av += sv[i];
+        }
+        if (do_q) q[(size_t)row * n_q + out] = aq;
+        if (do_kv) {
+            k[(size_t)row * n_kv + out] = ak;
+            v[(size_t)row * n_kv + out] = av;
         }
     }
 }
@@ -1798,4 +3433,260 @@ extern "C" __global__ void ssm_load_f32(
     unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) dst[i] = ssm[elem_off + i];
 }
+"#;
+
+/// Separate NVRTC unit so growing embed support does not reshuffle main-kernel PTX.
+pub const EMBED_KERNELS: &str = r#"
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int uint32_t;
+typedef unsigned long long uint64_t;
+typedef signed char int8_t;
+
+__device__ __forceinline__ float half_bits_to_f32(uint16_t h) {
+    float f;
+    asm volatile("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(h));
+    return f;
+}
+
+__device__ __forceinline__ float scale_min_k4(int j, const uint8_t* packed, float* mn_out) {
+    float sc, mn;
+    if (j < 4) {
+        sc = (float)(packed[j] & 63);
+        mn = (float)(packed[j + 4] & 63);
+    } else {
+        sc = (float)((packed[j + 4] & 0xf) | ((packed[j - 4] >> 6) << 4));
+        mn = (float)((packed[j + 4] >> 4) | ((packed[j] >> 6) << 4));
+    }
+    *mn_out = mn;
+    return sc;
+}
+
+extern "C" __global__ void embed_row_f32(
+    const uint8_t* __restrict__ w,
+    float* __restrict__ out,
+    unsigned n_in,
+    unsigned long long w_off,
+    unsigned fmt)
+{
+    unsigned lane = threadIdx.x;
+    const uint8_t* row = w + w_off;
+    if (fmt <= 2u) {
+        unsigned b = blockIdx.y;
+        float* o256 = out + b * 256u;
+        if (fmt == 0u) {
+            const uint8_t* blk = row + b * 144u;
+            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+            float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+            const uint8_t* packed = blk + 4;
+            const uint8_t* qs = blk + 16;
+            #pragma unroll
+            for (unsigned pair = 0; pair < 4u; pair++) {
+                float mn1, mn2;
+                float sc1 = scale_min_k4((int)pair * 2, packed, &mn1);
+                float sc2 = scale_min_k4((int)pair * 2 + 1, packed, &mn2);
+                uint8_t qq = qs[pair * 32u + lane];
+                o256[pair * 64u + lane] = d * sc1 * (float)(qq & 0xf) - dmin * mn1;
+                o256[pair * 64u + 32u + lane] = d * sc2 * (float)(qq >> 4) - dmin * mn2;
+            }
+            return;
+        }
+        if (fmt == 1u) {
+            const uint8_t* blk = row + b * 176u;
+            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+            float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+            const uint8_t* packed = blk + 4;
+            const uint8_t* qh = blk + 16;
+            const uint8_t* qs = blk + 48;
+            #pragma unroll
+            for (unsigned pair = 0; pair < 4u; pair++) {
+                float mn1, mn2;
+                float sc1 = scale_min_k4((int)pair * 2, packed, &mn1);
+                float sc2 = scale_min_k4((int)pair * 2 + 1, packed, &mn2);
+                uint8_t bit1 = (uint8_t)(1u << (pair * 2));
+                uint8_t bit2 = (uint8_t)(1u << (pair * 2 + 1));
+                uint8_t qq = qs[pair * 32u + lane];
+                int hi1 = (qh[lane] & bit1) ? 16 : 0;
+                int hi2 = (qh[lane] & bit2) ? 16 : 0;
+                o256[pair * 64u + lane] =
+                    d * sc1 * (float)((qq & 0xf) + hi1) - dmin * mn1;
+                o256[pair * 64u + 32u + lane] =
+                    d * sc2 * (float)((qq >> 4) + hi2) - dmin * mn2;
+            }
+            return;
+        }
+        {
+            const uint8_t* blk = row + b * 210u;
+            const uint8_t* ql = blk;
+            const uint8_t* qh = blk + 128;
+            const int8_t* scales = (const int8_t*)(blk + 192);
+            float d = half_bits_to_f32((uint16_t)blk[208] | ((uint16_t)blk[209] << 8));
+            #pragma unroll
+            for (unsigned hi = 0; hi < 2u; hi++) {
+                const uint8_t* ql_h = ql + hi * 64u;
+                const uint8_t* qh_h = qh + hi * 32u;
+                const int8_t* sc = scales + hi * 8;
+                float* oh = o256 + hi * 128u;
+                unsigned is = lane / 16u;
+                int q1 = (int)((ql_h[lane] & 0xf) | ((qh_h[lane] & 3) << 4)) - 32;
+                int q2 = (int)((ql_h[lane + 32] & 0xf) | (((qh_h[lane] >> 2) & 3) << 4)) - 32;
+                int q3 = (int)((ql_h[lane] >> 4) | (((qh_h[lane] >> 4) & 3) << 4)) - 32;
+                int q4 = (int)((ql_h[lane + 32] >> 4) | (((qh_h[lane] >> 6) & 3) << 4)) - 32;
+                oh[lane] = d * (float)sc[is] * (float)q1;
+                oh[32u + lane] = d * (float)sc[is + 2] * (float)q2;
+                oh[64u + lane] = d * (float)sc[is + 4] * (float)q3;
+                oh[96u + lane] = d * (float)sc[is + 6] * (float)q4;
+            }
+            return;
+        }
+    }
+    if (lane != 0 || blockIdx.x != 0) return;
+    if (fmt == 3u) {
+        unsigned nb = n_in / 32u;
+        for (unsigned b = 0; b < nb; b++) {
+            const uint8_t* blk = row + b * 34u;
+            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+            for (unsigned i = 0; i < 32u; i++) {
+                out[b * 32u + i] = d * (float)((int8_t)blk[2 + i]);
+            }
+        }
+        return;
+    }
+    if (fmt == 7u) {
+        const uint16_t* src = (const uint16_t*)row;
+        for (unsigned i = 0; i < n_in; i++) out[i] = half_bits_to_f32(src[i]);
+        return;
+    }
+    if (fmt == 8u) {
+        const float* src = (const float*)row;
+        for (unsigned i = 0; i < n_in; i++) out[i] = src[i];
+    }
+}
+
+// Like embed_row_f32 but token id lives on device (greedy chain after argmax).
+extern "C" __global__ void embed_row_f32_dtoken(
+    const uint8_t* __restrict__ w,
+    float* __restrict__ out,
+    unsigned n_in,
+    unsigned long long w_base,
+    unsigned row_bytes,
+    unsigned fmt,
+    const unsigned* __restrict__ d_token)
+{
+    unsigned lane = threadIdx.x;
+    unsigned long long w_off = w_base + (unsigned long long)d_token[0] * (unsigned long long)row_bytes;
+    const uint8_t* row = w + w_off;
+    if (fmt <= 2u) {
+        unsigned b = blockIdx.y;
+        float* o256 = out + b * 256u;
+        if (fmt == 0u) {
+            const uint8_t* blk = row + b * 144u;
+            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+            float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+            const uint8_t* packed = blk + 4;
+            const uint8_t* qs = blk + 16;
+            #pragma unroll
+            for (unsigned pair = 0; pair < 4u; pair++) {
+                float mn1, mn2;
+                float sc1 = scale_min_k4((int)pair * 2, packed, &mn1);
+                float sc2 = scale_min_k4((int)pair * 2 + 1, packed, &mn2);
+                uint8_t qq = qs[pair * 32u + lane];
+                o256[pair * 64u + lane] = d * sc1 * (float)(qq & 0xf) - dmin * mn1;
+                o256[pair * 64u + 32u + lane] = d * sc2 * (float)(qq >> 4) - dmin * mn2;
+            }
+            return;
+        }
+        if (fmt == 1u) {
+            const uint8_t* blk = row + b * 176u;
+            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+            float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+            const uint8_t* packed = blk + 4;
+            const uint8_t* qh = blk + 16;
+            const uint8_t* qs = blk + 48;
+            #pragma unroll
+            for (unsigned pair = 0; pair < 4u; pair++) {
+                float mn1, mn2;
+                float sc1 = scale_min_k4((int)pair * 2, packed, &mn1);
+                float sc2 = scale_min_k4((int)pair * 2 + 1, packed, &mn2);
+                uint8_t bit1 = (uint8_t)(1u << (pair * 2));
+                uint8_t bit2 = (uint8_t)(1u << (pair * 2 + 1));
+                uint8_t qq = qs[pair * 32u + lane];
+                int hi1 = (qh[lane] & bit1) ? 16 : 0;
+                int hi2 = (qh[lane] & bit2) ? 16 : 0;
+                o256[pair * 64u + lane] =
+                    d * sc1 * (float)((qq & 0xf) + hi1) - dmin * mn1;
+                o256[pair * 64u + 32u + lane] =
+                    d * sc2 * (float)((qq >> 4) + hi2) - dmin * mn2;
+            }
+            return;
+        }
+        {
+            const uint8_t* blk = row + b * 210u;
+            const uint8_t* ql = blk;
+            const uint8_t* qh = blk + 128;
+            const int8_t* scales = (const int8_t*)(blk + 192);
+            float d = half_bits_to_f32((uint16_t)blk[208] | ((uint16_t)blk[209] << 8));
+            #pragma unroll
+            for (unsigned hi = 0; hi < 2u; hi++) {
+                const uint8_t* ql_h = ql + hi * 64u;
+                const uint8_t* qh_h = qh + hi * 32u;
+                const int8_t* sc = scales + hi * 8;
+                float* oh = o256 + hi * 128u;
+                unsigned is = lane / 16u;
+                int q1 = (int)((ql_h[lane] & 0xf) | ((qh_h[lane] & 3) << 4)) - 32;
+                int q2 = (int)((ql_h[lane + 32] & 0xf) | (((qh_h[lane] >> 2) & 3) << 4)) - 32;
+                int q3 = (int)((ql_h[lane] >> 4) | (((qh_h[lane] >> 4) & 3) << 4)) - 32;
+                int q4 = (int)((ql_h[lane + 32] >> 4) | (((qh_h[lane] >> 6) & 3) << 4)) - 32;
+                oh[lane] = d * (float)sc[is] * (float)q1;
+                oh[32u + lane] = d * (float)sc[is + 2] * (float)q2;
+                oh[64u + lane] = d * (float)sc[is + 4] * (float)q3;
+                oh[96u + lane] = d * (float)sc[is + 6] * (float)q4;
+            }
+            return;
+        }
+    }
+    if (lane != 0 || blockIdx.x != 0) return;
+    if (fmt == 3u) {
+        unsigned nb = n_in / 32u;
+        for (unsigned b = 0; b < nb; b++) {
+            const uint8_t* blk = row + b * 34u;
+            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+            for (unsigned i = 0; i < 32u; i++) {
+                out[b * 32u + i] = d * (float)((int8_t)blk[2 + i]);
+            }
+        }
+        return;
+    }
+    if (fmt == 7u) {
+        const uint16_t* src = (const uint16_t*)row;
+        for (unsigned i = 0; i < n_in; i++) out[i] = half_bits_to_f32(src[i]);
+        return;
+    }
+    if (fmt == 8u) {
+        const float* src = (const float*)row;
+        for (unsigned i = 0; i < n_in; i++) out[i] = src[i];
+    }
+}
+
+extern "C" __global__ void inc_u32(unsigned* __restrict__ p) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) p[0] += 1u;
+}
+
+extern "C" __global__ void copy_u32(
+    unsigned* __restrict__ dst,
+    const unsigned* __restrict__ src,
+    unsigned n)
+{
+    unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = src[i];
+}
+
+extern "C" __global__ void store_u32_at(
+    unsigned* __restrict__ dst,
+    const unsigned* __restrict__ src,
+    unsigned idx)
+{
+    if (threadIdx.x == 0 && blockIdx.x == 0) dst[idx] = src[0];
+}
+
 "#;

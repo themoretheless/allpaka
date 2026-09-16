@@ -6,6 +6,22 @@ pub fn attach(_mapping: &[u8]) -> bool {
     false
 }
 
+pub fn set_rope_inv_freq(_inv_freq: &[f32]) -> bool {
+    false
+}
+
+pub fn has_device_rope_freq() -> bool {
+    false
+}
+
+pub fn prefer_gpu_embed() -> bool {
+    false
+}
+
+pub fn decode_greedy_continue(_req: &TokenReq, _n_more: usize) -> Option<Vec<u32>> {
+    None
+}
+
 pub fn is_attached() -> bool {
     false
 }
@@ -199,15 +215,14 @@ pub struct TokenReq<'a> {
     pub output_norm: &'a [u8],
     pub output: (GgmlType, &'a [u8], usize),
     pub argmax: bool,
+    pub embd: Option<(GgmlType, &'a [u8], usize)>,
+    pub token_id: Option<u32>,
 }
 
 pub enum TokenOut {
     Logits(Vec<f32>),
     Argmax(u32),
-    Rows {
-        argmax: Vec<u32>,
-        hidden: Vec<f32>,
-    },
+    Rows { argmax: Vec<u32>, hidden: Vec<f32> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
