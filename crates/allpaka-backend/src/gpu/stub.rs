@@ -84,6 +84,18 @@ pub fn wrap_region(_region: &[u8]) -> Option<SharedRegion> {
     None
 }
 
+pub fn upload_region_range(_region: &mut SharedRegion, _offset: usize, _data: &[u8]) -> bool {
+    false
+}
+
+pub fn decode_attention_capacity_safe(_capacity: usize) -> bool {
+    true
+}
+
+pub fn minimum_kv_capacity() -> usize {
+    1
+}
+
 pub struct AttnReq<'a> {
     pub cache: &'a SharedRegion,
     pub k_off: usize,
@@ -201,6 +213,7 @@ pub struct TokenReq<'a> {
     pub m: usize,
     pub layers: &'a [TokenLayer<'a>],
     pub cache: &'a SharedRegion,
+    pub cache_capacity: usize,
     pub ssm: Option<&'a SharedRegion>,
     pub ssm_slots: Option<(&'a SharedRegion, usize)>,
     pub kv_dim: usize,

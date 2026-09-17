@@ -452,6 +452,31 @@ impl KvCache {
         ops::f16::from_f32(v, &mut store[vr.start + at..vr.start + at + kv_dim]);
     }
 
+    pub fn sync_gpu_range(&mut self, layer: usize, positions: std::ops::Range<usize>) -> bool {
+        if positions.start > positions.end || positions.end > self.capacity {
+            return false;
+        }
+        let count = (positions.end - positions.start) * self.kv_dim;
+        let k_at = layer * self.layer_stride + positions.start * self.kv_dim;
+        let v_at = self.v_base + k_at;
+        let bytes = self.store.as_bytes();
+        let Some(shared) = self.shared.as_mut() else {
+            return false;
+        };
+        let k_bytes = k_at * 2;
+        let v_bytes = v_at * 2;
+        let byte_count = count * 2;
+        allpaka_backend::gpu::upload_region_range(
+            shared,
+            k_bytes,
+            &bytes[k_bytes..k_bytes + byte_count],
+        ) && allpaka_backend::gpu::upload_region_range(
+            shared,
+            v_bytes,
+            &bytes[v_bytes..v_bytes + byte_count],
+        )
+    }
+
     /// Store at an explicit position that may already be sealed. Only for
     /// the MTP draft layer's slot: the trunk's verify batch seals positions
     /// in the trunk layers, and the MTP block appends its own layer at the

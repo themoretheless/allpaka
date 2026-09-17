@@ -948,6 +948,7 @@ impl<'a> Model<'a> {
     /// A session whose KV cache has one extra layer for the MTP block
     /// (index n_layers); plain sessions do not pay for it.
     pub fn new_session_mtp(&self, context_tokens: usize) -> Session {
+        let context_tokens = context_tokens.max(allpaka_backend::gpu::minimum_kv_capacity());
         Session {
             kv: KvCache::new(
                 self.config.n_layers as usize + self.config.nextn as usize,
@@ -969,6 +970,7 @@ impl<'a> Model<'a> {
     }
 
     pub fn new_session(&self, context_tokens: usize) -> Session {
+        let context_tokens = context_tokens.max(allpaka_backend::gpu::minimum_kv_capacity());
         Session {
             kv: KvCache::new(
                 self.config.n_layers as usize,
@@ -1501,6 +1503,7 @@ impl<'a> Model<'a> {
                     &v[i * c.kv_dim()..(i + 1) * c.kv_dim()],
                 );
             }
+            let cache_synced = s.kv.sync_gpu_range(li, base..base + m);
 
             // Per-token causal attention over the cache; causality is each
             // row's own `n_pos`, not a mask. The whole chunk goes to the GPU
@@ -1515,7 +1518,7 @@ impl<'a> Model<'a> {
             let on_gpu = {
                 let kv = &mut s.kv;
                 kv.gpu_view(li)
-                    .filter(|_| !cpu_only)
+                    .filter(|_| !cpu_only && cache_synced)
                     .and_then(|(cache, k_off, v_off)| {
                         let reqs: Vec<allpaka_backend::gpu::AttnReq> = (0..m)
                             .map(|i| allpaka_backend::gpu::AttnReq {
@@ -1975,6 +1978,7 @@ impl<'a> Model<'a> {
             }
             return Ok(None);
         };
+        let cache_capacity = s.kv.capacity();
         let (cache, _, _) = match s.kv.gpu_view_checked(0) {
             Ok(view) => view,
             Err(reason) => {
@@ -2012,6 +2016,7 @@ impl<'a> Model<'a> {
             m: 1,
             layers: &layers,
             cache,
+            cache_capacity,
             ssm: ssm_region,
             ssm_slots: None,
             kv_dim: c.kv_dim(),
@@ -2066,6 +2071,7 @@ impl<'a> Model<'a> {
             }
             return Ok(None);
         };
+        let cache_capacity = s.kv.capacity();
         let (cache, _, _) = match s.kv.gpu_view_checked(0) {
             Ok(view) => view,
             Err(reason) => {
@@ -2092,6 +2098,7 @@ impl<'a> Model<'a> {
             m,
             layers: &layers,
             cache,
+            cache_capacity,
             ssm: ssm_region,
             ssm_slots: slots,
             kv_dim: c.kv_dim(),
@@ -2383,7 +2390,11 @@ impl<'a> Model<'a> {
             // scheduling than in execution, so the win here is the merge
             // itself. Declines (non-NEOX rope, no GPU) fall through to the
             // step-by-step path below.
-            if matches!(c.rope_style, RopeStyle::Neox) && !cpu_attn && pos < s.kv.capacity() {
+            if matches!(c.rope_style, RopeStyle::Neox)
+                && !cpu_attn
+                && pos < s.kv.capacity()
+                && allpaka_backend::gpu::decode_attention_capacity_safe(s.kv.capacity())
+            {
                 let scale = 1.0 / (head_dim as f32).sqrt();
                 let blocked = {
                     let _s = profile::span(profile::Phase::Attend);
@@ -2675,6 +2686,7 @@ impl<'a> Model<'a> {
         let Some(layers) = self.token_layers(s)? else {
             return Ok(None);
         };
+        let cache_capacity = s.kv.capacity();
         let (cache, _, _) = match s.kv.gpu_view_checked(0) {
             Ok(view) => view,
             Err(_) => return Ok(None),
@@ -2688,6 +2700,7 @@ impl<'a> Model<'a> {
             m: 1,
             layers: &layers,
             cache,
+            cache_capacity,
             ssm: None,
             ssm_slots: None,
             kv_dim: c.kv_dim(),

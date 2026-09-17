@@ -220,6 +220,14 @@ pub fn enabled() -> bool {
     }
 }
 
+pub fn fa_kv_floor() -> usize {
+    std::env::var("ALLPAKA_FA_KV_FLOOR")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| (16..=8192).contains(&v))
+        .unwrap_or(256)
+}
+
 /// Bind cudarc's stream so ggml can share it (preferred) or use events.
 pub fn bind_peer_stream(stream: &CudaStream) {
     let Some(api) = load() else {

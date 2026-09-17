@@ -8306,6 +8306,20 @@ pub fn wrap_region(region: &[u8]) -> Option<SharedRegion> {
     })
 }
 
+pub fn upload_region_range(region: &mut SharedRegion, offset: usize, data: &[u8]) -> bool {
+    offset
+        .checked_add(data.len())
+        .is_some_and(|end| end <= region.len)
+}
+
+pub fn decode_attention_capacity_safe(_capacity: usize) -> bool {
+    true
+}
+
+pub fn minimum_kv_capacity() -> usize {
+    1
+}
+
 /// One decode step's attention over the cache, for every query head.
 ///
 /// `k_off` and `v_off` are *element* offsets of this layer's K and V inside
@@ -8561,6 +8575,7 @@ pub struct TokenReq<'a> {
     pub m: usize,
     pub layers: &'a [TokenLayer<'a>],
     pub cache: &'a SharedRegion,
+    pub cache_capacity: usize,
     /// qwen35moe: the SSM region holding every GDN layer's conv window and
     /// deltanet state (f32 elements), wrapped like the KV cache.
     pub ssm: Option<&'a SharedRegion>,

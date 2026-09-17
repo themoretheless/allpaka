@@ -277,6 +277,39 @@ pub fn wrap_region(region: &[u8]) -> Option<SharedRegion> {
     })
 }
 
+pub fn upload_region_range(region: &mut SharedRegion, offset: usize, data: &[u8]) -> bool {
+    let Some(end) = offset.checked_add(data.len()) else {
+        return false;
+    };
+    if end > region.len {
+        return false;
+    }
+    with_gpu(|gpu| {
+        gpu.stream
+            .memcpy_htod(data, &mut region.buf.slice_mut(offset..end))
+            .ok()?;
+        Some(())
+    })
+    .is_some()
+}
+
+pub fn decode_attention_capacity_safe(capacity: usize) -> bool {
+    let native = std::env::var("ALLPAKA_NATIVE_ATTEND")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    !crate::gpu::cuda::ggml::enabled()
+        || native
+        || capacity >= crate::gpu::cuda::ggml::fa_kv_floor()
+}
+
+pub fn minimum_kv_capacity() -> usize {
+    if crate::gpu::cuda::ggml::enabled() {
+        crate::gpu::cuda::ggml::fa_kv_floor()
+    } else {
+        1
+    }
+}
+
 pub struct AttnReq<'a> {
     pub cache: &'a SharedRegion,
     pub k_off: usize,
@@ -667,6 +700,7 @@ pub struct TokenReq<'a> {
     pub m: usize,
     pub layers: &'a [TokenLayer<'a>],
     pub cache: &'a SharedRegion,
+    pub cache_capacity: usize,
     pub ssm: Option<&'a SharedRegion>,
     pub ssm_slots: Option<(&'a SharedRegion, usize)>,
     pub kv_dim: usize,
@@ -754,6 +788,9 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     }
     let m = req.m;
     if m == 0 || m > 8 {
+        return None;
+    }
+    if m == 1 && !decode_attention_capacity_safe(req.cache_capacity) {
         return None;
     }
     let gpu_embed = m == 1 && req.x.is_empty() && req.token_id.is_some() && req.embd.is_some();

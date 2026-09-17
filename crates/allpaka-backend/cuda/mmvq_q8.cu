@@ -67,6 +67,9 @@ __device__ __forceinline__ int dp4a_s32(int a, int b, int c) {
 }
 
 __device__ __forceinline__ int get_int_b2(const void* x, int i32) {
+    if (((unsigned long long)x & 3ull) == 0) {
+        return (int)__ldcs((const uint32_t*)x + i32);
+    }
     const uint16_t* x16 = (const uint16_t*)x + 2 * i32;
     return (int)__ldcs(x16) | ((int)__ldcs(x16 + 1) << 16);
 }
@@ -916,7 +919,11 @@ __global__ void __launch_bounds__(MMVQ_NWARPS * 32, 8) matvec_q4_q4_q6_q8_qkv(
         if (do_q) acc_q += vec_dot_q4_k_q8(wrow_q + kbx * 144u, xb, iqs);
         if (do_kv) {
             acc_k += vec_dot_q4_k_q8(wrow_k + kbx * 144u, xb, iqs);
-            acc_v += vec_dot_q6_k_q8(wrow_v + kbx * 210u, xb, iqs);
+        }
+    }
+    if (do_kv) {
+        for (unsigned kbx = tid / 32u; kbx < nb; kbx += 4u) {
+            acc_v += vec_dot_q6_k_q8(wrow_v + kbx * 210u, xr + kbx * 8u, (int)lane);
         }
     }
     pdl_lc();

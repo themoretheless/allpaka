@@ -359,7 +359,10 @@ pub fn measure_engine(
 
     let warm = model.forward_batch(&prompt[..32], &mut session)?;
     drop(warm);
-    // Warm the kernels without leaving warmup tokens in measured KV state.
+    session = model.new_session(prompt.len() + decode_tokens + 1);
+    let warm = model.forward_batch(&prompt[32..], &mut session)?;
+    drop(warm);
+    // Warm the measured shape without leaving warmup tokens in measured KV state.
     session = model.new_session(prompt.len() + decode_tokens + 1);
 
     let gpu_pre = allpaka_backend::gpu::stats();
@@ -400,7 +403,23 @@ pub fn measure_engine(
     // Decode from near-empty KV, matching llama-bench tg (n_prompt=0, n_depth=0).
     // Prefill above is a separate metric; chaining decode after pp480 makes tg
     // look bandwidth-heavier than the llama baseline we compare against.
+    if let Ok(ms) = std::env::var("ALLPAKA_BENCH_BETWEEN_MS") {
+        let ms = ms
+            .parse::<u64>()
+            .context("ALLPAKA_BENCH_BETWEEN_MS must be an integer")?;
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     session = model.new_session(decode_tokens + 4);
+    let warm_seed_logits = model.forward_batch(&[1u32], &mut session)?;
+    let warm_next = warm_seed_logits
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(i, _)| i as u32)
+        .unwrap_or(0);
+    let warm = model.forward_greedy_n(warm_next, &mut session, decode_tokens)?;
+    drop(warm);
+    session.truncate(0);
     let seed = [1u32];
     let seed_logits = model.forward_batch(&seed, &mut session)?;
     let gpu_before = allpaka_backend::gpu::stats();
