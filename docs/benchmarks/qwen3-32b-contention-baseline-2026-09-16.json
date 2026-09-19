@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "generated_at_unix_ms": 1789559789739,
+    "git_commit": "unknown",
+    "model": "C:\\Users\\domez\\.cache\\huggingface\\hub\\models--unsloth--Qwen3-32B-GGUF\\snapshots\\931c84066f88693a02ab8de820cfcd066d913241\\Qwen3-32B-Q4_K_M.gguf",
+    "model_fingerprint": "db1dbcd284b48fed",
+    "device": "cuda",
+    "runtime_profile": "auto",
+    "resolved_overrides": {
+      "ALLPAKA_BENCH_PP": "1",
+      "ALLPAKA_BENCH_REPORT": "D:\\Source\\allpaka\\docs\\benchmarks\\qwen3-32b-contention-baseline-2026-09-16.json",
+      "ALLPAKA_BENCH_TG": "32",
+      "ALLPAKA_CUDA_GRAPH": "1",
+      "ALLPAKA_CUDA_PDL": "1",
+      "ALLPAKA_FA_DIRECT": "1",
+      "ALLPAKA_FA_INLINE": "1",
+      "ALLPAKA_FA_KV_FLOOR": "256",
+      "ALLPAKA_GGML": "1",
+      "ALLPAKA_GGML_DIR": "D:\\Source\\allpaka\\third_party\\allpaka_ggml\\bin",
+      "ALLPAKA_GREEDY_CHAIN": "1",
+      "ALLPAKA_PROFILE": "auto",
+      "ALLPAKA_QK_THREADS": "128"
+    }
+  },
+  "measurements": [
+    {
+      "name": "prefill",
+      "tokens": 1,
+      "context_tokens": 0,
+      "input_tokens": [
+        23473
+      ],
+      "samples_tok_s": [
+        11.258877625007317
+      ],
+      "summary": {
+        "median": 11.258877625007317,
+        "p10": 11.258877625007317,
+        "p90": 11.258877625007317,
+        "min": 11.258877625007317,
+        "max": 11.258877625007317
+      },
+      "fast_path": {
+        "attempts": 0,
+        "successes": 0,
+        "declines": 0
+      },
+      "phases": [
+        {
+          "name": "qkv proj",
+          "milliseconds": 22.6118,
+          "calls": 64
+        },
+        {
+          "name": "attn out proj",
+          "milliseconds": 8.9711,
+          "calls": 64
+        },
+        {
+          "name": "attention",
+          "milliseconds": 7.0729,
+          "calls": 129
+        },
+        {
+          "name": "q/k norm + rope",
+          "milliseconds": 2.0322,
+          "calls": 64
+        },
+        {
+          "name": "ffn combine",
+          "milliseconds": 0.8027,
+          "calls": 64
+        },
+        {
+          "name": "kv store",
+          "milliseconds": 0.5076,
+          "calls": 64
+        },
+        {
+          "name": "ffn norm",
+          "milliseconds": 0.3622,
+          "calls": 64
+        },
+        {
+          "name": "attn norm",
+          "milliseconds": 0.3304,
+          "calls": 64
+        },
+        {
+          "name": "embed",
+          "milliseconds": 0.0099,
+          "calls": 1
+        }
+      ],
+      "peak_memory_bytes": null,
+      "kv_bytes_per_token": null
+    },
+    {
+      "name": "decode",
+      "tokens": 32,
+      "context_tokens": 1,
+      "input_tokens": [
+        0,
+        6888,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        654,
+        11,
+        8,
+        654,
+        654,
+        654
+      ],
+      "samples_tok_s": [
+        61.83000188774725
+      ],
+      "summary": {
+        "median": 61.83000188774725,
+        "p10": 61.83000188774725,
+        "p90": 61.83000188774725,
+        "min": 61.83000188774725,
+        "max": 61.83000188774725
+      },
+      "fast_path": {
+        "attempts": 32,
+        "successes": 32,
+        "declines": 0
+      },
+      "phases": [],
+      "peak_memory_bytes": null,
+      "kv_bytes_per_token": null
+    }
+  ]
+}

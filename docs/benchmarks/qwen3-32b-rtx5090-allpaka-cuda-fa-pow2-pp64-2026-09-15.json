@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "generated_at_unix_ms": 1789419389186,
+    "git_commit": "unknown",
+    "model": "C:\\Users\\domez\\.cache\\huggingface\\hub\\models--unsloth--Qwen3-32B-GGUF\\snapshots\\931c84066f88693a02ab8de820cfcd066d913241\\Qwen3-32B-Q4_K_M.gguf",
+    "model_fingerprint": "db1dbcd284b48fed",
+    "device": "cuda",
+    "runtime_profile": "auto",
+    "resolved_overrides": {
+      "ALLPAKA_BENCH_PP": "64",
+      "ALLPAKA_BENCH_REPORT": "D:\\Source\\allpaka\\docs\\benchmarks\\qwen3-32b-rtx5090-allpaka-cuda-fa-pow2-pp64-2026-09-15.json",
+      "ALLPAKA_BENCH_TG": "32",
+      "ALLPAKA_CUDA_DEFAULT_STREAM": "1",
+      "ALLPAKA_CUDA_NO_GRAPH": "1",
+      "ALLPAKA_GGML": "1",
+      "ALLPAKA_GGML_DIR": "D:\\Source\\allpaka\\third_party\\allpaka_ggml\\bin",
+      "ALLPAKA_PROFILE": "auto"
+    }
+  },
+  "measurements": [
+    {
+      "name": "prefill",
+      "tokens": 64,
+      "context_tokens": 0,
+      "input_tokens": [
+        23473,
+        24206,
+        24939,
+        25672,
+        26405,
+        27138,
+        27871,
+        28604,
+        29337,
+        70,
+        803,
+        1536,
+        2269,
+        3002,
+        3735,
+        4468,
+        5201,
+        5934,
+        6667,
+        7400,
+        8133,
+        8866,
+        9599,
+        10332,
+        11065,
+        11798,
+        12531,
+        13264,
+        13997,
+        14730,
+        15463,
+        16196,
+        16929,
+        17662,
+        18395,
+        19128,
+        19861,
+        20594,
+        21327,
+        22060,
+        22793,
+        23526,
+        24259,
+        24992,
+        25725,
+        26458,
+        27191,
+        27924,
+        28657,
+        29390,
+        123,
+        856,
+        1589,
+        2322,
+        3055,
+        3788,
+        4521,
+        5254,
+        5987,
+        6720,
+        7453,
+        8186,
+        8919,
+        9652
+      ],
+      "samples_tok_s": [
+        1658.9035166162514
+      ],
+      "summary": {
+        "median": 1658.9035166162514,
+        "p10": 1658.9035166162514,
+        "p90": 1658.9035166162514,
+        "min": 1658.9035166162514,
+        "max": 1658.9035166162514
+      },
+      "fast_path": {
+        "attempts": 0,
+        "successes": 0,
+        "declines": 0
+      },
+      "phases": [
+        {
+          "name": "attention",
+          "milliseconds": 24.6339,
+          "calls": 64
+        },
+        {
+          "name": "ffn (experts)",
+          "milliseconds": 5.1089,
+          "calls": 64
+        },
+        {
+          "name": "embed",
+          "milliseconds": 0.4243,
+          "calls": 1
+        },
+        {
+          "name": "router",
+          "milliseconds": 0.1278,
+          "calls": 64
+        }
+      ],
+      "peak_memory_bytes": null,
+      "kv_bytes_per_token": null
+    },
+    {
+      "name": "decode",
+      "tokens": 32,
+      "context_tokens": 64,
+      "input_tokens": [
+        100918,
+        243,
+        271,
+        0,
+        654,
+        568,
+        91419,
+        225,
+        113254,
+        222,
+        101,
+        568,
+        91419,
+        225,
+        113254,
+        222,
+        101,
+        568,
+        91419,
+        225,
+        113254,
+        222,
+        101,
+        568,
+        91419,
+        225,
+        113254,
+        222,
+        101,
+        568,
+        91419,
+        225
+      ],
+      "samples_tok_s": [
+        45.009532878408855
+      ],
+      "summary": {
+        "median": 45.009532878408855,
+        "p10": 45.009532878408855,
+        "p90": 45.009532878408855,
+        "min": 45.009532878408855,
+        "max": 45.009532878408855
+      },
+      "fast_path": {
+        "attempts": 32,
+        "successes": 32,
+        "declines": 0
+      },
+      "phases": [
+        {
+          "name": "attention",
+          "milliseconds": 0.0044,
+          "calls": 32
+        }
+      ],
+      "peak_memory_bytes": null,
+      "kv_bytes_per_token": null
+    }
+  ]
+}
