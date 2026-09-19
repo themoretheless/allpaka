@@ -189,6 +189,8 @@ pub struct CudaGpu {
     pub q8_off: usize,
     /// Last L2-persist window size applied to `q8_q` (0 = never).
     pub q8_l2_bytes: usize,
+    /// FA output device ptr for fused WO f32→Q8 mmvq (`ALLPAKA_WO_FA_Q8`).
+    pub wo_fa_x: u64,
 }
 
 unsafe impl Send for CudaGpu {}
@@ -302,13 +304,17 @@ fn init_device() -> Option<CudaGpu> {
             for name in [
                 "matvec_q4_k_q8",
                 "matvec_q4_k_q8_k8192",
+                "matvec_q4_k_q8_k5120",
+                "matvec_q4_k_f32_k8192",
                 "matvec_q4_k_q8_n2",
                 "matvec_q4_k_q8_r2",
                 "matvec_q4_k_q8_n8",
                 "matvec_q6_k_q8",
                 "matvec_q6_k_q8_n8",
+                "matvec_q6_k_q8_n8_k25600",
                 "matvec_q6_k_f32_n8",
                 "matvec_q4_k_q8_2",
+                "matvec_q4_k_q8_2_k5120",
                 "matvec_q4_k_q8_2_n8",
                 "matvec_q4_k_q8_2_q8",
                 "matvec_q4_k_q8_qkv",
@@ -438,6 +444,7 @@ fn init_device() -> Option<CudaGpu> {
         q8_src_m: 0,
         q8_off: 0,
         q8_l2_bytes: 0,
+        wo_fa_x: 0,
     })
 }
 
@@ -1557,6 +1564,44 @@ fn launch_qk_q8_matvec_on(
         && std::env::var("ALLPAKA_Q6_F32")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+    // FA→WO: consume pending FA f32 ptr with fused pack-in-mmvq (skips permute_q8).
+    let wo_fa = matches!(ty, GgmlType::Q4K)
+        && m == 1
+        && n_in == 8192
+        && gpu.wo_fa_x != 0
+        && gpu.fns.contains_key("matvec_q4_k_f32_k8192");
+    if wo_fa {
+        let x_fa = gpu.wo_fa_x;
+        gpu.wo_fa_x = 0;
+        let f = gpu.func_owned("matvec_q4_k_f32_k8192")?;
+        let n_u = n_in as u32;
+        let n_out_u = n_out as u32;
+        let m_u = m as u32;
+        let w_off_u = w_off;
+        let add_u = add as u32;
+        let cfg = LaunchConfig {
+            grid_dim: (n_out_u, m_u, 1),
+            block_dim: (32, 4, 1),
+            shared_mem_bytes: 0,
+        };
+        let wb = &gpu.chunks[chunk].buf;
+        unsafe {
+            stream
+                .launch_builder_pdl(&f)
+                .arg(wb)
+                .arg(&x_fa)
+                .arg(&y_ptr)
+                .arg(&n_u)
+                .arg(&n_out_u)
+                .arg(&w_off_u)
+                .arg(&m_u)
+                .arg(&add_u)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        gpu.invalidate_q8();
+        return Some(());
+    }
     if q6_f32 {
         let f = gpu.func_owned("matvec_q6_k_f32_n8")?;
         let n_u = n_in as u32;
@@ -1604,7 +1649,27 @@ fn launch_qk_q8_matvec_on(
         {
             ("matvec_q4_k_q8_k8192", 4u32, n_out as u32)
         }
+        // Opt-in: measured ~61 tg vs ~70.6 generic on Qwen3-32B / 5090.
+        (GgmlType::Q4K, false, false, false)
+            if n_in == 5120
+                && gpu.fns.contains_key("matvec_q4_k_q8_k5120")
+                && std::env::var("ALLPAKA_K5120")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false) =>
+        {
+            ("matvec_q4_k_q8_k5120", 4u32, n_out as u32)
+        }
         (GgmlType::Q4K, false, false, false) => ("matvec_q4_k_q8", 4u32, n_out as u32),
+        // Opt-in: soft-pipe unroll regressed ~58 tg vs ~70.6 n8 on 5090.
+        (GgmlType::Q6K, true, _, _)
+            if n_in == 25600
+                && gpu.fns.contains_key("matvec_q6_k_q8_n8_k25600")
+                && std::env::var("ALLPAKA_Q6_K25600")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false) =>
+        {
+            ("matvec_q6_k_q8_n8_k25600", 8u32, n_out as u32)
+        }
         (GgmlType::Q6K, true, _, _) => ("matvec_q6_k_q8_n8", 8u32, n_out as u32),
         (GgmlType::Q6K, _, _, _) => ("matvec_q6_k_q8", 4u32, n_out as u32),
         _ => return None,
@@ -2020,8 +2085,17 @@ pub fn launch_matvec_q4k_2(
             && std::env::var("ALLPAKA_GU_N8")
                 .map(|v| v == "1")
                 .unwrap_or(false);
+        // Opt-in only; same regression as single-row k5120 on 5090.
+        let use_k5120 = !use_n8
+            && n_in == 5120
+            && gpu.fns.contains_key("matvec_q4_k_q8_2_k5120")
+            && std::env::var("ALLPAKA_K5120")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
         let f = gpu.func_owned(if use_n8 {
             "matvec_q4_k_q8_2_n8"
+        } else if use_k5120 {
+            "matvec_q4_k_q8_2_k5120"
         } else {
             "matvec_q4_k_q8_2"
         })?;
@@ -2158,8 +2232,17 @@ pub fn launch_matvec_q4k_qkv(
         gpu.q8_off = 0;
     }
     let f = gpu.func_owned(kern)?;
+    // GQA split (opt-in): fat Q4/Q4/Q6 kernel only for n_kv rows; thin Q4 for Q tail.
+    // Decode m=1 only — thin matvec stride must match contiguous Q[n_kv..).
+    let split = matches!(v_ty, GgmlType::Q6K)
+        && m == 1
+        && n_q > n_kv
+        && std::env::var("ALLPAKA_QKV_SPLIT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    let grid_x = if split { n_kv_u } else { n_q_u.max(n_kv_u) };
     let cfg = LaunchConfig {
-        grid_dim: (n_q_u.max(n_kv_u), m_u, 1),
+        grid_dim: (grid_x, m_u, 1),
         block_dim: (32, 4, 1),
         shared_mem_bytes: 0,
     };
@@ -2219,5 +2302,30 @@ pub fn launch_matvec_q4k_qkv(
         }
     }
     .ok()?;
+    if split {
+        let rb4 = (n_in / 256) * 144;
+        let q_tail = n_q - n_kv;
+        let oq_tail = oq + (n_kv as u64) * (rb4 as u64);
+        let q_tail_ptr = q + (n_kv * 4) as u64;
+        // Reuse already-quantized Q8 at gpu.q8_off (same xv).
+        launch_qk_q8_matvec(
+            gpu,
+            GgmlType::Q4K,
+            chunk_q,
+            oq_tail,
+            n_in,
+            q_tail,
+            xv,
+            q_tail_ptr,
+            m,
+            false,
+        )?;
+        if std::env::var("ALLPAKA_FUSE_LOG")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            eprintln!("cuda: qkv_split n_kv={n_kv} q_tail={q_tail}");
+        }
+    }
     Some(())
 }

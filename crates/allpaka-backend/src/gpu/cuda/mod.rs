@@ -2213,7 +2213,15 @@ fn decode_token_one_fused(
                 ) {
                     if fuse_q8 && crate::gpu::cuda::ggml::fa_q8_consumed() {
                         if let Some(fa) = crate::gpu::cuda::ggml::fa_last_src() {
-                            if q8_only {
+                            let wo_fa_q8 = q8_only
+                                && std::env::var("ALLPAKA_WO_FA_Q8")
+                                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                                    .unwrap_or(false)
+                                && q_n == 8192;
+                            if wo_fa_q8 {
+                                // Skip permute_q8_m1_qonly; WO mmvq packs from FA buffer.
+                                gpu.wo_fa_x = fa;
+                            } else if q8_only {
                                 crate::gpu::cuda::runtime::launch_permute_q8_m1_qonly(
                                     gpu,
                                     fa,
