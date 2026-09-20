@@ -50,6 +50,12 @@ struct AttnWeights<'a> {
     gate_in_q: bool,
 }
 
+static TRACE_HOOK: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+pub fn set_trace_hook(hook: fn(&str)) {
+    let _ = TRACE_HOOK.set(hook);
+}
+
 /// The gated-delta-net branch of one linear-attention layer (qwen35moe).
 /// Dims from the model: key_dim = n_group*d_state (2048),
 /// value_dim = dt_rank*d_state (4096), conv covers key_dim*2+value_dim (8192).
@@ -69,11 +75,15 @@ fn trace(name: &str, li: usize, v: &[f32]) {
             .rev()
             .map(|x| format!("{x:.6}"))
             .collect();
-        eprintln!(
+        let line = format!(
             "trace {name}-{li} sum={sum:.6} head=[{}] tail=[{}]",
             head.join(" "),
             tail.join(" ")
         );
+        eprintln!("{line}");
+        if let Some(hook) = TRACE_HOOK.get() {
+            hook(&line);
+        }
     }
 }
 
@@ -1626,6 +1636,9 @@ impl<'a> Model<'a> {
         s: &mut Session,
     ) -> Option<Vec<f32>> {
         let hidden = self.config.hidden as usize;
+        if let Some(done) = allpaka_backend::gpu::prefill_replay(xs) {
+            return Some(done);
+        }
         allpaka_backend::gpu::prefill_begin(xs)?;
         // Deferred buffers of earlier layers may still be in flight when a
         // layer declines; wait them out before the CPU fallback runs.
@@ -1863,7 +1876,7 @@ impl<'a> Model<'a> {
                         vec![[0u32, 0u32, m as u32]],
                         (0..m as u32).collect::<Vec<_>>(),
                         m,
-                        (0..m).map(|i| vec![(i as u32, 1.0f32)]).collect::<Vec<_>>(),
+                        Vec::new(),
                     )
                 }
                 _ => return None,
@@ -1872,12 +1885,19 @@ impl<'a> Model<'a> {
             let mut hit_row = Vec::with_capacity(total_rows + m);
             let mut hit_w = Vec::with_capacity(total_rows + m);
             tok_off.push(0u32);
-            for h in &hits_per_token {
-                for &(r, w) in h {
-                    hit_row.push(r);
-                    hit_w.push(w);
+            if hits_per_token.is_empty() {
+                // Dense identity: one hit per token, no per-row Vec.
+                hit_row.extend(0..total_rows as u32);
+                hit_w.resize(total_rows, 1.0);
+                tok_off.extend(1..=total_rows as u32);
+            } else {
+                for h in &hits_per_token {
+                    for &(r, w) in h {
+                        hit_row.push(r);
+                        hit_w.push(w);
+                    }
+                    tok_off.push(hit_row.len() as u32);
                 }
-                tok_off.push(hit_row.len() as u32);
             }
             drop(router_span);
 

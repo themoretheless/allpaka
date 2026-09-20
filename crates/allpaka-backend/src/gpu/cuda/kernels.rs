@@ -2435,6 +2435,19 @@ extern "C" __global__ void add_bias_f32(
     if (i < n) x[i] += bias[i];
 }
 
+// Prefill: x[rows, n] += bias[n] broadcast over rows.
+extern "C" __global__ void add_bias_rows_f32(
+    float* __restrict__ x,
+    const float* __restrict__ bias,
+    unsigned rows,
+    unsigned n)
+{
+    unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned r = blockIdx.y;
+    if (r >= rows || i >= n) return;
+    x[(size_t)r * n + i] += bias[i];
+}
+
 extern "C" __global__ void gather_rows_f32(
     float* __restrict__ dst,       // [total_rows, cols]
     const float* __restrict__ src, // [m, cols]

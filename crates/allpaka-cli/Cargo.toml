@@ -9,8 +9,9 @@ name = "allpaka"
 path = "src/main.rs"
 
 [features]
-default = ["cuda"]
+default = ["cuda", "airbug"]
 cuda = ["allpaka-backend/cuda", "allpaka-model/cuda"]
+airbug = ["dep:airbug-otel", "dep:airbug-bench"]
 
 [dependencies]
 allpaka-core.workspace = true
@@ -22,3 +23,5 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+airbug-otel = { workspace = true, optional = true }
+airbug-bench = { workspace = true, optional = true }

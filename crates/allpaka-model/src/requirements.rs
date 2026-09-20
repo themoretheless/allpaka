@@ -24,6 +24,15 @@ impl ModelRequirements {
     pub fn for_architecture(architecture: &str) -> Option<Self> {
         let normalized = architecture.to_ascii_lowercase();
         let (family, required, optional) = match normalized.as_str() {
+            "qwen2" => (
+                ModelFamily::Qwen3,
+                vec![
+                    Feature::DenseFfn,
+                    Feature::GqaAttention,
+                    Feature::StandardKv,
+                ],
+                vec![Feature::PagedKv, Feature::QkNorm],
+            ),
             "qwen3" => (
                 ModelFamily::Qwen3,
                 vec![

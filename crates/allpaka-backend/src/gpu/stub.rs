@@ -295,6 +295,10 @@ pub fn prefill_begin(_xs: &[f32]) -> Option<()> {
     None
 }
 
+pub fn prefill_replay(_xs: &[f32]) -> Option<Vec<f32>> {
+    None
+}
+
 pub fn prefill_end(_xs: &mut [f32]) -> Option<()> {
     None
 }

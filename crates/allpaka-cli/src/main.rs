@@ -1,6 +1,7 @@
 //! allpaka - decide whether splitting a model across your machines is worth it,
 //! and if so, where to cut it.
 
+mod airbug;
 mod bench;
 mod benchmark_report;
 mod autotune;
@@ -258,7 +259,9 @@ fn main() -> Result<()> {
         let resolved = profile.resolve_with_env();
         let _ = allpaka_backend::runtime::install(resolved.policy);
     }
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    airbug::install();
+    match cli.command {
         Command::Explain {
             engine,
             profile,

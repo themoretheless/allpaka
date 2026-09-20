@@ -93,23 +93,40 @@ __device__ __forceinline__ void pdl_lc() {
 #endif
 }
 
-__device__ __forceinline__ float vec_dot_q4_k_q8(
+} // extern "C"
+
+template <bool STREAM>
+__device__ __forceinline__ float vec_dot_q4_k_q8_t(
     const uint8_t* __restrict__ blk,
     const block_q8_1* __restrict__ bq8,
     int iqs)
 {
     const int bq8_offset = 2 * ((iqs / 2) / 4);
     const int* q4 = (const int*)(blk + 16 + 16 * bq8_offset + 4 * ((iqs / 2) % 4));
-    // STREAMING hint on weight traffic (evict-first); Q8 X stays __ldg.
-    int v0 = __ldcs(q4);
-    int v1 = __ldcs(q4 + 4);
+    int v0, v1;
+    if constexpr (STREAM) {
+        v0 = __ldcs(q4);
+        v1 = __ldcs(q4 + 4);
+    } else {
+        v0 = q4[0];
+        v1 = q4[4];
+    }
 
     const uint16_t* scales = (const uint16_t*)(blk + 4);
     const int j = bq8_offset / 2;
     const int jm = j & 1;
-    const uint32_t s0 = __ldcs(scales + jm + 0);
-    const uint32_t s2 = __ldcs(scales + jm + 2);
-    const uint32_t s4 = __ldcs(scales + jm + 4);
+    uint32_t s0, s2, s4, dm;
+    if constexpr (STREAM) {
+        s0 = __ldcs(scales + jm + 0);
+        s2 = __ldcs(scales + jm + 2);
+        s4 = __ldcs(scales + jm + 4);
+        dm = __ldcs((const uint32_t*)blk);
+    } else {
+        s0 = scales[jm + 0];
+        s2 = scales[jm + 2];
+        s4 = scales[jm + 4];
+        dm = *(const uint32_t*)blk;
+    }
     const uint32_t hi = (uint32_t)-(int32_t)(j >= 2);
     uint16_t aux[2];
     aux[0] = (uint16_t)(((s0 & 0x3f3f) & ~hi) | ((((s4 >> 0) & 0x0f0f) | ((s0 & 0xc0c0) >> 2)) & hi));
@@ -117,7 +134,6 @@ __device__ __forceinline__ float vec_dot_q4_k_q8(
     const uint8_t* sc = (const uint8_t*)aux;
     const uint8_t* mn = sc + 2;
 
-    const uint32_t dm = __ldcs((const uint32_t*)blk);
     float d = half_bits_to_f32((uint16_t)dm);
     float dmin = half_bits_to_f32((uint16_t)(dm >> 16));
 
@@ -139,6 +155,16 @@ __device__ __forceinline__ float vec_dot_q4_k_q8(
     }
     return d * sumf_d - dmin * sumf_m;
 }
+
+__device__ __forceinline__ float vec_dot_q4_k_q8(
+    const uint8_t* __restrict__ blk,
+    const block_q8_1* __restrict__ bq8,
+    int iqs)
+{
+    return vec_dot_q4_k_q8_t<true>(blk, bq8, iqs);
+}
+
+extern "C" {
 
 // Plain Q8 loads for shared-memory tiles (FA→WO fused pack).
 __device__ __forceinline__ float vec_dot_q4_k_q8_smem(
@@ -329,6 +355,11 @@ __global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q4_k_q8(
 
     float acc = 0.f;
     for (unsigned kbx = tid / 16u; kbx < nb; kbx += 8u) {
+        unsigned next = kbx + 8u;
+        if (next < nb) {
+            const uint8_t * p = wrow + next * 144u + (unsigned)(tid % 16u) * 8u;
+            asm volatile("prefetch.global.L2 [%0];" :: "l"(p));
+        }
         int iqs = (int)(2u * (tid % 16u));
         acc += vec_dot_q4_k_q8(wrow + kbx * 144u, xr + kbx * 8u, iqs);
     }
@@ -846,6 +877,12 @@ __global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q4_k_q8_2(
 
     float acc0 = 0.f, acc1 = 0.f;
     for (unsigned kbx = tid / 16u; kbx < nb; kbx += 8u) {
+        unsigned next = kbx + 8u;
+        if (next < nb) {
+            unsigned off = next * 144u + (unsigned)(tid % 16u) * 8u;
+            asm volatile("prefetch.global.L2 [%0];" :: "l"(row0 + off));
+            asm volatile("prefetch.global.L2 [%0];" :: "l"(row1 + off));
+        }
         int iqs = (int)(2u * (tid % 16u));
         const block_q8_1* xb = xr + kbx * 8u;
         acc0 += vec_dot_q4_k_q8(row0 + kbx * 144u, xb, iqs);
@@ -872,6 +909,7 @@ __global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q4_k_q8_2(
 }
 
 // Gate+up dual for n_in=5120 (nb=20), same stride pattern as k5120 single.
+// Load-imbalanced: half-warps with tid/16>=4 skip the third vec_dot.
 __global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q4_k_q8_2_k5120(
     const uint8_t* __restrict__ w0,
     const uint8_t* __restrict__ w1,
@@ -928,6 +966,60 @@ __global__ void __launch_bounds__(MMVQ_NWARPS * 32, 1) matvec_q4_k_q8_2_k5120(
         float s0 = 0.f, s1 = 0.f;
         #pragma unroll
         for (unsigned i = 0; i < MMVQ_NWARPS; i++) {
+            s0 += wacc0[i];
+            s1 += wacc1[i];
+        }
+        y0[(size_t)row * n_out + out] = silu_f(s0) * s1;
+    }
+}
+
+// Balanced GU dual for n_in=5120: 5 warps -> 10 half-warp streams, 2 blocks each.
+#define MMVQ_NWARPS5 5u
+__global__ void __launch_bounds__(MMVQ_NWARPS5 * 32, 1) matvec_q4_k_q8_2_k5120_bal(
+    const uint8_t* __restrict__ w0,
+    const uint8_t* __restrict__ w1,
+    const block_q8_1* __restrict__ x,
+    float* __restrict__ y0,
+    float* __restrict__ y1,
+    unsigned n_in, unsigned n_out,
+    unsigned long long w_off0, unsigned long long w_off1, unsigned m)
+{
+    unsigned lane = threadIdx.x;
+    unsigned warp = threadIdx.y;
+    unsigned tid = warp * 32u + lane;
+    unsigned out = blockIdx.x;
+    unsigned row = blockIdx.y;
+    pdl_sync();
+    if (out >= n_out || row >= m) { pdl_lc(); return; }
+    (void)y1;
+    (void)n_in;
+
+    const block_q8_1* xr = x + (size_t)row * 160u;
+    const uint8_t* row0 = (w0 + w_off0) + (size_t)out * 2880u;
+    const uint8_t* row1 = (w1 + w_off1) + (size_t)out * 2880u;
+    unsigned kbx = tid / 16u;
+    int iqs = (int)(2u * (tid % 16u));
+
+    float acc0 = 0.f, acc1 = 0.f;
+    #pragma unroll
+    for (unsigned i = 0; i < 2u; i++, kbx += 10u) {
+        const block_q8_1* xb = xr + kbx * 8u;
+        acc0 += vec_dot_q4_k_q8(row0 + kbx * 144u, xb, iqs);
+        acc1 += vec_dot_q4_k_q8(row1 + kbx * 144u, xb, iqs);
+    }
+    pdl_lc();
+    acc0 = warp_sum_f(acc0);
+    acc1 = warp_sum_f(acc1);
+    __shared__ float wacc0[MMVQ_NWARPS5], wacc1[MMVQ_NWARPS5];
+    if (lane == 0) {
+        wacc0[warp] = acc0;
+        wacc1[warp] = acc1;
+    }
+    __syncthreads();
+    if (warp == 0 && lane == 0) {
+        float s0 = 0.f, s1 = 0.f;
+        #pragma unroll
+        for (unsigned i = 0; i < MMVQ_NWARPS5; i++) {
             s0 += wacc0[i];
             s1 += wacc1[i];
         }

@@ -1185,12 +1185,8 @@ fn fuse_decode_eligible(req: &TokenReq) -> bool {
         return false;
     }
     for layer in req.layers {
-        if layer.gdn.is_some()
-            || layer.gate_in_q
-            || layer.q_bias.is_some()
-            || layer.k_bias.is_some()
-            || layer.v_bias.is_some()
-        {
+        // Attn bias (qwen2) is handled in the fused stream via add_bias_f32.
+        if layer.gdn.is_some() || layer.gate_in_q {
             return false;
         }
         if !matches!(layer.ffn, TokenFfn::Dense { .. }) {
@@ -1278,12 +1274,19 @@ fn decode_token_one_fused(
     let y_elems = amax_at + align64(2);
 
     // x_arena: rope + output norm + per-layer norms (stable for CUDA graph).
-    // Per layer: attn_norm[H], ffn_norm[H], q_norm[hd], k_norm[hd].
+    // Per layer: attn_norm[H], ffn_norm[H], q_norm[hd], k_norm[hd],
+    // and when any layer has attn bias: q_bias[q_dim], k_bias[kv], v_bias[kv].
+    let has_attn_bias = req.layers.iter().any(|l| l.q_bias.is_some());
     let rope_q_at = 0usize;
     let rope_k_at = rope_q_at + req.n_heads * rope_pairs * 2;
     let out_norm_at = rope_k_at + req.n_kv_heads * rope_pairs * 2;
     let norms_base = out_norm_at + hidden;
-    let per_layer_norms = 2 * hidden + 2 * hd;
+    let bias_stride = if has_attn_bias {
+        q_dim + 2 * kv
+    } else {
+        0
+    };
+    let per_layer_norms = 2 * hidden + 2 * hd + bias_stride;
     let x_elems = norms_base + req.layers.len() * per_layer_norms;
 
     let out_norm = norm_f32_bytes(req.output_norm, hidden)?;
@@ -1424,6 +1427,29 @@ fn decode_token_one_fused(
                                 .slice_mut(base + 2 * hidden + hd..base + 2 * hidden + 2 * hd),
                         )
                         .ok()?;
+                }
+                if has_attn_bias {
+                    let qb_at = base + 2 * hidden + 2 * hd;
+                    let kb_at = qb_at + q_dim;
+                    let vb_at = kb_at + kv;
+                    if let Some(b) = layer.q_bias {
+                        let qb = norm_f32_bytes(b, q_dim)?;
+                        stream
+                            .memcpy_htod(&qb, &mut gpu.x_arena.slice_mut(qb_at..qb_at + q_dim))
+                            .ok()?;
+                    }
+                    if let Some(b) = layer.k_bias {
+                        let kb = norm_f32_bytes(b, kv)?;
+                        stream
+                            .memcpy_htod(&kb, &mut gpu.x_arena.slice_mut(kb_at..kb_at + kv))
+                            .ok()?;
+                    }
+                    if let Some(b) = layer.v_bias {
+                        let vb = norm_f32_bytes(b, kv)?;
+                        stream
+                            .memcpy_htod(&vb, &mut gpu.x_arena.slice_mut(vb_at..vb_at + kv))
+                            .ok()?;
+                    }
                 }
             }
             gpu.decode_norms_key = graph_key;
@@ -1823,6 +1849,25 @@ fn decode_token_one_fused(
                         .arg(&n_u)
                         .arg(&eps)
                         .arg(&rows_u)
+                        .launch_pdl(cfg)
+                }
+                .ok()?;
+                Some(())
+            };
+
+        let launch_add_bias =
+            |gpu: &mut CudaGpu, x_off: usize, bias_off: usize, n: usize| -> Option<()> {
+                let f = gpu.func_owned("add_bias_f32")?;
+                let n_u = n as u32;
+                let cfg = CudaGpu::cfg_1d(n_u, 256);
+                let xp = ybase + (x_off * 4) as u64;
+                let bp = xbase + (bias_off * 4) as u64;
+                unsafe {
+                    stream
+                        .launch_builder_pdl(&f)
+                        .arg(&xp)
+                        .arg(&bp)
+                        .arg(&n_u)
                         .launch_pdl(cfg)
                 }
                 .ok()?;
@@ -2352,7 +2397,9 @@ fn decode_token_one_fused(
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false);
             // Fused QKV: Q4/Q4/Q4 or Q4_K_M Q4/Q4/Q6 (V often Q6_K).
-            // Decode: also write V straight into f16 KV cache (no RoPE on V).
+            // Decode: write V straight into f16 KV cache when V has no bias
+            // (bias must land in arena first, then store_kv).
+            let write_v_cache = layer.v_bias.is_none();
             let qkv_fused = !ggml_decode
                 && matches!(
                     (layer.wq.0, layer.wk.0, layer.wv.0),
@@ -2377,7 +2424,11 @@ fn decode_token_one_fused(
                     1,
                     ybase,
                     layer.wv.0,
-                    Some((&req.cache.buf, layer.v_off as u64, req.kv_dim as u32)),
+                    if write_v_cache {
+                        Some((&req.cache.buf, layer.v_off as u64, req.kv_dim as u32))
+                    } else {
+                        None
+                    },
                 )
                 .is_some();
             if _li == 0
@@ -2386,11 +2437,12 @@ fn decode_token_one_fused(
                     .unwrap_or(false)
             {
                 eprintln!(
-                    "cuda: layer0 qkv_fused={qkv_fused} ggml_decode={ggml_decode} chunks=({wq_c},{wk_c},{wv_c}) types=({:?},{:?},{:?}) q8={}",
+                    "cuda: layer0 qkv_fused={qkv_fused} ggml_decode={ggml_decode} chunks=({wq_c},{wk_c},{wv_c}) types=({:?},{:?},{:?}) q8={} bias={}",
                     layer.wq.0,
                     layer.wk.0,
                     layer.wv.0,
-                    crate::gpu::cuda::runtime::q8_decode_enabled()
+                    crate::gpu::cuda::runtime::q8_decode_enabled(),
+                    has_attn_bias
                 );
             }
             if !qkv_fused {
@@ -2409,6 +2461,25 @@ fn decode_token_one_fused(
                 }
             } else {
                 launches += 1;
+            }
+
+            // Attn bias after QKV projections (qwen2), before RoPE / KV store.
+            if has_attn_bias {
+                let qb_at = layer_base + 2 * hidden + 2 * hd;
+                let kb_at = qb_at + q_dim;
+                let vb_at = kb_at + kv;
+                if layer.q_bias.is_some() {
+                    launch_add_bias(gpu, q_at, qb_at, q_dim)?;
+                    launches += 1;
+                }
+                if layer.k_bias.is_some() {
+                    launch_add_bias(gpu, k_at, kb_at, kv)?;
+                    launches += 1;
+                }
+                if layer.v_bias.is_some() {
+                    launch_add_bias(gpu, v_at, vb_at, kv)?;
+                    launches += 1;
+                }
             }
 
             let can_fuse_qk_post =
@@ -2465,10 +2536,14 @@ fn decode_token_one_fused(
                 false
             };
 
-            if qkv_fused && k_stored {
+            if qkv_fused && k_stored && write_v_cache {
                 // V already in cache from QKV; K stored by rmsnorm_rope_store_dpos.
-            } else if qkv_fused {
+            } else if qkv_fused && write_v_cache {
                 launch_store(gpu, k_at, layer.k_off, kv)?;
+                launches += 1;
+            } else if qkv_fused && k_stored {
+                // K fused into cache; V stayed in arena (bias) — store V only.
+                launch_store(gpu, v_at, layer.v_off, kv)?;
                 launches += 1;
             } else {
                 launch_store_pair(gpu, k_at, v_at, layer.k_off, layer.v_off, kv)?;
@@ -3277,6 +3352,11 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
         if dual {
             crate::gpu::cuda::ggml::clear_shared_for_prefill();
         }
+        if pf_graph_on() && gpu.pf_graph_len != xs.len() {
+            gpu.pf_graph = None;
+            gpu.pf_graph_seen = 0;
+            gpu.pf_graph_len = xs.len();
+        }
         gpu.stream
             .memcpy_htod(xs, &mut gpu.pf_x.slice_mut(0..xs.len()))
             .ok()?;
@@ -3284,8 +3364,50 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
         gpu.pf_len = xs.len();
         gpu.pf_ffn_done = false;
         gpu.pf_rope_n = 0;
+        if pf_graph_on() && !dual && gpu.pf_graph.is_none() && gpu.pf_graph_seen == 1 {
+            if gpu
+                .stream
+                .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
+                .is_ok()
+            {
+                gpu.pf_capturing = true;
+            }
+        }
         Some(())
     })
+}
+
+/// Replay a captured prefill. `None` means the caller should run the normal path.
+pub fn prefill_replay(xs: &[f32]) -> Option<Vec<f32>> {
+    if !pf_graph_on() {
+        return None;
+    }
+    with_gpu(|gpu| {
+        if gpu.pf_graph_len != xs.len() {
+            return Some(None);
+        }
+        if gpu.pf_graph.is_none() {
+            return Some(None);
+        }
+        gpu.ensure_prefill(xs.len())?;
+        gpu.stream
+            .memcpy_htod(xs, &mut gpu.pf_x.slice_mut(0..xs.len()))
+            .ok()?;
+        gpu.pf_graph.as_ref()?.launch().ok()?;
+        crate::gpu::cuda::ggml::sync();
+        gpu.sync()?;
+        let mut out = vec![0f32; xs.len()];
+        gpu.stream
+            .memcpy_dtoh(&gpu.pf_x.slice(0..xs.len()), &mut out)
+            .ok()?;
+        Some(Some(out))
+    })
+    .flatten()
+}
+
+fn pf_graph_on() -> bool {
+    std::env::var("ALLPAKA_PF_GRAPH")
+        .map_or(true, |v| !(v == "0" || v.eq_ignore_ascii_case("false")))
 }
 
 pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
@@ -3293,6 +3415,20 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
         if !gpu.pf_active || xs.len() != gpu.pf_len {
             return None;
         }
+        if gpu.pf_capturing {
+            let graph_flags = unsafe { std::mem::transmute::<u32, CUgraphInstantiate_flags>(0) };
+            match gpu.stream.end_capture(graph_flags) {
+                Ok(Some(g)) => {
+                    eprintln!("cuda: prefill graph captured ({} floats)", gpu.pf_len);
+                    gpu.pf_graph = Some(g);
+                    gpu.pf_graph_len = gpu.pf_len;
+                }
+                Ok(None) => eprintln!("cuda: prefill graph empty"),
+                Err(e) => eprintln!("cuda: prefill end_capture failed: {e}"),
+            }
+            gpu.pf_capturing = false;
+        }
+        gpu.pf_graph_seen = gpu.pf_graph_seen.saturating_add(1);
         // Drain ggml private queue before sharing cudarc again (graph capture).
         crate::gpu::cuda::ggml::sync();
         gpu.sync()?;
@@ -3352,7 +3488,14 @@ fn try_prefill_attn_fused_dev(
         let rope_at = m * hidden;
         let qn_at = rope_at + m * pairs * 2;
         let kn_at = qn_at + hd;
-        let x_need = (kn_at + hd) * 4;
+        let qb_at = kn_at + hd;
+        let kb_at = qb_at + q_dim;
+        let vb_at = kb_at + kv;
+        let x_need = if req.attn_bias.is_some() {
+            (vb_at + kv) * 4
+        } else {
+            (kn_at + hd) * 4
+        };
         gpu.ensure_arenas(x_need, y_need)?;
 
         // attn RMSNorm: pf_x -> pf_hs
@@ -3438,6 +3581,48 @@ fn try_prefill_attn_fused_dev(
             stream
                 .memcpy_htod(&wn[..hd], &mut gpu.x_arena.slice_mut(kn_at..kn_at + hd))
                 .ok()?;
+        }
+        if let Some((qb, kb, vb)) = req.attn_bias {
+            let qb = norm_f32_bytes(qb, q_dim)?;
+            let kb = norm_f32_bytes(kb, kv)?;
+            let vb = norm_f32_bytes(vb, kv)?;
+            stream
+                .memcpy_htod(&qb, &mut gpu.x_arena.slice_mut(qb_at..qb_at + q_dim))
+                .ok()?;
+            stream
+                .memcpy_htod(&kb, &mut gpu.x_arena.slice_mut(kb_at..kb_at + kv))
+                .ok()?;
+            stream
+                .memcpy_htod(&vb, &mut gpu.x_arena.slice_mut(vb_at..vb_at + kv))
+                .ok()?;
+            let f = gpu.func_owned("add_bias_rows_f32")?;
+            let (ybase, _yg) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
+            let (xbase, _xg) = DevicePtr::device_ptr(&gpu.x_arena, &stream);
+            let m_u = m as u32;
+            for (off, bias_off, n) in [
+                (q_at, qb_at, q_dim),
+                (k_at, kb_at, kv),
+                (v_at, vb_at, kv),
+            ] {
+                let n_u = n as u32;
+                let cfg = LaunchConfig {
+                    grid_dim: (n_u.div_ceil(256), m_u, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let xp = ybase + (off * 4) as u64;
+                let bp = xbase + (bias_off * 4) as u64;
+                unsafe {
+                    stream
+                        .launch_builder_pdl(&f)
+                        .arg(&xp)
+                        .arg(&bp)
+                        .arg(&m_u)
+                        .arg(&n_u)
+                        .launch_pdl(cfg)
+                }
+                .ok()?;
+            }
         }
 
         {
@@ -3892,8 +4077,9 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
     }
 
     // Device-resident fused path: no mid-layer D2H for dense Qwen-style layers.
+    // Attn bias (qwen2) is applied on-device after QKV GEMMs.
     if let Some(f) = &req.fusion {
-        if !req.gate_in_q && req.attn_bias.is_none() {
+        if !req.gate_in_q {
             if let Some(out) = try_prefill_attn_fused_dev(req, f) {
                 return Some(out);
             }

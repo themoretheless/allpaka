@@ -21,7 +21,7 @@ pub mod tokenizer;
 
 pub use config::{Config, ModelCapability, ModelSupport, RopeStyle};
 pub use kv::KvCache;
-pub use model::{Model, Session};
+pub use model::{set_trace_hook, Model, Session};
 pub use tokenizer::Tokenizer;
 
 #[cfg(test)]

@@ -8,6 +8,8 @@
 mod rag_tools;
 mod request_control;
 mod ingress;
+mod launch;
+mod resources;
 use request_control::{Interrupted, Registry as RequestRegistry, RequestControl};
 use rag_tools::{rag_default_tool_schemas, run_rag_tool, RagTools};
 
@@ -45,8 +47,18 @@ impl ChatState {
 
     fn reset(&mut self, model: &Model<'static>, capacity: usize) -> Result<()> {
         // Reserve the new storage while the old storage is still alive.
-        *self = Self::new(model, &self.memory.budget(), capacity)?;
-        Ok(())
+        // A too-large KV allocation asserts inside the cache; keep the
+        // running session and report it instead of killing the process.
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::new(model, &self.memory.budget(), capacity)
+        }));
+        match built {
+            Ok(session) => {
+                *self = session?;
+                Ok(())
+            }
+            Err(_) => bail!("out of memory for a {capacity}-token session"),
+        }
     }
 }
 
@@ -60,10 +72,11 @@ struct PrefixSnap {
     logits: Vec<f32>,
 }
 
-/// Context the persistent session is sized for. f32 KV cache is heavy
-/// (~0.4 MB per token on Qwen3-30B), so this is a deliberate budget, not the
-/// model's maximum.
-const SESSION_TOKENS: usize = 16384;
+/// Generation cap the chat field is allowed to ask for. The session is this
+/// plus room for the prompt. KV is allocated up front, so a 512000-token
+/// request on a 32B model is on the order of 100 GiB.
+const MAX_NEW_TOKENS: usize = 512_000;
+const SESSION_TOKENS: usize = MAX_NEW_TOKENS + 32_768;
 
 struct CompletionResult {
     content: String,
@@ -199,8 +212,11 @@ fn run_inference(
         emit_done,
     } = request;
     let prompt = template.prompt(tok, messages)?;
-    anyhow::ensure!(max_tokens <= SESSION_TOKENS && prompt.len().saturating_add(max_tokens).saturating_add(1) <= SESSION_TOKENS,
-        "request exceeds the 16384-token session limit");
+    anyhow::ensure!(
+        max_tokens <= MAX_NEW_TOKENS
+            && prompt.len().saturating_add(max_tokens).saturating_add(1) <= SESSION_TOKENS,
+        "request exceeds the {MAX_NEW_TOKENS}-token generation limit"
+    );
     let stops = template.stop_tokens(tok);
     let mut sampler = Sampler::new(temperature, top_p, repeat_penalty);
     // Greedy without a repeat penalty can take the on-GPU argmax: one word
@@ -284,13 +300,16 @@ fn run_inference(
 
     let prefill_chunk = allpaka_model::Model::prefill_chunk();
     let t0 = std::time::Instant::now();
-    if !skip_prefill {
-        for chunk in prompt[common..].chunks(prefill_chunk) {
-            context.control.check()?;
-            logits = model.forward_batch(chunk, &mut chat.session)?;
-            chat.tokens.extend_from_slice(chunk);
+    crate::airbug::span("prefill", || -> Result<()> {
+        if !skip_prefill {
+            for chunk in prompt[common..].chunks(prefill_chunk) {
+                context.control.check()?;
+                logits = model.forward_batch(chunk, &mut chat.session)?;
+                chat.tokens.extend_from_slice(chunk);
+            }
         }
-    }
+        Ok(())
+    })?;
     let prefill_secs = t0.elapsed().as_secs_f64();
 
     // Snapshot before generation, when state is exactly "prompt consumed".
@@ -334,44 +353,47 @@ fn run_inference(
     let mut emitted = String::new();
     let mut finish = "length";
     let mut greedy_next: Option<u32> = None;
-    for _ in 0..max_tokens {
-        context.control.check()?;
-        let next = match greedy_next.take() {
-            Some(t) => t,
-            None => sampler.pick(&logits, &chat.tokens),
-        };
-        if stops.contains(&next) {
-            finish = "stop";
-            break;
-        }
-        generated.push(next);
-        if streaming {
-            let full = tok.decode(&generated);
-            let complete = full.strip_suffix('\u{FFFD}').unwrap_or(&full);
-            let complete = if parse_tools {
-                &complete[..stream_safe_len(complete)]
-            } else {
-                complete
+    crate::airbug::span("decode", || -> Result<()> {
+        for _ in 0..max_tokens {
+            context.control.check()?;
+            let next = match greedy_next.take() {
+                Some(t) => t,
+                None => sampler.pick(&logits, &chat.tokens),
             };
-            if let Some(delta) = complete.strip_prefix(emitted.as_str()) {
-                if !delta.is_empty() {
-                    let chunk = json!({
-                        "object": "chat.completion.chunk",
-                        "choices": [{"index": 0, "delta": {"content": delta}}],
-                        "tokens_generated": generated.len(),
-                    });
-                    write_sse_event(stream.as_mut().unwrap(), &chunk)?;
-                    emitted = complete.to_string();
+            if stops.contains(&next) {
+                finish = "stop";
+                break;
+            }
+            generated.push(next);
+            if streaming {
+                let full = tok.decode(&generated);
+                let complete = full.strip_suffix('\u{FFFD}').unwrap_or(&full);
+                let complete = if parse_tools {
+                    &complete[..stream_safe_len(complete)]
+                } else {
+                    complete
+                };
+                if let Some(delta) = complete.strip_prefix(emitted.as_str()) {
+                    if !delta.is_empty() {
+                        let chunk = json!({
+                            "object": "chat.completion.chunk",
+                            "choices": [{"index": 0, "delta": {"content": delta}}],
+                            "tokens_generated": generated.len(),
+                        });
+                        write_sse_event(stream.as_mut().unwrap(), &chunk)?;
+                        emitted = complete.to_string();
+                    }
                 }
             }
+            if greedy {
+                greedy_next = Some(model.forward_greedy(next, &mut chat.session)?);
+            } else {
+                logits = model.forward(next, &mut chat.session)?;
+            }
+            chat.tokens.push(next);
         }
-        if greedy {
-            greedy_next = Some(model.forward_greedy(next, &mut chat.session)?);
-        } else {
-            logits = model.forward(next, &mut chat.session)?;
-        }
-        chat.tokens.push(next);
-    }
+        Ok(())
+    })?;
     let decode_secs = t1.elapsed().as_secs_f64();
 
     let text = format!("{think_prefix}{}", tok.decode(&generated));
@@ -389,6 +411,37 @@ fn run_inference(
         prompt.len() - common,
         generated.len(),
         generated.len() as f64 / decode_secs.max(1e-9),
+    );
+    let new_prompt = prompt.len() - common;
+    if new_prompt > 0 {
+        crate::airbug::log_rate(
+            "prefill",
+            new_prompt,
+            prefill_secs,
+            new_prompt as f64 / prefill_secs.max(1e-9),
+        );
+    }
+    if !generated.is_empty() {
+        crate::airbug::log_rate(
+            "decode",
+            generated.len(),
+            decode_secs,
+            generated.len() as f64 / decode_secs.max(1e-9),
+        );
+    }
+    resources::note_generation(
+        if new_prompt > 0 {
+            new_prompt as f64 / prefill_secs.max(1e-9)
+        } else {
+            0.0
+        },
+        if generated.is_empty() {
+            0.0
+        } else {
+            generated.len() as f64 / decode_secs.max(1e-9)
+        },
+        chat.tokens.len(),
+        chat.session.capacity(),
     );
 
     if streaming {
@@ -943,7 +996,17 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
     let mut runtime = ServerRuntime::new(limits);
     let mut default_model = String::new();
     for (path, bytes) in model_paths.iter().zip(planned_bytes) {
-        let (name, service) = load_model_service(path, &memory)?;
+        let started = std::time::Instant::now();
+        let (name, service) =
+            crate::airbug::span("load_model", || load_model_service(path, &memory))?;
+        let load_secs = started.elapsed().as_secs_f64();
+        crate::airbug::histogram("model_load_s", load_secs);
+        crate::airbug::gauge("model_bytes", bytes as f64);
+        crate::airbug::gauge("model_layers", service.model.config.n_layers as f64);
+        crate::airbug::event(
+            "startup",
+            &format!("{name} loaded in {load_secs:.1}s, {bytes} bytes"),
+        );
         if default_model.is_empty() {
             default_model.clone_from(&name);
         }
@@ -952,6 +1015,8 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
             .map_err(|error| anyhow::anyhow!("installing model {name}: {error:?}"))?;
     }
     let listener = TcpListener::bind(bind).with_context(|| format!("binding {bind}"))?;
+    launch::remember_bind(bind);
+    resources::start();
     println!(
         "allpaka serve: {} on http://{bind}/v1/chat/completions",
         runtime.model_names().join(", ")
@@ -1053,6 +1118,10 @@ fn prepare_connection(
         respond(&mut stream, 200, &json!({"status":"ok"}))?;
         return Ok(None);
     }
+    if request_line.starts_with("GET /resources ") {
+        respond(&mut stream, 200, &resources::snapshot())?;
+        return Ok(None);
+    }
     if let Some(route) = request_line.strip_prefix("POST /v1/requests/") {
         if let Some(id) = route.strip_suffix("/cancel HTTP/1.1") {
             let cancelled = registry.cancel(id);
@@ -1068,7 +1137,10 @@ fn prepare_connection(
         anyhow::ensure!(id.is_string(), "request_id must be a string");
     }
     if let Some(tokens) = request.get("max_tokens") {
-        anyhow::ensure!(tokens.as_u64().is_some_and(|n| n > 0 && n < SESSION_TOKENS as u64), "max_tokens must be in 1..16384");
+        anyhow::ensure!(
+            tokens.as_u64().is_some_and(|n| n > 0 && n <= MAX_NEW_TOKENS as u64),
+            "max_tokens must be in 1..={MAX_NEW_TOKENS}"
+        );
     }
     let timeout_ms = match request.get("timeout_ms") {
         None => 120_000,
@@ -1127,6 +1199,29 @@ fn dispatch_connection(
     runtime: &mut ServerRuntime,
     rag: &RagTools,
 ) -> Result<()> {
+    if connection.request_line.starts_with("GET /v1/catalog") {
+        return respond(
+            &mut connection.stream.try_clone()?,
+            200,
+            &json!({"object": "list", "data": launch::list_models()}),
+        );
+    }
+    if connection.request_line.starts_with("POST /v1/launch") {
+        let req: Value = serde_json::from_str(&connection.body).unwrap_or(Value::Null);
+        let path = req["path"].as_str().unwrap_or("");
+        let mut stream = connection.stream;
+        match launch::schedule(path, "") {
+            Ok(()) => {
+                respond(&mut stream, 200, &json!({"status": "restarting"}))?;
+                let _ = stream.flush();
+                println!("relaunch: {path}");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                return respond(&mut stream, 400, &json!({"error": error.to_string()}));
+            }
+        }
+    }
     if connection.request_line.starts_with("GET /v1/models") {
         let data = runtime
             .model_names()
@@ -1241,19 +1336,22 @@ fn dispatch_connection(
 /// sequential pass at SSD streaming speed moves that cost to startup.
 pub fn prewarm(mapping: &[u8]) {
     const PAGE: usize = 16384;
-    let t0 = std::time::Instant::now();
-    let mut acc = 0u8;
-    let mut i = 0;
-    while i < mapping.len() {
-        acc ^= mapping[i];
-        i += PAGE;
-    }
-    std::hint::black_box(acc);
-    println!(
-        "prewarmed {:.1} GiB of weights in {:.1}s",
-        mapping.len() as f64 / (1u64 << 30) as f64,
-        t0.elapsed().as_secs_f64()
-    );
+    let (gib, secs) = crate::airbug::span("prewarm", || {
+        let t0 = std::time::Instant::now();
+        let mut acc = 0u8;
+        let mut i = 0;
+        while i < mapping.len() {
+            acc ^= mapping[i];
+            i += PAGE;
+        }
+        std::hint::black_box(acc);
+        let gib = mapping.len() as f64 / (1u64 << 30) as f64;
+        let secs = t0.elapsed().as_secs_f64();
+        println!("prewarmed {gib:.1} GiB of weights in {secs:.1}s");
+        (gib, secs)
+    });
+    crate::airbug::histogram("prewarm_s", secs);
+    crate::airbug::gauge("weights_gib", gib);
 }
 
 fn handle(
@@ -1694,7 +1792,8 @@ mod tests {
 const CHAT_PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8">
 <title>allpaka chat</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: light; }
+  html, body { background: #f4f5f7; color: #1c1c1c; }
   body { font-family: ui-sans-serif, system-ui; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
   #log { display: flex; flex-direction: column; gap: .6rem; margin-bottom: 1rem; }
   .msg { padding: .6rem .9rem; border-radius: .7rem; white-space: pre-wrap; line-height: 1.4; }
@@ -1703,16 +1802,32 @@ const CHAT_PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8">
   .meta { opacity: .5; font-size: .75rem; align-self: flex-start; }
   .thinking { opacity: .55; font-style: italic; }
   form { display: flex; gap: .5rem; }
-  input { flex: 1; padding: .6rem .8rem; border-radius: .6rem; border: 1px solid rgba(127,127,127,.4); font-size: 1rem; }
+  input, select { background: #fff; color: #1c1c1c; }
+  input { flex: 1; padding: .6rem .8rem; border-radius: .6rem; border: 1px solid #c8cdd4; font-size: 1rem; }
   button { padding: .6rem 1.1rem; border-radius: .6rem; border: none; background: #3b82f6; color: white; font-size: 1rem; }
   button:disabled { opacity: .5; }
-  h1 { font-size: 1.1rem; opacity: .7; }
+  h1 { font-size: 1.1rem; color: #333; }
   details { opacity: .6; font-size: .85rem; }
   #stats { display: flex; align-items: center; gap: .8rem; font-size: .78rem;
-           opacity: .75; margin-bottom: 1rem; flex-wrap: wrap; }
+           color: #444; margin-bottom: 1rem; flex-wrap: wrap; }
   #ctxbar { width: 160px; height: 6px; border-radius: 3px;
             background: rgba(127,127,127,.25); overflow: hidden; }
   #ctxfill { height: 100%; width: 0%; background: #3b82f6; transition: width .3s; }
+  .launch { display: flex; flex-wrap: wrap; gap: .6rem; align-items: flex-end;
+            margin-bottom: 1rem; font-size: .85rem; }
+  .launch label { display: flex; flex-direction: column; gap: .2rem; color: #333; }
+  .launch input, .launch select { padding: .35rem .5rem; border-radius: .4rem;
+            border: 1px solid #c8cdd4; font-size: .9rem; background: #fff; color: #1c1c1c; }
+  .launch select { max-width: 100%; }
+  #launch-status { color: #444; align-self: center; }
+  .res { margin: 0 0 1rem; padding: .8rem; background: #fff; border: 1px solid #e2e4e8; border-radius: .7rem; }
+  .res h2 { font-size: .9rem; margin: 0 0 .45rem; color: #222; font-weight: 600; }
+  .meters { display: flex; flex-wrap: wrap; gap: .35rem .9rem; font-size: .78rem; color: #222; margin-bottom: .55rem; }
+  .meters b { font-weight: 600; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .55rem; }
+  .charts figure { margin: 0; }
+  .charts figcaption { font-size: .72rem; color: #444; margin-bottom: .15rem; }
+  .charts canvas { width: 100%; height: 76px; background: #f7f8fa; border-radius: .35rem; display: block; }
 </style></head><body>
 <h1>allpaka · собственный движок · чат</h1>
 <div id="stats">
@@ -1721,12 +1836,100 @@ const CHAT_PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8">
   <div id="ctxbar"><div id="ctxfill"></div></div>
   <span id="s-speed"></span>
 </div>
+<div class="launch">
+  <label>модель
+    <select id="model"></select>
+  </label>
+  <label>max tokens
+    <input id="max_tokens" type="number" min="1" max="512000" value="1024">
+  </label>
+  <label>temperature
+    <input id="temperature" type="number" min="0" max="2" step="0.05" value="0.7">
+  </label>
+  <label>top_p
+    <input id="top_p" type="number" min="0" max="1" step="0.05" value="0.95">
+  </label>
+  <label>repeat
+    <input id="repeat" type="number" min="0.5" max="2" step="0.05" value="1.1">
+  </label>
+  <button type="button" id="launch">Запустить</button>
+  <span id="launch-status"></span>
+</div>
+<section class="res">
+  <h2 id="res-title">ресурсы</h2>
+  <div class="meters" id="meters">собираю…</div>
+  <div class="charts">
+    <figure><figcaption>видеопамять, МиБ</figcaption><canvas id="c-vram" width="320" height="76"></canvas></figure>
+    <figure><figcaption>загрузка GPU, %</figcaption><canvas id="c-util" width="320" height="76"></canvas></figure>
+    <figure><figcaption>процесс, МиБ</figcaption><canvas id="c-rss" width="320" height="76"></canvas></figure>
+    <figure><figcaption>генерация, tok/s</figcaption><canvas id="c-tok" width="320" height="76"></canvas></figure>
+  </div>
+</section>
 <div id="log"></div>
 <form id="f"><input id="q" placeholder="Спросите что-нибудь..." autofocus autocomplete="off">
 <button id="send">→</button></form>
 <script>
 const log = document.getElementById('log');
 const history = [];
+const saved = JSON.parse(localStorage.getItem('allpaka-params') || '{}');
+for (const id of ['max_tokens', 'temperature', 'top_p', 'repeat']) {
+  if (saved[id] != null) document.getElementById(id).value = saved[id];
+  document.getElementById(id).addEventListener('change', () => {
+    const next = {};
+    for (const key of ['max_tokens', 'temperature', 'top_p', 'repeat']) {
+      next[key] = document.getElementById(key).value;
+    }
+    localStorage.setItem('allpaka-params', JSON.stringify(next));
+  });
+}
+function num(id, fallback) {
+  let v = Number(document.getElementById(id).value);
+  if (!Number.isFinite(v)) v = fallback;
+  if (id === 'max_tokens') v = Math.min(512000, Math.max(1, Math.round(v)));
+  return v;
+}
+let currentModel = '';
+fetch('/v1/catalog').then(r => r.json()).then(list => {
+  const sel = document.getElementById('model');
+  const rows = list.data || [];
+  for (const row of rows) {
+    const opt = document.createElement('option');
+    opt.value = row.path;
+    opt.dataset.name = row.name;
+    const gib = (row.bytes / (1024 * 1024 * 1024)).toFixed(1);
+    opt.textContent = row.name + ' · ' + gib + ' ГиБ';
+    sel.appendChild(opt);
+  }
+  const match = [...sel.options].find(opt => opt.dataset.name === currentModel);
+  if (match) sel.value = match.value;
+  if (!rows.length) document.getElementById('launch-status').textContent = 'gguf не найдены';
+}).catch(() => {});
+document.getElementById('launch').addEventListener('click', async () => {
+  const sel = document.getElementById('model');
+  const status = document.getElementById('launch-status');
+  const picked = sel.selectedOptions[0];
+  if (!picked) { status.textContent = 'нет модели'; return; }
+  if (picked.dataset.name === currentModel) {
+    status.textContent = 'уже запущена, параметры — к следующему сообщению';
+    return;
+  }
+  status.textContent = 'перезапуск…';
+  try {
+    await fetch('/v1/launch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: sel.value})
+    });
+  } catch (_) {}
+  for (let i = 0; i < 40; i++) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    try {
+      const health = await fetch('/health');
+      if (health.ok) { location.reload(); return; }
+    } catch (_) {}
+  }
+  status.textContent = 'сервер не поднялся';
+});
 function setStats(used, cap, speed) {
   document.getElementById('s-ctx').textContent =
     `${used.toLocaleString('ru')} / ${cap.toLocaleString('ru')} (${Math.round(used/cap*100)}%)`;
@@ -1734,8 +1937,12 @@ function setStats(used, cap, speed) {
   if (speed) document.getElementById('s-speed').textContent = speed;
 }
 fetch('/stats').then(r => r.json()).then(s => {
+  currentModel = s.model;
   document.getElementById('s-model').textContent =
     s.model + (s.moe ? ' (MoE)' : '') + ' · ' + s.n_layers + ' слоёв';
+  const sel = document.getElementById('model');
+  const match = [...sel.options].find(opt => opt.dataset.name === s.model);
+  if (match) sel.value = match.value;
   setStats(s.context_used, s.context_capacity, '');
 }).catch(() => {});
 function add(cls, text) {
@@ -1771,8 +1978,18 @@ document.getElementById('f').addEventListener('submit', async (e) => {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       signal: aborter.signal,
-      body: JSON.stringify({messages: history, max_tokens: 1024, temperature: 0.7, stream: true})
+      body: JSON.stringify({
+        messages: history,
+        max_tokens: num('max_tokens', 1024),
+        temperature: num('temperature', 0.7),
+        top_p: num('top_p', 0.95),
+        repeat_penalty: num('repeat', 1.1),
+        stream: true
+      })
     });
+    if (!r.ok) {
+      throw new Error((await r.text()).slice(0, 300) || String(r.status));
+    }
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -1818,7 +2035,8 @@ document.getElementById('f').addEventListener('submit', async (e) => {
     if (err.name === 'AbortError') {
       stopped = true;
     } else {
-      busy.textContent = 'ошибка: ' + err;
+      busy.textContent = 'ошибка: ' + (err.message || err);
+      meta.textContent = '';
       aborter = null;
       btn.textContent = '→';
       q.focus();
@@ -1861,4 +2079,51 @@ document.getElementById('f').addEventListener('submit', async (e) => {
   btn.textContent = '→';
   q.focus();
 });
+function gib(mib) { return (mib / 1024).toFixed(1); }
+function draw(id, values, color, scale) {
+  const canvas = document.getElementById(id);
+  const c = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  c.clearRect(0, 0, w, h);
+  c.strokeStyle = '#e2e4e8';
+  c.beginPath();
+  c.moveTo(0, h - 1);
+  c.lineTo(w, h - 1);
+  c.stroke();
+  if (!values || !values.length) return;
+  const max = scale || Math.max.apply(null, values.concat([1]));
+  c.strokeStyle = color;
+  c.lineWidth = 1.6;
+  c.beginPath();
+  for (let i = 0; i < values.length; i++) {
+    const x = values.length === 1 ? 1 : (i / (values.length - 1)) * (w - 2) + 1;
+    const y = h - 3 - (Number(values[i]) / max) * (h - 8);
+    if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+  }
+  c.stroke();
+}
+async function paintResources() {
+  try {
+    const s = await (await fetch('/resources')).json();
+    const name = s.gpu_name || 'GPU';
+    document.getElementById('res-title').textContent = 'ресурсы · ' + name;
+    const ctx = s.context_capacity
+      ? `контекст ${s.context_used} / ${s.context_capacity}`
+      : 'контекст —';
+    document.getElementById('meters').innerHTML =
+      `<span><b>VRAM</b> ${gib(s.gpu_used_mib)} / ${gib(s.gpu_total_mib)} ГиБ</span>`
+      + `<span><b>GPU</b> ${s.gpu_util}% · ${s.gpu_temp_c}°C · ${Number(s.gpu_power_w).toFixed(0)} Вт</span>`
+      + `<span><b>процесс</b> ${gib(s.rss_mib)} ГиБ</span>`
+      + `<span><b>ОЗУ</b> ${gib(s.ram_used_mib)} / ${gib(s.ram_total_mib)} ГиБ</span>`
+      + `<span><b>decode</b> ${Number(s.decode_tok_s).toFixed(1)} tok/s</span>`
+      + `<span><b>prefill</b> ${Number(s.prefill_tok_s).toFixed(1)} tok/s</span>`
+      + `<span>${ctx}</span>`;
+    draw('c-vram', s.vram, '#3b82f6', s.gpu_total_mib || 0);
+    draw('c-util', s.util, '#16a34a', 100);
+    draw('c-rss', s.rss, '#d97706', 0);
+    draw('c-tok', s.tok_s, '#7c3aed', 0);
+  } catch (_) {}
+}
+paintResources();
+setInterval(paintResources, 1000);
 </script></body></html>"#;

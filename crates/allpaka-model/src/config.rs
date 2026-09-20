@@ -119,7 +119,9 @@ pub struct Config {
 impl Config {
     pub fn capability(&self) -> ModelCapability {
         match self.architecture.as_str() {
-            "qwen3" | "qwen3moe" | "qwen35moe" => ModelCapability {
+            // qwen2 (Qwen2.5 GGUF arch tag) shares the dense Neox+GQA graph with qwen3;
+            // QK norms are detected from tensors, so absence on qwen2 is fine.
+            "qwen2" | "qwen3" | "qwen3moe" | "qwen35moe" => ModelCapability {
                 support: ModelSupport::Supported,
                 reason: "Qwen dense, MoE, and hybrid GDN kernels are implemented",
             },

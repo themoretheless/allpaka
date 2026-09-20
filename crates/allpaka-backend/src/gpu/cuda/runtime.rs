@@ -90,6 +90,7 @@ const KERNEL_NAMES: &[&str] = &[
     "mm_q4_k_mmq",
     "mm_q6_k",
     "add_bias_f32",
+    "add_bias_rows_f32",
     "gather_rows_f32",
     "gemm_f16_f32",
     "gdn_conv",
@@ -150,6 +151,11 @@ pub struct CudaGpu {
     /// Captured whole-token dense decode graph (invalidated on shape change).
     /// For hybrid FA: optional mega-graph that replays segment launches + FA in one go.
     pub decode_graph: Option<CudaGraph>,
+    /// Whole-prefill graph. Captured on the second call of a given length.
+    pub pf_graph: Option<CudaGraph>,
+    pub pf_graph_len: usize,
+    pub pf_graph_seen: u32,
+    pub pf_capturing: bool,
     /// Hybrid FA decode: per-layer (pre-attend, post-attend) graphs + final tail.
     /// Used when ALLPAKA_CUDA_GRAPH=1 and ggml FA is available.
     pub decode_fa_graphs: Option<(Vec<CudaGraph>, Vec<CudaGraph>, CudaGraph)>,
@@ -315,6 +321,7 @@ fn init_device() -> Option<CudaGpu> {
                 "matvec_q6_k_f32_n8",
                 "matvec_q4_k_q8_2",
                 "matvec_q4_k_q8_2_k5120",
+                "matvec_q4_k_q8_2_k5120_bal",
                 "matvec_q4_k_q8_2_n8",
                 "matvec_q4_k_q8_2_q8",
                 "matvec_q4_k_q8_qkv",
@@ -419,6 +426,10 @@ fn init_device() -> Option<CudaGpu> {
         d_rope_freq_n: 0,
         d_argmax,
         decode_graph: None,
+        pf_graph: None,
+        pf_graph_len: 0,
+        pf_graph_seen: 0,
+        pf_capturing: false,
         decode_fa_graphs: None,
         decode_fa_attn: None,
         decode_fa_execs: None,
@@ -2085,8 +2096,16 @@ pub fn launch_matvec_q4k_2(
             && std::env::var("ALLPAKA_GU_N8")
                 .map(|v| v == "1")
                 .unwrap_or(false);
-        // Opt-in only; same regression as single-row k5120 on 5090.
+        // Balanced nb=20 GU dual (5 warps, 2 blocks each). Opt-in; do not enable single-row k5120.
+        let use_k5120_gu = !use_n8
+            && n_in == 5120
+            && gpu.fns.contains_key("matvec_q4_k_q8_2_k5120_bal")
+            && std::env::var("ALLPAKA_K5120_GU")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+        // Opt-in only; imbalanced 4-warp k5120 regressed on 5090.
         let use_k5120 = !use_n8
+            && !use_k5120_gu
             && n_in == 5120
             && gpu.fns.contains_key("matvec_q4_k_q8_2_k5120")
             && std::env::var("ALLPAKA_K5120")
@@ -2094,6 +2113,8 @@ pub fn launch_matvec_q4k_2(
                 .unwrap_or(false);
         let f = gpu.func_owned(if use_n8 {
             "matvec_q4_k_q8_2_n8"
+        } else if use_k5120_gu {
+            "matvec_q4_k_q8_2_k5120_bal"
         } else if use_k5120 {
             "matvec_q4_k_q8_2_k5120"
         } else {
@@ -2101,7 +2122,13 @@ pub fn launch_matvec_q4k_2(
         })?;
         let n_out_u = n_out as u32;
         let m_u = m as u32;
-        let nwarps = if use_n8 { 8u32 } else { 4u32 };
+        let nwarps = if use_n8 {
+            8u32
+        } else if use_k5120_gu {
+            5u32
+        } else {
+            4u32
+        };
         let cfg = LaunchConfig {
             grid_dim: (n_out_u, m_u, 1),
             block_dim: (32, nwarps, 1),

@@ -362,17 +362,23 @@ pub fn measure_engine(
     session = model.new_session(prompt.len() + decode_tokens + 1);
     let warm = model.forward_batch(&prompt[32..], &mut session)?;
     drop(warm);
-    // Warm the measured shape without leaving warmup tokens in measured KV state.
-    session = model.new_session(prompt.len() + decode_tokens + 1);
+    // Same KV allocation: second pass captures the prefill graph, timed pass replays it.
+    session.truncate(0);
+    let warm = model.forward_batch(&prompt[32..], &mut session)?;
+    drop(warm);
+    session.truncate(0);
 
     let gpu_pre = allpaka_backend::gpu::stats();
     let clock_pre = allpaka_backend::gpu::gpu_time_stats();
     allpaka_model::profile::reset();
     let t0 = std::time::Instant::now();
-    let mut logits = Vec::new();
-    for chunk in prompt[32..].chunks(allpaka_model::Model::prefill_chunk()) {
-        logits = model.forward_batch(chunk, &mut session)?;
-    }
+    let logits = crate::airbug::span("prefill", || -> Result<Vec<f32>> {
+        let mut logits = Vec::new();
+        for chunk in prompt[32..].chunks(allpaka_model::Model::prefill_chunk()) {
+            logits = model.forward_batch(chunk, &mut session)?;
+        }
+        Ok(logits)
+    })?;
     let prefill_secs = t0.elapsed().as_secs_f64();
     let gpu_prefill = allpaka_backend::gpu::stats();
     let prefill_rate = (prompt.len() - 32) as f64 / prefill_secs;
@@ -382,10 +388,18 @@ pub fn measure_engine(
         bad == 0 && !logits.is_empty(),
         "benchmark invalid: empty or non-finite logits"
     );
+    let argmax = logits
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    eprintln!("  prefill argmax={argmax}");
     println!(
         "  prefill  {:>4} tok in {prefill_secs:>6.2} s   {prefill_rate:>7.1} tok/s",
         prompt.len() - 32
     );
+    crate::airbug::log_rate("prefill", prompt.len() - 32, prefill_secs, prefill_rate);
     // The same split for prefill. This is the number that says whether a slow
     // prefill is the GPU or everything around it: wall time far above GPU wait
     // means the time is going to CPU-side work (attention, norms, routing, the
@@ -435,7 +449,9 @@ pub fn measure_engine(
         .map(|(i, _)| i as u32)
         .unwrap_or(0);
     let t1 = std::time::Instant::now();
-    let outs = model.forward_greedy_n(next, &mut session, decode_tokens)?;
+    let outs = crate::airbug::span("decode", || {
+        model.forward_greedy_n(next, &mut session, decode_tokens)
+    })?;
     anyhow::ensure!(
         outs.len() == decode_tokens,
         "forward_greedy_n returned {} tokens, expected {decode_tokens}",
@@ -449,6 +465,7 @@ pub fn measure_engine(
     println!(
         "  decode   {decode_tokens:>4} tok in {decode_secs:>6.2} s   {decode_rate:>7.1} tok/s"
     );
+    crate::airbug::log_rate("decode", decode_tokens, decode_secs, decode_rate);
     let decode_stats_after = allpaka_backend::gpu::decode_path_stats();
     let gpu_attempts = decode_stats_after.attempts - decode_stats_before.attempts;
     let gpu_successes = decode_stats_after.successes - decode_stats_before.successes;
@@ -817,6 +834,17 @@ fn write_engine_report(
     std::fs::write(&temporary, serde_json::to_vec_pretty(&report)?)?;
     std::fs::rename(&temporary, &report_path)?;
     println!("  benchmark report: {}", report_path.display());
+    if let (Some(prefill), Some(decode)) = (
+        report.measurements.iter().find(|m| m.name == "prefill"),
+        report.measurements.iter().find(|m| m.name == "decode"),
+    ) {
+        if let (Some(&prefill_rate), Some(&decode_rate)) = (
+            prefill.samples_tok_s.first(),
+            decode.samples_tok_s.first(),
+        ) {
+            crate::airbug::save_run(prefill_rate, prefill.tokens, decode_rate, decode.tokens);
+        }
+    }
     Ok(())
 }
 
@@ -858,6 +886,10 @@ fn report_phases(what: &str, secs: f64, tokens: usize) -> Vec<PhaseMetric> {
             per_token(*ns),
             *ns as f64 / (secs * 1e9) * 100.0
         );
+        crate::airbug::log(&format!(
+            "{what} {name} {:.1} ms/tok",
+            per_token(*ns)
+        ));
     }
     println!(
         "    {:<18} {:>7.1}  ({:>4.1}%)",

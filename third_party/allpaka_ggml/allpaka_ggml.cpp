@@ -73,6 +73,21 @@ static void fa_permute_out(
 
 extern "C" cudaStream_t allpaka_peer_stream(void);
 
+extern "C" int allpaka_dequant_f16(
+    void * cuda_ctx_v, const void * src, void * dst, int64_t n_elem, int w_type);
+
+extern "C" int allpaka_lt_gemm(
+    void * cuda_ctx_v, const void * w_f16, const float * x_f32, float * y_f32,
+    int n_in, int n_out, int m);
+
+extern "C" int allpaka_fp8_gemm(
+    void * cuda_ctx_v, const void * w_f16, const float * x_f32, float * y_f32,
+    int n_in, int n_out, int m);
+
+extern "C" int allpaka_fp8_gemm_q(
+    void * cuda_ctx_v, const void * w_q, const float * x_f32, float * y_f32,
+    int n_in, int n_out, int m, int w_type);
+
 extern "C" int allpaka_fa_launch_direct(void * fa_tensor_v);
 
 namespace {
@@ -80,6 +95,57 @@ namespace {
 std::mutex g_mu;
 ggml_backend_t g_be = nullptr;
 int g_device = 0;
+
+static bool f16_weights_on() {
+    const char * e = std::getenv("ALLPAKA_F16_W");
+    if (!e || !e[0]) {
+        return true;
+    }
+    return !(e[0] == '0' || e[0] == 'f' || e[0] == 'F');
+}
+
+// One-time Q4/Q6 -> f16. Prefill otherwise dequants the same weights on every GEMM.
+static std::unordered_map<const void *, void *> g_f16_w;
+
+static const void * f16_weight(const void * w, int32_t n_in, int32_t n_out, int32_t w_type, int32_t * ty_io) {
+    if (!f16_weights_on() || !g_be) {
+        return w;
+    }
+    auto it = g_f16_w.find(w);
+    if (it != g_f16_w.end()) {
+        *ty_io = GGML_TYPE_F16;
+        return it->second;
+    }
+    const int64_t n = (int64_t) n_in * (int64_t) n_out;
+    if (n <= 0) {
+        return w;
+    }
+    size_t free_b = 0, total_b = 0;
+    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) {
+        return w;
+    }
+    const size_t need = (size_t) n * sizeof(uint16_t);
+    if (free_b < need + (3ull << 30)) {
+        return w;
+    }
+    void * dst = nullptr;
+    if (cudaMalloc(&dst, need) != cudaSuccess) {
+        return w;
+    }
+    if (allpaka_dequant_f16(g_be->context, w, dst, n, w_type) != 0) {
+        cudaFree(dst);
+        return w;
+    }
+    g_f16_w.emplace(w, dst);
+    static int logged = 0;
+    if (logged < 3) {
+        std::fprintf(stderr, "allpaka_ggml: f16 weight %d MiB (cached %d)\n",
+                     (int) (need >> 20), (int) g_f16_w.size());
+        logged++;
+    }
+    *ty_io = GGML_TYPE_F16;
+    return dst;
+}
 
 struct ViewCtx {
     void * ptr;
@@ -601,16 +667,36 @@ extern "C" int allpaka_ggml_mul_mat(
     }
 
     std::lock_guard<std::mutex> lock(g_mu);
-    ShapeKey key{n_in, n_out, m, w_type};
+    const char * fp8_first = std::getenv("ALLPAKA_FP8");
+    if (fp8_first && fp8_first[0] == '1' && m >= 32 &&
+        allpaka_fp8_gemm_q(g_be->context, w_dev, x_dev, y_dev, n_in, n_out, m, w_type) == 0) {
+        return 0;
+    }
+    int32_t ty_use = w_type;
+    const void * w_use = f16_weight(w_dev, n_in, n_out, w_type, &ty_use);
+    ShapeKey key{n_in, n_out, m, ty_use};
     Slot * slot = get_or_create_slot(key);
     if (!slot) {
         return -5;
     }
 
-    slot->vw->ptr = const_cast<void *>(w_dev);
+    if (ty_use == GGML_TYPE_F16) {
+        const char * fp8 = std::getenv("ALLPAKA_FP8");
+        if (fp8 && fp8[0] == '1' &&
+            allpaka_fp8_gemm(g_be->context, w_use, x_dev, y_dev, n_in, n_out, m) == 0) {
+            return 0;
+        }
+        const char * lt = std::getenv("ALLPAKA_LT");
+        const bool lt_on = !lt || !lt[0] || !(lt[0] == '0' || lt[0] == 'f' || lt[0] == 'F');
+        if (lt_on && allpaka_lt_gemm(g_be->context, w_use, x_dev, y_dev, n_in, n_out, m) == 0) {
+            return 0;
+        }
+    }
+
+    slot->vw->ptr = const_cast<void *>(w_use);
     slot->vx->ptr = const_cast<float *>(x_dev);
     slot->vy->ptr = y_dev;
-    slot->W->data = const_cast<void *>(w_dev);
+    slot->W->data = const_cast<void *>(w_use);
     slot->X->data = const_cast<float *>(x_dev);
     slot->Y->data = y_dev;
 

@@ -30,7 +30,7 @@ link.exe /nologo /DLL /OUT:"%OUT%\allpaka_ggml.dll" /IMPLIB:"%OUT%\allpaka_ggml.
   "%OUT%\allpaka_ggml.obj" "%OUT%\fa_permute.obj" "%OUT%\mmvq_bridge.obj" ^
   "%LLAMA%\build-cuda\ggml\src\ggml-base.lib" ^
   "%LLAMA%\build-cuda\ggml\src\ggml-cuda\ggml-cuda.lib" ^
-  /LIBPATH:"%CUDA_PATH%\lib\x64" cudart.lib cuda.lib cublas.lib
+  /LIBPATH:"%CUDA_PATH%\lib\x64" cudart.lib cuda.lib cublas.lib cublasLt.lib
 if errorlevel 1 exit /b 1
 
 copy /Y "%LLAMA%\build-cuda\bin\ggml-base.dll" "%OUT%\" >nul
