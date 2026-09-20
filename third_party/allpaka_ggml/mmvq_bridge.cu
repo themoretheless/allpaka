@@ -1043,7 +1043,7 @@ extern "C" int allpaka_fp8_gemm_q(
         w8 = cit->second.fp8;
         w_scale = cit->second.scale;
         cached = true;
-    } else if (!capturing && need_w >= (64ull << 20)) {
+    } else if (!capturing && need_w >= (1ull << 20)) {
         size_t free_b = 0, total_b = 0;
         cudaMemGetInfo(&free_b, &total_b);
         if (free_b > need_w + (512ull << 20)) {
@@ -1092,7 +1092,7 @@ extern "C" int allpaka_fp8_gemm_q(
         }
         qs = qstream;
     }
-    const bool time_this = !capturing && !cached && m >= 400 && nw >= 100000000 && timed < 3;
+    const bool time_this = !capturing && !cached && m >= 400 && nw >= 10000000 && timed < 3;
     if (!cached) {
     if (time_this) {
         cudaEventRecord(ev0, qs);
@@ -1188,7 +1188,7 @@ extern "C" int allpaka_fp8_gemm_q(
         float best_ms = 1e30f;
         const float alpha_try = 1.f;
         const float beta_try = 0.f;
-        const bool tune = m >= 400 && nw >= 100000000;
+        const bool tune = m >= 400 && nw >= 10000000;
         if (tune) {
             for (int spin = 0; spin < 30; ++spin) {
                 cublasLtMatmul(

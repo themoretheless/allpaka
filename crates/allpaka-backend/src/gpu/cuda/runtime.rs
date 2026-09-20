@@ -1887,6 +1887,7 @@ pub fn launch_matvec_y_ptr_on(
     // Prefill-sized batches use ggml MMQ via launch_gemm_dequant.
     // ALLPAKA_GGML_DECODE=1: llama MMVQ for non-add (legacy; disables fusion in decode).
     // ALLPAKA_GGML_MMVQ=1: llama MMVQ for all m=1 including add, keep our QKV/gate fusion.
+    // Opt-in: native MMVQ measured ~70 tg vs ~66 ggml on 32B/5090 (hot window).
     let ggml_mmvq = crate::gpu::cuda::ggml::enabled()
         && (std::env::var("ALLPAKA_GGML_MMVQ")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
