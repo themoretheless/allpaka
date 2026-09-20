@@ -12,6 +12,7 @@ use crate::profile;
 use allpaka_backend::{ops, QuantMat};
 use allpaka_gguf::GgufFile;
 use anyhow::{bail, Context, Result};
+use std::borrow::Cow;
 
 /// q/k/v projection biases (GLM's attention_bias): the parsed vectors for the
 /// CPU path, the raw F32 mmap bytes for GPU binds.
@@ -600,9 +601,9 @@ pub fn route_gated(
     // GLM/DeepSeek-style selection bias: it shifts ONLY the top-k choice;
     // the weights stay the unbiased gated scores (llama.cpp does the same:
     // `selection_probs = probs + exp_probs_b`, weights from `probs`).
-    let selection: Vec<f32> = match bias {
-        Some(b) => scores.iter().zip(b).map(|(s, b)| s + b).collect(),
-        None => scores.clone(),
+    let selection: Cow<'_, [f32]> = match bias {
+        Some(b) => Cow::Owned(scores.iter().zip(b).map(|(s, b)| s + b).collect()),
+        None => Cow::Borrowed(&scores),
     };
     // Partial selection, not a full sort: this runs once per token per layer
     // (480 x 94 in a prefill), and sorting 128 floats to take 8 was a
