@@ -5,18 +5,6 @@ version = 3
 [[package]]
 name = "airbug-bench"
 version = "0.6.0"
-source = "git+https://github.com/themoretheless/airbug?branch=release#ce464fac0369ee4bbde4cf578eaa0b6626ae957e"
-dependencies = [
- "airbug-bench-macros",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
-name = "airbug-bench"
-version = "0.6.0"
 source = "git+https://github.com/themoretheless/airbug?rev=75b1321b5d7ff2cee983379f539c07726a7d27e5#75b1321b5d7ff2cee983379f539c07726a7d27e5"
 dependencies = [
  "serde",
@@ -26,9 +14,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "airbug-bench"
+version = "0.6.0"
+source = "git+https://github.com/themoretheless/airbug?rev=ce464fac#ce464fac0369ee4bbde4cf578eaa0b6626ae957e"
+dependencies = [
+ "airbug-bench-macros",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "airbug-bench-macros"
 version = "0.6.0"
-source = "git+https://github.com/themoretheless/airbug?branch=release#ce464fac0369ee4bbde4cf578eaa0b6626ae957e"
+source = "git+https://github.com/themoretheless/airbug?rev=ce464fac#ce464fac0369ee4bbde4cf578eaa0b6626ae957e"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -63,8 +63,8 @@ dependencies = [
 name = "allpaka-cli"
 version = "0.1.0"
 dependencies = [
- "airbug-bench 0.6.0 (git+https://github.com/themoretheless/airbug?branch=release)",
  "airbug-bench 0.6.0 (git+https://github.com/themoretheless/airbug?rev=75b1321b5d7ff2cee983379f539c07726a7d27e5)",
+ "airbug-bench 0.6.0 (git+https://github.com/themoretheless/airbug?rev=ce464fac)",
  "airbug-otel",
  "allpaka-backend",
  "allpaka-core",

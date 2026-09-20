@@ -25,7 +25,7 @@ run_allpaka() {
       ([.measurements[] | select(.name=="prefill")][0] |
        .tokens==$pp and .context_tokens==0 and (.input_tokens|length)==$pp) and
       ([.measurements[] | select(.name=="decode")][0] |
-       .tokens==$tg and .context_tokens==$pp and (.input_tokens|length)==$tg and
+       .tokens==$tg and .context_tokens==1 and (.input_tokens|length)==$tg and
        .fast_path.attempts==$tg and .fast_path.successes==$tg and .fast_path.declines==0)
     ' "$out/allpaka-$1.json" >/dev/null
 }
@@ -33,7 +33,7 @@ run_allpaka() {
 run_llama() {
     "$llama" -m "$model" -p "$pp" -n 0 -d 0 -r 1 -ngl 99 -ctk f16 -ctv f16 -o json \
         >"$out/llama-pp-$1.json" 2>"$out/llama-pp-$1.log"
-    "$llama" -m "$model" -p 0 -n "$tg" -d "$pp" -r 1 -ngl 99 -ctk f16 -ctv f16 -o json \
+    "$llama" -m "$model" -p 0 -n "$tg" -d 1 -r 1 -ngl 99 -ctk f16 -ctv f16 -o json \
         >"$out/llama-tg-$1.json" 2>"$out/llama-tg-$1.log"
 }
 
@@ -56,7 +56,7 @@ jq -n --arg model "$model" --arg sha "$sha" --argjson pp "$pp" --argjson tg "$tg
    allpaka_prefill: ([$ap[0][].measurements[]|select(.name=="prefill")|.summary.median]|stats),
    allpaka_decode: ([$ap[0][].measurements[]|select(.name=="decode")|.summary.median]|stats),
    llama_prefill: ([$lp[0][]|select(.n_prompt==$pp and .n_gen==0 and .n_depth==0)|.samples_ts[]]|stats),
-   llama_decode: ([$lt[0][]|select(.n_prompt==0 and .n_gen==$tg and .n_depth==$pp)|.samples_ts[]]|stats)}
+   llama_decode: ([$lt[0][]|select(.n_prompt==0 and .n_gen==$tg and .n_depth==1)|.samples_ts[]]|stats)}
 ' >"$out/comparison.json"
 cat "$out/comparison.json"
 printf '\nArtifacts: %s\n' "$out"

@@ -26,14 +26,19 @@ run_allpaka() {
 
 {
   echo "=== mvbench (MV_ID on) ==="
+  set +e
   (cd "$ROOT" && cargo test -p allpaka-backend --release --test gpu_glm_mvbench -- --ignored --nocapture) \
-    | tee "$OUT/mvbench-on.log" | rg 'GB/s|SKIP|idx |error|panic' || true
+    >"$OUT/mvbench-on.log" 2>&1
+  mvbench_status=$?
+  set -e
+  rg 'GB/s|SKIP|idx |error|panic' "$OUT/mvbench-on.log" || true
+  (( mvbench_status == 0 )) || exit "$mvbench_status"
 
-  run_allpaka mvid-on
+  run_allpaka mvid-on ALLPAKA_MV_ID=1 ALLPAKA_SHARED_STAGGER=0
   sleep 2
-  run_allpaka mvid-off ALLPAKA_MV_ID=0
+  run_allpaka mvid-off ALLPAKA_MV_ID=0 ALLPAKA_SHARED_STAGGER=0
   sleep 2
-  run_allpaka stagger-on ALLPAKA_SHARED_STAGGER=1
+  run_allpaka stagger-on ALLPAKA_MV_ID=0 ALLPAKA_SHARED_STAGGER=1
   sleep 2
   echo "=== llama ==="
   llama-bench -m "$MODEL" -p 480 -n 32 -r 1 -b 2048 -ub 512 | tee "$OUT/llama.log"
