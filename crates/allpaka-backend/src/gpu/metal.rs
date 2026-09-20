@@ -18,7 +18,9 @@
 #![cfg(target_os = "macos")]
 
 use metal::foreign_types::ForeignType;
-use metal::{Buffer, CommandQueue, ComputePipelineState, Device, MTLResourceOptions, MTLSize};
+use metal::{
+    Buffer, CommandQueue, ComputePipelineState, Device, MTLResourceOptions, MTLSize,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -45,10 +47,97 @@ static SCHED_NS: AtomicU64 = AtomicU64::new(0);
 
 /// `(gpu_busy_ns, sched_ns)` since process start.
 pub fn gpu_time_stats() -> (u64, u64) {
-    (
-        GPU_BUSY_NS.load(Ordering::Relaxed),
-        SCHED_NS.load(Ordering::Relaxed),
-    )
+    (GPU_BUSY_NS.load(Ordering::Relaxed), SCHED_NS.load(Ordering::Relaxed))
+}
+
+/// Effective GB/s of one INDEXED matvec (slots experts × n_out rows).
+/// Used by `gpu_glm_mvbench` to A/B `ALLPAKA_MV_ID` geometry vs plain.
+/// `w` must hold at least `slots` contiguous expert matrices of shape
+/// `[n_out, n_in]` (same layout as decode expert packs).
+pub fn indexed_matvec_bandwidth(
+    w: &[u8],
+    ty: GgmlType,
+    n_out: usize,
+    n_in: usize,
+    slots: usize,
+    rounds: u32,
+) -> Option<f64> {
+    let gpu_m = GPU.get()?.as_ref()?;
+    let mut gpu = gpu_m.lock().ok()?;
+    let mat = resolve(&gpu, ty, w)?;
+    let lpr = lanes_per_row(ty, n_in);
+    let state = gpu
+        .pipeline_full(mat.kernel, 1, lpr, true, false)?
+        .to_owned();
+    let expert_bytes = match ty {
+        GgmlType::Q4K => n_out * (n_in / 256) * 144,
+        GgmlType::Q5K => n_out * (n_in / 256) * 176,
+        GgmlType::Q8_0 => n_out * (n_in / 32) * 34,
+        _ => return None,
+    };
+    if w.len() < expert_bytes.saturating_mul(slots.max(1)) {
+        return None;
+    }
+    let stride = expert_bytes as u64;
+    // Stage x / ids / y in the shared arenas.
+    let x_elems = n_in.max(slots);
+    let y_elems = n_out * slots + slots;
+    gpu.ensure_arenas(x_elems * 4, y_elems * 4);
+    unsafe {
+        let xp = gpu.x_arena.contents() as *mut f32;
+        for i in 0..n_in {
+            *xp.add(i) = 0.01;
+        }
+        let yp = gpu.y_arena.contents() as *mut u32;
+        for s in 0..slots {
+            *yp.add(s) = (s % slots.max(1)) as u32;
+        }
+    }
+    let before = gpu_time_stats();
+    objc::rc::autoreleasepool(|| {
+        for _ in 0..rounds {
+            let cmd = gpu.queue.new_command_buffer();
+            let enc = cmd.compute_command_encoder_with_dispatch_type(
+                metal::MTLDispatchType::Concurrent,
+            );
+            enc.set_compute_pipeline_state(&state);
+            enc.set_buffer(0, Some(&gpu.chunks[mat.chunk].buf), 0);
+            enc.set_buffer(1, Some(&gpu.x_arena), 0);
+            enc.set_buffer(2, Some(&gpu.y_arena), (slots * 4) as u64);
+            let a = n_in as u32;
+            let b = n_out as u32;
+            enc.set_bytes(3, 4, &a as *const u32 as *const _);
+            enc.set_bytes(4, 4, &b as *const u32 as *const _);
+            enc.set_bytes(5, 8, &mat.w_off as *const u64 as *const _);
+            enc.set_buffer(6, Some(&gpu.y_arena), 0);
+            let idx = GpuIdxArgs {
+                stride,
+                slots: slots as u32,
+                x_stride: 0,
+                ids_stride: 0,
+                x_row_stride: 0,
+                y_row_stride: 0,
+                n_rows: 0,
+            };
+            enc.set_bytes(
+                7,
+                std::mem::size_of::<GpuIdxArgs>() as u64,
+                &idx as *const GpuIdxArgs as *const _,
+            );
+            dispatch_mv_indexed(&enc, ty, n_in, n_out, slots);
+            enc.end_encoding();
+            cmd.commit();
+            cmd.wait_until_completed();
+            note_gpu_times(cmd);
+        }
+    });
+    let after = gpu_time_stats();
+    let busy = (after.0 - before.0) as f64 / 1e9;
+    if busy <= 0.0 {
+        return None;
+    }
+    let total = (expert_bytes * slots) as f64 * rounds as f64;
+    Some(total / busy / 1e9)
 }
 
 /// Read the completed buffer's own timestamps. CFTimeIntervals in seconds on
@@ -151,14 +240,17 @@ constant bool DUAL_GW [[function_constant(5)]];
 // y_row_stride elements apart. Off: plain indexed decode.
 constant bool ROWS [[function_constant(6)]];
 
-// COMBINE (decode MoE down projection): one threadgroup per output row
-// pair, one simdgroup per routed expert (threadgroup = 32 * idx.slots
-// threads), so y[j] = sum_s wts[s] * dot(W[ids[s]][j], act_s) reduces through
-// threadgroup memory directly into the residual delta. Removes the per-slot
-// down buffer, the standalone combine dispatch and one barrier per layer,
-// and stays deterministic: the slot order is fixed, no atomics. INDEXED
-// only; idx.slots <= 32.
-constant bool COMBINE [[function_constant(7)]];
+// Last INDEXED slot reads weights from buffer 11 / w2_off instead of
+// ids[slot]*stride. Lets the GLM shared expert's Q8_0 down ride in the
+// same dispatch as the routed experts (one more parallel slot), dropping
+// the separate shared-down launch. Must be pinned false when unused:
+// unset bool constants read as TRUE on this Metal.
+constant bool SHARED_TAIL [[function_constant(7)]];
+
+// Llama-style mul_mv_id grid for INDEXED decode: slot = tpg.z, rows on x.
+// Default ON; ALLPAKA_MV_ID=0 compiles the flat n_out*slots 1D packing.
+// Must be pinned explicitly (unset bool == TRUE on this Metal).
+constant bool MV_ID_GRID [[function_constant(8)]];
 
 inline float4 sw4(float4 g, float4 u) {
     return u * (g / (1.0f + exp(-g)));
@@ -254,6 +346,114 @@ kernel void matvec_q8_0(
     }
 }
 
+
+
+// Port of llama.cpp's kernel_mul_mv_q8_0_f32 structure (MIT): NR0 rows per
+// SIMD group via LPR (default NR0=2). INDEXED requires n_out % NR0 == 0.
+// Decode INDEXED uses llama mul_mv_id geometry: grid.z = slot, grid.x covers
+// n_out (ALLPAKA_MV_ID=0 keeps flat n_out*slots 1D). SWIGLU_X / SHARED_TAIL
+// as before. qs loads are packed_char4 (34-byte blocks).
+kernel void matvec_q8_0_mv(
+    device const uchar* w [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant uint& n_in [[buffer(3)]],
+    constant uint& n_out [[buffer(4)]],
+    constant ulong& w_off [[buffer(5)]],
+    device const uint* ids [[buffer(6)]],
+    constant IdxArgs& idx [[buffer(7)]],
+    device const float* xu [[buffer(8)]],
+    device const uchar* w2 [[buffer(11)]],
+    constant ulong& w2_off [[buffer(12)]],
+    uint3 tpg [[thread_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]])
+{
+    constexpr short NQ = 8;
+    const uint NR0 = 32 / LPR;
+    // ID grid: one expert slot per z; x walks rows within that expert.
+    // ROWS stays on the flat 1D packing (MTP verify). MV_ID_GRID opt-out
+    // restores flat INDEXED for A/B (ALLPAKA_MV_ID=0).
+    const bool id_grid = INDEXED && !ROWS && MV_ID_GRID;
+    uint tok = 0;
+    uint slot = 0;
+    uint j0 = 0;
+    uint y_base = 0;
+    uint nrows = 0;
+    bool any;
+    if (id_grid) {
+        slot = tpg.z;
+        j0 = (tpg.x / 32) * NR0;
+        any = slot < idx.slots && j0 < n_out;
+        if (!any) {
+            j0 = 0;
+            slot = 0;
+        }
+        nrows = any ? min(NR0, n_out - j0) : 0u;
+        y_base = slot * n_out + j0;
+    } else {
+        uint ycols = INDEXED ? n_out * idx.slots : n_out;
+        uint flat = (tpg.x / 32) * NR0;
+        any = flat < (ROWS ? ycols * idx.n_rows : ycols);
+        if (!any) flat = 0;
+        tok = ROWS ? flat / ycols : 0;
+        uint fr = ROWS ? flat - tok * ycols : flat;
+        nrows = any ? min(NR0, ycols - fr) : 0u;
+        slot = INDEXED ? fr / n_out : 0;
+        j0 = INDEXED ? fr % n_out : fr;
+        y_base = fr;
+    }
+    device const uchar* wm = w;
+    ulong woff = w_off;
+    if (INDEXED) {
+        if (SHARED_TAIL && slot + 1u == idx.slots) {
+            wm = w2;
+            woff = w2_off;
+        } else {
+            wm += ids[(ROWS ? tok * idx.ids_stride : 0u) + slot] * idx.stride;
+        }
+        x += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
+        if (SWIGLU_X) {
+            xu += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
+        }
+    }
+    uint nb = n_in / 32;
+    ulong nb01 = (ulong)nb * 34;
+    device const uchar* row0 = wm + woff + (ulong)j0 * nb01;
+
+    const short ix = tiisg / 4;
+    const short il = tiisg % 4;
+    float sumf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    device const float* yb = x + (ulong)ix * 32u + (ulong)il * (uint)NQ;
+    device const float* ub = xu + (ulong)ix * 32u + (ulong)il * (uint)NQ;
+
+    for (uint ib = ix; ib < nb; ib += 8) {
+        float4 a0 = *(device const float4*)(yb + 0);
+        float4 a1 = *(device const float4*)(yb + 4);
+        if (SWIGLU_X) {
+            a0 = sw4(a0, *(device const float4*)(ub + 0));
+            a1 = sw4(a1, *(device const float4*)(ub + 4));
+        }
+        device const uchar* blk = row0 + (ulong)ib * 34u;
+        for (uint row = 0; row < NR0; ++row) {
+            device const packed_char4* qs =
+                (device const packed_char4*)(blk + 2 + il * NQ);
+            float sumq = dot(float4(qs[0]), a0) + dot(float4(qs[1]), a1);
+            sumf[row] += sumq * (float)(*(device const half*)blk);
+            ulong step = (row + 1 < nrows) ? nb01 : 0;
+            blk += step;
+        }
+        yb += 8 * 32;
+        ub += 8 * 32;
+    }
+
+    for (uint row = 0; row < NR0; row++) {
+        float s = simd_sum(sumf[row]);
+        if (tiisg == 0 && row < nrows) {
+            y[(ROWS ? tok * idx.y_row_stride : 0u) + y_base + row] = s;
+        }
+    }
+}
 
 // Q5_0: 22-byte blocks (f16 scale, 32 high bits, 16 nibble bytes); same
 // dispatch geometry as matvec_q8_0, dequantising on load like ggml's
@@ -957,28 +1157,25 @@ kernel void matvec_q6_k_mv(
     constant ulong& w_off [[buffer(5)]],
     device const uint* ids [[buffer(6)]],
     constant IdxArgs& idx [[buffer(7)]],
-    device const float* xu [[buffer(8)]],
-    device const float* wts [[buffer(14)]],
     uint tid [[thread_position_in_grid]],
-    uint tgpig [[threadgroup_position_in_grid]],
-    ushort sgitg [[simdgroup_index_in_threadgroup]],
     ushort tiisg [[thread_index_in_simdgroup]])
 {
     const uchar kmask1 = 0x03, kmask2 = 0x0C, kmask3 = 0x30, kmask4 = 0xC0;
 
-    // COMBINE: one threadgroup per output row pair, one simdgroup per routed
-    // slot (threadgroup = 32 * slots threads); the slots reduce through
-    // threadgroup memory below. Otherwise the flat row space covers
-    // n_out * slots and the slot comes from the row index.
-    uint ycols = (INDEXED && !COMBINE) ? n_out * idx.slots : n_out;
-    uint flat = COMBINE ? tgpig * 2 : (tid / 32) * 2;
+    uint ycols = INDEXED ? n_out * idx.slots : n_out;
+    uint flat = (tid / 32) * 2;
     bool any = flat < ycols;
     if (!any) flat = 0;
     uint nrows = any ? min(2u, ycols - flat) : 0u;
-    uint slot = COMBINE ? sgitg : ((INDEXED && !COMBINE) ? flat / n_out : 0);
-    uint j0 = (INDEXED && !COMBINE) ? flat % n_out : flat;
+    uint slot = INDEXED ? flat / n_out : 0;
+    uint j0 = INDEXED ? flat % n_out : flat;
+    if (INDEXED) {
+        w += ids[slot] * idx.stride;
+        x += (ulong)slot * idx.x_stride;
+    }
     uint nb = n_in / 256;
     ulong nb01 = (ulong)nb * 210;
+    device const uchar* row0 = w + w_off + (ulong)j0 * nb01;
 
     const short t = tiisg / 2;
     const short ix = tiisg % 2;
@@ -993,77 +1190,40 @@ kernel void matvec_q6_k_mv(
     float yl[16];
     float sumf[2] = {0.0f, 0.0f};
 
-    {
-        device const uchar* wm = w;
-        device const float* xs = x;
-        device const float* us = xu;
-        if (INDEXED) {
-            wm += ids[slot] * idx.stride;
-            xs += (ulong)slot * idx.x_stride;
-            if (SWIGLU_X) {
-                us += (ulong)slot * idx.x_stride;
-            }
+    for (uint ib = ix; ib < nb; ib += 2) {
+        device const uchar* blk = row0 + ib * 210;
+        device const uchar* q1 = blk + q_offset_l;
+        device const uchar* q2 = q1 + 32;
+        device const uchar* qh = blk + 128 + q_offset_h;
+        device const char* sc = (device const char*)(blk + 192) + is;
+        device const uchar* dh = blk + 208;
+
+        device const float* yv = x + ib * 256 + y_offset;
+        for (short l = 0; l < 4; ++l) {
+            yl[4 * l + 0] = yv[l + 0];
+            yl[4 * l + 1] = yv[l + 32];
+            yl[4 * l + 2] = yv[l + 64];
+            yl[4 * l + 3] = yv[l + 96];
         }
-        device const uchar* row0 = wm + w_off + (ulong)j0 * nb01;
-        thread float* part = sumf;
 
-        for (uint ib = ix; ib < nb; ib += 2) {
-            device const uchar* blk = row0 + ib * 210;
-            device const uchar* q1 = blk + q_offset_l;
-            device const uchar* q2 = q1 + 32;
-            device const uchar* qh = blk + 128 + q_offset_h;
-            device const char* sc = (device const char*)(blk + 192) + is;
-            device const uchar* dh = blk + 208;
-
-            device const float* yv = xs + ib * 256 + y_offset;
-            device const float* uv = us + ib * 256 + y_offset;
+        for (uint row = 0; row < 2; ++row) {
+            float4 sums = {0.0f, 0.0f, 0.0f, 0.0f};
             for (short l = 0; l < 4; ++l) {
-                yl[4 * l + 0] = SWIGLU_X ? sw1(yv[l + 0], uv[l + 0]) : yv[l + 0];
-                yl[4 * l + 1] = SWIGLU_X ? sw1(yv[l + 32], uv[l + 32]) : yv[l + 32];
-                yl[4 * l + 2] = SWIGLU_X ? sw1(yv[l + 64], uv[l + 64]) : yv[l + 64];
-                yl[4 * l + 3] = SWIGLU_X ? sw1(yv[l + 96], uv[l + 96]) : yv[l + 96];
+                sums[0] += yl[4 * l + 0] * ((char)((q1[l] & 0xF) | ((qh[l] & kmask1) << 4)) - 32);
+                sums[1] += yl[4 * l + 1] * ((char)((q2[l] & 0xF) | ((qh[l] & kmask2) << 2)) - 32);
+                sums[2] += yl[4 * l + 2] * ((char)((q1[l] >> 4) | ((qh[l] & kmask3) << 0)) - 32);
+                sums[3] += yl[4 * l + 3] * ((char)((q2[l] >> 4) | ((qh[l] & kmask4) >> 2)) - 32);
             }
+            sumf[row] += half_at(dh) *
+                (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);
 
-            for (uint row = 0; row < 2; ++row) {
-                float4 sums = {0.0f, 0.0f, 0.0f, 0.0f};
-                for (short l = 0; l < 4; ++l) {
-                    sums[0] += yl[4 * l + 0] * ((char)((q1[l] & 0xF) | ((qh[l] & kmask1) << 4)) - 32);
-                    sums[1] += yl[4 * l + 1] * ((char)((q2[l] & 0xF) | ((qh[l] & kmask2) << 2)) - 32);
-                    sums[2] += yl[4 * l + 2] * ((char)((q1[l] >> 4) | ((qh[l] & kmask3) << 0)) - 32);
-                    sums[3] += yl[4 * l + 3] * ((char)((q2[l] >> 4) | ((qh[l] & kmask4) >> 2)) - 32);
-                }
-                part[row] += half_at(dh) *
-                    (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);
-
-                ulong step = (row + 1 < nrows) ? nb01 : 0;
-                q1 += step;
-                q2 += step;
-                qh += step;
-                sc += step;
-                dh += step;
-            }
+            ulong step = (row + 1 < nrows) ? nb01 : 0;
+            q1 += step;
+            q2 += step;
+            qh += step;
+            sc += step;
+            dh += step;
         }
-    }
-
-    if (COMBINE) {
-        // Weighted slot sum in fixed slot order: the same arithmetic the
-        // standalone combine kernel performed on the per-slot down output.
-        threadgroup float red[64];
-        float s0 = simd_sum(sumf[0]);
-        float s1 = simd_sum(sumf[1]);
-        if (tiisg == 0) {
-            red[2 * sgitg + 0] = wts[slot] * s0;
-            red[2 * sgitg + 1] = wts[slot] * s1;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (sgitg == 0 && tiisg < nrows) {
-            float acc = 0.0f;
-            for (uint s = 0; s < idx.slots; ++s) {
-                acc += red[2 * s + tiisg];
-            }
-            y[flat + tiisg] = acc;
-        }
-        return;
     }
 
     for (uint row = 0; row < 2; row++) {
@@ -1075,10 +1235,10 @@ kernel void matvec_q6_k_mv(
 }
 
 // Port of llama.cpp's kernel_mul_mv_q4_K_f32 structure (MIT), same skeleton
-// as matvec_q3_k_mv: 2 rows per SIMD group, activations registered once
-// (yl low half, yh high half), nibble masks in place with 1/16 and 1/256
-// folded into the scale multipliers. 16 threads per output row; INDEXED
-// requires n_out % 2 == 0.
+// as matvec_q3_k_mv: NR0 rows per SIMD group via LPR (default NR0=2),
+// activations registered once (yl low half, yh high half), nibble masks in
+// place with 1/16 and 1/256 folded into the scale multipliers. INDEXED
+// requires n_out % NR0 == 0 so a group never straddles expert slots.
 kernel void matvec_q4_k_mv(
     device const uchar* w [[buffer(0)]],
     device const float* x [[buffer(1)]],
@@ -1094,11 +1254,8 @@ kernel void matvec_q4_k_mv(
     device const uchar* w2 [[buffer(11)]],
     constant ulong& w2_off [[buffer(12)]],
     device float* y2 [[buffer(13)]],
-    device const float* wts [[buffer(14)]],
-    uint tid [[thread_position_in_grid]],
+    uint3 tpg [[thread_position_in_grid]],
     uint ltid [[thread_position_in_threadgroup]],
-    uint tgpig [[threadgroup_position_in_grid]],
-    ushort sgitg [[simdgroup_index_in_threadgroup]],
     ushort tiisg [[thread_index_in_simdgroup]])
 {
     if (WAIT_X) {
@@ -1114,31 +1271,58 @@ kernel void matvec_q4_k_mv(
     const ushort kmask2 = 0x0f0f;
     const ushort kmask3 = 0xc0c0;
 
-    // COMBINE: one threadgroup per output row pair, one simdgroup per routed
-    // slot (threadgroup = 32 * slots threads), reduced through threadgroup
-    // memory at the end. Otherwise the flat row space covers n_out * slots.
-    uint gate_rows = (INDEXED && !COMBINE) ? n_out * idx.slots : n_out;
-    uint ycols = DUAL_GW ? gate_rows * 2 : gate_rows;
-    uint flat = COMBINE ? tgpig * 2 : (tid / 32) * 2;
-    bool any = flat < (ROWS ? gate_rows * idx.n_rows : ycols);
-    if (!any) flat = 0;
-    uint tok = ROWS ? flat / gate_rows : 0;
-    // The second half of the flat rows belongs to the up matrix.
+    const uint NR0 = 32 / LPR;
+    // ID grid for plain INDEXED decode; DUAL_GW / ROWS stay flat 1D.
+    const bool id_grid = INDEXED && !ROWS && !DUAL_GW && MV_ID_GRID;
+    uint tok = 0;
+    uint slot = 0;
+    uint j0 = 0;
+    uint y_base = 0;
+    uint nrows = 0;
+    bool any;
     device const uchar* wm = w;
     ulong woff = w_off;
     device float* yout = y;
-    if (DUAL_GW && flat >= gate_rows) {
-        flat -= gate_rows;
-        wm = w2;
-        woff = w2_off;
-        yout = y2;
+    if (id_grid) {
+        slot = tpg.z;
+        j0 = (tpg.x / 32) * NR0;
+        any = slot < idx.slots && j0 < n_out;
+        if (!any) {
+            j0 = 0;
+            slot = 0;
+        }
+        nrows = any ? min(NR0, n_out - j0) : 0u;
+        y_base = slot * n_out + j0;
+    } else {
+        uint gate_rows = INDEXED ? n_out * idx.slots : n_out;
+        uint ycols = DUAL_GW ? gate_rows * 2 : gate_rows;
+        uint flat = (tpg.x / 32) * NR0;
+        any = flat < (ROWS ? gate_rows * idx.n_rows : ycols);
+        if (!any) flat = 0;
+        tok = ROWS ? flat / gate_rows : 0;
+        // The second half of the flat rows belongs to the up matrix.
+        if (DUAL_GW && flat >= gate_rows) {
+            flat -= gate_rows;
+            wm = w2;
+            woff = w2_off;
+            yout = y2;
+        }
+        uint fr = ROWS ? flat - tok * gate_rows : flat;
+        nrows = any ? min(NR0, gate_rows - fr) : 0u;
+        slot = INDEXED ? fr / n_out : 0;
+        j0 = INDEXED ? fr % n_out : fr;
+        y_base = fr;
     }
-    uint fr = ROWS ? flat - tok * gate_rows : flat;
-    uint nrows = any ? min(2u, gate_rows - fr) : 0u;
-    uint slot = COMBINE ? sgitg : ((INDEXED && !COMBINE) ? fr / n_out : 0);
-    uint j0 = (INDEXED && !COMBINE) ? fr % n_out : fr;
+    if (INDEXED) {
+        wm += ids[(ROWS ? tok * idx.ids_stride : 0u) + slot] * idx.stride;
+        x += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
+        if (SWIGLU_X) {
+            xu += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
+        }
+    }
     uint nb = n_in / 256;
     ulong nb01 = (ulong)nb * 144;
+    device const uchar* row0 = wm + woff + (ulong)j0 * nb01;
 
     const short ix = tiisg / 8;
     const short it = tiisg % 8;
@@ -1147,109 +1331,227 @@ kernel void matvec_q4_k_mv(
 
     float yl[16];
     float yh[16];
-    float sumf[2] = {0.0f, 0.0f};
+    float sumf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    device const float* y4 = x + ix * 256 + 64 * iq + 8 * ir;
+    device const float* u4 = xu + ix * 256 + 64 * iq + 8 * ir;
 
     ushort sc16[4];
     thread const uchar* sc8 = (thread const uchar*)sc16;
 
-    {
-        device const uchar* ws = wm;
-        device const float* xs = x;
-        device const float* us = xu;
-        if (INDEXED) {
-            ws += ids[(ROWS ? tok * idx.ids_stride : 0u) + slot] * idx.stride;
-            xs += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
-            if (SWIGLU_X) {
-                us += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
-            }
+    for (uint ib = ix; ib < nb; ib += 4) {
+        // float4 activation loads (same idea as Q8 `_mv`); weight dequant
+        // still walks yl/yh element-wise.
+        float4 yl0 = *(device const float4*)(y4 + 0);
+        float4 yl1 = *(device const float4*)(y4 + 4);
+        float4 yl2 = *(device const float4*)(y4 + 32);
+        float4 yl3 = *(device const float4*)(y4 + 36);
+        float4 yh0 = *(device const float4*)(y4 + 128);
+        float4 yh1 = *(device const float4*)(y4 + 132);
+        float4 yh2 = *(device const float4*)(y4 + 160);
+        float4 yh3 = *(device const float4*)(y4 + 164);
+        if (SWIGLU_X) {
+            yl0 = sw4(yl0, *(device const float4*)(u4 + 0));
+            yl1 = sw4(yl1, *(device const float4*)(u4 + 4));
+            yl2 = sw4(yl2, *(device const float4*)(u4 + 32));
+            yl3 = sw4(yl3, *(device const float4*)(u4 + 36));
+            yh0 = sw4(yh0, *(device const float4*)(u4 + 128));
+            yh1 = sw4(yh1, *(device const float4*)(u4 + 132));
+            yh2 = sw4(yh2, *(device const float4*)(u4 + 160));
+            yh3 = sw4(yh3, *(device const float4*)(u4 + 164));
         }
-        device const uchar* row0 = ws + woff + (ulong)j0 * nb01;
-        device const float* y4 = xs + ix * 256 + 64 * iq + 8 * ir;
-        device const float* u4 = us + ix * 256 + 64 * iq + 8 * ir;
-        thread float* part = sumf;
+        *((thread float4*)(yl + 0)) = yl0;
+        *((thread float4*)(yl + 4)) = yl1;
+        *((thread float4*)(yl + 8)) = yl2;
+        *((thread float4*)(yl + 12)) = yl3;
+        *((thread float4*)(yh + 0)) = yh0;
+        *((thread float4*)(yh + 4)) = yh1;
+        *((thread float4*)(yh + 8)) = yh2;
+        *((thread float4*)(yh + 12)) = yh3;
+        float4 sumy = {
+            yl0[0] + yl0[1] + yl0[2] + yl0[3] + yl1[0] + yl1[1] + yl1[2] + yl1[3],
+            yl2[0] + yl2[1] + yl2[2] + yl2[3] + yl3[0] + yl3[1] + yl3[2] + yl3[3],
+            yh0[0] + yh0[1] + yh0[2] + yh0[3] + yh1[0] + yh1[1] + yh1[2] + yh1[3],
+            yh2[0] + yh2[1] + yh2[2] + yh2[3] + yh3[0] + yh3[1] + yh3[2] + yh3[3],
+        };
+        device const uchar* blk = row0 + ib * 144;
+        device const ushort* sc = (device const ushort*)(blk + 4) + iq;
+        device const ushort* q1 = (device const ushort*)(blk + 16) + 16 * iq + 4 * ir;
+        device const uchar* dh = blk;
 
-        for (uint ib = ix; ib < nb; ib += 4) {
-            float4 sumy = {0.0f, 0.0f, 0.0f, 0.0f};
-            for (short i = 0; i < 8; ++i) {
-                yl[i + 0] = SWIGLU_X ? sw1(y4[i + 0], u4[i + 0]) : y4[i + 0];
-                sumy[0] += yl[i + 0];
-                yl[i + 8] = SWIGLU_X ? sw1(y4[i + 32], u4[i + 32]) : y4[i + 32];
-                sumy[1] += yl[i + 8];
-                yh[i + 0] = SWIGLU_X ? sw1(y4[i + 128], u4[i + 128]) : y4[i + 128];
-                sumy[2] += yh[i + 0];
-                yh[i + 8] = SWIGLU_X ? sw1(y4[i + 160], u4[i + 160]) : y4[i + 160];
-                sumy[3] += yh[i + 8];
+        for (uint row = 0; row < NR0; row++) {
+            sc16[0] = sc[0] & kmask1;
+            sc16[1] = sc[2] & kmask1;
+            sc16[2] = ((sc[4] >> 0) & kmask2) | ((sc[0] & kmask3) >> 2);
+            sc16[3] = ((sc[4] >> 4) & kmask2) | ((sc[2] & kmask3) >> 2);
+
+            device const ushort* q2 = q1 + 32;
+
+            float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
+            float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
+            for (short i = 0; i < 4; ++i) {
+                acc1[0] += yl[2 * i + 0] * (q1[i] & 0x000F);
+                acc1[1] += yl[2 * i + 1] * (q1[i] & 0x0F00);
+                acc1[2] += yl[2 * i + 8] * (q1[i] & 0x00F0);
+                acc1[3] += yl[2 * i + 9] * (q1[i] & 0xF000);
+                acc2[0] += yh[2 * i + 0] * (q2[i] & 0x000F);
+                acc2[1] += yh[2 * i + 1] * (q2[i] & 0x0F00);
+                acc2[2] += yh[2 * i + 8] * (q2[i] & 0x00F0);
+                acc2[3] += yh[2 * i + 9] * (q2[i] & 0xF000);
             }
-            device const uchar* blk = row0 + ib * 144;
-            device const ushort* sc = (device const ushort*)(blk + 4) + iq;
-            device const ushort* q1 = (device const ushort*)(blk + 16) + 16 * iq + 4 * ir;
-            device const uchar* dh = blk;
 
-            for (uint row = 0; row < 2; row++) {
-                sc16[0] = sc[0] & kmask1;
-                sc16[1] = sc[2] & kmask1;
-                sc16[2] = ((sc[4] >> 0) & kmask2) | ((sc[0] & kmask3) >> 2);
-                sc16[3] = ((sc[4] >> 4) & kmask2) | ((sc[2] & kmask3) >> 2);
+            half2 dm = *(device const half2*)dh;
+            sumf[row] +=
+                (float)dm.x * ((acc1[0] + (1.0f / 256.0f) * acc1[1]) * sc8[0] +
+                               (acc1[2] + (1.0f / 256.0f) * acc1[3]) * sc8[1] * (1.0f / 16.0f) +
+                               (acc2[0] + (1.0f / 256.0f) * acc2[1]) * sc8[4] +
+                               (acc2[2] + (1.0f / 256.0f) * acc2[3]) * sc8[5] * (1.0f / 16.0f)) -
+                (float)dm.y * (sumy[0] * sc8[2] + sumy[1] * sc8[3] +
+                               sumy[2] * sc8[6] + sumy[3] * sc8[7]);
 
-                device const ushort* q2 = q1 + 32;
-
-                float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
-                float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
-                for (short i = 0; i < 4; ++i) {
-                    acc1[0] += yl[2 * i + 0] * (q1[i] & 0x000F);
-                    acc1[1] += yl[2 * i + 1] * (q1[i] & 0x0F00);
-                    acc1[2] += yl[2 * i + 8] * (q1[i] & 0x00F0);
-                    acc1[3] += yl[2 * i + 9] * (q1[i] & 0xF000);
-                    acc2[0] += yh[2 * i + 0] * (q2[i] & 0x000F);
-                    acc2[1] += yh[2 * i + 1] * (q2[i] & 0x0F00);
-                    acc2[2] += yh[2 * i + 8] * (q2[i] & 0x00F0);
-                    acc2[3] += yh[2 * i + 9] * (q2[i] & 0xF000);
-                }
-
-                half2 dm = *(device const half2*)dh;
-                part[row] +=
-                    (float)dm.x * ((acc1[0] + (1.0f / 256.0f) * acc1[1]) * sc8[0] +
-                                   (acc1[2] + (1.0f / 256.0f) * acc1[3]) * sc8[1] * (1.0f / 16.0f) +
-                                   (acc2[0] + (1.0f / 256.0f) * acc2[1]) * sc8[4] +
-                                   (acc2[2] + (1.0f / 256.0f) * acc2[3]) * sc8[5] * (1.0f / 16.0f)) -
-                    (float)dm.y * (sumy[0] * sc8[2] + sumy[1] * sc8[3] +
-                                   sumy[2] * sc8[6] + sumy[3] * sc8[7]);
-
-                ulong step = (row + 1 < nrows) ? nb01 : 0;
-                q1 = (device const ushort*)((device const uchar*)q1 + step);
-                sc = (device const ushort*)((device const uchar*)sc + step);
-                dh += step;
-            }
-            y4 += 4 * 256;
-            u4 += 4 * 256;
+            ulong step = (row + 1 < nrows) ? nb01 : 0;
+            q1 = (device const ushort*)((device const uchar*)q1 + step);
+            sc = (device const ushort*)((device const uchar*)sc + step);
+            dh += step;
         }
+        y4 += 4 * 256;
+        u4 += 4 * 256;
     }
 
-    if (COMBINE) {
-        // Weighted slot sum in fixed slot order: the same arithmetic the
-        // standalone combine kernel performed on the per-slot down output.
-        threadgroup float red[64];
-        float s0 = simd_sum(sumf[0]);
-        float s1 = simd_sum(sumf[1]);
-        if (tiisg == 0) {
-            red[2 * sgitg + 0] = wts[slot] * s0;
-            red[2 * sgitg + 1] = wts[slot] * s1;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (sgitg == 0 && tiisg < nrows) {
-            float acc = 0.0f;
-            for (uint s = 0; s < idx.slots; ++s) {
-                acc += red[2 * s + tiisg];
-            }
-            yout[fr + tiisg] = acc;
-        }
-        return;
-    }
-
-    for (uint row = 0; row < 2; row++) {
+    for (uint row = 0; row < NR0; row++) {
         float s = simd_sum(sumf[row]);
         if (tiisg == 0 && row < nrows) {
-            yout[(ROWS ? tok * idx.y_row_stride : 0u) + fr + row] = s;
+            yout[(ROWS ? tok * idx.y_row_stride : 0u) + y_base + row] = s;
+        }
+    }
+}
+
+
+// Port of llama.cpp's kernel_mul_mv_q5_K_f32 structure (MIT): NR0 rows per
+// SIMD group via LPR (default NR0=2), activations registered once (yl/yh)
+// and reused across rows, with the 5th bit folded via qh masks. INDEXED
+// requires n_out % NR0 == 0. Used heavily for GLM shared gate/up (Q5_K).
+kernel void matvec_q5_k_mv(
+    device const uchar* w [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* y [[buffer(2)]],
+    constant uint& n_in [[buffer(3)]],
+    constant uint& n_out [[buffer(4)]],
+    constant ulong& w_off [[buffer(5)]],
+    device const uint* ids [[buffer(6)]],
+    constant IdxArgs& idx [[buffer(7)]],
+    device const float* xu [[buffer(8)]],
+    uint tid [[thread_position_in_grid]],
+    ushort tiisg [[thread_index_in_simdgroup]])
+{
+    const ushort kmask1 = 0x3f3f;
+    const ushort kmask2 = 0x0f0f;
+    const ushort kmask3 = 0xc0c0;
+
+    const uint NR0 = 32 / LPR;
+    uint ycols = INDEXED ? n_out * idx.slots : n_out;
+    uint flat = (tid / 32) * NR0;
+    bool any = flat < (ROWS ? ycols * idx.n_rows : ycols);
+    if (!any) flat = 0;
+    uint tok = ROWS ? flat / ycols : 0;
+    uint fr = ROWS ? flat - tok * ycols : flat;
+    uint nrows = any ? min(NR0, ycols - fr) : 0u;
+    uint slot = INDEXED ? fr / n_out : 0;
+    uint j0 = INDEXED ? fr % n_out : fr;
+    if (INDEXED) {
+        w += ids[(ROWS ? tok * idx.ids_stride : 0u) + slot] * idx.stride;
+        x += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
+        if (SWIGLU_X) {
+            xu += (ulong)tok * idx.x_row_stride + (ulong)slot * idx.x_stride;
+        }
+    }
+    uint nb = n_in / 256;
+    ulong nb01 = (ulong)nb * 176;
+    device const uchar* row0 = w + w_off + (ulong)j0 * nb01;
+
+    const short tid4 = tiisg / 4;
+    const short ix = tiisg % 4;
+    const short iq = tid4 / 4;
+    const short ir = tid4 % 4;
+    const short l0 = 8 * ir;
+    const short q_offset = 32 * iq + l0;
+    const short y_offset = 64 * iq + l0;
+    const uchar hm1 = (uchar)(1u << (2 * iq));
+    const uchar hm2 = (uchar)(hm1 << 1);
+    const uchar hm3 = (uchar)(hm1 << 4);
+    const uchar hm4 = (uchar)(hm2 << 4);
+
+    float yl[16];
+    float yh[16];
+    float sumf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    ushort sc16[4];
+    thread const uchar* sc8 = (thread const uchar*)sc16;
+
+    device const float* y1 = x + (ulong)ix * 256u + y_offset;
+    device const float* u1 = xu + (ulong)ix * 256u + y_offset;
+
+    for (uint ib = ix; ib < nb; ib += 4) {
+        device const float* y2 = y1 + 128;
+        device const float* u2 = u1 + 128;
+        float4 sumy = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (short l = 0; l < 8; ++l) {
+            yl[l + 0] = SWIGLU_X ? sw1(y1[l + 0], u1[l + 0]) : y1[l + 0];  sumy[0] += yl[l + 0];
+            yl[l + 8] = SWIGLU_X ? sw1(y1[l + 32], u1[l + 32]) : y1[l + 32]; sumy[1] += yl[l + 8];
+            yh[l + 0] = SWIGLU_X ? sw1(y2[l + 0], u2[l + 0]) : y2[l + 0];  sumy[2] += yh[l + 0];
+            yh[l + 8] = SWIGLU_X ? sw1(y2[l + 32], u2[l + 32]) : y2[l + 32]; sumy[3] += yh[l + 8];
+        }
+
+        device const uchar* blk = row0 + (ulong)ib * 176u;
+        device const ushort* a = (device const ushort*)(blk + 4) + iq;
+        // block_q5_K: d(2) dmin(2) scales(12) qh(32) qs(128) = 176
+        device const uchar* q1 = blk + 48 + q_offset;
+        device const uchar* qh = blk + 16 + l0;
+        device const uchar* dh = blk;
+
+        for (uint row = 0; row < NR0; ++row) {
+            device const uchar* q2 = q1 + 64;
+            sc16[0] = a[0] & kmask1;
+            sc16[1] = a[2] & kmask1;
+            sc16[2] = ((a[4] >> 0) & kmask2) | ((a[0] & kmask3) >> 2);
+            sc16[3] = ((a[4] >> 4) & kmask2) | ((a[2] & kmask3) >> 2);
+
+            float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
+            float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
+            for (short l = 0; l < 8; ++l) {
+                uchar h = qh[l];
+                acc1[0] += yl[l + 0] * (float)(q1[l] & 0x0F);
+                acc1[1] += yl[l + 8] * (float)(q1[l] & 0xF0);
+                acc1[2] += yh[l + 0] * (float)(q2[l] & 0x0F);
+                acc1[3] += yh[l + 8] * (float)(q2[l] & 0xF0);
+                acc2[0] += (h & hm1) ? yl[l + 0] : 0.0f;
+                acc2[1] += (h & hm2) ? yl[l + 8] : 0.0f;
+                acc2[2] += (h & hm3) ? yh[l + 0] : 0.0f;
+                acc2[3] += (h & hm4) ? yh[l + 8] : 0.0f;
+            }
+
+            half2 dm = *(device const half2*)dh;
+            sumf[row] +=
+                (float)dm.x * (sc8[0] * (acc1[0] + 16.0f * acc2[0]) +
+                               sc8[1] * (acc1[1] / 16.0f + 16.0f * acc2[1]) +
+                               sc8[4] * (acc1[2] + 16.0f * acc2[2]) +
+                               sc8[5] * (acc1[3] / 16.0f + 16.0f * acc2[3])) -
+                (float)dm.y * (sumy[0] * sc8[2] + sumy[1] * sc8[3] +
+                               sumy[2] * sc8[6] + sumy[3] * sc8[7]);
+
+            ulong step = (row + 1 < nrows) ? nb01 : 0;
+            q1 += step;
+            qh += step;
+            a = (device const ushort*)((device const uchar*)a + step);
+            dh += step;
+        }
+        y1 += 4 * 256;
+        u1 += 4 * 256;
+    }
+
+    for (uint row = 0; row < NR0; row++) {
+        float s = simd_sum(sumf[row]);
+        if (tiisg == 0 && row < nrows) {
+            y[(ROWS ? tok * idx.y_row_stride : 0u) + fr + row] = s;
         }
     }
 }
@@ -1918,173 +2220,6 @@ kernel void resnorm_router(
     }
 }
 
-// resnorm + router matvec + gating top-k in ONE dispatch spread over MANY
-// threadgroups. The single-threadgroup fusions (router_topk, resnorm_router)
-// are latency-bound: one group streams the whole router matrix (1 MB on
-// qwen3-30b) through its own load queue. Here threadgroup g owns experts
-// g*8+sg, one per simdgroup, and recomputes the norm scale itself from the
-// cache-resident x/delta/normw rows, so the matrix streams in parallel.
-// Every group writes its logits and bumps an arrival counter; the LAST
-// group to arrive is the only one still running, so it alone publishes
-// x += delta and h, runs the top-k, and resets the counter for the next
-// layer. No group waits on another: co-residency is never required.
-kernel void resnorm_router_mt(
-    device float* x [[buffer(0)]],
-    device const float* delta [[buffer(1)]],
-    device float* h [[buffer(2)]],
-    device const float* normw [[buffer(3)]],
-    constant uint& hidden [[buffer(4)]],
-    constant float& eps [[buffer(5)]],
-    device const uchar* rw [[buffer(6)]],
-    constant ulong& rw_off [[buffer(7)]],
-    device uint* ids [[buffer(8)]],
-    device float* wts [[buffer(9)]],
-    constant uint& n [[buffer(10)]],
-    constant uint& k [[buffer(11)]],
-    device const float* rbias [[buffer(12)]],
-    constant uint& sigmoid [[buffer(13)]],
-    constant uint& has_bias [[buffer(14)]],
-    device float* logits_out [[buffer(15)]],
-    device atomic_uint* ctr [[buffer(16)]],
-    uint tid [[thread_position_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]],
-    uint sg [[simdgroup_index_in_threadgroup]],
-    uint tg [[threadgroup_position_in_grid]],
-    uint n_tg [[threadgroups_per_grid]])
-{
-    threadgroup float partial[8];
-    threadgroup uint last;
-    float acc = 0.0f;
-    for (uint i = tid; i < hidden; i += 256) {
-        float v = x[i] + delta[i];
-        acc += v * v;
-    }
-    float s = simd_sum(acc);
-    if (lane == 0) {
-        partial[sg] = s;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float total = 0.0f;
-    for (uint i = 0; i < 8; i++) {
-        total += partial[i];
-    }
-    float scale = rsqrt(total / (float)hidden + eps);
-
-    device const float* wr = (device const float*)(rw + rw_off);
-    uint e = tg * 8 + sg;
-    if (e < n) {
-        device const float* row = wr + (ulong)e * hidden;
-        float a = 0.0f;
-        for (uint i = lane * 4; i + 3 < hidden; i += 128) {
-            float4 w4 = *(device const float4*)(row + i);
-            float4 xv = *(device const float4*)(x + i) + *(device const float4*)(delta + i);
-            float4 nw = *(device const float4*)(normw + i);
-            a += dot(w4, xv * nw);
-        }
-        float sum = simd_sum(a);
-        if (lane == 0) {
-            logits_out[e] = sum * scale;
-        }
-    }
-    // Publish this group's logits, then count the arrival. Only the last
-    // group to arrive continues past here.
-    threadgroup_barrier(mem_flags::mem_device);
-    if (tid == 0) {
-        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
-        uint prev = atomic_fetch_add_explicit(ctr, 1u, memory_order_relaxed);
-        last = (prev + 1 == n_tg) ? 1u : 0u;
-        if (last != 0) {
-            atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
-        }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (last == 0) {
-        return;
-    }
-    // Every other group has finished reading x and delta: fold the residual
-    // and write the normed h the expert matvecs read.
-    for (uint i = tid; i < hidden; i += 256) {
-        float v = x[i] + delta[i];
-        x[i] = v;
-        h[i] = v * scale * normw[i];
-    }
-    threadgroup float logits[256];
-    for (uint i = tid; i < n; i += 256) {
-        logits[i] = logits_out[i];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (sg != 0) {
-        return;
-    }
-    float v[8];
-    uint vid[8];
-    for (uint t = 0; t < 8; t++) {
-        uint idx = lane + t * 32;
-        if (idx < n) {
-            // Sigmoid gating selects by sigmoid(l) + rbias (llama.cpp
-            // `selection_probs`); softmax selects by the raw logit.
-            v[t] = sigmoid != 0
-                ? 1.0f / (1.0f + exp(-logits[idx])) +
-                      (has_bias != 0 ? rbias[idx] : 0.0f)
-                : logits[idx];
-        } else {
-            v[t] = -INFINITY;
-        }
-        vid[t] = idx;
-    }
-    for (uint kk = 0; kk < k; kk++) {
-        float lm = -INFINITY;
-        uint li = 0xFFFFFFFF;
-        for (uint t = 0; t < 8; t++) {
-            if (v[t] > lm) {
-                lm = v[t];
-                li = vid[t];
-            }
-        }
-        float m = simd_max(lm);
-        uint who = simd_min(lm == m ? li : 0xFFFFFFFF);
-        if (lane == 0) {
-            ids[kk] = who;
-        }
-        for (uint t = 0; t < 8; t++) {
-            if (vid[t] == who) {
-                v[t] = -INFINITY;
-            }
-        }
-    }
-    if (lane == 0) {
-        if (sigmoid != 0) {
-            // Weights are the UNBIASED sigmoid renormalised over the picks.
-            float total = 0.0f;
-            for (uint kk = 0; kk < k; kk++) {
-                float s = 1.0f / (1.0f + exp(-logits[ids[kk]]));
-                wts[kk] = s;
-                total += s;
-            }
-            for (uint kk = 0; kk < k; kk++) {
-                wts[kk] /= total;
-            }
-        } else {
-            float mx = -INFINITY;
-            for (uint kk = 0; kk < k; kk++) {
-                mx = max(mx, logits[ids[kk]]);
-            }
-            float total = 0.0f;
-            for (uint kk = 0; kk < k; kk++) {
-                float e = exp(logits[ids[kk]] - mx);
-                wts[kk] = e;
-                total += e;
-            }
-            for (uint kk = 0; kk < k; kk++) {
-                wts[kk] /= total;
-            }
-        }
-        // Reset for the next layer: no other group touches the counter
-        // until the host's stage barrier orders the next dispatch.
-        atomic_store_explicit(ctr, 0u, memory_order_relaxed);
-    }
-}
-
 // resnorm_router over m token rows in ONE dispatch: threadgroup y owns the
 // row, the per-row math (reduction order included) is resnorm_router's
 // verbatim, so every row is bit-identical to the single-row kernel. Used by
@@ -2315,22 +2450,25 @@ struct MegaArgs {
     // GLM: sigmoid gating with a selection bias (buffer 7), and an
     // always-on shared expert (buffers 8-10) riding slot n_used.
     uint sigmoid;
+    // 0 = none, 1 = always-on weight 1, 2 = gated via buffer 11 (F32[hidden]
+    // projection -> raw logit in wts[n_used], sigmoid applied at combine).
     uint has_shared;
     ulong sh_gate_off;
     ulong sh_up_off;
     ulong sh_down_off;
+    ulong sh_gout_off;
 };
 
-inline void mega_sync(device atomic_uint* ctr, uint target, uint ltid) {
-    threadgroup_barrier(mem_flags::mem_device);
-    if (ltid == 0) {
-        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
-        atomic_fetch_add_explicit(ctr, 1u, memory_order_relaxed);
-        while (atomic_load_explicit(ctr, memory_order_relaxed) < target) {
-        }
-        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
-    }
-    threadgroup_barrier(mem_flags::mem_device);
+// Cross-stage sync for the megakernel. Device atomic busy-wait across
+// threadgroups soft-locks the Metal scheduler and can freeze the Mac; the
+// spin path is deleted. Host hard-caps mega_tg to 1, so a local barrier is
+// enough. Multi-TG MEGA needs a redesign (encoder barriers / no spin).
+inline void mega_sync(device atomic_uint* ctr, uint target, uint ltid, uint n_tg) {
+    (void)ctr;
+    (void)target;
+    (void)ltid;
+    (void)n_tg;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
 inline float lane_sum_dyn(float v, uint lpr) {
@@ -2715,16 +2853,20 @@ kernel void moe_ffn_mega(
     device const uchar* sh_gate_w [[buffer(8)]],
     device const uchar* sh_up_w [[buffer(9)]],
     device const uchar* sh_down_w [[buffer(10)]],
+    device const float* sh_gout [[buffer(11)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint ltid [[thread_position_in_threadgroup]],
     ushort sg [[simdgroup_index_in_threadgroup]],
     ushort tiisg [[thread_index_in_simdgroup]])
 {
     device atomic_uint* ctr = (device atomic_uint*)(y + a.ctr_at);
+    // n_tg==0 would make total_sg==0 and turn every `task += total_sg` into
+    // an infinite loop; clamp so a bad constant-buffer read cannot hang.
+    uint n_tg = max(1u, a.n_tg);
     uint sgid = tgid * 8 + sg;
-    uint total_sg = a.n_tg * 8;
+    uint total_sg = n_tg * 8;
     uint gthread = tgid * 256 + ltid;
-    uint total_threads = a.n_tg * 256;
+    uint total_threads = n_tg * 256;
     uint base = a.ctr_base;
 
     // s0: x += delta; h = rmsnorm(x) * ffn_norm. TG0 alone; the norm is a
@@ -2754,7 +2896,7 @@ kernel void moe_ffn_mega(
             h[i] = x[i] * scale * norm_w[i];
         }
     }
-    mega_sync(ctr, base + 1 * a.n_tg, ltid);
+    mega_sync(ctr, base + 1 * n_tg, ltid, n_tg);
 
     // s1: router logits, one expert row per simdgroup.
     {
@@ -2773,7 +2915,7 @@ kernel void moe_ffn_mega(
             }
         }
     }
-    mega_sync(ctr, base + 2 * a.n_tg, ltid);
+    mega_sync(ctr, base + 2 * n_tg, ltid, n_tg);
 
     // s2: top-k over the logits; first simdgroup of TG0. Softmax gating for
     // Qwen-style models; GLM selects by sigmoid(l) + rbias and weights by
@@ -2848,8 +2990,26 @@ kernel void moe_ffn_mega(
                 }
             }
         }
+        // Gated shared expert (GLM / qwen35moe): raw gate logit into
+        // wts[n_used]; sigmoid applied at combine. One simdgroup owns the
+        // hidden-wide dot.
+        if (a.has_shared == 2 && tgid == 0 && sg == 0) {
+            device const float* h = y + a.h_at;
+            // sh_gout_off is a BYTE offset into the F32 projection buffer.
+            device const float* proj =
+                (device const float*)((device const uchar*)sh_gout + a.sh_gout_off);
+            float acc = 0.0f;
+            for (uint i = tiisg * 4; i + 3 < a.hidden; i += 128) {
+                acc += dot(*(device const float4*)(proj + i),
+                           *(device const float4*)(h + i));
+            }
+            float s = simd_sum(acc);
+            if (tiisg == 0) {
+                y[a.wts_at + a.n_used] = s;
+            }
+        }
     }
-    mega_sync(ctr, base + 3 * a.n_tg, ltid);
+    mega_sync(ctr, base + 3 * n_tg, ltid, n_tg);
 
     // s3: gate and up projections for every hit expert (+ the shared one).
     {
@@ -2870,19 +3030,20 @@ kernel void moe_ffn_mega(
                               1, ids + a.n_used, sgid, total_sg, tiisg);
         }
     }
-    mega_sync(ctr, base + 4 * a.n_tg, ltid);
+    mega_sync(ctr, base + 4 * n_tg, ltid, n_tg);
 
     // s4: swiglu in place over the gate half.
     {
         device float* g = y + a.gate_at;
         device const float* u = y + a.up_at;
-        uint n = (a.n_used + a.has_shared) * a.ffn;
+        // has_shared is 0/1/2 (tri-state); only 0/1 contributes a slot.
+        uint n = (a.n_used + (a.has_shared != 0)) * a.ffn;
         for (uint i = gthread; i < n; i += total_threads) {
             float gv = g[i];
             g[i] = u[i] * (gv / (1.0f + exp(-gv)));
         }
     }
-    mega_sync(ctr, base + 5 * a.n_tg, ltid);
+    mega_sync(ctr, base + 5 * n_tg, ltid, n_tg);
 
     // s5: down projections, per-slot activations (+ the shared one).
     {
@@ -2897,7 +3058,7 @@ kernel void moe_ffn_mega(
                               a.hidden, 1, ids + a.n_used, sgid, total_sg, tiisg);
         }
     }
-    mega_sync(ctr, base + 6 * a.n_tg, ltid);
+    mega_sync(ctr, base + 6 * n_tg, ltid, n_tg);
 
     // s6: weighted combine into delta; the shared slot joins with weight 1.
     {
@@ -2909,8 +3070,12 @@ kernel void moe_ffn_mega(
             for (uint s = 0; s < a.n_used; s++) {
                 acc += wts[s] * downo[s * a.hidden + i];
             }
-            if (a.has_shared != 0) {
+            if (a.has_shared == 1) {
                 acc += downo[a.n_used * a.hidden + i];
+            } else if (a.has_shared == 2) {
+                float g = y[a.wts_at + a.n_used];
+                float w = 1.0f / (1.0f + exp(-g));
+                acc += w * downo[a.n_used * a.hidden + i];
             }
             delta[i] = acc;
         }
@@ -4233,6 +4398,7 @@ kernel void mmllr64_q4_k(
 }
 
 DEFINE_MM_LL_NK(mmll_q8_0, BlkQ8_0, 2, dqll_q8_0, (n_in / 32) * 34, 32)
+DEFINE_MM_LL_NK(mmll_q5_0, BlkQ5_0, 2, dqll_q5_0, (n_in / 32) * 22, 32)
 DEFINE_MM_LL_NK(mmll_q2_k, BlkQ2K, 16, dqll_q2_k, (n_in / 256) * 84, 32)
 DEFINE_MM_LL_NK(mmll_q3_k, BlkQ3K, 16, dqll_q3_k, (n_in / 256) * 110, 32)
 DEFINE_MM_LL_NK(mmll_q4_k, BlkQ4K, 16, dqll_q4_k, (n_in / 256) * 144, 32)
@@ -4240,6 +4406,7 @@ DEFINE_MM_LL_NK(mmll_q5_k, BlkQ5K, 16, dqll_q5_k, (n_in / 256) * 176, 32)
 DEFINE_MM_LL_NK(mmll_q6_k, BlkQ6K, 16, dqll_q6_k, (n_in / 256) * 210, 32)
 DEFINE_MM_LL_NK(mmll_f32, BlkF32, 1, dqll_f32, (ulong)n_in * 4, 32)
 DEFINE_MM_LL_NK(mm64ll_q8_0, BlkQ8_0, 2, dqll_q8_0, (n_in / 32) * 34, 64)
+DEFINE_MM_LL_NK(mm64ll_q5_0, BlkQ5_0, 2, dqll_q5_0, (n_in / 32) * 22, 64)
 DEFINE_MM_LL_NK(mm64ll_q2_k, BlkQ2K, 16, dqll_q2_k, (n_in / 256) * 84, 64)
 DEFINE_MM_LL_NK(mm64ll_q3_k, BlkQ3K, 16, dqll_q3_k, (n_in / 256) * 110, 64)
 DEFINE_MM_LL_NK(mm64ll_q4_k, BlkQ4K, 16, dqll_q4_k, (n_in / 256) * 144, 64)
@@ -7004,18 +7171,8 @@ fn route_layout(m: usize, n_expert: usize, n_used: usize, shared: bool) -> Route
     let bias = logits + align(m * n_expert);
     let total = bias + align(n_expert);
     RouteLayout {
-        counts,
-        counters,
-        table,
-        picks,
-        pickw,
-        tok,
-        hit_row,
-        hit_w,
-        tok_off,
-        logits,
-        bias,
-        total,
+        counts, counters, table, picks, pickw, tok, hit_row, hit_w, tok_off,
+        logits, bias, total,
     }
 }
 
@@ -7046,22 +7203,6 @@ pub fn attach(mapping: &[u8]) -> bool {
         return true; // already attached (tests attach the same region twice)
     }
     gpu.add_mapping(mapping)
-}
-
-pub fn set_rope_inv_freq(_inv_freq: &[f32]) -> bool {
-    false
-}
-
-pub fn has_device_rope_freq() -> bool {
-    false
-}
-
-pub fn prefer_gpu_embed() -> bool {
-    false
-}
-
-pub fn decode_greedy_continue(_req: &TokenReq, _n_more: usize) -> Option<Vec<u32>> {
-    None
 }
 
 pub fn is_attached() -> bool {
@@ -7119,7 +7260,6 @@ fn init_device() -> Option<Gpu> {
         "moe_combine_rows",
         "combine_resnorm",
         "resnorm_router",
-        "resnorm_router_mt",
         "resnorm_router_rows",
         "mmllr64_q4_k",
         "mmllp_q4_k",
@@ -7147,12 +7287,10 @@ fn init_device() -> Option<Gpu> {
         "attend_mm256",
         "route_patch_shared_w",
     ] {
-        let f = library
-            .get_function(name, None)
+        let f = library.get_function(name, None)
             .map_err(|e| eprintln!("metal: get_function {name} failed: {e}"))
             .ok()?;
-        let p = device
-            .new_compute_pipeline_state_with_function(&f)
+        let p = device.new_compute_pipeline_state_with_function(&f)
             .map_err(|e| eprintln!("metal: pipeline {name} failed: {e}"))
             .ok()?;
         pipelines.insert((name, 1, 1), p);
@@ -7233,11 +7371,7 @@ impl Gpu {
         if max_buf == 0 {
             return false;
         }
-        let step = if max_buf > CHUNK_OVERLAP {
-            max_buf - CHUNK_OVERLAP
-        } else {
-            max_buf / 2
-        };
+        let step = if max_buf > CHUNK_OVERLAP { max_buf - CHUNK_OVERLAP } else { max_buf / 2 };
         let step = (step / page).max(1) * page;
 
         let mut added = Vec::new();
@@ -7257,11 +7391,7 @@ impl Gpu {
                 );
                 return false;
             }
-            added.push(WeightChunk {
-                buf,
-                start: base + start,
-                len,
-            });
+            added.push(WeightChunk { buf, start: base + start, len });
             if start + len >= aligned_len {
                 break;
             }
@@ -7273,11 +7403,9 @@ impl Gpu {
             self.device.name(),
             mapping.len() as f64 / (1u64 << 30) as f64,
             if added.len() > 1 {
-                format!(
-                    " in {} windows (maxBufferLength {:.1} GiB)",
+                format!(" in {} windows (maxBufferLength {:.1} GiB)",
                     added.len(),
-                    max_buf as f64 / (1u64 << 30) as f64
-                )
+                    max_buf as f64 / (1u64 << 30) as f64)
             } else {
                 String::new()
             }
@@ -7330,12 +7458,7 @@ impl Gpu {
     /// The pipeline for one (kernel, tile, lanes-per-row) shape, specialised
     /// and cached on first use. Returns None if the shape will not compile,
     /// which sends the whole batch to the CPU rather than half of it.
-    fn pipeline(
-        &mut self,
-        name: &'static str,
-        tile: usize,
-        lpr: usize,
-    ) -> Option<&ComputePipelineState> {
+    fn pipeline(&mut self, name: &'static str, tile: usize, lpr: usize) -> Option<&ComputePipelineState> {
         self.pipeline_full(name, tile, lpr, false, false)
     }
 
@@ -7380,7 +7503,9 @@ impl Gpu {
                 "matvec_q2_k_mv" => "matvec_q2_k",
                 "matvec_q3_k_mv" => "matvec_q3_k",
                 "matvec_q4_k_mv" => "matvec_q4_k",
+                "matvec_q5_k_mv" => "matvec_q5_k",
                 "matvec_q6_k_mv" => "matvec_q6_k",
+                "matvec_q8_0_mv" => "matvec_q8_0",
                 other => other,
             }
         } else {
@@ -7391,7 +7516,8 @@ impl Gpu {
             tile,
             lpr + if indexed { 1000 } else { 0 }
                 + if swiglu { 2000 } else { 0 }
-                + if wait { 4000 } else { 0 },
+                + if wait { 4000 } else { 0 }
+                + if indexed && mv_id_grid() { 80000 } else { 0 },
         );
         if !self.pipelines.contains_key(&key) {
             let consts = metal::FunctionConstantValues::new();
@@ -7421,9 +7547,8 @@ impl Gpu {
                 4,
             );
             // NB: an UNSET bool function constant reads as TRUE on this
-            // Metal (measured, macOS 26 / M4 Max) - DUAL_GW (5), ROWS (6)
-            // and COMBINE (7) must be pinned to false explicitly or the
-            // plain specialisations silently take the variant path.
+            // Metal (measured, macOS 26 / M4 Max) - DUAL_GW (5), ROWS (6),
+            // SHARED_TAIL (7), and MV_ID_GRID (8) must be pinned explicitly.
             for index in [5u64, 6, 7] {
                 let f = false;
                 consts.set_constant_value_at_index(
@@ -7432,15 +7557,18 @@ impl Gpu {
                     index,
                 );
             }
+            let idg = indexed && mv_id_grid();
+            consts.set_constant_value_at_index(
+                &idg as *const bool as *const _,
+                metal::MTLDataType::Bool,
+                8,
+            );
             let f = self
                 .library
                 .get_function(name, Some(consts))
                 .map_err(|e| eprintln!("metal: {name}<tile {tile}, lanes {lpr}> failed: {e}"))
                 .ok()?;
-            let p = self
-                .device
-                .new_compute_pipeline_state_with_function(&f)
-                .ok()?;
+            let p = self.device.new_compute_pipeline_state_with_function(&f).ok()?;
             self.pipelines.insert(key, p);
         }
         self.pipelines.get(&key)
@@ -7471,6 +7599,7 @@ impl Gpu {
                 (5, true),
                 (6, false),
                 (7, false),
+                (8, false),
             ] {
                 consts.set_constant_value_at_index(
                     &value as *const bool as *const _,
@@ -7483,59 +7612,7 @@ impl Gpu {
                 .get_function(name, Some(consts))
                 .map_err(|e| eprintln!("metal: {name}<dual, lanes {lpr}> failed: {e}"))
                 .ok()?;
-            let p = self
-                .device
-                .new_compute_pipeline_state_with_function(&f)
-                .ok()?;
-            self.pipelines.insert(key, p);
-        }
-        self.pipelines.get(&key)
-    }
-
-    /// The COMBINE variant of an INDEXED down matvec (decode MoE): function
-    /// constant 7 with SWIGLU_X on, so one dispatch reads raw gate/up, loops
-    /// the routed slots in-simdgroup and writes the weighted sum straight
-    /// into the residual delta. Only matvec_q4_k_mv and matvec_q6_k_mv carry
-    /// the variant.
-    fn pipeline_combine(
-        &mut self,
-        name: &'static str,
-        lpr: usize,
-        swiglu_x: bool,
-    ) -> Option<&ComputePipelineState> {
-        let key = (name, 1, lpr + if swiglu_x { 32000 } else { 33000 });
-        if !self.pipelines.contains_key(&key) {
-            let consts = metal::FunctionConstantValues::new();
-            for (index, value) in [(0u64, 1u32), (1, lpr as u32)] {
-                consts.set_constant_value_at_index(
-                    &value as *const u32 as *const _,
-                    metal::MTLDataType::UInt,
-                    index,
-                );
-            }
-            for (index, value) in [
-                (2u64, true),
-                (3, swiglu_x),
-                (4, false),
-                (5, false),
-                (6, false),
-                (7, true),
-            ] {
-                consts.set_constant_value_at_index(
-                    &value as *const bool as *const _,
-                    metal::MTLDataType::Bool,
-                    index,
-                );
-            }
-            let f = self
-                .library
-                .get_function(name, Some(consts))
-                .map_err(|e| eprintln!("metal: {name}<combine, lanes {lpr}> failed: {e}"))
-                .ok()?;
-            let p = self
-                .device
-                .new_compute_pipeline_state_with_function(&f)
-                .ok()?;
+            let p = self.device.new_compute_pipeline_state_with_function(&f).ok()?;
             self.pipelines.insert(key, p);
         }
         self.pipelines.get(&key)
@@ -7568,6 +7645,7 @@ impl Gpu {
                 (5, false),
                 (6, true),
                 (7, false),
+                (8, false),
             ] {
                 consts.set_constant_value_at_index(
                     &value as *const bool as *const _,
@@ -7580,10 +7658,52 @@ impl Gpu {
                 .get_function(name, Some(consts))
                 .map_err(|e| eprintln!("metal: {name}<rows, lanes {lpr}> failed: {e}"))
                 .ok()?;
-            let p = self
-                .device
-                .new_compute_pipeline_state_with_function(&f)
+            let p = self.device.new_compute_pipeline_state_with_function(&f).ok()?;
+            self.pipelines.insert(key, p);
+        }
+        self.pipelines.get(&key)
+    }
+
+    /// INDEXED matvec with SHARED_TAIL: last slot reads w2/w2_off (GLM
+    /// shared expert down folded into the routed down launch).
+    fn pipeline_shared_tail(
+        &mut self,
+        name: &'static str,
+        lpr: usize,
+        swiglu: bool,
+    ) -> Option<&ComputePipelineState> {
+        let key = (name, 1, lpr + 32000 + if swiglu { 2000 } else { 0 }
+            + if mv_id_grid() { 80000 } else { 0 });
+        if !self.pipelines.contains_key(&key) {
+            let consts = metal::FunctionConstantValues::new();
+            for (index, value) in [(0u64, 1u32), (1, lpr as u32)] {
+                consts.set_constant_value_at_index(
+                    &value as *const u32 as *const _,
+                    metal::MTLDataType::UInt,
+                    index,
+                );
+            }
+            for (index, value) in [
+                (2u64, true),
+                (3, swiglu),
+                (4, false),
+                (5, false),
+                (6, false),
+                (7, true),
+                (8, mv_id_grid()),
+            ] {
+                consts.set_constant_value_at_index(
+                    &value as *const bool as *const _,
+                    metal::MTLDataType::Bool,
+                    index,
+                );
+            }
+            let f = self
+                .library
+                .get_function(name, Some(consts))
+                .map_err(|e| eprintln!("metal: {name}<shared_tail, lanes {lpr}> failed: {e}"))
                 .ok()?;
+            let p = self.device.new_compute_pipeline_state_with_function(&f).ok()?;
             self.pipelines.insert(key, p);
         }
         self.pipelines.get(&key)
@@ -7605,6 +7725,7 @@ impl Gpu {
             (down_fmt | (sh_down_fmt << 4)) as usize,
         );
         if !self.pipelines.contains_key(&key) {
+            let t0 = std::time::Instant::now();
             let consts = metal::FunctionConstantValues::new();
             for (index, value) in [
                 (10u64, gate_fmt),
@@ -7623,10 +7744,13 @@ impl Gpu {
                 .get_function("moe_ffn_mega", Some(consts))
                 .map_err(|e| eprintln!("metal: moe_ffn_mega<{gate_fmt},{down_fmt},{sh_gate_fmt},{sh_down_fmt}> failed: {e}"))
                 .ok()?;
-            let p = self
-                .device
-                .new_compute_pipeline_state_with_function(&f)
-                .ok()?;
+            let p = self.device.new_compute_pipeline_state_with_function(&f).ok()?;
+            if mega_debug() {
+                eprintln!(
+                    "mega: specialized pipeline gate={gate_fmt} down={down_fmt} in {:.1} ms",
+                    t0.elapsed().as_secs_f64() * 1e3
+                );
+            }
             self.pipelines.insert(key, p);
         }
         self.pipelines.get(&key)
@@ -7643,16 +7767,12 @@ impl Gpu {
     fn ensure_prefill(&mut self, bytes: usize) {
         if bytes > self.pf_x_cap {
             let cap = bytes.next_power_of_two();
-            self.pf_x = self
-                .device
-                .new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
+            self.pf_x = self.device.new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
             self.pf_x_cap = cap;
         }
         if bytes > self.pf_hs_cap {
             let cap = bytes.next_power_of_two();
-            self.pf_hs = self
-                .device
-                .new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
+            self.pf_hs = self.device.new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
             self.pf_hs_cap = cap;
         }
     }
@@ -7660,16 +7780,12 @@ impl Gpu {
     fn ensure_arenas(&mut self, x_need: usize, y_need: usize) {
         if x_need > self.x_cap {
             let cap = x_need.next_power_of_two();
-            self.x_arena = self
-                .device
-                .new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
+            self.x_arena = self.device.new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
             self.x_cap = cap;
         }
         if y_need > self.y_cap {
             let cap = y_need.next_power_of_two();
-            self.y_arena = self
-                .device
-                .new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
+            self.y_arena = self.device.new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
             self.y_cap = cap;
         }
     }
@@ -7678,9 +7794,8 @@ impl Gpu {
         let bytes = words * 4;
         if bytes > self.route_cap {
             let cap = bytes.next_power_of_two();
-            self.route_buf = self
-                .device
-                .new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
+            self.route_buf =
+                self.device.new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
             self.route_cap = cap;
             self.route_staged = None;
         }
@@ -7748,11 +7863,8 @@ impl Gpu {
                 );
                 return;
             }
-            let Some(set) = self
-                .device
-                .counter_sets()
-                .into_iter()
-                .find(|s| s.name() == "timestamp")
+            let Some(set) =
+                self.device.counter_sets().into_iter().find(|s| s.name() == "timestamp")
             else {
                 eprintln!("gpu counters: no timestamp counter set");
                 return;
@@ -7798,7 +7910,9 @@ impl Gpu {
         let ts = unsafe { std::slice::from_raw_parts(dst.contents() as *const u64, n).to_vec() };
         let labels = self.cstamp_labels.borrow();
         let scale = match cal {
-            Some((gs, ge)) if ts[n - 1] > ts[0] => (ge - gs) * 1e9 / (ts[n - 1] - ts[0]) as f64,
+            Some((gs, ge)) if ts[n - 1] > ts[0] => {
+                (ge - gs) * 1e9 / (ts[n - 1] - ts[0]) as f64
+            }
             _ => 1.0,
         };
         let mut total: std::collections::HashMap<&str, (f64, u32, f64)> =
@@ -7859,15 +7973,39 @@ fn lanes_per_row(ty: GgmlType, n_in: usize) -> usize {
         });
         return 32 / nr0;
     }
-    // The q3/q4 counterparts carry 2 rows per SIMD group: 16 threads per row.
+    // The q3/q4/q5/q6/q8 llama-structure kernels use NR0 rows per SIMD
+    // group via LPR (NR0 = 32/LPR). Q4/Q5 are sweepable for GLM 1408-wide
+    // expert/shared shapes; others stay at the port default (NR0=2).
     if ty == GgmlType::Q3K && q3_mv() {
         return 16;
     }
     if ty == GgmlType::Q4K && q4_mv() {
-        return 16;
+        static NR0: OnceLock<usize> = OnceLock::new();
+        let nr0 = *NR0.get_or_init(|| {
+            std::env::var("ALLPAKA_Q4_NR0")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|n: &usize| [1, 2, 4].contains(n))
+                .unwrap_or(2)
+        });
+        return 32 / nr0;
+    }
+    if ty == GgmlType::Q5K && q5_mv() {
+        static NR0: OnceLock<usize> = OnceLock::new();
+        let nr0 = *NR0.get_or_init(|| {
+            std::env::var("ALLPAKA_Q5_NR0")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|n: &usize| [1, 2, 4].contains(n))
+                .unwrap_or(2)
+        });
+        return 32 / nr0;
     }
     if ty == GgmlType::Q6K && q6_mv() {
         return 16;
+    }
+    if ty == GgmlType::Q8_0 && q8_mv() {
+        return 32 / q8_nr0();
     }
     let be = ty.block_elements().unwrap_or(32) as usize;
     let blocks = (n_in / be.max(1)).max(1);
@@ -7894,6 +8032,61 @@ fn lanes_per_row(ty: GgmlType, n_in: usize) -> usize {
             .unwrap_or(1)
     });
     (base / div).max(1)
+}
+
+/// Threadgroup size for matvec dispatch. Default 128; sweep with
+/// `ALLPAKA_MV_TG` ∈ {64,128,256} (geometry only — NR0 stays 2).
+fn mv_tg() -> u64 {
+    static TG: OnceLock<u64> = OnceLock::new();
+    *TG.get_or_init(|| {
+        std::env::var("ALLPAKA_MV_TG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n: &u64| matches!(n, 64 | 128 | 256))
+            .unwrap_or(128)
+    })
+}
+
+/// Llama-style `mul_mv_id` grid for INDEXED decode matvecs (`grid.z = slots`).
+/// Default ON. `ALLPAKA_MV_ID=0` restores flat `n_out * slots` 1D packing.
+fn mv_id_grid() -> bool {
+    static S: OnceLock<bool> = OnceLock::new();
+    *S.get_or_init(|| std::env::var("ALLPAKA_MV_ID").map_or(true, |v| v != "0"))
+}
+
+/// Dispatch geometry for a matvec pipeline (LPR × rows, TG via `mv_tg`).
+fn dispatch_mv(
+    enc: &metal::ComputeCommandEncoderRef,
+    ty: GgmlType,
+    n_in: usize,
+    n_rows: usize,
+) {
+    let lpr = lanes_per_row(ty, n_in) as u64;
+    let tg = mv_tg();
+    enc.dispatch_thread_groups(
+        MTLSize::new((n_rows as u64 * lpr).div_ceil(tg), 1, 1),
+        MTLSize::new(tg, 1, 1),
+    );
+}
+
+/// Indexed MoE matvec: either llama `mul_mv_id` (`z = slots`) or flat 1D.
+fn dispatch_mv_indexed(
+    enc: &metal::ComputeCommandEncoderRef,
+    ty: GgmlType,
+    n_in: usize,
+    n_out: usize,
+    slots: usize,
+) {
+    if mv_id_grid() {
+        let lpr = lanes_per_row(ty, n_in) as u64;
+        let tg = mv_tg();
+        enc.dispatch_thread_groups(
+            MTLSize::new((n_out as u64 * lpr).div_ceil(tg), 1, slots as u64),
+            MTLSize::new(tg, 1, 1),
+        );
+    } else {
+        dispatch_mv(enc, ty, n_in, n_out * slots);
+    }
 }
 
 /// Batch size from which the tile-matmul kernels beat the tiled matvecs.
@@ -7951,6 +8144,9 @@ fn mm_kernel_for(ty: GgmlType, m: usize) -> Option<(&'static str, usize, usize)>
                     "mmll_q8_0"
                 }
             }
+            // Plain (non-indexed) Q5_0 mm: GLM shared / dense projections that
+            // are not expert-indexed. Indexed MoE already had mmll_id_q5_0.
+            (GgmlType::Q5_0, false) => "mmll_q5_0",
             (GgmlType::Q2K, false) => "mmll_q2_k",
             (GgmlType::Q3K, false) => "mmll_q3_k",
             (GgmlType::Q4K, false) => {
@@ -7967,6 +8163,7 @@ fn mm_kernel_for(ty: GgmlType, m: usize) -> Option<(&'static str, usize, usize)>
             (GgmlType::Q5K, false) => "mmll_q5_k",
             (GgmlType::Q6K, false) => "mmll_q6_k",
             (GgmlType::Q8_0, true) => "mm64ll_q8_0",
+            (GgmlType::Q5_0, true) => "mm64ll_q5_0",
             (GgmlType::Q2K, true) => "mm64ll_q2_k",
             (GgmlType::Q3K, true) => "mm64ll_q3_k",
             (GgmlType::Q4K, true) => "mm64ll_q4_k",
@@ -7978,8 +8175,9 @@ fn mm_kernel_for(ty: GgmlType, m: usize) -> Option<(&'static str, usize, usize)>
             // clean A/B: ALLPAKA_MM_LL_F32=0.
             (GgmlType::F32, _) => {
                 static F32LL: OnceLock<bool> = OnceLock::new();
-                if *F32LL.get_or_init(|| std::env::var("ALLPAKA_MM_LL_F32").is_ok_and(|v| v == "1"))
-                {
+                if *F32LL.get_or_init(|| {
+                    std::env::var("ALLPAKA_MM_LL_F32").is_ok_and(|v| v == "1")
+                }) {
                     "mmll_f32"
                 } else {
                     return Some(("matmul_f32", 32, 32));
@@ -8049,15 +8247,7 @@ fn tiles_for(m: usize) -> Vec<(usize, usize)> {
 
 /// Run one matvec on the GPU. Returns None to mean "do it on the CPU".
 pub fn matvec(ty: GgmlType, w: &[u8], n_in: usize, n_out: usize, x: &[f32]) -> Option<Vec<f32>> {
-    matvec_batch(&[MatvecReq {
-        ty,
-        w,
-        n_in,
-        n_out,
-        x,
-        m: 1,
-    }])
-    .map(|mut v| v.pop().unwrap())
+    matvec_batch(&[MatvecReq { ty, w, n_in, n_out, x, m: 1 }]).map(|mut v| v.pop().unwrap())
 }
 
 /// Run several independent matvecs as ONE command buffer with ONE wait.
@@ -8085,11 +8275,11 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
         // a rounding error on the CPU.
         let kernel = match r.ty {
             GgmlType::Q5_0 => Some("matvec_q5_0"),
-            GgmlType::Q8_0 => Some("matvec_q8_0"),
+            GgmlType::Q8_0 => Some(q8_kernel()),
             GgmlType::Q2K => Some(q2_kernel()),
             GgmlType::Q3K => Some(q3_kernel()),
             GgmlType::Q4K => Some(q4_kernel()),
-            GgmlType::Q5K => Some("matvec_q5_k"),
+            GgmlType::Q5K => Some(q5_kernel()),
             GgmlType::Q6K => Some(q6_kernel()),
             _ => None,
         };
@@ -8127,27 +8317,13 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
         // matvec dispatches, each running the tile specialisation that
         // matches its row count exactly.
         if r.m >= MM_MIN_M && mm_kernel_for(r.ty, r.m).is_some() {
-            slots.push(Slot {
-                ri,
-                start_row: 0,
-                rows: r.m,
-                x_off: x_need,
-                y_off: y_need,
-                mm: true,
-            });
+            slots.push(Slot { ri, start_row: 0, rows: r.m, x_off: x_need, y_off: y_need, mm: true });
             x_need += align(r.m * r.n_in * 4);
             y_need += align(r.m * r.n_out * 4);
             continue;
         }
         for (start_row, rows) in tiles_for(r.m) {
-            slots.push(Slot {
-                ri,
-                start_row,
-                rows,
-                x_off: x_need,
-                y_off: y_need,
-                mm: false,
-            });
+            slots.push(Slot { ri, start_row, rows, x_off: x_need, y_off: y_need, mm: false });
             x_need += align(rows * r.n_in * 4);
             y_need += align(rows * r.n_out * 4);
         }
@@ -8161,8 +8337,7 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
     for s in &slots {
         if s.mm {
             states.push(
-                gpu.pipeline(mm_kernel_for(reqs[s.ri].ty, s.rows)?.0, 1, 1)?
-                    .to_owned(),
+                gpu.pipeline(mm_kernel_for(reqs[s.ri].ty, s.rows)?.0, 1, 1)?.to_owned(),
             );
         } else {
             let lpr = lanes_per_row(reqs[s.ri].ty, reqs[s.ri].n_in);
@@ -8176,7 +8351,11 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
         for s in &slots {
             let r = &reqs[s.ri];
             let xs = &r.x[s.start_row * r.n_in..(s.start_row + s.rows) * r.n_in];
-            std::ptr::copy_nonoverlapping(xs.as_ptr() as *const u8, xp.add(s.x_off), xs.len() * 4);
+            std::ptr::copy_nonoverlapping(
+                xs.as_ptr() as *const u8,
+                xp.add(s.x_off),
+                xs.len() * 4,
+            );
         }
     }
 
@@ -8192,8 +8371,9 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
         // single expert-sized matvec is ~25k threads - a fraction of the
         // device - and the serial encoder was running them ONE AT A TIME:
         // that, not arithmetic, was the measured ceiling of the decode ffn.
-        let enc =
-            cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
+        let enc = cmd.compute_command_encoder_with_dispatch_type(
+            metal::MTLDispatchType::Concurrent,
+        );
         for (si, s) in slots.iter().enumerate() {
             let r = &reqs[s.ri];
             let (_, chunk, w_off) = &kernels[s.ri];
@@ -8209,7 +8389,8 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
 
             if s.mm {
                 // One threadgroup per [BM x BN] output tile.
-                let (bm, bn) = mm_kernel_for(r.ty, s.rows).map_or((32, 32), |(_, bm, bn)| (bm, bn));
+                let (bm, bn) =
+                    mm_kernel_for(r.ty, s.rows).map_or((32, 32), |(_, bm, bn)| (bm, bn));
                 let m32 = s.rows as u32;
                 enc.set_bytes(6, 4, &m32 as *const u32 as *const _);
                 enc.dispatch_thread_groups(
@@ -8222,13 +8403,8 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
                 );
             } else {
                 // One lane group per output row, threadgroups of four SIMD
-                // groups.
-                let per_group = 128u64;
-                let total_threads = r.n_out as u64 * lanes_per_row(r.ty, r.n_in) as u64;
-                enc.dispatch_thread_groups(
-                    MTLSize::new(total_threads.div_ceil(per_group), 1, 1),
-                    MTLSize::new(per_group, 1, 1),
-                );
+                // groups (see dispatch_mv).
+                dispatch_mv(&enc, r.ty, r.n_in, r.n_out);
             }
         }
         enc.end_encoding();
@@ -8242,10 +8418,8 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
         CALLS.fetch_add(1, Ordering::Relaxed);
         DISPATCHES.fetch_add(slots.len() as u64, Ordering::Relaxed);
 
-        let mut out: Vec<Vec<f32>> = reqs
-            .iter()
-            .map(|r| Vec::with_capacity(r.m * r.n_out))
-            .collect();
+        let mut out: Vec<Vec<f32>> =
+            reqs.iter().map(|r| Vec::with_capacity(r.m * r.n_out)).collect();
         let yp = gpu.y_arena.contents() as *const u8;
         for s in &slots {
             let n = s.rows * reqs[s.ri].n_out;
@@ -8300,24 +8474,7 @@ pub fn wrap_region(region: &[u8]) -> Option<SharedRegion> {
     if buf.as_ptr().is_null() {
         return None;
     }
-    Some(SharedRegion {
-        buf,
-        len: region.len(),
-    })
-}
-
-pub fn upload_region_range(region: &mut SharedRegion, offset: usize, data: &[u8]) -> bool {
-    offset
-        .checked_add(data.len())
-        .is_some_and(|end| end <= region.len)
-}
-
-pub fn decode_attention_capacity_safe(_capacity: usize) -> bool {
-    true
-}
-
-pub fn minimum_kv_capacity() -> usize {
-    1
+    Some(SharedRegion { buf, len: region.len() })
 }
 
 /// One decode step's attention over the cache, for every query head.
@@ -8351,7 +8508,12 @@ const ATTN_HEAD_DIM: usize = 128;
 ///
 /// The intermediate never leaves the GPU arena, so the attention output is
 /// not copied to the CPU at all.
-pub fn attend_project(req: &AttnReq, wo_ty: GgmlType, wo: &[u8], n_out: usize) -> Option<Vec<f32>> {
+pub fn attend_project(
+    req: &AttnReq,
+    wo_ty: GgmlType,
+    wo: &[u8],
+    n_out: usize,
+) -> Option<Vec<f32>> {
     if !attn_shape_ok(req) {
         return None;
     }
@@ -8432,7 +8594,12 @@ fn attn_shape_ok(req: &AttnReq) -> bool {
 
 /// Encode attention into an open encoder, q already staged in the x arena and
 /// the result landing at `y_off` in the y arena.
-fn encode_attend(enc: &metal::ComputeCommandEncoderRef, gpu: &Gpu, req: &AttnReq, y_off: usize) {
+fn encode_attend(
+    enc: &metal::ComputeCommandEncoderRef,
+    gpu: &Gpu,
+    req: &AttnReq,
+    y_off: usize,
+) {
     encode_attend_at(enc, gpu, req, 0, y_off)
 }
 
@@ -8575,7 +8742,6 @@ pub struct TokenReq<'a> {
     pub m: usize,
     pub layers: &'a [TokenLayer<'a>],
     pub cache: &'a SharedRegion,
-    pub cache_capacity: usize,
     /// qwen35moe: the SSM region holding every GDN layer's conv window and
     /// deltanet state (f32 elements), wrapped like the KV cache.
     pub ssm: Option<&'a SharedRegion>,
@@ -8600,9 +8766,6 @@ pub struct TokenReq<'a> {
     /// Greedy caller: run the argmax on the GPU after the output projection
     /// and read back 4 bytes instead of the whole vocabulary.
     pub argmax: bool,
-    /// CUDA-only: GPU embd lookup. Metal ignores and always uses `x`.
-    pub embd: Option<(GgmlType, &'a [u8], usize)>,
-    pub token_id: Option<u32>,
 }
 
 /// What decode_token produced: the full vocabulary logits, or just the
@@ -8613,7 +8776,10 @@ pub struct TokenReq<'a> {
 pub enum TokenOut {
     Logits(Vec<f32>),
     Argmax(u32),
-    Rows { argmax: Vec<u32>, hidden: Vec<f32> },
+    Rows {
+        argmax: Vec<u32>,
+        hidden: Vec<f32>,
+    },
 }
 
 /// A resolved norm bind: which chunk window holds the F32 weights.
@@ -8649,13 +8815,9 @@ fn resolve_norm(gpu: &Gpu, raw: &[u8], hidden: usize) -> Option<NormRef> {
         return None;
     }
     let chunk = gpu.chunk_for(addr, raw.len())?;
-    Some(NormRef {
-        chunk,
-        off: (addr - gpu.chunks[chunk].start) as u64,
-    })
+    Some(NormRef { chunk, off: (addr - gpu.chunks[chunk].start) as u64 })
 }
 
-#[repr(C)]
 #[repr(C)]
 struct GpuMegaArgs {
     hidden: u32,
@@ -8684,28 +8846,36 @@ struct GpuMegaArgs {
     up_stride: u64,
     down_stride: u64,
     sigmoid: u32,
+    /// 0 = none, 1 = always-on weight 1, 2 = gated via `sh_gout_off`.
     has_shared: u32,
     sh_gate_off: u64,
     sh_up_off: u64,
     sh_down_off: u64,
+    sh_gout_off: u64,
+    /// Metal `set_bytes` length should be a multiple of 16; keep trailing pad.
+    _tail: u64,
 }
 
-/// How many threadgroups the megakernel launches. Every TG must be RESIDENT
-/// simultaneously or the in-kernel sync deadlocks; 48 x 256 threads sits
-/// comfortably inside a 40-core M4 Max. `ALLPAKA_MEGA_TG` to sweep.
+/// How many threadgroups the megakernel launches.
+///
+/// Multi-TG uses a device atomic busy-wait that soft-locks the Metal
+/// scheduler and can freeze the whole Mac. Until a non-spinning sync exists,
+/// this is hard-capped at 1 (local barrier only). `ALLPAKA_MEGA_TG` is ignored.
 fn mega_tg() -> u32 {
-    static N: OnceLock<u32> = OnceLock::new();
-    *N.get_or_init(|| {
-        std::env::var("ALLPAKA_MEGA_TG")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(48)
-    })
+    1
 }
 
-fn mega_enabled() -> bool {
+fn mega_debug() -> bool {
     static M: OnceLock<bool> = OnceLock::new();
-    *M.get_or_init(|| std::env::var("ALLPAKA_MEGA").is_ok_and(|v| v == "1"))
+    *M.get_or_init(|| std::env::var("ALLPAKA_MEGA_DEBUG").is_ok_and(|v| v == "1"))
+}
+
+/// MEGA stays off. A live multi-TG device-atomic `mega_sync` soft-locked the
+/// Metal scheduler and froze a Mac; the spin was deleted and `mega_tg` is 1,
+/// but the fused path is still unfinished. Do not re-enable via env until a
+/// non-spinning redesign + a test that cannot wedge the GPU lands.
+fn mega_enabled() -> bool {
+    false
 }
 
 /// Format code for the megakernel's expert cores; None = unsupported.
@@ -8778,6 +8948,8 @@ enum FfnRefs {
         mats: [MatRef; 3],
         states: [ComputePipelineState; 3],
         ffn_dim: usize,
+        /// Down reads silu(gate)*up via SWIGLU_X (same as MoE).
+        sw_fused: bool,
     },
     Moe {
         router: MatRef,
@@ -8799,9 +8971,9 @@ enum FfnRefs {
         /// gate + up as one dual-output indexed dispatch
         /// (ALLPAKA_DECODE_GUFUSE).
         gu_dual: Option<ComputePipelineState>,
-        /// down + combine as ONE indexed dispatch writing the
-        /// residual delta (COMBINE function constant).
-        down_combine: Option<ComputePipelineState>,
+        /// Indexed down with SHARED_TAIL: routed + shared Q8_0 down in one
+        /// launch (`ALLPAKA_SHARED_TAIL=1`).
+        down_tail: Option<ComputePipelineState>,
     },
 }
 
@@ -8878,9 +9050,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     macro_rules! why {
         ($cond:expr, $msg:expr) => {
             if $cond {
-                if dbg {
-                    eprintln!("tokenbuf declined: {}", $msg);
-                }
+                if dbg { eprintln!("tokenbuf declined: {}", $msg); }
                 return None;
             }
         };
@@ -8893,10 +9063,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     why!(hd != 128 && hd != 256 || hidden % 4 != 0, "shape");
     // Full rotary, GLM-style half rotary, qwen35moe's quarter rotary at 256.
     why!(req.rope.len() != m * req.rot_dim / 2, "rope table");
-    why!(
-        req.rot_dim != hd && req.rot_dim * 2 != hd && !(hd == 256 && req.rot_dim == 64),
-        "rot dim"
-    );
+    why!(req.rot_dim != hd && req.rot_dim * 2 != hd && !(hd == 256 && req.rot_dim == 64), "rot dim");
     let q_dim = req.n_heads * hd;
     let kv = req.n_kv_heads * hd;
     let span = (req.pos + m) * req.kv_dim;
@@ -8913,36 +9080,31 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         why!(true, "lock");
         return None;
     };
-    let resolve_or_decline =
-        |label: &str, ty: GgmlType, w: &[u8], dbg: bool, gpu: &mut _| -> Option<MatRef> {
-            let Some(mat) = resolve(gpu, ty, w) else {
-                if dbg {
-                    eprintln!("tokenbuf declined: {label} resolve");
-                }
-                return None;
-            };
-            Some(mat)
+    let resolve_or_decline = |label: &str, ty: GgmlType, w: &[u8], dbg: bool, gpu: &mut _| -> Option<MatRef> {
+        let Some(mat) = resolve(gpu, ty, w) else {
+            if dbg {
+                eprintln!("tokenbuf declined: {label} resolve");
+            }
+            return None;
         };
-    let resolve_f32_or_decline =
-        |label: &str, b: &[u8], n: usize, dbg: bool, gpu: &mut _| -> Option<MatRef> {
-            let Some(norm) = resolve_f32(gpu, b, n) else {
-                if dbg {
-                    eprintln!("tokenbuf declined: {label} norm resolve");
-                }
-                return None;
-            };
-            Some(norm)
+        Some(mat)
+    };
+    let resolve_f32_or_decline = |label: &str, b: &[u8], n: usize, dbg: bool, gpu: &mut _| -> Option<MatRef> {
+        let Some(norm) = resolve_f32(gpu, b, n) else {
+            if dbg {
+                eprintln!("tokenbuf declined: {label} norm resolve");
+            }
+            return None;
         };
+        Some(norm)
+    };
 
     let mut layers = Vec::with_capacity(req.layers.len());
     let mut max_ffn = 0usize;
     let mut max_slots = 1usize;
     let mut max_expert = 0usize;
     for l in req.layers {
-        why!(
-            (l.k_off + span) * 2 > req.cache.len || (l.v_off + span) * 2 > req.cache.len,
-            "cache span"
-        );
+        why!((l.k_off + span) * 2 > req.cache.len || (l.v_off + span) * 2 > req.cache.len, "cache span");
         // GDN layer: no attention mats at all; resolve the deltanet branch.
         let gdn = match &l.gdn {
             None => None,
@@ -8950,20 +9112,10 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 let key_dim = g.heads_k * g.d;
                 let value_dim = g.heads_v * g.d;
                 let channels = key_dim * 2 + value_dim;
-                why!(
-                    g.wqkv.2 != channels || g.zgate.2 != value_dim || g.ssm_out.2 != hidden,
-                    "gdn dims"
-                );
-                why!(
-                    g.alpha.len() != hidden * g.heads_v * 4
-                        || g.beta.len() != hidden * g.heads_v * 4,
-                    "gdn ab dims"
-                );
+                why!(g.wqkv.2 != channels || g.zgate.2 != value_dim || g.ssm_out.2 != hidden, "gdn dims");
+                why!(g.alpha.len() != hidden * g.heads_v * 4 || g.beta.len() != hidden * g.heads_v * 4, "gdn ab dims");
                 why!(g.conv1d.len() != channels * g.d_conv * 4, "gdn conv dims");
-                why!(
-                    g.a.len() != g.heads_v || g.dt.len() != g.heads_v || g.ssm_norm.len() != g.d,
-                    "gdn vec dims"
-                );
+                why!(g.a.len() != g.heads_v || g.dt.len() != g.heads_v || g.ssm_norm.len() != g.d, "gdn vec dims");
                 let mats = [
                     resolve_or_decline("gdn.wqkv", g.wqkv.0, g.wqkv.1, dbg, &mut gpu)?,
                     resolve_or_decline("gdn.zgate", g.zgate.0, g.zgate.1, dbg, &mut gpu)?,
@@ -8982,10 +9134,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         return None;
                     }
                     let chunk = gpu.chunk_for(addr, g.conv1d.len())?;
-                    NormRef {
-                        chunk,
-                        off: (addr - gpu.chunks[chunk].start) as u64,
-                    }
+                    NormRef { chunk, off: (addr - gpu.chunks[chunk].start) as u64 }
                 };
                 Some(GdnRefs {
                     mats,
@@ -9004,16 +9153,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         };
         let wq_out = if l.gate_in_q { 2 * q_dim } else { q_dim };
         let mats_pre = if gdn.is_none() {
-            let dims = [
-                (hidden, wq_out),
-                (hidden, l.wk.2),
-                (hidden, l.wv.2),
-                (q_dim, l.wo.2),
-            ];
-            why!(
-                l.wq.2 != wq_out || l.wk.2 != kv || l.wv.2 != kv || l.wo.2 != hidden,
-                "attn dims"
-            );
+            let dims = [(hidden, wq_out), (hidden, l.wk.2), (hidden, l.wv.2), (q_dim, l.wo.2)];
+            why!(l.wq.2 != wq_out || l.wk.2 != kv || l.wv.2 != kv || l.wo.2 != hidden, "attn dims");
             let mats = [
                 resolve_or_decline("attn.wq", l.wq.0, l.wq.1, dbg, &mut gpu)?,
                 resolve_or_decline("attn.wk", l.wk.0, l.wk.1, dbg, &mut gpu)?,
@@ -9042,8 +9183,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     let lpr = lanes_per_row(mat.ty, n_in);
                     let wait = normflag && i < 3;
                     mat_states.push(
-                        gpu.pipeline_wait(mat.kernel, 1, lpr, false, false, wait)?
-                            .to_owned(),
+                        gpu.pipeline_wait(mat.kernel, 1, lpr, false, false, wait)?.to_owned(),
                     );
                 }
                 (Some(mats), Some(mat_states.try_into().ok()?))
@@ -9060,38 +9200,29 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     resolve_or_decline("ffn.up", up.0, up.1, dbg, &mut gpu)?,
                     resolve_or_decline("ffn.down", down.0, down.1, dbg, &mut gpu)?,
                 ];
+                let sw_capable = |k: &str| {
+                    matches!(k, "matvec_q2_k" | "matvec_q3_k_mv" | "matvec_q4_k_mv"
+                        | "matvec_q5_k_mv" | "matvec_q8_0" | "matvec_q8_0_mv")
+                };
+                let sw_fused = sw_capable(mats[2].kernel)
+                    && std::env::var("ALLPAKA_SWFUSE").map_or(true, |v| v != "0");
                 let mut states = Vec::with_capacity(3);
-                for (mat, n_in) in mats.iter().zip([hidden, hidden, gate.2]) {
+                for (i, (mat, n_in)) in mats.iter().zip([hidden, hidden, gate.2]).enumerate() {
                     let lpr = lanes_per_row(mat.ty, n_in);
-                    states.push(gpu.pipeline(mat.kernel, 1, lpr)?.to_owned());
+                    let swiglu = i == 2 && sw_fused;
+                    states.push(gpu.pipeline_full(mat.kernel, 1, lpr, false, swiglu)?.to_owned());
                 }
                 max_ffn = max_ffn.max(gate.2);
                 FfnRefs::Dense {
                     mats,
                     states: states.try_into().ok()?,
                     ffn_dim: gate.2,
+                    sw_fused,
                 }
             }
-            TokenFfn::Moe {
-                router,
-                router_bias,
-                gate,
-                up,
-                down,
-                expert_ffn,
-                n_used,
-                sigmoid,
-                shared,
-                shared_gate,
-            } => {
-                why!(
-                    router.0 != GgmlType::F32 || router.2 > 256 || *n_used > 16,
-                    "router shape"
-                );
-                why!(
-                    shared_gate.is_some() && shared.is_none(),
-                    "shared gate without shared expert"
-                );
+            TokenFfn::Moe { router, router_bias, gate, up, down, expert_ffn, n_used, sigmoid, shared, shared_gate } => {
+                why!(router.0 != GgmlType::F32 || router.2 > 256 || *n_used > 16, "router shape");
+                why!(shared_gate.is_some() && shared.is_none(), "shared gate without shared expert");
                 let router_ref = resolve_f32_or_decline("router", router.1, hidden, dbg, &mut gpu)?;
                 let router_state = gpu
                     .pipeline_wait(
@@ -9120,26 +9251,19 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 let mut gu_kernels = [""; 2];
                 // Kernels carrying the SWIGLU_X down-projection variant.
                 let sw_capable = |k: &str| {
-                    matches!(
-                        k,
-                        "matvec_q2_k" | "matvec_q3_k_mv" | "matvec_q4_k_mv" | "matvec_q8_0"
-                    )
+                    matches!(k, "matvec_q2_k" | "matvec_q3_k_mv" | "matvec_q4_k_mv"
+                        | "matvec_q5_k_mv" | "matvec_q8_0" | "matvec_q8_0_mv")
                 };
                 // With a shared expert, fusion is only safe when the shared
                 // down carries the variant too - otherwise its slot would
                 // read raw gate values once the standalone swiglu is gone.
                 let shared_down_sw = match shared {
-                    Some(sh) => {
-                        resolve_or_decline("ffn.shared.down", sh[2].0, sh[2].1, dbg, &mut gpu)
-                            .is_some_and(|m| sw_capable(m.kernel))
-                    }
+                    Some(sh) => resolve_or_decline("ffn.shared.down", sh[2].0, sh[2].1, dbg, &mut gpu)
+                        .is_some_and(|m| sw_capable(m.kernel)),
                     None => true,
                 };
-                for (i, ((mat, n_in), n_out)) in mats
-                    .iter()
-                    .zip([hidden, hidden, *expert_ffn])
-                    .zip(n_outs)
-                    .enumerate()
+                for (i, ((mat, n_in), n_out)) in
+                    mats.iter().zip([hidden, hidden, *expert_ffn]).zip(n_outs).enumerate()
                 {
                     let lpr = lanes_per_row(mat.ty, n_in);
                     // The mv kernel's INDEXED form maps 4 consecutive flat
@@ -9149,7 +9273,9 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         "matvec_q2_k_mv" if n_out % 4 != 0 => "matvec_q2_k",
                         "matvec_q3_k_mv" if n_out % 2 != 0 => "matvec_q3_k",
                         "matvec_q4_k_mv" if n_out % 2 != 0 => "matvec_q4_k",
+                        "matvec_q5_k_mv" if n_out % 2 != 0 => "matvec_q5_k",
                         "matvec_q6_k_mv" if n_out % 2 != 0 => "matvec_q6_k",
+                        "matvec_q8_0_mv" if n_out % q8_nr0() != 0 => "matvec_q8_0",
                         k => k,
                     };
                     if i < 2 {
@@ -9161,7 +9287,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     let swiglu = i == 2
                         && sw_capable(kernel)
                         && shared_down_sw
-                        && std::env::var("ALLPAKA_SWFUSE").is_ok_and(|v| v == "1");
+                        && std::env::var("ALLPAKA_SWFUSE").map_or(true, |v| v != "0");
                     if swiglu {
                         sw_fused = true;
                     }
@@ -9172,10 +9298,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     Some(sh) => {
                         // The shared expert rides the combine as an extra
                         // slot, so its ffn width must match a routed one.
-                        why!(
-                            sh[0].2 != *expert_ffn || sh[1].2 != *expert_ffn || sh[2].2 != hidden,
-                            "shared dims"
-                        );
+                        why!(sh[0].2 != *expert_ffn || sh[1].2 != *expert_ffn
+                            || sh[2].2 != hidden, "shared dims");
                         let smats = [
                             resolve_or_decline("ffn.shared.gate", sh[0].0, sh[0].1, dbg, &mut gpu)?,
                             resolve_or_decline("ffn.shared.up", sh[1].0, sh[1].1, dbg, &mut gpu)?,
@@ -9187,10 +9311,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         {
                             let lpr = lanes_per_row(mat.ty, n_in);
                             let swiglu = i == 2 && sw_fused && sw_capable(mat.kernel);
-                            sstates.push(
-                                gpu.pipeline_full(mat.kernel, 1, lpr, false, swiglu)?
-                                    .to_owned(),
-                            );
+                            sstates
+                                .push(gpu.pipeline_full(mat.kernel, 1, lpr, false, swiglu)?.to_owned());
                         }
                         max_slots = max_slots.max(*n_used + 1);
                         Some((smats, sstates.try_into().ok()?))
@@ -9201,7 +9323,10 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     }
                 };
                 max_expert = max_expert.max(n_expert);
-                let mega = if mega_enabled() && n_expert <= 128 && shared_gate.is_none() {
+                // shared_gate (GLM gated shared expert) is supported as
+                // has_shared=2 inside the megakernel; the old barrier that
+                // refused any shared_gate blocked the GLM decode win.
+                let mega = if mega_enabled() && n_expert <= 256 {
                     let gf = mega_fmt(mats[0].ty);
                     let uf = mega_fmt(mats[1].ty);
                     let df = mega_fmt(mats[2].ty);
@@ -9241,22 +9366,19 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 } else {
                     None
                 };
-                // down + combine as ONE dispatch into delta: the per-slot
-                // down buffer, the combine dispatch and a barrier drop out
-                // of every MoE layer. Routed
-                // experts only - a shared expert's slot comes from another
-                // matrix - and the 2-row simdgroup pairs need an even
-                // hidden. `ALLPAKA_DCOMB=0` reverts to the separate stages.
-                let down_kernel = match mats[2].kernel {
-                    k @ ("matvec_q4_k_mv" | "matvec_q6_k_mv") => Some(k),
-                    _ => None,
-                };
-                let down_combine = match down_kernel {
-                    Some(k) if dcomb() && shared.is_none() && hidden % 2 == 0 && *n_used <= 32 => {
-                        gpu.pipeline_combine(k, lanes_per_row(mats[2].ty, *expert_ffn), dcomb_sw())
-                            .filter(|p| {
-                                p.max_total_threads_per_threadgroup() >= 32 * *n_used as u64
-                            })
+                // Fold shared Q8_0 down into the indexed expert down (+1
+                // parallel slot). Same format only; gate/up stay separate
+                // (Q4 vs Q5 on GLM). Opt out: ALLPAKA_SHARED_TAIL=0.
+                let down_tail = match &shared_refs {
+                    Some((smats, _))
+                        if shared_tail()
+                            && mats[2].kernel == "matvec_q8_0_mv"
+                            && smats[2].kernel == "matvec_q8_0_mv"
+                            && mats[2].ty == smats[2].ty
+                            && (hidden * (*n_used + 1)) % 2 == 0 =>
+                    {
+                        let lpr = lanes_per_row(mats[2].ty, *expert_ffn);
+                        gpu.pipeline_shared_tail("matvec_q8_0_mv", lpr, sw_fused)
                             .map(|p| p.to_owned())
                     }
                     _ => None,
@@ -9281,13 +9403,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     shared_gate: match shared_gate {
                         Some(sg) => {
                             why!(sg.len() != hidden * 4, "shared gate dims");
-                            let mat = resolve_f32_or_decline(
-                                "ffn.shared.gate_out",
-                                sg,
-                                hidden,
-                                dbg,
-                                &mut gpu,
-                            )?;
+                            let mat = resolve_f32_or_decline("ffn.shared.gate_out", sg, hidden, dbg, &mut gpu)?;
                             let state = gpu
                                 .pipeline("matvec_f32", 1, lanes_per_row(GgmlType::F32, hidden))?
                                 .to_owned();
@@ -9296,7 +9412,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         None => None,
                     },
                     gu_dual,
-                    down_combine,
+                    down_tail,
                 }
             }
         };
@@ -9346,26 +9462,20 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     let gdn_conv_state = gpu.pipelines[&("gdn_conv", 1, 1)].to_owned();
     let gdn_step_state = gpu.pipelines[&("gdn_step", 1, 1)].to_owned();
     let gdn_norm_state = gpu.pipelines[&("gdn_out_norm", 1, 1)].to_owned();
-    let sigmoid_gating = req
-        .layers
-        .iter()
-        .any(|l| matches!(l.ffn, TokenFfn::Moe { sigmoid: true, .. }));
+    let sigmoid_gating = req.layers.iter().any(|l| {
+        matches!(l.ffn, TokenFfn::Moe { sigmoid: true, .. })
+    });
     let topk_state = gpu.pipelines[&(
-        if sigmoid_gating {
-            "sigmoid_topk"
-        } else {
-            "softmax_topk"
-        },
+        if sigmoid_gating { "sigmoid_topk" } else { "softmax_topk" },
         1,
         1,
     )]
-        .to_owned();
+    .to_owned();
     let rtopk_state = gpu.pipelines[&("router_topk", 1, 1)].to_owned();
     let swiglu_state = gpu.pipelines[&("swiglu", 1, 1)].to_owned();
     let combine_state = gpu.pipelines[&("moe_combine", 1, 1)].to_owned();
     let combine_resnorm_state = gpu.pipelines[&("combine_resnorm", 1, 1)].to_owned();
     let resnorm_router_state = gpu.pipelines[&("resnorm_router", 1, 1)].to_owned();
-    let resnorm_router_mt_state = gpu.pipelines[&("resnorm_router_mt", 1, 1)].to_owned();
     let argmax_state = gpu.pipelines[&("argmax_f32", 1, 1)].to_owned();
     let argmax_final_state = gpu.pipelines[&("argmax_final", 1, 1)].to_owned();
 
@@ -9419,9 +9529,6 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     let out_logits_at = downo_at + align(max_slots * hidden);
     let flag_at = out_logits_at + align(vocab);
     let ctr_at = flag_at + align(1);
-    // Arrival counter of the multi-threadgroup resnorm_router_mt kernel;
-    // the kernel's last group resets it, so one word serves every layer.
-    let rctr_at = ctr_at + align(1);
     // Flash-decoding split fan-out: past a few hundred cached positions one
     // threadgroup per q head walks the KV cache too serially (measured 86 us
     // per layer at 544 tokens against ~2 us of cache bytes). Split the
@@ -9436,7 +9543,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         .unwrap_or_else(|| (n_pos / 128).clamp(1, 12))
         .clamp(1, 16)
         .min(n_pos);
-    let sp_acc_at = rctr_at + align(1);
+    let sp_acc_at = ctr_at + align(1);
     let sp_md_at = sp_acc_at + align(req.n_heads * nsplit * hd);
     // The greedy argmax: 64 (value, index) partial pairs plus the winner.
     let amax_at = sp_md_at + align(req.n_heads * nsplit * 2);
@@ -9450,18 +9557,11 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         std::ptr::write_bytes(yp.add(delta_at), 0, hidden);
         std::ptr::write_bytes(yp.add(flag_at), 0, 1);
         std::ptr::write_bytes(yp.add(ctr_at), 0, 1);
-        std::ptr::write_bytes(yp.add(rctr_at), 0, 1);
         // The shared expert's combine weight is a constant 1 in the slot past
         // the router-written ones - unless the layer carries qwen35moe's
         // gate projection, whose matvec overwrites it during the token.
         for l in &layers {
-            if let FfnRefs::Moe {
-                n_used,
-                shared: Some(_),
-                shared_gate: None,
-                ..
-            } = &l.ffn
-            {
+            if let FfnRefs::Moe { n_used, shared: Some(_), shared_gate: None, .. } = &l.ffn {
                 *yp.add(wts_at + *n_used) = 1.0;
             }
         }
@@ -9474,7 +9574,21 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         // ALLPAKA_DECODE_SERIAL=1: serial encoder, implicit ordering, all
         // explicit barriers skipped - probes whether the driver's own
         // hazard tracking beats our barrier drains per stage boundary.
-        let serial = crate::runtime::get().decode_serial;
+        // Megakernel multi-TG sync busy-waits on a device atomic; concurrent
+        // unrelated dispatches can starve sibling TGs and deadlock. Force
+        // serial whenever any layer uses MEGA (still honor explicit SERIAL=1).
+        let any_mega = layers
+            .iter()
+            .any(|l| matches!(&l.ffn, FfnRefs::Moe { mega: Some(_), .. }));
+        let serial = crate::runtime::get().decode_serial || any_mega;
+        if any_mega && mega_debug() {
+            eprintln!(
+                "mega: encode path n_tg={} serial={} layers={}",
+                mega_tg(),
+                serial,
+                layers.len()
+            );
+        }
         // ALLPAKA_DECODE_SPLIT=1: sample the GPU timestamp counter at existing
         // stage boundaries. Profile mode uses multiple compute encoders inside
         // the same command buffer; production mode remains one concurrent
@@ -9495,9 +9609,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 .find(|set| set.name() == "timestamp")
                 .and_then(|set| {
                     desc.set_counter_set(set);
-                    gpu.device
-                        .new_counter_sample_buffer_with_descriptor(&desc)
-                        .ok()
+                    gpu.device.new_counter_sample_buffer_with_descriptor(&desc).ok()
                 })
         } else {
             None
@@ -9512,7 +9624,9 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         let mut split_index = 0u64;
         let mut split_cpu_start = 0u64;
         let mut split_gpu_start = 0u64;
-        let profile_encoder = |counter: &metal::CounterSampleBufferRef, start: u64, end: u64| {
+        let profile_encoder = |counter: &metal::CounterSampleBufferRef,
+                               start: u64,
+                               end: u64| {
             let desc = metal::ComputePassDescriptor::new();
             let attachment = desc
                 .sample_buffer_attachments()
@@ -9524,8 +9638,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             cmd.compute_command_encoder_with_descriptor(desc)
         };
         let mut enc = if let Some(counter) = split_counter.as_ref() {
-            gpu.device
-                .sample_timestamps(&mut split_cpu_start, &mut split_gpu_start);
+            gpu.device.sample_timestamps(&mut split_cpu_start, &mut split_gpu_start);
             split_index = 2;
             profile_encoder(counter, 0, 1)
         } else {
@@ -9585,11 +9698,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             enc.set_bytes(3, 4, &a as *const u32 as *const _);
             enc.set_bytes(4, 4, &b as *const u32 as *const _);
             enc.set_bytes(5, 8, &mat.w_off as *const u64 as *const _);
-            let lpr = lanes_per_row(mat.ty, n_in) as u64;
-            enc.dispatch_thread_groups(
-                MTLSize::new((n_out as u64 * lpr).div_ceil(128), 1, 1),
-                MTLSize::new(128, 1, 1),
-            );
+            dispatch_mv(enc, mat.ty, n_in, n_out);
         };
         // The indexed form: n_out is per expert, the grid covers all slots.
         let matvec_idx = |enc: &metal::ComputeCommandEncoderRef,
@@ -9612,25 +9721,13 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             enc.set_bytes(4, 4, &b as *const u32 as *const _);
             enc.set_bytes(5, 8, &mat.w_off as *const u64 as *const _);
             enc.set_buffer(6, Some(y), e(ids_at));
-            let idx = GpuIdxArgs {
-                stride,
-                slots: slots as u32,
-                x_stride: x_stride as u32,
-                ids_stride: 0,
-                x_row_stride: 0,
-                y_row_stride: 0,
-                n_rows: 0,
-            };
+            let idx = GpuIdxArgs { stride, slots: slots as u32, x_stride: x_stride as u32, ids_stride: 0, x_row_stride: 0, y_row_stride: 0, n_rows: 0 };
             enc.set_bytes(
                 7,
                 std::mem::size_of::<GpuIdxArgs>() as u64,
                 &idx as *const GpuIdxArgs as *const _,
             );
-            let lpr = lanes_per_row(mat.ty, n_in) as u64;
-            enc.dispatch_thread_groups(
-                MTLSize::new(((n_out * slots) as u64 * lpr).div_ceil(128), 1, 1),
-                MTLSize::new(128, 1, 1),
-            );
+            dispatch_mv_indexed(&enc, mat.ty, n_in, n_out, slots);
         };
         let resnorm = |enc: &metal::ComputeCommandEncoderRef, norm: &NormRef| {
             enc.set_compute_pipeline_state(&resnorm_state);
@@ -9661,22 +9758,21 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         };
         // residual_norm with the combine folded in: one dispatch and one
         // barrier less per MoE layer boundary.
-        let combine_resnorm =
-            |enc: &metal::ComputeCommandEncoderRef, norm: &NormRef, slots: u32, sig_last: u32| {
-                enc.set_compute_pipeline_state(&combine_resnorm_state);
-                enc.set_buffer(0, Some(y), e(x_at));
-                enc.set_buffer(1, Some(y), e(delta_at));
-                enc.set_buffer(2, Some(y), e(h_at));
-                enc.set_buffer(3, Some(&gpu.chunks[norm.chunk].buf), norm.off);
-                let n = hidden as u32;
-                enc.set_bytes(4, 4, &n as *const u32 as *const _);
-                enc.set_bytes(5, 4, &req.eps as *const f32 as *const _);
-                enc.set_buffer(6, Some(y), e(downo_at));
-                enc.set_buffer(7, Some(y), e(wts_at));
-                enc.set_bytes(8, 4, &slots as *const u32 as *const _);
-                enc.set_bytes(9, 4, &sig_last as *const u32 as *const _);
-                enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(256, 1, 1));
-            };
+        let combine_resnorm = |enc: &metal::ComputeCommandEncoderRef, norm: &NormRef, slots: u32, sig_last: u32| {
+            enc.set_compute_pipeline_state(&combine_resnorm_state);
+            enc.set_buffer(0, Some(y), e(x_at));
+            enc.set_buffer(1, Some(y), e(delta_at));
+            enc.set_buffer(2, Some(y), e(h_at));
+            enc.set_buffer(3, Some(&gpu.chunks[norm.chunk].buf), norm.off);
+            let n = hidden as u32;
+            enc.set_bytes(4, 4, &n as *const u32 as *const _);
+            enc.set_bytes(5, 4, &req.eps as *const f32 as *const _);
+            enc.set_buffer(6, Some(y), e(downo_at));
+            enc.set_buffer(7, Some(y), e(wts_at));
+            enc.set_bytes(8, 4, &slots as *const u32 as *const _);
+            enc.set_bytes(9, 4, &sig_last as *const u32 as *const _);
+            enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(256, 1, 1));
+        };
         // The signalling form: publishes `epoch` to the flag word instead of
         // relying on the barrier the caller then skips.
         let resnorm_sig = |enc: &metal::ComputeCommandEncoderRef, norm: &NormRef, epoch: u32| {
@@ -9738,42 +9834,10 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 let tg = &l.gdn.as_ref().expect("gdn refs without gdn layer");
                 let ssm_buf = &req.ssm.expect("gdn layer without ssm region").buf;
                 if !probe_skip("qkv") {
-                    matvec(
-                        &enc,
-                        &g.states[0],
-                        &g.mats[0],
-                        hidden,
-                        g.channels,
-                        h_at,
-                        gqkv_at,
-                    );
-                    matvec(
-                        &enc,
-                        &g.states[1],
-                        &g.mats[1],
-                        hidden,
-                        g.value_dim,
-                        h_at,
-                        gz_at,
-                    );
-                    matvec(
-                        &enc,
-                        &g.states[2],
-                        &g.mats[2],
-                        hidden,
-                        g.heads_v as usize,
-                        h_at,
-                        gab_at,
-                    );
-                    matvec(
-                        &enc,
-                        &g.states[3],
-                        &g.mats[3],
-                        hidden,
-                        g.heads_v as usize,
-                        h_at,
-                        gab_at + g.heads_v as usize,
-                    );
+                    matvec(&enc, &g.states[0], &g.mats[0], hidden, g.channels, h_at, gqkv_at);
+                    matvec(&enc, &g.states[1], &g.mats[1], hidden, g.value_dim, h_at, gz_at);
+                    matvec(&enc, &g.states[2], &g.mats[2], hidden, g.heads_v as usize, h_at, gab_at);
+                    matvec(&enc, &g.states[3], &g.mats[3], hidden, g.heads_v as usize, h_at, gab_at + g.heads_v as usize);
                 }
                 bar_c(&enc, b'a');
                 split_here!("qkv");
@@ -9790,11 +9854,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         pad1: 0,
                         conv_off: g.conv_off,
                     };
-                    enc.set_bytes(
-                        3,
-                        std::mem::size_of::<GdnConvArgs>() as u64,
-                        &cargs as *const GdnConvArgs as *const _,
-                    );
+                    enc.set_bytes(3, std::mem::size_of::<GdnConvArgs>() as u64,
+                        &cargs as *const GdnConvArgs as *const _);
                     enc.dispatch_thread_groups(
                         MTLSize::new((g.channels as u64).div_ceil(256), 1, 1),
                         MTLSize::new(256, 1, 1),
@@ -9814,11 +9875,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                         pad0: 0,
                         state_off: g.state_off,
                     };
-                    enc.set_bytes(
-                        3,
-                        std::mem::size_of::<GdnStepArgs>() as u64,
-                        &sargs as *const GdnStepArgs as *const _,
-                    );
+                    enc.set_bytes(3, std::mem::size_of::<GdnStepArgs>() as u64,
+                        &sargs as *const GdnStepArgs as *const _);
                     enc.set_bytes(4, (tg.a.len() * 4) as u64, tg.a.as_ptr() as *const _);
                     enc.set_bytes(5, (tg.dt.len() * 4) as u64, tg.dt.as_ptr() as *const _);
                     enc.set_buffer(6, Some(y), e(gy_at));
@@ -9831,11 +9889,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     enc.set_compute_pipeline_state(&gdn_norm_state);
                     enc.set_buffer(0, Some(y), e(gy_at));
                     enc.set_buffer(1, Some(y), e(gz_at));
-                    enc.set_bytes(
-                        2,
-                        (tg.ssm_norm.len() * 4) as u64,
-                        tg.ssm_norm.as_ptr() as *const _,
-                    );
+                    enc.set_bytes(2, (tg.ssm_norm.len() * 4) as u64,
+                        tg.ssm_norm.as_ptr() as *const _);
                     let hv = g.heads_v;
                     let dd = g.d;
                     enc.set_bytes(3, 4, &hv as *const u32 as *const _);
@@ -9850,365 +9905,322 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                 bar_c(&enc, b'a');
                 // ssm_out straight into delta.
                 if !probe_skip("qkv") {
-                    matvec(
-                        &enc,
-                        &g.states[4],
-                        &g.mats[4],
-                        g.value_dim,
-                        hidden,
-                        gy_at,
-                        delta_at,
-                    );
+                    matvec(&enc, &g.states[4], &g.mats[4], g.value_dim, hidden, gy_at, delta_at);
                 }
                 bar_c(&enc, b'a');
                 split_here!("wo");
             } else {
-                // qkv from h.
-                let amats = refs.mats.as_ref().expect("attention layer without mats");
-                let astates = refs
-                    .mat_states
-                    .as_ref()
-                    .expect("attention layer without mat states");
-                if !probe_skip("qkv") {
-                    matvec(&enc, &astates[0], &amats[0], hidden, l.wq.2, h_at, q_at);
-                    matvec(&enc, &astates[1], &amats[1], hidden, kv, h_at, k_at);
-                    matvec(&enc, &astates[2], &amats[2], hidden, kv, h_at, v_at);
+            // qkv from h.
+            let amats = refs.mats.as_ref().expect("attention layer without mats");
+            let astates = refs.mat_states.as_ref().expect("attention layer without mat states");
+            if !probe_skip("qkv") {
+                matvec(&enc, &astates[0], &amats[0], hidden, l.wq.2, h_at, q_at);
+                matvec(&enc, &astates[1], &amats[1], hidden, kv, h_at, k_at);
+                matvec(&enc, &astates[2], &amats[2], hidden, kv, h_at, v_at);
+            }
+            bar_c(&enc, b'a');
+            split_here!("qkv");
+            // Norm + rope + cache store.
+            if !probe_skip("attend") {
+            if hd == 256 {
+            // head_dim-256 path: qk_prep256 deinterleaves the fused gate and
+            // writes normed q to qn_at; attend_s32_256/attend_split_256 run
+            // the scores; the sigmoid gate lands before wo.
+            enc.set_compute_pipeline_state(&qk_prep256_state);
+            enc.set_buffer(0, Some(y), e(q_at));
+            enc.set_buffer(1, Some(y), e(k_at));
+            enc.set_buffer(2, Some(y), e(v_at));
+            enc.set_buffer(3, Some(&req.cache.buf), 0);
+            let args = QkPrep256Args {
+                n_heads: req.n_heads as u32,
+                n_kv_heads: req.n_kv_heads as u32,
+                kv_dim: req.kv_dim as u32,
+                eps: req.eps,
+                pos: req.pos as u32,
+                has_qk_norm: l.q_norm.is_some() as u32,
+                rot_dim: req.rot_dim as u32,
+                gate_in_q: l.gate_in_q as u32,
+                k_base: l.k_off as u64,
+                v_base: l.v_off as u64,
+            };
+            enc.set_bytes(4, std::mem::size_of::<QkPrep256Args>() as u64,
+                &args as *const QkPrep256Args as *const _);
+            let ones = [1.0f32; 256];
+            let qw = l.q_norm.unwrap_or(&ones);
+            let kw = l.k_norm.unwrap_or(&ones);
+            enc.set_bytes(5, (256 * 4) as u64, qw.as_ptr() as *const _);
+            enc.set_bytes(6, (256 * 4) as u64, kw.as_ptr() as *const _);
+            enc.set_bytes(7, (req.rope.len() * 8) as u64, req.rope.as_ptr() as *const _);
+            enc.set_buffer(8, Some(y), e(qn_at));
+            enc.set_buffer(9, Some(y), e(qgate_at));
+            enc.dispatch_thread_groups(
+                MTLSize::new((req.n_heads + 2 * req.n_kv_heads) as u64, 1, 1),
+                MTLSize::new(32, 1, 1),
+            );
+            enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
+            let group = (req.n_heads / req.n_kv_heads.max(1)) as u32;
+            enc.set_buffer(0, Some(&req.cache.buf), 0);
+            enc.set_buffer(1, Some(&req.cache.buf), 0);
+            enc.set_buffer(2, Some(y), e(qn_at));
+            for (index, value) in [
+                (4u64, req.kv_dim as u32),
+                (5, 256u32),
+                (6, (req.pos + 1) as u32),
+                (7, group),
+            ] {
+                enc.set_bytes(index, 4, &value as *const u32 as *const _);
+            }
+            enc.set_bytes(8, 4, &req.scale as *const f32 as *const _);
+            for (index, value) in [(9u64, l.k_off as u64), (10, l.v_off as u64)] {
+                enc.set_bytes(index, 8, &value as *const u64 as *const _);
+            }
+            if nsplit > 1 {
+                enc.set_compute_pipeline_state(&attend_split256_state);
+                enc.set_buffer(3, Some(y), e(sp_acc_at));
+                enc.set_buffer(11, Some(y), e(sp_md_at));
+                enc.set_bytes(12, 4, &(nsplit as u32) as *const u32 as *const _);
+                enc.dispatch_thread_groups(
+                    MTLSize::new((req.n_heads * nsplit) as u64, 1, 1),
+                    MTLSize::new(512, 1, 1),
+                );
+                enc.memory_barrier_with_resources(&[y]);
+                enc.set_compute_pipeline_state(&attend_merge_state);
+                enc.set_buffer(0, Some(y), e(sp_acc_at));
+                enc.set_buffer(1, Some(y), e(sp_md_at));
+                enc.set_buffer(2, Some(y), e(attn_at));
+                enc.set_bytes(3, 4, &(nsplit as u32) as *const u32 as *const _);
+                enc.set_bytes(4, 4, &(hd as u32) as *const u32 as *const _);
+                enc.dispatch_thread_groups(
+                    MTLSize::new(req.n_heads as u64, 1, 1),
+                    MTLSize::new(128, 1, 1),
+                );
+            } else {
+                enc.set_compute_pipeline_state(&attend256_state);
+                enc.set_buffer(3, Some(y), e(attn_at));
+                enc.dispatch_thread_groups(
+                    MTLSize::new(req.n_heads as u64, 1, 1),
+                    MTLSize::new(512, 1, 1),
+                );
+            }
+            if l.gate_in_q {
+                enc.memory_barrier_with_resources(&[y]);
+                enc.set_compute_pipeline_state(&gate_mul_state);
+                enc.set_buffer(0, Some(y), e(attn_at));
+                enc.set_buffer(1, Some(y), e(qgate_at));
+                let n = (q_dim) as u32;
+                enc.set_bytes(2, 4, &n as *const u32 as *const _);
+                enc.dispatch_thread_groups(
+                    MTLSize::new((q_dim as u64).div_ceil(256), 1, 1),
+                    MTLSize::new(256, 1, 1),
+                );
+            }
+            } else {
+            enc.set_compute_pipeline_state(&qk_prep_state);
+            enc.set_buffer(0, Some(y), e(q_at));
+            enc.set_buffer(1, Some(y), e(k_at));
+            enc.set_buffer(2, Some(y), e(v_at));
+            enc.set_buffer(3, Some(&req.cache.buf), 0);
+            let args = QkPrepArgs {
+                n_heads: req.n_heads as u32,
+                n_kv_heads: req.n_kv_heads as u32,
+                head_dim: hd as u32,
+                kv_dim: req.kv_dim as u32,
+                eps: req.eps,
+                pos: req.pos as u32,
+                has_qk_norm: l.q_norm.is_some() as u32,
+                rot_dim: req.rot_dim as u32,
+                k_base: l.k_off as u64,
+                v_base: l.v_off as u64,
+                has_bias: refs.q_bias.is_some() as u32,
+                pad2: 0,
+            };
+            enc.set_bytes(4, std::mem::size_of::<QkPrepArgs>() as u64,
+                &args as *const QkPrepArgs as *const _);
+            let ones = [1.0f32; ATTN_HEAD_DIM];
+            let qw = l.q_norm.unwrap_or(&ones);
+            let kw = l.k_norm.unwrap_or(&ones);
+            enc.set_bytes(5, (hd * 4) as u64, qw.as_ptr() as *const _);
+            enc.set_bytes(6, (hd * 4) as u64, kw.as_ptr() as *const _);
+            enc.set_bytes(7, (req.rope.len() * 8) as u64, req.rope.as_ptr() as *const _);
+            // Bias buffers: real F32 regions when the model has them, any
+            // valid buffer otherwise (the kernel skips them on has_bias == 0).
+            let dummy = &gpu.chunks[refs.attn_norm.chunk].buf;
+            for (index, b) in [(8u64, &refs.q_bias), (9, &refs.k_bias), (10, &refs.v_bias)] {
+                match b {
+                    Some(r) => enc.set_buffer(index, Some(&gpu.chunks[r.chunk].buf), r.off),
+                    None => enc.set_buffer(index, Some(dummy), 0),
                 }
-                bar_c(&enc, b'a');
-                split_here!("qkv");
-                // Norm + rope + cache store.
-                if !probe_skip("attend") {
-                    if hd == 256 {
-                        // head_dim-256 path: qk_prep256 deinterleaves the fused gate and
-                        // writes normed q to qn_at; attend_s32_256/attend_split_256 run
-                        // the scores; the sigmoid gate lands before wo.
-                        enc.set_compute_pipeline_state(&qk_prep256_state);
-                        enc.set_buffer(0, Some(y), e(q_at));
-                        enc.set_buffer(1, Some(y), e(k_at));
-                        enc.set_buffer(2, Some(y), e(v_at));
-                        enc.set_buffer(3, Some(&req.cache.buf), 0);
-                        let args = QkPrep256Args {
-                            n_heads: req.n_heads as u32,
-                            n_kv_heads: req.n_kv_heads as u32,
-                            kv_dim: req.kv_dim as u32,
-                            eps: req.eps,
-                            pos: req.pos as u32,
-                            has_qk_norm: l.q_norm.is_some() as u32,
-                            rot_dim: req.rot_dim as u32,
-                            gate_in_q: l.gate_in_q as u32,
-                            k_base: l.k_off as u64,
-                            v_base: l.v_off as u64,
-                        };
-                        enc.set_bytes(
-                            4,
-                            std::mem::size_of::<QkPrep256Args>() as u64,
-                            &args as *const QkPrep256Args as *const _,
-                        );
-                        let ones = [1.0f32; 256];
-                        let qw = l.q_norm.unwrap_or(&ones);
-                        let kw = l.k_norm.unwrap_or(&ones);
-                        enc.set_bytes(5, (256 * 4) as u64, qw.as_ptr() as *const _);
-                        enc.set_bytes(6, (256 * 4) as u64, kw.as_ptr() as *const _);
-                        enc.set_bytes(
-                            7,
-                            (req.rope.len() * 8) as u64,
-                            req.rope.as_ptr() as *const _,
-                        );
-                        enc.set_buffer(8, Some(y), e(qn_at));
-                        enc.set_buffer(9, Some(y), e(qgate_at));
-                        enc.dispatch_thread_groups(
-                            MTLSize::new((req.n_heads + 2 * req.n_kv_heads) as u64, 1, 1),
-                            MTLSize::new(32, 1, 1),
-                        );
-                        enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
-                        let group = (req.n_heads / req.n_kv_heads.max(1)) as u32;
-                        enc.set_buffer(0, Some(&req.cache.buf), 0);
-                        enc.set_buffer(1, Some(&req.cache.buf), 0);
-                        enc.set_buffer(2, Some(y), e(qn_at));
-                        for (index, value) in [
-                            (4u64, req.kv_dim as u32),
-                            (5, 256u32),
-                            (6, (req.pos + 1) as u32),
-                            (7, group),
-                        ] {
-                            enc.set_bytes(index, 4, &value as *const u32 as *const _);
-                        }
-                        enc.set_bytes(8, 4, &req.scale as *const f32 as *const _);
-                        for (index, value) in [(9u64, l.k_off as u64), (10, l.v_off as u64)] {
-                            enc.set_bytes(index, 8, &value as *const u64 as *const _);
-                        }
-                        if nsplit > 1 {
-                            enc.set_compute_pipeline_state(&attend_split256_state);
-                            enc.set_buffer(3, Some(y), e(sp_acc_at));
-                            enc.set_buffer(11, Some(y), e(sp_md_at));
-                            enc.set_bytes(12, 4, &(nsplit as u32) as *const u32 as *const _);
-                            enc.dispatch_thread_groups(
-                                MTLSize::new((req.n_heads * nsplit) as u64, 1, 1),
-                                MTLSize::new(512, 1, 1),
-                            );
-                            enc.memory_barrier_with_resources(&[y]);
-                            enc.set_compute_pipeline_state(&attend_merge_state);
-                            enc.set_buffer(0, Some(y), e(sp_acc_at));
-                            enc.set_buffer(1, Some(y), e(sp_md_at));
-                            enc.set_buffer(2, Some(y), e(attn_at));
-                            enc.set_bytes(3, 4, &(nsplit as u32) as *const u32 as *const _);
-                            enc.set_bytes(4, 4, &(hd as u32) as *const u32 as *const _);
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(req.n_heads as u64, 1, 1),
-                                MTLSize::new(128, 1, 1),
-                            );
-                        } else {
-                            enc.set_compute_pipeline_state(&attend256_state);
-                            enc.set_buffer(3, Some(y), e(attn_at));
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(req.n_heads as u64, 1, 1),
-                                MTLSize::new(512, 1, 1),
-                            );
-                        }
-                        if l.gate_in_q {
-                            enc.memory_barrier_with_resources(&[y]);
-                            enc.set_compute_pipeline_state(&gate_mul_state);
-                            enc.set_buffer(0, Some(y), e(attn_at));
-                            enc.set_buffer(1, Some(y), e(qgate_at));
-                            let n = (q_dim) as u32;
-                            enc.set_bytes(2, 4, &n as *const u32 as *const _);
-                            enc.dispatch_thread_groups(
-                                MTLSize::new((q_dim as u64).div_ceil(256), 1, 1),
-                                MTLSize::new(256, 1, 1),
-                            );
-                        }
-                    } else {
-                        enc.set_compute_pipeline_state(&qk_prep_state);
-                        enc.set_buffer(0, Some(y), e(q_at));
-                        enc.set_buffer(1, Some(y), e(k_at));
-                        enc.set_buffer(2, Some(y), e(v_at));
-                        enc.set_buffer(3, Some(&req.cache.buf), 0);
-                        let args = QkPrepArgs {
-                            n_heads: req.n_heads as u32,
-                            n_kv_heads: req.n_kv_heads as u32,
-                            head_dim: hd as u32,
-                            kv_dim: req.kv_dim as u32,
-                            eps: req.eps,
-                            pos: req.pos as u32,
-                            has_qk_norm: l.q_norm.is_some() as u32,
-                            rot_dim: req.rot_dim as u32,
-                            k_base: l.k_off as u64,
-                            v_base: l.v_off as u64,
-                            has_bias: refs.q_bias.is_some() as u32,
-                            pad2: 0,
-                        };
-                        enc.set_bytes(
-                            4,
-                            std::mem::size_of::<QkPrepArgs>() as u64,
-                            &args as *const QkPrepArgs as *const _,
-                        );
-                        let ones = [1.0f32; ATTN_HEAD_DIM];
-                        let qw = l.q_norm.unwrap_or(&ones);
-                        let kw = l.k_norm.unwrap_or(&ones);
-                        enc.set_bytes(5, (hd * 4) as u64, qw.as_ptr() as *const _);
-                        enc.set_bytes(6, (hd * 4) as u64, kw.as_ptr() as *const _);
-                        enc.set_bytes(
-                            7,
-                            (req.rope.len() * 8) as u64,
-                            req.rope.as_ptr() as *const _,
-                        );
-                        // Bias buffers: real F32 regions when the model has them, any
-                        // valid buffer otherwise (the kernel skips them on has_bias == 0).
-                        let dummy = &gpu.chunks[refs.attn_norm.chunk].buf;
-                        for (index, b) in
-                            [(8u64, &refs.q_bias), (9, &refs.k_bias), (10, &refs.v_bias)]
-                        {
-                            match b {
-                                Some(r) => {
-                                    enc.set_buffer(index, Some(&gpu.chunks[r.chunk].buf), r.off)
-                                }
-                                None => enc.set_buffer(index, Some(dummy), 0),
-                            }
-                        }
-                        enc.dispatch_thread_groups(
-                            MTLSize::new((req.n_heads + 2 * req.n_kv_heads) as u64, 1, 1),
-                            MTLSize::new(32, 1, 1),
-                        );
-                        enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
-                        // Attention.
-                        let attn_req = AttnReq {
-                            cache: req.cache,
-                            k_off: l.k_off,
-                            v_off: l.v_off,
-                            q: &[],
-                            kv_dim: req.kv_dim,
-                            head_dim: hd,
-                            n_q_heads: req.n_heads,
-                            group: req.n_heads / req.n_kv_heads.max(1),
-                            n_pos: req.pos + 1,
-                            scale: req.scale,
-                        };
-                        enc.set_buffer(0, Some(&req.cache.buf), 0);
-                        enc.set_buffer(1, Some(&req.cache.buf), 0);
-                        enc.set_buffer(2, Some(y), e(q_at));
-                        for (index, value) in [
-                            (4u64, attn_req.kv_dim as u32),
-                            (5, attn_req.head_dim as u32),
-                            (6, attn_req.n_pos as u32),
-                            (7, attn_req.group as u32),
-                        ] {
-                            enc.set_bytes(index, 4, &value as *const u32 as *const _);
-                        }
-                        enc.set_bytes(8, 4, &attn_req.scale as *const f32 as *const _);
-                        for (index, value) in [(9u64, l.k_off as u64), (10, l.v_off as u64)] {
-                            enc.set_bytes(index, 8, &value as *const u64 as *const _);
-                        }
-                        if nsplit > 1 {
-                            // Flash-decoding: partial attention per position slice, then
-                            // a merge. The scalar bindings 4..=10 set above are identical;
-                            // only the outputs change.
-                            enc.set_compute_pipeline_state(&attend_split_state);
-                            enc.set_buffer(3, Some(y), e(sp_acc_at));
-                            enc.set_buffer(11, Some(y), e(sp_md_at));
-                            enc.set_bytes(12, 4, &(nsplit as u32) as *const u32 as *const _);
-                            enc.dispatch_thread_groups(
-                                MTLSize::new((req.n_heads * nsplit) as u64, 1, 1),
-                                MTLSize::new(512, 1, 1),
-                            );
-                            enc.memory_barrier_with_resources(&[y]);
-                            enc.set_compute_pipeline_state(&attend_merge_state);
-                            enc.set_buffer(0, Some(y), e(sp_acc_at));
-                            enc.set_buffer(1, Some(y), e(sp_md_at));
-                            enc.set_buffer(2, Some(y), e(attn_at));
-                            enc.set_bytes(3, 4, &(nsplit as u32) as *const u32 as *const _);
-                            enc.set_bytes(4, 4, &(hd as u32) as *const u32 as *const _);
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(req.n_heads as u64, 1, 1),
-                                MTLSize::new(128, 1, 1),
-                            );
-                        } else {
-                            enc.set_compute_pipeline_state(&attend_state);
-                            enc.set_buffer(3, Some(y), e(attn_at));
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(req.n_heads as u64, 1, 1),
-                                MTLSize::new(attend_tg(), 1, 1),
-                            );
-                        }
-                    }
-                }
-                split_here!("attend");
-                bar_c(&enc, b'a');
-                // Output projection straight into delta.
-                if !probe_skip("qkv") {
-                    matvec(
-                        &enc,
-                        &astates[3],
-                        &amats[3],
-                        q_dim,
-                        hidden,
-                        attn_at,
-                        delta_at,
-                    );
-                }
-                bar_c(&enc, b'a');
-                split_here!("wo");
+            }
+            enc.dispatch_thread_groups(
+                MTLSize::new((req.n_heads + 2 * req.n_kv_heads) as u64, 1, 1),
+                MTLSize::new(32, 1, 1),
+            );
+            enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
+            // Attention.
+            let attn_req = AttnReq {
+                cache: req.cache,
+                k_off: l.k_off,
+                v_off: l.v_off,
+                q: &[],
+                kv_dim: req.kv_dim,
+                head_dim: hd,
+                n_q_heads: req.n_heads,
+                group: req.n_heads / req.n_kv_heads.max(1),
+                n_pos: req.pos + 1,
+                scale: req.scale,
+            };
+            enc.set_buffer(0, Some(&req.cache.buf), 0);
+            enc.set_buffer(1, Some(&req.cache.buf), 0);
+            enc.set_buffer(2, Some(y), e(q_at));
+            for (index, value) in [
+                (4u64, attn_req.kv_dim as u32),
+                (5, attn_req.head_dim as u32),
+                (6, attn_req.n_pos as u32),
+                (7, attn_req.group as u32),
+            ] {
+                enc.set_bytes(index, 4, &value as *const u32 as *const _);
+            }
+            enc.set_bytes(8, 4, &attn_req.scale as *const f32 as *const _);
+            for (index, value) in [(9u64, l.k_off as u64), (10, l.v_off as u64)] {
+                enc.set_bytes(index, 8, &value as *const u64 as *const _);
+            }
+            if nsplit > 1 {
+                // Flash-decoding: partial attention per position slice, then
+                // a merge. The scalar bindings 4..=10 set above are identical;
+                // only the outputs change.
+                enc.set_compute_pipeline_state(&attend_split_state);
+                enc.set_buffer(3, Some(y), e(sp_acc_at));
+                enc.set_buffer(11, Some(y), e(sp_md_at));
+                enc.set_bytes(12, 4, &(nsplit as u32) as *const u32 as *const _);
+                enc.dispatch_thread_groups(
+                    MTLSize::new((req.n_heads * nsplit) as u64, 1, 1),
+                    MTLSize::new(512, 1, 1),
+                );
+                enc.memory_barrier_with_resources(&[y]);
+                enc.set_compute_pipeline_state(&attend_merge_state);
+                enc.set_buffer(0, Some(y), e(sp_acc_at));
+                enc.set_buffer(1, Some(y), e(sp_md_at));
+                enc.set_buffer(2, Some(y), e(attn_at));
+                enc.set_bytes(3, 4, &(nsplit as u32) as *const u32 as *const _);
+                enc.set_bytes(4, 4, &(hd as u32) as *const u32 as *const _);
+                enc.dispatch_thread_groups(
+                    MTLSize::new(req.n_heads as u64, 1, 1),
+                    MTLSize::new(128, 1, 1),
+                );
+            } else {
+            enc.set_compute_pipeline_state(&attend_state);
+            enc.set_buffer(3, Some(y), e(attn_at));
+            enc.dispatch_thread_groups(
+                MTLSize::new(req.n_heads as u64, 1, 1),
+                MTLSize::new(attend_tg(), 1, 1),
+            );
+            }
+            }
+            }
+            split_here!("attend");
+            bar_c(&enc, b'a');
+            // Output projection straight into delta.
+            if !probe_skip("qkv") {
+                matvec(&enc, &astates[3], &amats[3], q_dim, hidden, attn_at, delta_at);
+            }
+            bar_c(&enc, b'a');
+            split_here!("wo");
             }
             // The megakernel absorbs the whole FFN half, resnorm included.
-            if let FfnRefs::Moe {
-                mega: Some(mega_state),
-                router,
-                router_bias,
-                mats,
-                strides,
-                n_expert,
-                expert_ffn,
-                n_used,
-                sigmoid,
-                shared,
-                ..
-            } = &refs.ffn
-            {
+            if let FfnRefs::Moe { mega: Some(mega_state), router, router_bias, mats, strides, n_expert, expert_ffn, n_used, sigmoid, shared, shared_gate, .. } = &refs.ffn {
                 // The megakernel covers softmax (Qwen) and sigmoid+bias
                 // gating with a shared-expert slot (GLM) when the quant
                 // formats have cores in the kernel.
                 {
-                    enc.set_compute_pipeline_state(mega_state);
-                    enc.set_buffer(0, Some(y), 0);
-                    enc.set_buffer(1, Some(&gpu.chunks[mats[0].chunk].buf), 0);
-                    enc.set_buffer(2, Some(&gpu.chunks[mats[1].chunk].buf), 0);
-                    enc.set_buffer(3, Some(&gpu.chunks[mats[2].chunk].buf), 0);
-                    enc.set_buffer(4, Some(&gpu.chunks[router.chunk].buf), 0);
-                    enc.set_buffer(
-                        5,
-                        Some(&gpu.chunks[refs.ffn_norm.chunk].buf),
-                        refs.ffn_norm.off,
-                    );
-                    let ntg = mega_tg();
-                    let margs = GpuMegaArgs {
-                        hidden: hidden as u32,
-                        ffn: *expert_ffn as u32,
-                        n_expert: *n_expert as u32,
-                        n_used: *n_used as u32,
-                        x_at: x_at as u32,
-                        delta_at: delta_at as u32,
-                        h_at: h_at as u32,
-                        logits_at: logits_at as u32,
-                        ids_at: ids_at as u32,
-                        wts_at: wts_at as u32,
-                        gate_at: gate_at as u32,
-                        up_at: up_at as u32,
-                        downo_at: downo_at as u32,
-                        ctr_at: ctr_at as u32,
-                        n_tg: ntg,
-                        ctr_base: (li as u32) * 6 * ntg,
-                        eps: req.eps,
-                        _pad: 0,
-                        gate_off: mats[0].w_off,
-                        up_off: mats[1].w_off,
-                        down_off: mats[2].w_off,
-                        router_off: router.w_off,
-                        gate_stride: strides[0],
-                        up_stride: strides[1],
-                        down_stride: strides[2],
-                        sigmoid: *sigmoid as u32,
-                        has_shared: shared.is_some() as u32,
-                        sh_gate_off: shared.as_ref().map_or(0, |(m, _)| m[0].w_off),
-                        sh_up_off: shared.as_ref().map_or(0, |(m, _)| m[1].w_off),
-                        sh_down_off: shared.as_ref().map_or(0, |(m, _)| m[2].w_off),
-                    };
-                    enc.set_bytes(
-                        6,
-                        std::mem::size_of::<GpuMegaArgs>() as u64,
-                        &margs as *const GpuMegaArgs as *const _,
-                    );
-                    // Buffers 7-10: router bias and the shared expert's weights;
-                    // dummies when unused (the kernel skips them on the flags).
-                    match router_bias {
-                        Some(rb) => enc.set_buffer(7, Some(&gpu.chunks[rb.chunk].buf), rb.off),
-                        None => enc.set_buffer(7, Some(y), 0),
+                enc.set_compute_pipeline_state(mega_state);
+                enc.set_buffer(0, Some(y), 0);
+                enc.set_buffer(1, Some(&gpu.chunks[mats[0].chunk].buf), 0);
+                enc.set_buffer(2, Some(&gpu.chunks[mats[1].chunk].buf), 0);
+                enc.set_buffer(3, Some(&gpu.chunks[mats[2].chunk].buf), 0);
+                enc.set_buffer(4, Some(&gpu.chunks[router.chunk].buf), 0);
+                enc.set_buffer(5, Some(&gpu.chunks[refs.ffn_norm.chunk].buf), refs.ffn_norm.off);
+                let ntg = mega_tg();
+                let margs = GpuMegaArgs {
+                    hidden: hidden as u32,
+                    ffn: *expert_ffn as u32,
+                    n_expert: *n_expert as u32,
+                    n_used: *n_used as u32,
+                    x_at: x_at as u32,
+                    delta_at: delta_at as u32,
+                    h_at: h_at as u32,
+                    logits_at: logits_at as u32,
+                    ids_at: ids_at as u32,
+                    wts_at: wts_at as u32,
+                    gate_at: gate_at as u32,
+                    up_at: up_at as u32,
+                    downo_at: downo_at as u32,
+                    ctr_at: ctr_at as u32,
+                    n_tg: ntg,
+                    ctr_base: (li as u32) * 6 * ntg,
+                    eps: req.eps,
+                    _pad: 0,
+                    gate_off: mats[0].w_off,
+                    up_off: mats[1].w_off,
+                    down_off: mats[2].w_off,
+                    router_off: router.w_off,
+                    gate_stride: strides[0],
+                    up_stride: strides[1],
+                    down_stride: strides[2],
+                    sigmoid: *sigmoid as u32,
+                    has_shared: match (shared.is_some(), shared_gate.is_some()) {
+                        (false, _) => 0,
+                        (true, false) => 1,
+                        (true, true) => 2,
+                    },
+                    sh_gate_off: shared.as_ref().map_or(0, |(m, _)| m[0].w_off),
+                    sh_up_off: shared.as_ref().map_or(0, |(m, _)| m[1].w_off),
+                    sh_down_off: shared.as_ref().map_or(0, |(m, _)| m[2].w_off),
+                    sh_gout_off: shared_gate.as_ref().map_or(0, |(m, _)| m.w_off),
+                    _tail: 0,
+                };
+                enc.set_bytes(
+                    6,
+                    std::mem::size_of::<GpuMegaArgs>() as u64,
+                    &margs as *const GpuMegaArgs as *const _,
+                );
+                // Buffers 7-11: router bias, shared expert weights, optional
+                // shared-gate projection; dummies when unused.
+                match router_bias {
+                    Some(rb) => enc.set_buffer(7, Some(&gpu.chunks[rb.chunk].buf), rb.off),
+                    None => enc.set_buffer(7, Some(y), 0),
+                }
+                match shared {
+                    Some((smats, _)) => {
+                        enc.set_buffer(8, Some(&gpu.chunks[smats[0].chunk].buf), 0);
+                        enc.set_buffer(9, Some(&gpu.chunks[smats[1].chunk].buf), 0);
+                        enc.set_buffer(10, Some(&gpu.chunks[smats[2].chunk].buf), 0);
                     }
-                    match shared {
-                        Some((smats, _)) => {
-                            enc.set_buffer(8, Some(&gpu.chunks[smats[0].chunk].buf), 0);
-                            enc.set_buffer(9, Some(&gpu.chunks[smats[1].chunk].buf), 0);
-                            enc.set_buffer(10, Some(&gpu.chunks[smats[2].chunk].buf), 0);
-                        }
-                        None => {
-                            enc.set_buffer(8, Some(y), 0);
-                            enc.set_buffer(9, Some(y), 0);
-                            enc.set_buffer(10, Some(y), 0);
-                        }
+                    None => {
+                        enc.set_buffer(8, Some(y), 0);
+                        enc.set_buffer(9, Some(y), 0);
+                        enc.set_buffer(10, Some(y), 0);
                     }
-                    enc.dispatch_thread_groups(
-                        MTLSize::new(ntg as u64, 1, 1),
-                        MTLSize::new(256, 1, 1),
-                    );
-                    bar_c(&enc, b'f');
-                    dispatched += 1;
-                    continue;
+                }
+                match shared_gate {
+                    Some((sg, _)) => enc.set_buffer(11, Some(&gpu.chunks[sg.chunk].buf), 0),
+                    None => enc.set_buffer(11, Some(y), 0),
+                }
+                enc.dispatch_thread_groups(
+                    MTLSize::new(ntg as u64, 1, 1),
+                    MTLSize::new(256, 1, 1),
+                );
+                bar_c(&enc, b'f');
+                dispatched += 1;
+                continue;
                 }
             }
             // h = rmsnorm(x + delta) * ffn_norm. On the plain MoE path the
             // norm fuses with the router into ONE dispatch below
             // (resnorm_router), so it runs there instead.
-            // `ALLPAKA_RFUSE=0` reverts to the separate norm dispatch.
+            // `ALLPAKA_RFUSE=1` enables; kept off under default `normflag`
+            // (max-performance): fused path loses ~20–27% decode on GLM / 30B.
             let moe_plain =
-                !refs.normflag && (rmt() || rfuse()) && matches!(&refs.ffn, FfnRefs::Moe { .. });
+                !refs.normflag && rfuse() && matches!(&refs.ffn, FfnRefs::Moe { .. });
             if !moe_plain {
                 if refs.normflag {
                     resnorm_sig(&enc, &refs.ffn_norm, ep_ffn);
@@ -10225,31 +10237,31 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             split_here!("resnorm");
 
             match &refs.ffn {
-                FfnRefs::Dense {
-                    mats,
-                    states,
-                    ffn_dim,
-                } => {
+                FfnRefs::Dense { mats, states, ffn_dim, sw_fused } => {
                     matvec(&enc, &states[0], &mats[0], hidden, *ffn_dim, h_at, gate_at);
                     matvec(&enc, &states[1], &mats[1], hidden, *ffn_dim, h_at, up_at);
                     split_here!("gate_up");
                     bar(&enc);
-                    enc.set_compute_pipeline_state(&swiglu_state);
-                    enc.set_buffer(0, Some(y), e(gate_at));
-                    enc.set_buffer(1, Some(y), e(up_at));
-                    let n = *ffn_dim as u32;
-                    enc.set_bytes(2, 4, &n as *const u32 as *const _);
-                    enc.dispatch_thread_groups(
-                        MTLSize::new((n as u64).div_ceil(256), 1, 1),
-                        MTLSize::new(256, 1, 1),
-                    );
-                    split_here!("swiglu");
-                    bar(&enc);
-                    matvec(
-                        &enc, &states[2], &mats[2], *ffn_dim, hidden, gate_at, delta_at,
-                    );
+                    if !*sw_fused {
+                        enc.set_compute_pipeline_state(&swiglu_state);
+                        enc.set_buffer(0, Some(y), e(gate_at));
+                        enc.set_buffer(1, Some(y), e(up_at));
+                        let n = *ffn_dim as u32;
+                        enc.set_bytes(2, 4, &n as *const u32 as *const _);
+                        enc.dispatch_thread_groups(
+                            MTLSize::new((n as u64).div_ceil(256), 1, 1),
+                            MTLSize::new(256, 1, 1),
+                        );
+                        split_here!("swiglu");
+                        bar(&enc);
+                        matvec(&enc, &states[2], &mats[2], *ffn_dim, hidden, gate_at, delta_at);
+                        dispatched += 4;
+                    } else {
+                        enc.set_buffer(8, Some(y), e(up_at));
+                        matvec(&enc, &states[2], &mats[2], *ffn_dim, hidden, gate_at, delta_at);
+                        dispatched += 3;
+                    }
                     split_here!("down");
-                    dispatched += 4;
                 }
                 FfnRefs::Moe {
                     router,
@@ -10267,282 +10279,219 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     shared,
                     shared_gate,
                     gu_dual,
-                    down_combine,
+                    down_tail,
                 } => {
                     let n_slots = *n_used + shared.is_some() as usize;
                     let sig_last = shared_gate.is_some() as u32;
                     let mut ffn_dispatches = 0u64;
                     if !probe_skip("router") {
-                        if moe_plain {
-                            // FFN residual norm + router matvec + gating + top-k
-                            // in ONE dispatch. `ALLPAKA_RMT=1`: the
-                            // multi-threadgroup kernel (one group per 8
-                            // experts, last arrival does the top-k);
-                            // `ALLPAKA_RFUSE=1`: the single-threadgroup
-                            // original. Not under normflag: that path orders
-                            // the norm by spin-flag.
-                            let mt = rmt();
-                            enc.set_compute_pipeline_state(if mt {
-                                &resnorm_router_mt_state
-                            } else {
-                                &resnorm_router_state
-                            });
-                            enc.set_buffer(0, Some(y), e(x_at));
-                            enc.set_buffer(1, Some(y), e(delta_at));
-                            enc.set_buffer(2, Some(y), e(h_at));
-                            enc.set_buffer(
-                                3,
-                                Some(&gpu.chunks[refs.ffn_norm.chunk].buf),
-                                refs.ffn_norm.off,
-                            );
-                            let hd = hidden as u32;
-                            enc.set_bytes(4, 4, &hd as *const u32 as *const _);
-                            enc.set_bytes(5, 4, &req.eps as *const f32 as *const _);
-                            enc.set_buffer(6, Some(&gpu.chunks[router.chunk].buf), 0);
-                            enc.set_bytes(7, 8, &router.w_off as *const u64 as *const _);
-                            enc.set_buffer(8, Some(y), e(ids_at));
-                            enc.set_buffer(9, Some(y), e(wts_at));
-                            let n = *n_expert as u32;
-                            let k = *n_used as u32;
-                            enc.set_bytes(10, 4, &n as *const u32 as *const _);
-                            enc.set_bytes(11, 4, &k as *const u32 as *const _);
-                            match router_bias {
-                                Some(rb) => {
-                                    enc.set_buffer(12, Some(&gpu.chunks[rb.chunk].buf), rb.off)
-                                }
-                                None => enc.set_buffer(12, Some(&gpu.chunks[router.chunk].buf), 0),
-                            }
-                            let sg = *sigmoid as u32;
-                            let hb = router_bias.is_some() as u32;
-                            enc.set_bytes(13, 4, &sg as *const u32 as *const _);
-                            enc.set_bytes(14, 4, &hb as *const u32 as *const _);
-                            if mt {
-                                enc.set_buffer(15, Some(y), e(logits_at));
-                                enc.set_buffer(16, Some(y), e(rctr_at));
-                                enc.dispatch_thread_groups(
-                                    MTLSize::new((*n_expert as u64).div_ceil(8), 1, 1),
-                                    MTLSize::new(256, 1, 1),
-                                );
-                            } else {
-                                enc.dispatch_thread_groups(
-                                    MTLSize::new(1, 1, 1),
-                                    MTLSize::new(256, 1, 1),
-                                );
-                            }
-                            ffn_dispatches += 1;
-                        } else if !refs.normflag && rtopk_fused() {
-                            // Router matvec + gating + top-k in ONE dispatch: the
-                            // two tiny dispatches and the drain between them were
-                            // pure stage-boundary latency. Not under normflag:
-                            // that path orders the norm by spin-flag, which only
-                            // the router matvec's WAIT variant can wait on.
-                            enc.set_compute_pipeline_state(&rtopk_state);
-                            enc.set_buffer(0, Some(&gpu.chunks[router.chunk].buf), 0);
-                            enc.set_buffer(1, Some(y), e(h_at));
-                            enc.set_buffer(2, Some(y), e(ids_at));
-                            enc.set_buffer(3, Some(y), e(wts_at));
-                            let hd = hidden as u32;
-                            let n = *n_expert as u32;
-                            let k = *n_used as u32;
-                            enc.set_bytes(4, 4, &hd as *const u32 as *const _);
-                            enc.set_bytes(5, 4, &n as *const u32 as *const _);
-                            enc.set_bytes(6, 4, &k as *const u32 as *const _);
-                            enc.set_bytes(7, 8, &router.w_off as *const u64 as *const _);
-                            match router_bias {
-                                Some(rb) => {
-                                    enc.set_buffer(8, Some(&gpu.chunks[rb.chunk].buf), rb.off)
-                                }
-                                None => enc.set_buffer(8, Some(&gpu.chunks[router.chunk].buf), 0),
-                            }
-                            let sg = *sigmoid as u32;
-                            let hb = router_bias.is_some() as u32;
-                            enc.set_bytes(9, 4, &sg as *const u32 as *const _);
-                            enc.set_bytes(10, 4, &hb as *const u32 as *const _);
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(1, 1, 1),
-                                MTLSize::new(256, 1, 1),
-                            );
-                            ffn_dispatches += 1;
-                        } else {
-                            matvec(
-                                &enc,
-                                router_state,
-                                router,
-                                hidden,
-                                *n_expert,
-                                h_at,
-                                logits_at,
-                            );
-                            bar(&enc);
-                            enc.set_compute_pipeline_state(&topk_state);
-                            enc.set_buffer(0, Some(y), e(logits_at));
-                            enc.set_buffer(1, Some(y), e(ids_at));
-                            enc.set_buffer(2, Some(y), e(wts_at));
-                            let n = *n_expert as u32;
-                            let k = *n_used as u32;
-                            enc.set_bytes(3, 4, &n as *const u32 as *const _);
-                            enc.set_bytes(4, 4, &k as *const u32 as *const _);
-                            // Sigmoid gating may carry a router bias (GLM exp_probs_b);
-                            // the softmax kernel never reads past buffer 4.
-                            match router_bias {
-                                Some(rb) => {
-                                    enc.set_buffer(5, Some(&gpu.chunks[rb.chunk].buf), rb.off);
-                                    let one = 1u32;
-                                    enc.set_bytes(6, 4, &one as *const u32 as *const _);
-                                }
-                                None => {
-                                    enc.set_buffer(5, Some(&gpu.chunks[router.chunk].buf), 0);
-                                    let zero = 0u32;
-                                    enc.set_bytes(6, 4, &zero as *const u32 as *const _);
-                                }
-                            }
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(1, 1, 1),
-                                MTLSize::new(32, 1, 1),
-                            );
-                            ffn_dispatches += 2;
+                    if moe_plain {
+                        // FFN residual norm + router matvec + gating + top-k
+                        // in ONE dispatch: both halves are single-threadgroup
+                        // kernels back to back, so the boundary between them
+                        // was pure launch and drain latency. Not under
+                        // normflag: that path orders the norm by spin-flag.
+                        // Measured 2026-09-12: under normflag, RFUSE costs
+                        // ~20–27% decode (GLM / qwen3-30b) despite fewer
+                        // dispatches — keep gated off.
+                        enc.set_compute_pipeline_state(&resnorm_router_state);
+                        enc.set_buffer(0, Some(y), e(x_at));
+                        enc.set_buffer(1, Some(y), e(delta_at));
+                        enc.set_buffer(2, Some(y), e(h_at));
+                        enc.set_buffer(3, Some(&gpu.chunks[refs.ffn_norm.chunk].buf), refs.ffn_norm.off);
+                        let hd = hidden as u32;
+                        enc.set_bytes(4, 4, &hd as *const u32 as *const _);
+                        enc.set_bytes(5, 4, &req.eps as *const f32 as *const _);
+                        enc.set_buffer(6, Some(&gpu.chunks[router.chunk].buf), 0);
+                        enc.set_bytes(7, 8, &router.w_off as *const u64 as *const _);
+                        enc.set_buffer(8, Some(y), e(ids_at));
+                        enc.set_buffer(9, Some(y), e(wts_at));
+                        let n = *n_expert as u32;
+                        let k = *n_used as u32;
+                        enc.set_bytes(10, 4, &n as *const u32 as *const _);
+                        enc.set_bytes(11, 4, &k as *const u32 as *const _);
+                        match router_bias {
+                            Some(rb) => enc.set_buffer(12, Some(&gpu.chunks[rb.chunk].buf), rb.off),
+                            None => enc.set_buffer(12, Some(&gpu.chunks[router.chunk].buf), 0),
+                        }
+                        let sg = *sigmoid as u32;
+                        let hb = router_bias.is_some() as u32;
+                        enc.set_bytes(13, 4, &sg as *const u32 as *const _);
+                        enc.set_bytes(14, 4, &hb as *const u32 as *const _);
+                        enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(256, 1, 1));
+                        ffn_dispatches += 1;
+                    } else if !refs.normflag && rtopk_fused() {
+                        // Router matvec + gating + top-k in ONE dispatch: the
+                        // two tiny dispatches and the drain between them were
+                        // pure stage-boundary latency. Not under normflag:
+                        // that path orders the norm by spin-flag, which only
+                        // the router matvec's WAIT variant can wait on.
+                        enc.set_compute_pipeline_state(&rtopk_state);
+                        enc.set_buffer(0, Some(&gpu.chunks[router.chunk].buf), 0);
+                        enc.set_buffer(1, Some(y), e(h_at));
+                        enc.set_buffer(2, Some(y), e(ids_at));
+                        enc.set_buffer(3, Some(y), e(wts_at));
+                        let hd = hidden as u32;
+                        let n = *n_expert as u32;
+                        let k = *n_used as u32;
+                        enc.set_bytes(4, 4, &hd as *const u32 as *const _);
+                        enc.set_bytes(5, 4, &n as *const u32 as *const _);
+                        enc.set_bytes(6, 4, &k as *const u32 as *const _);
+                        enc.set_bytes(7, 8, &router.w_off as *const u64 as *const _);
+                        match router_bias {
+                            Some(rb) => enc.set_buffer(8, Some(&gpu.chunks[rb.chunk].buf), rb.off),
+                            None => enc.set_buffer(8, Some(&gpu.chunks[router.chunk].buf), 0),
+                        }
+                        let sg = *sigmoid as u32;
+                        let hb = router_bias.is_some() as u32;
+                        enc.set_bytes(9, 4, &sg as *const u32 as *const _);
+                        enc.set_bytes(10, 4, &hb as *const u32 as *const _);
+                        enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(256, 1, 1));
+                        ffn_dispatches += 1;
+                    } else {
+                    matvec(&enc, router_state, router, hidden, *n_expert, h_at, logits_at);
+                    bar(&enc);
+                    enc.set_compute_pipeline_state(&topk_state);
+                    enc.set_buffer(0, Some(y), e(logits_at));
+                    enc.set_buffer(1, Some(y), e(ids_at));
+                    enc.set_buffer(2, Some(y), e(wts_at));
+                    let n = *n_expert as u32;
+                    let k = *n_used as u32;
+                    enc.set_bytes(3, 4, &n as *const u32 as *const _);
+                    enc.set_bytes(4, 4, &k as *const u32 as *const _);
+                    // Sigmoid gating may carry a router bias (GLM exp_probs_b);
+                    // the softmax kernel never reads past buffer 4.
+                    match router_bias {
+                        Some(rb) => {
+                            enc.set_buffer(5, Some(&gpu.chunks[rb.chunk].buf), rb.off);
+                            let one = 1u32;
+                            enc.set_bytes(6, 4, &one as *const u32 as *const _);
+                        }
+                        None => {
+                            enc.set_buffer(5, Some(&gpu.chunks[router.chunk].buf), 0);
+                            let zero = 0u32;
+                            enc.set_bytes(6, 4, &zero as *const u32 as *const _);
                         }
                     }
+                    enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(32, 1, 1));
+                    ffn_dispatches += 2;
+                    }
+                    }
                     split_here!("router");
+                    // Barrier after router/ids. shared_gate only writes
+                    // wts[n_used] and rides with gate/up (same as verify);
+                    // serial-before-barrier measured as noise on GLM (2026-09-12).
                     bar_c(&enc, b'f');
-                    // qwen35moe: the shared expert's gate projection writes
-                    // the raw logit into its combine slot; the combine
-                    // kernel applies the sigmoid. It runs alongside the
-                    // expert matvecs, AFTER the barrier: on the fused
-                    // resnorm_router paths h is written by the router
-                    // dispatch itself, and nothing reads this slot before
-                    // the down barrier.
+                    if !probe_skip("experts") {
                     if let Some((sg_mat, sg_state)) = shared_gate {
                         matvec(&enc, sg_state, sg_mat, hidden, 1, h_at, wts_at + *n_used);
                         ffn_dispatches += 1;
                     }
-                    if !probe_skip("experts") {
-                        match gu_dual {
-                            // gate + up in ONE dual-output indexed dispatch.
-                            Some(st) => {
-                                enc.set_compute_pipeline_state(st);
-                                enc.set_buffer(0, Some(&gpu.chunks[mats[0].chunk].buf), 0);
-                                enc.set_buffer(1, Some(y), e(h_at));
-                                enc.set_buffer(2, Some(y), e(gate_at));
-                                let a = hidden as u32;
-                                let b = *expert_ffn as u32;
-                                enc.set_bytes(3, 4, &a as *const u32 as *const _);
-                                enc.set_bytes(4, 4, &b as *const u32 as *const _);
-                                enc.set_bytes(5, 8, &mats[0].w_off as *const u64 as *const _);
-                                enc.set_buffer(6, Some(y), e(ids_at));
-                                let idx = GpuIdxArgs {
-                                    stride: strides[0],
-                                    slots: *n_used as u32,
-                                    x_stride: 0,
-                                    ids_stride: 0,
-                                    x_row_stride: 0,
-                                    y_row_stride: 0,
-                                    n_rows: 0,
-                                };
-                                enc.set_bytes(
-                                    7,
-                                    std::mem::size_of::<GpuIdxArgs>() as u64,
-                                    &idx as *const GpuIdxArgs as *const _,
-                                );
-                                enc.set_buffer(11, Some(&gpu.chunks[mats[1].chunk].buf), 0);
-                                enc.set_bytes(12, 8, &mats[1].w_off as *const u64 as *const _);
-                                enc.set_buffer(13, Some(y), e(up_at));
-                                let lpr = lanes_per_row(mats[0].ty, hidden) as u64;
-                                enc.dispatch_thread_groups(
-                                    MTLSize::new(
-                                        ((*expert_ffn * *n_used * 2) as u64 * lpr).div_ceil(128),
-                                        1,
-                                        1,
-                                    ),
-                                    MTLSize::new(128, 1, 1),
-                                );
-                                ffn_dispatches += 1;
-                            }
-                            None => {
-                                matvec_idx(
-                                    &enc,
-                                    &states[0],
-                                    &mats[0],
-                                    hidden,
-                                    *expert_ffn,
-                                    h_at,
-                                    gate_at,
-                                    strides[0],
-                                    *n_used,
-                                    0,
-                                );
-                                matvec_idx(
-                                    &enc,
-                                    &states[1],
-                                    &mats[1],
-                                    hidden,
-                                    *expert_ffn,
-                                    h_at,
-                                    up_at,
-                                    strides[1],
-                                    *n_used,
-                                    0,
-                                );
-                                ffn_dispatches += 2;
-                            }
+                    match gu_dual {
+                        // gate + up in ONE dual-output indexed dispatch.
+                        Some(st) => {
+                            enc.set_compute_pipeline_state(st);
+                            enc.set_buffer(0, Some(&gpu.chunks[mats[0].chunk].buf), 0);
+                            enc.set_buffer(1, Some(y), e(h_at));
+                            enc.set_buffer(2, Some(y), e(gate_at));
+                            let a = hidden as u32;
+                            let b = *expert_ffn as u32;
+                            enc.set_bytes(3, 4, &a as *const u32 as *const _);
+                            enc.set_bytes(4, 4, &b as *const u32 as *const _);
+                            enc.set_bytes(5, 8, &mats[0].w_off as *const u64 as *const _);
+                            enc.set_buffer(6, Some(y), e(ids_at));
+                            let idx = GpuIdxArgs {
+                                stride: strides[0],
+                                slots: *n_used as u32,
+                                x_stride: 0,
+                                ids_stride: 0,
+                                x_row_stride: 0,
+                                y_row_stride: 0,
+                                n_rows: 0,
+                            };
+                            enc.set_bytes(
+                                7,
+                                std::mem::size_of::<GpuIdxArgs>() as u64,
+                                &idx as *const GpuIdxArgs as *const _,
+                            );
+                            enc.set_buffer(11, Some(&gpu.chunks[mats[1].chunk].buf), 0);
+                            enc.set_bytes(12, 8, &mats[1].w_off as *const u64 as *const _);
+                            enc.set_buffer(13, Some(y), e(up_at));
+                            let lpr = lanes_per_row(mats[0].ty, hidden) as u64;
+                            let tg = mv_tg();
+                            enc.dispatch_thread_groups(
+                                MTLSize::new(
+                                    ((*expert_ffn * *n_used * 2) as u64 * lpr).div_ceil(tg),
+                                    1,
+                                    1,
+                                ),
+                                MTLSize::new(tg, 1, 1),
+                            );
+                            ffn_dispatches += 1;
                         }
-                        // The shared expert is a plain matvec into the extra slot.
-                        if let Some((smats, sstates)) = shared {
-                            matvec(
-                                &enc,
-                                &sstates[0],
-                                &smats[0],
-                                hidden,
-                                *expert_ffn,
-                                h_at,
-                                gate_at + *n_used * *expert_ffn,
-                            );
-                            matvec(
-                                &enc,
-                                &sstates[1],
-                                &smats[1],
-                                hidden,
-                                *expert_ffn,
-                                h_at,
-                                up_at + *n_used * *expert_ffn,
-                            );
+                        None => {
+                            matvec_idx(&enc, &states[0], &mats[0], hidden, *expert_ffn,
+                                h_at, gate_at, strides[0], *n_used, 0);
+                            matvec_idx(&enc, &states[1], &mats[1], hidden, *expert_ffn,
+                                h_at, up_at, strides[1], *n_used, 0);
                             ffn_dispatches += 2;
                         }
-                        split_here!("gate_up");
+                    }
+                    // Default: shared gate/up concurrent with expert gate/up.
+                    // Stagger (GLM): defer shared Q5 until after the barrier so
+                    // it rides with expert Q8 down instead of fighting Q4 BW.
+                    let stagger = shared.is_some()
+                        && shared_stagger()
+                        && down_tail.is_none();
+                    if let Some((smats, sstates)) = shared {
+                        if !stagger {
+                            matvec(&enc, &sstates[0], &smats[0], hidden, *expert_ffn,
+                                h_at, gate_at + *n_used * *expert_ffn);
+                            matvec(&enc, &sstates[1], &smats[1], hidden, *expert_ffn,
+                                h_at, up_at + *n_used * *expert_ffn);
+                            ffn_dispatches += 2;
+                        }
+                    }
+                    split_here!("gate_up");
+                    bar_c(&enc, b'f');
+                    if !*sw_fused {
+                        // Under stagger the shared gate/up slots are still
+                        // empty here — only silu the routed experts.
+                        let swiglu_n = if stagger { *n_used } else { n_slots };
+                        enc.set_compute_pipeline_state(&swiglu_state);
+                        enc.set_buffer(0, Some(y), e(gate_at));
+                        enc.set_buffer(1, Some(y), e(up_at));
+                        let n32 = (swiglu_n * *expert_ffn) as u32;
+                        enc.set_bytes(2, 4, &n32 as *const u32 as *const _);
+                        enc.dispatch_thread_groups(
+                            MTLSize::new((n32 as u64).div_ceil(256), 1, 1),
+                            MTLSize::new(256, 1, 1),
+                        );
+                        ffn_dispatches += 1;
+                        split_here!("swiglu");
                         bar_c(&enc, b'f');
-                        if let Some(dc) = down_combine {
-                            if !dcomb_sw() {
-                                enc.set_compute_pipeline_state(&swiglu_state);
-                                enc.set_buffer(0, Some(y), e(gate_at));
-                                enc.set_buffer(1, Some(y), e(up_at));
-                                let n32 = (n_slots * *expert_ffn) as u32;
-                                enc.set_bytes(2, 4, &n32 as *const u32 as *const _);
-                                enc.dispatch_thread_groups(
-                                    MTLSize::new((n32 as u64).div_ceil(256), 1, 1),
-                                    MTLSize::new(256, 1, 1),
-                                );
-                                ffn_dispatches += 1;
-                                split_here!("swiglu");
-                                bar_c(&enc, b'f');
-                            }
-                            // down + combine in ONE dispatch: swiglu'd gate
-                            // (x; raw gate + up in buffer 8 under DCOMB_SW),
-                            // one simdgroup per routed slot, router weights
-                            // in buffer 14, the weighted sum written straight
-                            // to delta. The grid covers hidden rows only.
-                            enc.set_compute_pipeline_state(dc);
+                    } else {
+                        // The down kernel reads raw gate (x) and raw up
+                        // (buffer 8) and applies swiglu on load.
+                        enc.set_buffer(8, Some(y), e(up_at));
+                    }
+                    match (down_tail, shared) {
+                        (Some(tail), Some((smats, _))) => {
+                            // Routed + shared Q8_0 down in one INDEXED launch.
+                            enc.set_compute_pipeline_state(tail);
                             enc.set_buffer(0, Some(&gpu.chunks[mats[2].chunk].buf), 0);
                             enc.set_buffer(1, Some(y), e(gate_at));
-                            enc.set_buffer(2, Some(y), e(delta_at));
+                            enc.set_buffer(2, Some(y), e(downo_at));
                             let a = *expert_ffn as u32;
                             let b = hidden as u32;
                             enc.set_bytes(3, 4, &a as *const u32 as *const _);
                             enc.set_bytes(4, 4, &b as *const u32 as *const _);
                             enc.set_bytes(5, 8, &mats[2].w_off as *const u64 as *const _);
                             enc.set_buffer(6, Some(y), e(ids_at));
+                            let slots = (*n_used + 1) as u32;
                             let idx = GpuIdxArgs {
                                 stride: strides[2],
-                                slots: *n_used as u32,
+                                slots,
                                 x_stride: *expert_ffn as u32,
                                 ids_stride: 0,
                                 x_row_stride: 0,
@@ -10554,81 +10503,80 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                                 std::mem::size_of::<GpuIdxArgs>() as u64,
                                 &idx as *const GpuIdxArgs as *const _,
                             );
-                            enc.set_buffer(8, Some(y), e(up_at));
-                            enc.set_buffer(14, Some(y), e(wts_at));
-                            // One threadgroup per row pair, one simdgroup
-                            // per routed slot.
-                            enc.dispatch_thread_groups(
-                                MTLSize::new((hidden as u64).div_ceil(2), 1, 1),
-                                MTLSize::new(32 * *n_used as u64, 1, 1),
-                            );
-                            ffn_dispatches += 1;
-                        } else {
-                            if !*sw_fused {
-                                enc.set_compute_pipeline_state(&swiglu_state);
-                                enc.set_buffer(0, Some(y), e(gate_at));
-                                enc.set_buffer(1, Some(y), e(up_at));
-                                let n32 = (n_slots * *expert_ffn) as u32;
-                                enc.set_bytes(2, 4, &n32 as *const u32 as *const _);
-                                enc.dispatch_thread_groups(
-                                    MTLSize::new((n32 as u64).div_ceil(256), 1, 1),
-                                    MTLSize::new(256, 1, 1),
-                                );
-                                ffn_dispatches += 1;
-                                split_here!("swiglu");
-                                bar_c(&enc, b'f');
-                            } else {
-                                // The down kernel reads raw gate (x) and raw up
-                                // (buffer 8) and applies swiglu on load.
+                            if *sw_fused {
                                 enc.set_buffer(8, Some(y), e(up_at));
                             }
-                            matvec_idx(
+                            enc.set_buffer(11, Some(&gpu.chunks[smats[2].chunk].buf), 0);
+                            enc.set_bytes(12, 8, &smats[2].w_off as *const u64 as *const _);
+                            dispatch_mv_indexed(
                                 &enc,
-                                &states[2],
-                                &mats[2],
+                                mats[2].ty,
                                 *expert_ffn,
                                 hidden,
-                                gate_at,
-                                downo_at,
-                                strides[2],
-                                *n_used,
-                                *expert_ffn,
+                                *n_used + 1,
                             );
                             ffn_dispatches += 1;
+                        }
+                        _ => {
+                            matvec_idx(&enc, &states[2], &mats[2], *expert_ffn, hidden,
+                                gate_at, downo_at, strides[2], *n_used, *expert_ffn);
+                            ffn_dispatches += 1;
                             if let Some((smats, sstates)) = shared {
+                                if stagger {
+                                    // Shared Q5 gate/up overlaps expert Q8 down
+                                    // (disjoint slots of gate/up / different
+                                    // weight chunks).
+                                    matvec(&enc, &sstates[0], &smats[0], hidden, *expert_ffn,
+                                        h_at, gate_at + *n_used * *expert_ffn);
+                                    matvec(&enc, &sstates[1], &smats[1], hidden, *expert_ffn,
+                                        h_at, up_at + *n_used * *expert_ffn);
+                                    ffn_dispatches += 2;
+                                    split_here!("shared_gu");
+                                    bar_c(&enc, b'f');
+                                    if !*sw_fused {
+                                        enc.set_compute_pipeline_state(&swiglu_state);
+                                        enc.set_buffer(
+                                            0,
+                                            Some(y),
+                                            e(gate_at + *n_used * *expert_ffn),
+                                        );
+                                        enc.set_buffer(
+                                            1,
+                                            Some(y),
+                                            e(up_at + *n_used * *expert_ffn),
+                                        );
+                                        let n32 = *expert_ffn as u32;
+                                        enc.set_bytes(2, 4, &n32 as *const u32 as *const _);
+                                        enc.dispatch_thread_groups(
+                                            MTLSize::new((n32 as u64).div_ceil(256), 1, 1),
+                                            MTLSize::new(256, 1, 1),
+                                        );
+                                        ffn_dispatches += 1;
+                                        bar_c(&enc, b'f');
+                                    }
+                                }
                                 // The shared down reads its own raw up slot.
                                 if *sw_fused {
                                     enc.set_buffer(8, Some(y), e(up_at + *n_used * *expert_ffn));
                                 }
-                                matvec(
-                                    &enc,
-                                    &sstates[2],
-                                    &smats[2],
-                                    *expert_ffn,
-                                    hidden,
+                                matvec(&enc, &sstates[2], &smats[2], *expert_ffn, hidden,
                                     gate_at + *n_used * *expert_ffn,
-                                    downo_at + *n_used * hidden,
-                                );
+                                    downo_at + *n_used * hidden);
                                 ffn_dispatches += 1;
                             }
                         }
                     }
+                    }
                     split_here!("down");
-                    if down_combine.is_some() {
-                        // delta is complete: the layer-end drain below is
-                        // the only barrier this stage needs.
+                    bar_c(&enc, b'f');
+                    if cfuse() {
+                        // No standalone combine: it folds into the next
+                        // residual norm (combine_resnorm), which the barrier
+                        // above already orders against the down writes.
+                        pending_combine = Some((n_slots as u32, sig_last));
                     } else {
-                        bar_c(&enc, b'f');
-                        if cfuse() {
-                            // No standalone combine: it folds into the next
-                            // residual norm (combine_resnorm), which the
-                            // barrier above already orders against the down
-                            // writes.
-                            pending_combine = Some((n_slots as u32, sig_last));
-                        } else {
-                            combine(&enc, n_slots as u32, sig_last);
-                            ffn_dispatches += 1;
-                        }
+                        combine(&enc, n_slots as u32, sig_last);
+                        ffn_dispatches += 1;
                     }
                     split_here!("combine");
                     dispatched += ffn_dispatches;
@@ -10650,15 +10598,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         split_here!("resnorm");
         bar(&enc);
         if !probe_skip("head") {
-            matvec(
-                &enc,
-                &out_state,
-                &out_mat,
-                hidden,
-                vocab,
-                h_at,
-                out_logits_at,
-            );
+            matvec(&enc, &out_state, &out_mat, hidden, vocab, h_at, out_logits_at);
         }
         split_here!("head");
         if req.argmax {
@@ -10689,7 +10629,23 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         ENCODE_NS.fetch_add(t_encode.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         let t_wait = std::time::Instant::now();
+        if any_mega && mega_debug() {
+            eprintln!(
+                "mega: encoded in {:.1} ms, committing ({} mega layers)",
+                t_encode.elapsed().as_secs_f64() * 1e3,
+                layers
+                    .iter()
+                    .filter(|l| matches!(&l.ffn, FfnRefs::Moe { mega: Some(_), .. }))
+                    .count()
+            );
+        }
         let cmd = cmd.commit_and_wait();
+        if any_mega && mega_debug() {
+            eprintln!(
+                "mega: GPU wait {:.1} ms",
+                t_wait.elapsed().as_secs_f64() * 1e3
+            );
+        }
         note_gpu_times(cmd);
         if let Some(resolved) = split_resolved.as_ref() {
             let mut cpu_end = 0u64;
@@ -10720,7 +10676,9 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     "qkv" => crate::telemetry::Phase::Qkv,
                     "attend" | "wo" => crate::telemetry::Phase::Attention,
                     "router" => crate::telemetry::Phase::Router,
-                    "gate_up" | "swiglu" | "down" | "combine" => crate::telemetry::Phase::Experts,
+                    "gate_up" | "swiglu" | "down" | "combine" => {
+                        crate::telemetry::Phase::Experts
+                    }
                     _ => crate::telemetry::Phase::Other,
                 };
                 crate::telemetry::record_global(
@@ -10743,7 +10701,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
 
         if req.argmax {
             let next = unsafe {
-                ((gpu.y_arena.contents() as *const f32).add(amax_at + 64 * 2) as *const u32).read()
+                ((gpu.y_arena.contents() as *const f32).add(amax_at + 64 * 2) as *const u32)
+                    .read()
             };
             TokenOut::Argmax(next)
         } else {
@@ -10817,13 +10776,7 @@ fn encode_verify_tokens(
     let mut t_shared: Vec<Option<[ComputePipelineState; 3]>> = Vec::with_capacity(layers.len());
     for l in layers {
         match &l.ffn {
-            FfnRefs::Moe {
-                shared,
-                shared_gate,
-                sw_fused,
-                expert_ffn,
-                ..
-            } => {
+            FfnRefs::Moe { shared, shared_gate, sw_fused, expert_ffn, .. } => {
                 t_sgate.push(match shared_gate {
                     Some((m0, _)) => Some(tstate(gpu, m0, hidden)?),
                     None => None,
@@ -10836,7 +10789,7 @@ fn encode_verify_tokens(
                             let lpr = lanes_per_row(smats[2].ty, *expert_ffn);
                             gpu.pipeline_full(smats[2].kernel, m, lpr, false, *sw_fused)?
                                 .to_owned()
-                        },
+                        }
                     ]),
                     None => None,
                 });
@@ -10854,24 +10807,32 @@ fn encode_verify_tokens(
     let mut t_moe_rows: Vec<Option<[ComputePipelineState; 3]>> = Vec::with_capacity(layers.len());
     for l in layers {
         t_moe_rows.push(match &l.ffn {
-            FfnRefs::Moe {
-                mats,
-                expert_ffn,
-                sw_fused,
-                ..
-            } => {
+            FfnRefs::Moe { mats, expert_ffn, sw_fused, .. } => {
                 let n_outs = [*expert_ffn, *expert_ffn, hidden];
                 let mut v: Vec<ComputePipelineState> = Vec::with_capacity(3);
-                for (i, (mat, n_in)) in mats.iter().zip([hidden, hidden, *expert_ffn]).enumerate() {
+                for (i, (mat, n_in)) in
+                    mats.iter().zip([hidden, hidden, *expert_ffn]).enumerate()
+                {
                     // The same _mv fallback decode applies per matrix.
                     let kernel = match mat.kernel {
                         "matvec_q2_k_mv" if n_outs[i] % 4 != 0 => "matvec_q2_k",
                         "matvec_q3_k_mv" if n_outs[i] % 2 != 0 => "matvec_q3_k",
                         "matvec_q4_k_mv" if n_outs[i] % 2 != 0 => "matvec_q4_k",
+                        "matvec_q5_k_mv" if n_outs[i] % 2 != 0 => "matvec_q5_k",
                         "matvec_q6_k_mv" if n_outs[i] % 2 != 0 => "matvec_q6_k",
+                        "matvec_q8_0_mv" if n_outs[i] % q8_nr0() != 0 => "matvec_q8_0",
                         k => k,
                     };
-                    if !matches!(kernel, "matvec_q4_k_mv" | "matvec_q5_k" | "matvec_q6_k") {
+                    if !matches!(
+                        kernel,
+                        "matvec_q4_k_mv"
+                            | "matvec_q5_k"
+                            | "matvec_q5_k_mv"
+                            | "matvec_q6_k"
+                            | "matvec_q6_k_mv"
+                            | "matvec_q8_0"
+                            | "matvec_q8_0_mv"
+                    ) {
                         v.clear();
                         break;
                     }
@@ -10936,14 +10897,7 @@ fn encode_verify_tokens(
             max_value_dim = max_value_dim.max(g.value_dim);
             max_heads_v = max_heads_v.max(g.heads_v as usize);
         }
-        if let FfnRefs::Moe {
-            expert_ffn,
-            n_used,
-            shared,
-            n_expert,
-            ..
-        } = &l.ffn
-        {
+        if let FfnRefs::Moe { expert_ffn, n_used, shared, n_expert, .. } = &l.ffn {
             max_ffn = max_ffn.max(*expert_ffn);
             max_slots = max_slots.max(*n_used + shared.is_some() as usize);
             max_expert = max_expert.max(*n_expert);
@@ -10955,14 +10909,7 @@ fn encode_verify_tokens(
     // caller falls back to the batch path). The router kernels are
     // single-threadgroup per row: n_expert <= 256.
     for l in layers {
-        if let FfnRefs::Moe {
-            expert_ffn,
-            n_used,
-            shared,
-            n_expert,
-            ..
-        } = &l.ffn
-        {
+        if let FfnRefs::Moe { expert_ffn, n_used, shared, n_expert, .. } = &l.ffn {
             if *n_used + shared.is_some() as usize != max_slots
                 || *expert_ffn != max_ffn
                 || *n_expert > 256
@@ -11015,13 +10962,7 @@ fn encode_verify_tokens(
         std::ptr::write_bytes(yp.add(flag_at), 0, 1);
         std::ptr::write_bytes(yp.add(ctr_at), 0, 1);
         for l in layers {
-            if let FfnRefs::Moe {
-                n_used,
-                shared: Some(_),
-                shared_gate: None,
-                ..
-            } = &l.ffn
-            {
+            if let FfnRefs::Moe { n_used, shared: Some(_), shared_gate: None, .. } = &l.ffn {
                 for i in 0..m {
                     *yp.add(wts_at + i * max_slots + *n_used) = 1.0;
                 }
@@ -11032,8 +10973,7 @@ fn encode_verify_tokens(
     let out = objc::rc::autoreleasepool(|| {
         let t_encode = std::time::Instant::now();
         let mut cmd = gpu.queue.new_command_buffer();
-        let mut enc =
-            cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
+        let mut enc = cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
         let y = &gpu.y_arena;
         let bar = |enc: &metal::ComputeCommandEncoderRef| enc.memory_barrier_with_resources(&[y]);
         let e = |off: usize| (off * 4) as u64;
@@ -11055,11 +10995,7 @@ fn encode_verify_tokens(
             enc.set_bytes(3, 4, &a as *const u32 as *const _);
             enc.set_bytes(4, 4, &b as *const u32 as *const _);
             enc.set_bytes(5, 8, &mat.w_off as *const u64 as *const _);
-            let lpr = lanes_per_row(mat.ty, n_in) as u64;
-            enc.dispatch_thread_groups(
-                MTLSize::new((n_out as u64 * lpr).div_ceil(128), 1, 1),
-                MTLSize::new(128, 1, 1),
-            );
+            dispatch_mv(enc, mat.ty, n_in, n_out);
         };
         // Single-row matvec for the per-token expert/shared projections.
         let resnorm = |enc: &metal::ComputeCommandEncoderRef, norm: &NormRef, i: usize| {
@@ -11089,11 +11025,7 @@ fn encode_verify_tokens(
             enc.set_bytes(3, 4, &a as *const u32 as *const _);
             enc.set_bytes(4, 4, &b as *const u32 as *const _);
             enc.set_bytes(5, 8, &mat.w_off as *const u64 as *const _);
-            let lpr = lanes_per_row(mat.ty, n_in) as u64;
-            enc.dispatch_thread_groups(
-                MTLSize::new((n_out as u64 * lpr).div_ceil(128), 1, 1),
-                MTLSize::new(128, 1, 1),
-            );
+            dispatch_mv(enc, mat.ty, n_in, n_out);
         };
 
         let mut dispatched = 0u64;
@@ -11124,24 +11056,19 @@ fn encode_verify_tokens(
                         eprintln!("  h_ffn_in sum={hs:.6}");
                         std::fs::write("/tmp/h0.bin", unsafe {
                             std::slice::from_raw_parts(h0.as_ptr() as *const u8, hidden * 4)
-                        })
-                        .ok();
-                        eprintln!(
-                            "  h_ffn_in head=[{:.6} {:.6} {:.6}] tail=[{:.6} {:.6} {:.6}]",
-                            h0[0], h0[1], h0[2], h0[2045], h0[2046], h0[2047]
-                        );
+                        }).ok();
+                        eprintln!("  h_ffn_in head=[{:.6} {:.6} {:.6}] tail=[{:.6} {:.6} {:.6}]",
+                            h0[0], h0[1], h0[2], h0[2045], h0[2046], h0[2047]);
                         let lg = std::slice::from_raw_parts(yp.add(logits_at), 256);
                         let ls: f64 = lg.iter().map(|&v| v as f64).sum();
                         eprintln!("  router logits sum={ls:.6}");
-                        eprintln!(
-                            "  router logits head=[{:.6} {:.6} {:.6} {:.6}]",
-                            lg[0], lg[1], lg[2], lg[3]
-                        );
+                        eprintln!("  router logits head=[{:.6} {:.6} {:.6} {:.6}]", lg[0], lg[1], lg[2], lg[3]);
                     }
                 }
                 cmd = gpu.queue.new_command_buffer();
-                enc = cmd
-                    .compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
+                enc = cmd.compute_command_encoder_with_dispatch_type(
+                    metal::MTLDispatchType::Concurrent,
+                );
             }
             // h = rmsnorm(x + delta) * attn_norm over ALL rows in ONE
             // dispatch (norm_rows is residual_norm's body with the row from
@@ -11150,11 +11077,7 @@ fn encode_verify_tokens(
             enc.set_buffer(0, Some(y), e(x_at));
             enc.set_buffer(1, Some(y), e(delta_at));
             enc.set_buffer(2, Some(y), e(h_at));
-            enc.set_buffer(
-                3,
-                Some(&gpu.chunks[refs.attn_norm.chunk].buf),
-                refs.attn_norm.off,
-            );
+            enc.set_buffer(3, Some(&gpu.chunks[refs.attn_norm.chunk].buf), refs.attn_norm.off);
             let n = hidden as u32;
             enc.set_bytes(4, 4, &n as *const u32 as *const _);
             enc.set_bytes(5, 4, &req.eps as *const f32 as *const _);
@@ -11176,160 +11099,123 @@ fn encode_verify_tokens(
                         );
                     }
                 } else {
-                    let tg = &l.gdn.as_ref().expect("gdn refs without gdn layer");
-                    let ts = t_gdn[li].as_ref().expect("gdn tile states");
-                    let ssm_buf = &req.ssm.expect("gdn layer without ssm region").buf;
-                    // The four projections over all m rows, two weight passes.
-                    matvec(enc, &ts[0], &g.mats[0], hidden, g.channels, h_at, gqkv_at);
-                    matvec(enc, &ts[1], &g.mats[1], hidden, g.value_dim, h_at, gz_at);
-                    matvec(
-                        enc,
-                        &ts[2],
-                        &g.mats[2],
-                        hidden,
-                        g.heads_v as usize,
-                        h_at,
-                        gab_at,
+                let tg = &l.gdn.as_ref().expect("gdn refs without gdn layer");
+                let ts = t_gdn[li].as_ref().expect("gdn tile states");
+                let ssm_buf = &req.ssm.expect("gdn layer without ssm region").buf;
+                // The four projections over all m rows, two weight passes.
+                matvec(enc, &ts[0], &g.mats[0], hidden, g.channels, h_at, gqkv_at);
+                matvec(enc, &ts[1], &g.mats[1], hidden, g.value_dim, h_at, gz_at);
+                matvec(enc, &ts[2], &g.mats[2], hidden, g.heads_v as usize, h_at, gab_at);
+                matvec(enc, &ts[3], &g.mats[3], hidden, g.heads_v as usize, h_at, gab_at + m * g.heads_v as usize);
+                bar(enc);
+                // Depthwise conv over the chunk (with rollback slots), then
+                // the session window commit.
+                enc.set_compute_pipeline_state(&conv_state);
+                enc.set_buffer(0, Some(y), e(gqkv_at));
+                enc.set_buffer(1, Some(y), e(gqkc_at));
+                enc.set_buffer(2, Some(ssm_buf), 0);
+                enc.set_buffer(3, Some(&gpu.chunks[g.conv1d.chunk].buf), g.conv1d.off);
+                let cargs = GdnConvBatchArgs {
+                    channels: g.channels as u32,
+                    d_conv: g.d_conv,
+                    m: m as u32,
+                    pad0: 0,
+                    conv_off: g.conv_off,
+                };
+                enc.set_bytes(4, std::mem::size_of::<GdnConvBatchArgs>() as u64,
+                    &cargs as *const GdnConvBatchArgs as *const _);
+                let (slots_buf, slot_total) = match req.ssm_slots {
+                    Some((r, total)) => (r, total as u32),
+                    None => (req.ssm.expect("ssm region"), 0u32),
+                };
+                enc.set_buffer(5, Some(&slots_buf.buf), 0);
+                enc.set_bytes(6, 4, &slot_total as *const u32 as *const _);
+                enc.dispatch_thread_groups(
+                    MTLSize::new((g.channels as u64).div_ceil(256), m as u64, 1),
+                    MTLSize::new(256, 1, 1),
+                );
+                enc.memory_barrier_with_resources(&[y, ssm_buf]);
+                // The last d_conv-1 raw rows become the next chunk's window.
+                enc.set_compute_pipeline_state(&gpu.pipelines[&("copy_f32", 1, 1)]);
+                let window_rows = g.d_conv as usize - 1;
+                let window_src = if m >= window_rows {
+                    gqkv_at + (m - window_rows) * g.channels
+                } else {
+                    let old = (window_rows - m) * g.channels;
+                    enc.set_buffer(0, Some(ssm_buf), ((g.conv_off + m as u64 * g.channels as u64) * 4) as u64);
+                    enc.set_buffer(1, Some(y), e(gate_at));
+                    let old32 = old as u32;
+                    enc.set_bytes(2, 4, &old32 as *const u32 as *const _);
+                    enc.dispatch_thread_groups(
+                        MTLSize::new((old as u64).div_ceil(256), 1, 1),
+                        MTLSize::new(256, 1, 1),
                     );
-                    matvec(
-                        enc,
-                        &ts[3],
-                        &g.mats[3],
-                        hidden,
-                        g.heads_v as usize,
-                        h_at,
-                        gab_at + m * g.heads_v as usize,
-                    );
-                    bar(enc);
-                    // Depthwise conv over the chunk (with rollback slots), then
-                    // the session window commit.
-                    enc.set_compute_pipeline_state(&conv_state);
                     enc.set_buffer(0, Some(y), e(gqkv_at));
-                    enc.set_buffer(1, Some(y), e(gqkc_at));
-                    enc.set_buffer(2, Some(ssm_buf), 0);
-                    enc.set_buffer(3, Some(&gpu.chunks[g.conv1d.chunk].buf), g.conv1d.off);
-                    let cargs = GdnConvBatchArgs {
-                        channels: g.channels as u32,
-                        d_conv: g.d_conv,
-                        m: m as u32,
-                        pad0: 0,
-                        conv_off: g.conv_off,
-                    };
-                    enc.set_bytes(
-                        4,
-                        std::mem::size_of::<GdnConvBatchArgs>() as u64,
-                        &cargs as *const GdnConvBatchArgs as *const _,
-                    );
-                    let (slots_buf, slot_total) = match req.ssm_slots {
-                        Some((r, total)) => (r, total as u32),
-                        None => (req.ssm.expect("ssm region"), 0u32),
-                    };
-                    enc.set_buffer(5, Some(&slots_buf.buf), 0);
-                    enc.set_bytes(6, 4, &slot_total as *const u32 as *const _);
+                    enc.set_buffer(1, Some(y), e(gate_at + old));
+                    let new32 = (m * g.channels) as u32;
+                    enc.set_bytes(2, 4, &new32 as *const u32 as *const _);
                     enc.dispatch_thread_groups(
-                        MTLSize::new((g.channels as u64).div_ceil(256), m as u64, 1),
+                        MTLSize::new((new32 as u64).div_ceil(256), 1, 1),
                         MTLSize::new(256, 1, 1),
                     );
                     enc.memory_barrier_with_resources(&[y, ssm_buf]);
-                    // The last d_conv-1 raw rows become the next chunk's window.
-                    enc.set_compute_pipeline_state(&gpu.pipelines[&("copy_f32", 1, 1)]);
-                    let window_rows = g.d_conv as usize - 1;
-                    let window_src = if m >= window_rows {
-                        gqkv_at + (m - window_rows) * g.channels
-                    } else {
-                        let old = (window_rows - m) * g.channels;
-                        enc.set_buffer(
-                            0,
-                            Some(ssm_buf),
-                            ((g.conv_off + m as u64 * g.channels as u64) * 4) as u64,
-                        );
-                        enc.set_buffer(1, Some(y), e(gate_at));
-                        let old32 = old as u32;
-                        enc.set_bytes(2, 4, &old32 as *const u32 as *const _);
-                        enc.dispatch_thread_groups(
-                            MTLSize::new((old as u64).div_ceil(256), 1, 1),
-                            MTLSize::new(256, 1, 1),
-                        );
-                        enc.set_buffer(0, Some(y), e(gqkv_at));
-                        enc.set_buffer(1, Some(y), e(gate_at + old));
-                        let new32 = (m * g.channels) as u32;
-                        enc.set_bytes(2, 4, &new32 as *const u32 as *const _);
-                        enc.dispatch_thread_groups(
-                            MTLSize::new((new32 as u64).div_ceil(256), 1, 1),
-                            MTLSize::new(256, 1, 1),
-                        );
-                        enc.memory_barrier_with_resources(&[y, ssm_buf]);
-                        gate_at
-                    };
-                    enc.set_buffer(0, Some(y), e(window_src));
-                    enc.set_buffer(1, Some(ssm_buf), (g.conv_off * 4) as u64);
-                    let nwin = (window_rows * g.channels) as u32;
-                    enc.set_bytes(2, 4, &nwin as *const u32 as *const _);
-                    enc.dispatch_thread_groups(
-                        MTLSize::new((nwin as u64).div_ceil(256), 1, 1),
-                        MTLSize::new(256, 1, 1),
-                    );
-                    enc.memory_barrier_with_resources(&[y, ssm_buf]);
-                    // The recurrence over the chunk, slots per row when armed.
-                    enc.set_compute_pipeline_state(&step_state);
-                    enc.set_buffer(0, Some(ssm_buf), 0);
-                    enc.set_buffer(1, Some(y), e(gqkc_at));
-                    enc.set_buffer(2, Some(y), e(gab_at));
-                    enc.set_buffer(3, Some(y), e(gab_at + m * g.heads_v as usize));
-                    let sargs = GdnStepBatchArgs {
-                        heads_k: g.heads_k,
-                        heads_v: g.heads_v,
-                        d: g.d,
-                        key_dim: g.heads_k * g.d,
-                        m: m as u32,
-                        eps: req.eps,
-                        state_off: g.state_off,
-                    };
-                    enc.set_bytes(
-                        4,
-                        std::mem::size_of::<GdnStepBatchArgs>() as u64,
-                        &sargs as *const GdnStepBatchArgs as *const _,
-                    );
-                    enc.set_bytes(5, (tg.a.len() * 4) as u64, tg.a.as_ptr() as *const _);
-                    enc.set_bytes(6, (tg.dt.len() * 4) as u64, tg.dt.as_ptr() as *const _);
-                    enc.set_buffer(7, Some(y), e(gy_at));
-                    enc.set_buffer(8, Some(&slots_buf.buf), 0);
-                    enc.set_bytes(9, 4, &slot_total as *const u32 as *const _);
-                    enc.dispatch_thread_groups(
-                        MTLSize::new((g.d / 4) as u64, g.heads_v as u64, 1),
-                        MTLSize::new(32, 4, 1),
-                    );
-                    enc.memory_barrier_with_resources(&[y, ssm_buf]);
-                    // Gated rmsnorm over the head outputs, times silu(z).
-                    enc.set_compute_pipeline_state(&norm_out_state);
-                    enc.set_buffer(0, Some(y), e(gy_at));
-                    enc.set_buffer(1, Some(y), e(gz_at));
-                    enc.set_bytes(
-                        2,
-                        (tg.ssm_norm.len() * 4) as u64,
-                        tg.ssm_norm.as_ptr() as *const _,
-                    );
-                    let hv = g.heads_v;
-                    let dd = g.d;
-                    enc.set_bytes(3, 4, &hv as *const u32 as *const _);
-                    enc.set_bytes(4, 4, &dd as *const u32 as *const _);
-                    enc.set_bytes(5, 4, &req.eps as *const f32 as *const _);
-                    enc.dispatch_thread_groups(
-                        MTLSize::new(g.heads_v as u64, m as u64, 1),
-                        MTLSize::new(g.d as u64, 1, 1),
-                    );
-                    bar(enc);
-                    matvec(
-                        enc,
-                        &ts[4],
-                        &g.mats[4],
-                        g.value_dim,
-                        hidden,
-                        gy_at,
-                        delta_at,
-                    );
-                    bar(enc);
-                    dispatched += 11;
+                    gate_at
+                };
+                enc.set_buffer(0, Some(y), e(window_src));
+                enc.set_buffer(1, Some(ssm_buf), (g.conv_off * 4) as u64);
+                let nwin = (window_rows * g.channels) as u32;
+                enc.set_bytes(2, 4, &nwin as *const u32 as *const _);
+                enc.dispatch_thread_groups(
+                    MTLSize::new((nwin as u64).div_ceil(256), 1, 1),
+                    MTLSize::new(256, 1, 1),
+                );
+                enc.memory_barrier_with_resources(&[y, ssm_buf]);
+                // The recurrence over the chunk, slots per row when armed.
+                enc.set_compute_pipeline_state(&step_state);
+                enc.set_buffer(0, Some(ssm_buf), 0);
+                enc.set_buffer(1, Some(y), e(gqkc_at));
+                enc.set_buffer(2, Some(y), e(gab_at));
+                enc.set_buffer(3, Some(y), e(gab_at + m * g.heads_v as usize));
+                let sargs = GdnStepBatchArgs {
+                    heads_k: g.heads_k,
+                    heads_v: g.heads_v,
+                    d: g.d,
+                    key_dim: g.heads_k * g.d,
+                    m: m as u32,
+                    eps: req.eps,
+                    state_off: g.state_off,
+                };
+                enc.set_bytes(4, std::mem::size_of::<GdnStepBatchArgs>() as u64,
+                    &sargs as *const GdnStepBatchArgs as *const _);
+                enc.set_bytes(5, (tg.a.len() * 4) as u64, tg.a.as_ptr() as *const _);
+                enc.set_bytes(6, (tg.dt.len() * 4) as u64, tg.dt.as_ptr() as *const _);
+                enc.set_buffer(7, Some(y), e(gy_at));
+                enc.set_buffer(8, Some(&slots_buf.buf), 0);
+                enc.set_bytes(9, 4, &slot_total as *const u32 as *const _);
+                enc.dispatch_thread_groups(
+                    MTLSize::new((g.d / 4) as u64, g.heads_v as u64, 1),
+                    MTLSize::new(32, 4, 1),
+                );
+                enc.memory_barrier_with_resources(&[y, ssm_buf]);
+                // Gated rmsnorm over the head outputs, times silu(z).
+                enc.set_compute_pipeline_state(&norm_out_state);
+                enc.set_buffer(0, Some(y), e(gy_at));
+                enc.set_buffer(1, Some(y), e(gz_at));
+                enc.set_bytes(2, (tg.ssm_norm.len() * 4) as u64,
+                    tg.ssm_norm.as_ptr() as *const _);
+                let hv = g.heads_v;
+                let dd = g.d;
+                enc.set_bytes(3, 4, &hv as *const u32 as *const _);
+                enc.set_bytes(4, 4, &dd as *const u32 as *const _);
+                enc.set_bytes(5, 4, &req.eps as *const f32 as *const _);
+                enc.dispatch_thread_groups(
+                    MTLSize::new(g.heads_v as u64, m as u64, 1),
+                    MTLSize::new(g.d as u64, 1, 1),
+                );
+                bar(enc);
+                matvec(enc, &ts[4], &g.mats[4], g.value_dim, hidden, gy_at, delta_at);
+                bar(enc);
+                dispatched += 11;
                 }
             } else {
                 let amats = refs.mats.as_ref().expect("attention layer without mats");
@@ -11360,11 +11246,8 @@ fn encode_verify_tokens(
                         k_base: l.k_off as u64,
                         v_base: l.v_off as u64,
                     };
-                    enc.set_bytes(
-                        4,
-                        std::mem::size_of::<QkPrepBatch256Args>() as u64,
-                        &args as *const QkPrepBatch256Args as *const _,
-                    );
+                    enc.set_bytes(4, std::mem::size_of::<QkPrepBatch256Args>() as u64,
+                        &args as *const QkPrepBatch256Args as *const _);
                     let ones = [1.0f32; 256];
                     let qw = l.q_norm.unwrap_or(&ones);
                     let kw = l.k_norm.unwrap_or(&ones);
@@ -11378,99 +11261,83 @@ fn encode_verify_tokens(
                         MTLSize::new(32, 1, 1),
                     );
                 } else {
-                    for i in 0..m {
-                        let pos = req.pos + i;
-                        if hd == 256 {
-                            enc.set_compute_pipeline_state(&qk_prep256_state);
-                            enc.set_buffer(0, Some(y), e(q_at + i * wq_max));
-                            enc.set_buffer(1, Some(y), e(k_at + i * kv));
-                            enc.set_buffer(2, Some(y), e(v_at + i * kv));
-                            enc.set_buffer(3, Some(&req.cache.buf), 0);
-                            let args = QkPrep256Args {
-                                n_heads: req.n_heads as u32,
-                                n_kv_heads: req.n_kv_heads as u32,
-                                kv_dim: req.kv_dim as u32,
-                                eps: req.eps,
-                                pos: pos as u32,
-                                has_qk_norm: l.q_norm.is_some() as u32,
-                                rot_dim: req.rot_dim as u32,
-                                gate_in_q: l.gate_in_q as u32,
-                                k_base: l.k_off as u64,
-                                v_base: l.v_off as u64,
-                            };
-                            enc.set_bytes(
-                                4,
-                                std::mem::size_of::<QkPrep256Args>() as u64,
-                                &args as *const QkPrep256Args as *const _,
-                            );
-                            let ones = [1.0f32; 256];
-                            let qw = l.q_norm.unwrap_or(&ones);
-                            let kw = l.k_norm.unwrap_or(&ones);
-                            enc.set_bytes(5, (256 * 4) as u64, qw.as_ptr() as *const _);
-                            enc.set_bytes(6, (256 * 4) as u64, kw.as_ptr() as *const _);
-                            enc.set_bytes(
-                                7,
-                                (rp * 8) as u64,
-                                req.rope[i * rp..].as_ptr() as *const _,
-                            );
-                            enc.set_buffer(8, Some(y), e(qn_at + i * q_dim));
-                            enc.set_buffer(9, Some(y), e(qgate_at + i * q_dim));
-                            enc.dispatch_thread_groups(
-                                MTLSize::new((req.n_heads + 2 * req.n_kv_heads) as u64, 1, 1),
-                                MTLSize::new(32, 1, 1),
-                            );
-                        } else {
-                            enc.set_compute_pipeline_state(&qk_prep_state);
-                            enc.set_buffer(0, Some(y), e(q_at + i * wq_max));
-                            enc.set_buffer(1, Some(y), e(k_at + i * kv));
-                            enc.set_buffer(2, Some(y), e(v_at + i * kv));
-                            enc.set_buffer(3, Some(&req.cache.buf), 0);
-                            let args = QkPrepArgs {
-                                n_heads: req.n_heads as u32,
-                                n_kv_heads: req.n_kv_heads as u32,
-                                head_dim: hd as u32,
-                                kv_dim: req.kv_dim as u32,
-                                eps: req.eps,
-                                pos: pos as u32,
-                                has_qk_norm: l.q_norm.is_some() as u32,
-                                rot_dim: req.rot_dim as u32,
-                                k_base: l.k_off as u64,
-                                v_base: l.v_off as u64,
-                                has_bias: refs.q_bias.is_some() as u32,
-                                pad2: 0,
-                            };
-                            enc.set_bytes(
-                                4,
-                                std::mem::size_of::<QkPrepArgs>() as u64,
-                                &args as *const QkPrepArgs as *const _,
-                            );
-                            let ones = [1.0f32; ATTN_HEAD_DIM];
-                            let qw = l.q_norm.unwrap_or(&ones);
-                            let kw = l.k_norm.unwrap_or(&ones);
-                            enc.set_bytes(5, (hd * 4) as u64, qw.as_ptr() as *const _);
-                            enc.set_bytes(6, (hd * 4) as u64, kw.as_ptr() as *const _);
-                            enc.set_bytes(
-                                7,
-                                (rp * 8) as u64,
-                                req.rope[i * rp..].as_ptr() as *const _,
-                            );
-                            let dummy = &gpu.chunks[refs.attn_norm.chunk].buf;
-                            for (index, b) in
-                                [(8u64, &refs.q_bias), (9, &refs.k_bias), (10, &refs.v_bias)]
-                            {
-                                match b {
-                                    Some(r) => {
-                                        enc.set_buffer(index, Some(&gpu.chunks[r.chunk].buf), r.off)
-                                    }
-                                    None => enc.set_buffer(index, Some(dummy), 0),
-                                }
+                for i in 0..m {
+                    let pos = req.pos + i;
+                    if hd == 256 {
+                        enc.set_compute_pipeline_state(&qk_prep256_state);
+                        enc.set_buffer(0, Some(y), e(q_at + i * wq_max));
+                        enc.set_buffer(1, Some(y), e(k_at + i * kv));
+                        enc.set_buffer(2, Some(y), e(v_at + i * kv));
+                        enc.set_buffer(3, Some(&req.cache.buf), 0);
+                        let args = QkPrep256Args {
+                            n_heads: req.n_heads as u32,
+                            n_kv_heads: req.n_kv_heads as u32,
+                            kv_dim: req.kv_dim as u32,
+                            eps: req.eps,
+                            pos: pos as u32,
+                            has_qk_norm: l.q_norm.is_some() as u32,
+                            rot_dim: req.rot_dim as u32,
+                            gate_in_q: l.gate_in_q as u32,
+                            k_base: l.k_off as u64,
+                            v_base: l.v_off as u64,
+                        };
+                        enc.set_bytes(4, std::mem::size_of::<QkPrep256Args>() as u64,
+                            &args as *const QkPrep256Args as *const _);
+                        let ones = [1.0f32; 256];
+                        let qw = l.q_norm.unwrap_or(&ones);
+                        let kw = l.k_norm.unwrap_or(&ones);
+                        enc.set_bytes(5, (256 * 4) as u64, qw.as_ptr() as *const _);
+                        enc.set_bytes(6, (256 * 4) as u64, kw.as_ptr() as *const _);
+                        enc.set_bytes(7, (rp * 8) as u64,
+                            req.rope[i * rp..].as_ptr() as *const _);
+                        enc.set_buffer(8, Some(y), e(qn_at + i * q_dim));
+                        enc.set_buffer(9, Some(y), e(qgate_at + i * q_dim));
+                        enc.dispatch_thread_groups(
+                            MTLSize::new((req.n_heads + 2 * req.n_kv_heads) as u64, 1, 1),
+                            MTLSize::new(32, 1, 1),
+                        );
+                    } else {
+                        enc.set_compute_pipeline_state(&qk_prep_state);
+                        enc.set_buffer(0, Some(y), e(q_at + i * wq_max));
+                        enc.set_buffer(1, Some(y), e(k_at + i * kv));
+                        enc.set_buffer(2, Some(y), e(v_at + i * kv));
+                        enc.set_buffer(3, Some(&req.cache.buf), 0);
+                        let args = QkPrepArgs {
+                            n_heads: req.n_heads as u32,
+                            n_kv_heads: req.n_kv_heads as u32,
+                            head_dim: hd as u32,
+                            kv_dim: req.kv_dim as u32,
+                            eps: req.eps,
+                            pos: pos as u32,
+                            has_qk_norm: l.q_norm.is_some() as u32,
+                            rot_dim: req.rot_dim as u32,
+                            k_base: l.k_off as u64,
+                            v_base: l.v_off as u64,
+                            has_bias: refs.q_bias.is_some() as u32,
+                            pad2: 0,
+                        };
+                        enc.set_bytes(4, std::mem::size_of::<QkPrepArgs>() as u64,
+                            &args as *const QkPrepArgs as *const _);
+                        let ones = [1.0f32; ATTN_HEAD_DIM];
+                        let qw = l.q_norm.unwrap_or(&ones);
+                        let kw = l.k_norm.unwrap_or(&ones);
+                        enc.set_bytes(5, (hd * 4) as u64, qw.as_ptr() as *const _);
+                        enc.set_bytes(6, (hd * 4) as u64, kw.as_ptr() as *const _);
+                        enc.set_bytes(7, (rp * 8) as u64,
+                            req.rope[i * rp..].as_ptr() as *const _);
+                        let dummy = &gpu.chunks[refs.attn_norm.chunk].buf;
+                        for (index, b) in [(8u64, &refs.q_bias), (9, &refs.k_bias), (10, &refs.v_bias)] {
+                            match b {
+                                Some(r) => enc.set_buffer(index, Some(&gpu.chunks[r.chunk].buf), r.off),
+                                None => enc.set_buffer(index, Some(dummy), 0),
                             }
-                            enc.dispatch_thread_groups(
-                                MTLSize::new((req.n_heads + 2 * req.n_kv_heads) as u64, 1, 1),
-                                MTLSize::new(32, 1, 1),
-                            );
                         }
+                        enc.dispatch_thread_groups(
+                            MTLSize::new((req.n_heads + 2 * req.n_kv_heads) as u64, 1, 1),
+                            MTLSize::new(32, 1, 1),
+                        );
                     }
+                }
                 }
                 enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
                 if hd == 256 && wq_max == wq_out {
@@ -11501,43 +11368,39 @@ fn encode_verify_tokens(
                         MTLSize::new(512, 1, 1),
                     );
                 } else {
-                    for i in 0..m {
-                        let n_pos = (req.pos + i + 1) as u32;
-                        enc.set_buffer(0, Some(&req.cache.buf), 0);
-                        enc.set_buffer(1, Some(&req.cache.buf), 0);
-                        let q_off = if hd == 256 {
-                            qn_at + i * q_dim
-                        } else {
-                            q_at + i * wq_max
-                        };
-                        enc.set_buffer(2, Some(y), e(q_off));
-                        enc.set_buffer(3, Some(y), e(attn_at + i * q_dim));
-                        for (index, value) in [
-                            (4u64, req.kv_dim as u32),
-                            (5, hd as u32),
-                            (6, n_pos),
-                            (7, (req.n_heads / req.n_kv_heads.max(1)) as u32),
-                        ] {
-                            enc.set_bytes(index, 4, &value as *const u32 as *const _);
-                        }
-                        enc.set_bytes(8, 4, &req.scale as *const f32 as *const _);
-                        for (index, value) in [(9u64, l.k_off as u64), (10, l.v_off as u64)] {
-                            enc.set_bytes(index, 8, &value as *const u64 as *const _);
-                        }
-                        if hd == 256 {
-                            enc.set_compute_pipeline_state(&attend256_state);
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(req.n_heads as u64, 1, 1),
-                                MTLSize::new(512, 1, 1),
-                            );
-                        } else {
-                            enc.set_compute_pipeline_state(&attend_state);
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(req.n_heads as u64, 1, 1),
-                                MTLSize::new(attend_tg(), 1, 1),
-                            );
-                        }
+                for i in 0..m {
+                    let n_pos = (req.pos + i + 1) as u32;
+                    enc.set_buffer(0, Some(&req.cache.buf), 0);
+                    enc.set_buffer(1, Some(&req.cache.buf), 0);
+                    let q_off = if hd == 256 { qn_at + i * q_dim } else { q_at + i * wq_max };
+                    enc.set_buffer(2, Some(y), e(q_off));
+                    enc.set_buffer(3, Some(y), e(attn_at + i * q_dim));
+                    for (index, value) in [
+                        (4u64, req.kv_dim as u32),
+                        (5, hd as u32),
+                        (6, n_pos),
+                        (7, (req.n_heads / req.n_kv_heads.max(1)) as u32),
+                    ] {
+                        enc.set_bytes(index, 4, &value as *const u32 as *const _);
                     }
+                    enc.set_bytes(8, 4, &req.scale as *const f32 as *const _);
+                    for (index, value) in [(9u64, l.k_off as u64), (10, l.v_off as u64)] {
+                        enc.set_bytes(index, 8, &value as *const u64 as *const _);
+                    }
+                    if hd == 256 {
+                        enc.set_compute_pipeline_state(&attend256_state);
+                        enc.dispatch_thread_groups(
+                            MTLSize::new(req.n_heads as u64, 1, 1),
+                            MTLSize::new(512, 1, 1),
+                        );
+                    } else {
+                        enc.set_compute_pipeline_state(&attend_state);
+                        enc.dispatch_thread_groups(
+                            MTLSize::new(req.n_heads as u64, 1, 1),
+                            MTLSize::new(attend_tg(), 1, 1),
+                        );
+                    }
+                }
                 }
                 bar(enc);
                 if l.gate_in_q && hd == 256 {
@@ -11594,52 +11457,34 @@ fn encode_verify_tokens(
                 continue;
             }
             match &refs.ffn {
-                FfnRefs::Dense {
-                    mats,
-                    states,
-                    ffn_dim,
-                } => {
+                FfnRefs::Dense { mats, states, ffn_dim, sw_fused } => {
                     for i in 0..m {
-                        matvec_row(
-                            enc,
-                            &states[0],
-                            &mats[0],
-                            hidden,
-                            *ffn_dim,
-                            h_at + i * hidden,
-                            gate_at,
-                        );
-                        matvec_row(
-                            enc,
-                            &states[1],
-                            &mats[1],
-                            hidden,
-                            *ffn_dim,
-                            h_at + i * hidden,
-                            up_at,
-                        );
+                        matvec_row(enc, &states[0], &mats[0], hidden, *ffn_dim,
+                            h_at + i * hidden, gate_at);
+                        matvec_row(enc, &states[1], &mats[1], hidden, *ffn_dim,
+                            h_at + i * hidden, up_at);
                         bar(enc);
-                        enc.set_compute_pipeline_state(&swiglu_state);
-                        enc.set_buffer(0, Some(y), e(gate_at));
-                        enc.set_buffer(1, Some(y), e(up_at));
-                        let n = *ffn_dim as u32;
-                        enc.set_bytes(2, 4, &n as *const u32 as *const _);
-                        enc.dispatch_thread_groups(
-                            MTLSize::new((n as u64).div_ceil(256), 1, 1),
-                            MTLSize::new(256, 1, 1),
-                        );
+                        if !*sw_fused {
+                            enc.set_compute_pipeline_state(&swiglu_state);
+                            enc.set_buffer(0, Some(y), e(gate_at));
+                            enc.set_buffer(1, Some(y), e(up_at));
+                            let n = *ffn_dim as u32;
+                            enc.set_bytes(2, 4, &n as *const u32 as *const _);
+                            enc.dispatch_thread_groups(
+                                MTLSize::new((n as u64).div_ceil(256), 1, 1),
+                                MTLSize::new(256, 1, 1),
+                            );
+                            bar(enc);
+                            matvec_row(enc, &states[2], &mats[2], *ffn_dim, hidden,
+                                gate_at, delta_at + i * hidden);
+                            dispatched += 4;
+                        } else {
+                            enc.set_buffer(8, Some(y), e(up_at));
+                            matvec_row(enc, &states[2], &mats[2], *ffn_dim, hidden,
+                                gate_at, delta_at + i * hidden);
+                            dispatched += 3;
+                        }
                         bar(enc);
-                        matvec_row(
-                            enc,
-                            &states[2],
-                            &mats[2],
-                            *ffn_dim,
-                            hidden,
-                            gate_at,
-                            delta_at + i * hidden,
-                        );
-                        bar(enc);
-                        dispatched += 4;
                     }
                 }
                 FfnRefs::Moe {
@@ -11658,7 +11503,7 @@ fn encode_verify_tokens(
                     shared,
                     shared_gate,
                     gu_dual: _,
-                    down_combine: _,
+                    down_tail: _,
                 } => {
                     let n_slots = *n_used + shared.is_some() as usize;
                     // Stage 1: FFN resnorm + router matvec + gating top-k over
@@ -11669,11 +11514,7 @@ fn encode_verify_tokens(
                     enc.set_buffer(0, Some(y), e(x_at));
                     enc.set_buffer(1, Some(y), e(delta_at));
                     enc.set_buffer(2, Some(y), e(h_at));
-                    enc.set_buffer(
-                        3,
-                        Some(&gpu.chunks[refs.ffn_norm.chunk].buf),
-                        refs.ffn_norm.off,
-                    );
+                    enc.set_buffer(3, Some(&gpu.chunks[refs.ffn_norm.chunk].buf), refs.ffn_norm.off);
                     let hd = hidden as u32;
                     enc.set_bytes(4, 4, &hd as *const u32 as *const _);
                     enc.set_bytes(5, 4, &req.eps as *const f32 as *const _);
@@ -11694,10 +11535,7 @@ fn encode_verify_tokens(
                     enc.set_bytes(13, 4, &sg as *const u32 as *const _);
                     enc.set_bytes(14, 4, &hb as *const u32 as *const _);
                     enc.set_bytes(15, 4, &(max_slots as u32) as *const u32 as *const _);
-                    enc.dispatch_thread_groups(
-                        MTLSize::new(1, m as u64, 1),
-                        MTLSize::new(256, 1, 1),
-                    );
+                    enc.dispatch_thread_groups(MTLSize::new(1, m as u64, 1), MTLSize::new(256, 1, 1));
                     bar(enc);
                     // Stage 2: gate/up. Every row is independent (per-row
                     // scratch blocks), so the rows dispatch back to back with
@@ -11708,15 +11546,7 @@ fn encode_verify_tokens(
                         matvec(enc, tsg, sg_mat, hidden, 1, h_at, sgate_at);
                     }
                     if let (Some((smats, _)), Some(tsh)) = (shared, t_shared[li].as_ref()) {
-                        matvec(
-                            enc,
-                            &tsh[0],
-                            &smats[0],
-                            hidden,
-                            *expert_ffn,
-                            h_at,
-                            sg_gate_at,
-                        );
+                        matvec(enc, &tsh[0], &smats[0], hidden, *expert_ffn, h_at, sg_gate_at);
                         matvec(enc, &tsh[1], &smats[1], hidden, *expert_ffn, h_at, sg_up_at);
                     }
                     let a = hidden as u32;
@@ -11746,93 +11576,47 @@ fn encode_verify_tokens(
                                 y_row_stride: (max_slots * max_ffn) as u32,
                                 n_rows: m as u32,
                             };
-                            enc.set_bytes(
-                                7,
-                                std::mem::size_of::<GpuIdxArgs>() as u64,
-                                &idx as *const GpuIdxArgs as *const _,
-                            );
+                            enc.set_bytes(7, std::mem::size_of::<GpuIdxArgs>() as u64,
+                                &idx as *const GpuIdxArgs as *const _);
                             enc.dispatch_thread_groups(
                                 MTLSize::new(
-                                    ((*expert_ffn * *n_used * m) as u64
-                                        * lanes_per_row(mats[mi].ty, hidden) as u64)
-                                        .div_ceil(128),
-                                    1,
-                                    1,
+                                    ((*expert_ffn * *n_used * m) as u64 * lanes_per_row(mats[mi].ty, hidden) as u64).div_ceil(128),
+                                    1, 1,
                                 ),
                                 MTLSize::new(128, 1, 1),
                             );
                         }
                     } else {
-                        for i in 0..m {
-                            let ids_off = ids_at + i * max_slots;
-                            let gate_row = gate_at + i * max_slots * max_ffn;
-                            let up_row = up_at + i * max_slots * max_ffn;
-                            let x_off = h_at + i * hidden;
-                            enc.set_compute_pipeline_state(&states[0]);
-                            enc.set_buffer(0, Some(&gpu.chunks[mats[0].chunk].buf), 0);
-                            enc.set_buffer(1, Some(y), e(x_off));
-                            enc.set_buffer(2, Some(y), e(gate_row));
-                            enc.set_bytes(3, 4, &a as *const u32 as *const _);
-                            enc.set_bytes(4, 4, &b as *const u32 as *const _);
-                            enc.set_bytes(5, 8, &mats[0].w_off as *const u64 as *const _);
-                            enc.set_buffer(6, Some(y), e(ids_off));
-                            let idx = GpuIdxArgs {
-                                stride: strides[0],
-                                slots: *n_used as u32,
-                                x_stride: 0,
-                                ids_stride: 0,
-                                x_row_stride: 0,
-                                y_row_stride: 0,
-                                n_rows: 0,
-                            };
-                            enc.set_bytes(
-                                7,
-                                std::mem::size_of::<GpuIdxArgs>() as u64,
-                                &idx as *const GpuIdxArgs as *const _,
-                            );
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(
-                                    ((*expert_ffn * *n_used) as u64
-                                        * lanes_per_row(mats[0].ty, hidden) as u64)
-                                        .div_ceil(128),
-                                    1,
-                                    1,
-                                ),
-                                MTLSize::new(128, 1, 1),
-                            );
-                            enc.set_compute_pipeline_state(&states[1]);
-                            enc.set_buffer(0, Some(&gpu.chunks[mats[1].chunk].buf), 0);
-                            enc.set_buffer(1, Some(y), e(x_off));
-                            enc.set_buffer(2, Some(y), e(up_row));
-                            enc.set_bytes(3, 4, &a as *const u32 as *const _);
-                            enc.set_bytes(4, 4, &b as *const u32 as *const _);
-                            enc.set_bytes(5, 8, &mats[1].w_off as *const u64 as *const _);
-                            enc.set_buffer(6, Some(y), e(ids_off));
-                            let idx = GpuIdxArgs {
-                                stride: strides[1],
-                                slots: *n_used as u32,
-                                x_stride: 0,
-                                ids_stride: 0,
-                                x_row_stride: 0,
-                                y_row_stride: 0,
-                                n_rows: 0,
-                            };
-                            enc.set_bytes(
-                                7,
-                                std::mem::size_of::<GpuIdxArgs>() as u64,
-                                &idx as *const GpuIdxArgs as *const _,
-                            );
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(
-                                    ((*expert_ffn * *n_used) as u64
-                                        * lanes_per_row(mats[1].ty, hidden) as u64)
-                                        .div_ceil(128),
-                                    1,
-                                    1,
-                                ),
-                                MTLSize::new(128, 1, 1),
-                            );
-                        }
+                    for i in 0..m {
+                        let ids_off = ids_at + i * max_slots;
+                        let gate_row = gate_at + i * max_slots * max_ffn;
+                        let up_row = up_at + i * max_slots * max_ffn;
+                        let x_off = h_at + i * hidden;
+                        enc.set_compute_pipeline_state(&states[0]);
+                        enc.set_buffer(0, Some(&gpu.chunks[mats[0].chunk].buf), 0);
+                        enc.set_buffer(1, Some(y), e(x_off));
+                        enc.set_buffer(2, Some(y), e(gate_row));
+                        enc.set_bytes(3, 4, &a as *const u32 as *const _);
+                        enc.set_bytes(4, 4, &b as *const u32 as *const _);
+                        enc.set_bytes(5, 8, &mats[0].w_off as *const u64 as *const _);
+                        enc.set_buffer(6, Some(y), e(ids_off));
+                        let idx = GpuIdxArgs { stride: strides[0], slots: *n_used as u32, x_stride: 0, ids_stride: 0, x_row_stride: 0, y_row_stride: 0, n_rows: 0 };
+                        enc.set_bytes(7, std::mem::size_of::<GpuIdxArgs>() as u64,
+                            &idx as *const GpuIdxArgs as *const _);
+                        dispatch_mv_indexed(enc, mats[0].ty, hidden, *expert_ffn, *n_used);
+                        enc.set_compute_pipeline_state(&states[1]);
+                        enc.set_buffer(0, Some(&gpu.chunks[mats[1].chunk].buf), 0);
+                        enc.set_buffer(1, Some(y), e(x_off));
+                        enc.set_buffer(2, Some(y), e(up_row));
+                        enc.set_bytes(3, 4, &a as *const u32 as *const _);
+                        enc.set_bytes(4, 4, &b as *const u32 as *const _);
+                        enc.set_bytes(5, 8, &mats[1].w_off as *const u64 as *const _);
+                        enc.set_buffer(6, Some(y), e(ids_off));
+                        let idx = GpuIdxArgs { stride: strides[1], slots: *n_used as u32, x_stride: 0, ids_stride: 0, x_row_stride: 0, y_row_stride: 0, n_rows: 0 };
+                        enc.set_bytes(7, std::mem::size_of::<GpuIdxArgs>() as u64,
+                            &idx as *const GpuIdxArgs as *const _);
+                        dispatch_mv_indexed(enc, mats[1].ty, hidden, *expert_ffn, *n_used);
+                    }
                     }
                     bar(enc);
                     if !*sw_fused {
@@ -11884,63 +11668,37 @@ fn encode_verify_tokens(
                             y_row_stride: (max_slots * hidden) as u32,
                             n_rows: m as u32,
                         };
-                        enc.set_bytes(
-                            7,
-                            std::mem::size_of::<GpuIdxArgs>() as u64,
-                            &idx as *const GpuIdxArgs as *const _,
-                        );
+                        enc.set_bytes(7, std::mem::size_of::<GpuIdxArgs>() as u64,
+                            &idx as *const GpuIdxArgs as *const _);
                         enc.dispatch_thread_groups(
                             MTLSize::new(
-                                ((hidden * *n_used * m) as u64
-                                    * lanes_per_row(mats[2].ty, *expert_ffn) as u64)
-                                    .div_ceil(128),
-                                1,
-                                1,
+                                ((hidden * *n_used * m) as u64 * lanes_per_row(mats[2].ty, *expert_ffn) as u64).div_ceil(128),
+                                1, 1,
                             ),
                             MTLSize::new(128, 1, 1),
                         );
                     } else {
-                        for i in 0..m {
-                            let ids_off = ids_at + i * max_slots;
-                            let gate_row = gate_at + i * max_slots * max_ffn;
-                            let up_row = up_at + i * max_slots * max_ffn;
-                            let downo_row = downo_at + i * max_slots * hidden;
-                            if *sw_fused {
-                                enc.set_buffer(8, Some(y), e(up_row));
-                            }
-                            enc.set_compute_pipeline_state(&states[2]);
-                            enc.set_buffer(0, Some(&gpu.chunks[mats[2].chunk].buf), 0);
-                            enc.set_buffer(1, Some(y), e(gate_row));
-                            enc.set_buffer(2, Some(y), e(downo_row));
-                            enc.set_bytes(3, 4, &a2 as *const u32 as *const _);
-                            enc.set_bytes(4, 4, &b2 as *const u32 as *const _);
-                            enc.set_bytes(5, 8, &mats[2].w_off as *const u64 as *const _);
-                            enc.set_buffer(6, Some(y), e(ids_off));
-                            let idx = GpuIdxArgs {
-                                stride: strides[2],
-                                slots: *n_used as u32,
-                                x_stride: *expert_ffn as u32,
-                                ids_stride: 0,
-                                x_row_stride: 0,
-                                y_row_stride: 0,
-                                n_rows: 0,
-                            };
-                            enc.set_bytes(
-                                7,
-                                std::mem::size_of::<GpuIdxArgs>() as u64,
-                                &idx as *const GpuIdxArgs as *const _,
-                            );
-                            enc.dispatch_thread_groups(
-                                MTLSize::new(
-                                    ((hidden * *n_used) as u64
-                                        * lanes_per_row(mats[2].ty, *expert_ffn) as u64)
-                                        .div_ceil(128),
-                                    1,
-                                    1,
-                                ),
-                                MTLSize::new(128, 1, 1),
-                            );
+                    for i in 0..m {
+                        let ids_off = ids_at + i * max_slots;
+                        let gate_row = gate_at + i * max_slots * max_ffn;
+                        let up_row = up_at + i * max_slots * max_ffn;
+                        let downo_row = downo_at + i * max_slots * hidden;
+                        if *sw_fused {
+                            enc.set_buffer(8, Some(y), e(up_row));
                         }
+                        enc.set_compute_pipeline_state(&states[2]);
+                        enc.set_buffer(0, Some(&gpu.chunks[mats[2].chunk].buf), 0);
+                        enc.set_buffer(1, Some(y), e(gate_row));
+                        enc.set_buffer(2, Some(y), e(downo_row));
+                        enc.set_bytes(3, 4, &a2 as *const u32 as *const _);
+                        enc.set_bytes(4, 4, &b2 as *const u32 as *const _);
+                        enc.set_bytes(5, 8, &mats[2].w_off as *const u64 as *const _);
+                        enc.set_buffer(6, Some(y), e(ids_off));
+                        let idx = GpuIdxArgs { stride: strides[2], slots: *n_used as u32, x_stride: *expert_ffn as u32, ids_stride: 0, x_row_stride: 0, y_row_stride: 0, n_rows: 0 };
+                        enc.set_bytes(7, std::mem::size_of::<GpuIdxArgs>() as u64,
+                            &idx as *const GpuIdxArgs as *const _);
+                        dispatch_mv_indexed(enc, mats[2].ty, *expert_ffn, hidden, *n_used);
+                    }
                     }
                     // The shared expert's down projection as one TILE matvec
                     // over all rows (the fused-swiglu variant reads the up
@@ -11949,15 +11707,7 @@ fn encode_verify_tokens(
                         if *sw_fused {
                             enc.set_buffer(8, Some(y), e(sg_up_at));
                         }
-                        matvec(
-                            enc,
-                            &tsh[2],
-                            &smats[2],
-                            *expert_ffn,
-                            hidden,
-                            sg_gate_at,
-                            sg_down_at,
-                        );
+                        matvec(enc, &tsh[2], &smats[2], *expert_ffn, hidden, sg_gate_at, sg_down_at);
                     }
                     bar(enc);
                     // Stage 4: the combine over ALL rows in ONE dispatch
@@ -12043,14 +11793,17 @@ fn encode_verify_tokens(
         unsafe {
             let yp = gpu.y_arena.contents() as *const f32;
             for i in 0..m {
-                argmax.push((yp.add(amax_at + i * (64 * 2 + 1) + 64 * 2) as *const u32).read());
+                argmax.push(
+                    (yp.add(amax_at + i * (64 * 2 + 1) + 64 * 2) as *const u32).read(),
+                );
             }
-            std::ptr::copy_nonoverlapping(yp.add(h_at), hidden_rows.as_mut_ptr(), m * hidden);
+            std::ptr::copy_nonoverlapping(
+                yp.add(h_at),
+                hidden_rows.as_mut_ptr(),
+                m * hidden,
+            );
         }
-        TokenOut::Rows {
-            argmax,
-            hidden: hidden_rows,
-        }
+        TokenOut::Rows { argmax, hidden: hidden_rows }
     });
     Some(out)
 }
@@ -12221,8 +11974,9 @@ pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
         let cmd = gpu.queue.new_command_buffer();
         // Concurrent, with a barrier at each stage boundary: q, k and v are
         // independent and small, and the serial encoder ran them one by one.
-        let enc =
-            cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
+        let enc = cmd.compute_command_encoder_with_dispatch_type(
+            metal::MTLDispatchType::Concurrent,
+        );
 
         // qkv projections out of the x arena.
         for (i, y_at) in [(0usize, q_off), (1, k_arena), (2, v_arena)] {
@@ -12265,21 +12019,14 @@ pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
         enc.set_buffer(1, Some(&gpu.y_arena), k_arena as u64);
         enc.set_buffer(2, Some(&gpu.y_arena), v_arena as u64);
         enc.set_buffer(3, Some(&req.cache.buf), 0);
-        enc.set_bytes(
-            4,
-            std::mem::size_of::<QkPrepArgs>() as u64,
-            &args as *const QkPrepArgs as *const _,
-        );
+        enc.set_bytes(4, std::mem::size_of::<QkPrepArgs>() as u64,
+            &args as *const QkPrepArgs as *const _);
         let ones = [1.0f32; ATTN_HEAD_DIM];
         let qw = req.q_norm.unwrap_or(&ones);
         let kw = req.k_norm.unwrap_or(&ones);
         enc.set_bytes(5, (hd * 4) as u64, qw.as_ptr() as *const _);
         enc.set_bytes(6, (hd * 4) as u64, kw.as_ptr() as *const _);
-        enc.set_bytes(
-            7,
-            (req.rope.len() * 8) as u64,
-            req.rope.as_ptr() as *const _,
-        );
+        enc.set_bytes(7, (req.rope.len() * 8) as u64, req.rope.as_ptr() as *const _);
         for index in 8u64..=10 {
             enc.set_buffer(index, Some(&req.cache.buf), 0);
         }
@@ -12509,10 +12256,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
     #[allow(unused_variables)]
     let mut states = Vec::with_capacity(4);
     for mat in &mats {
-        states.push(
-            gpu.pipeline(mm_kernel_for(mat.ty, req.m)?.0, 1, 1)?
-                .to_owned(),
-        );
+        states.push(gpu.pipeline(mm_kernel_for(mat.ty, req.m)?.0, 1, 1)?.to_owned());
     }
     let prep_state = gpu.pipelines[&("qk_prep_batch", 1, 1)].to_owned();
     let attend_state = gpu.pipelines[&(attend_rows_kernel(), 1, 1)].to_owned();
@@ -12535,9 +12279,8 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             let ffn_norm = resolve_norm(&gpu, f.ffn_norm, hidden)?;
             let router = if f.n_expert > 0 {
                 let router = resolve_f32(&gpu, f.router, hidden)?;
-                let router_state = gpu
-                    .pipeline(mm_kernel_for(GgmlType::F32, req.m)?.0, 1, 1)?
-                    .to_owned();
+                let router_state =
+                    gpu.pipeline(mm_kernel_for(GgmlType::F32, req.m)?.0, 1, 1)?.to_owned();
                 Some((router, router_state))
             } else {
                 None
@@ -12702,215 +12445,199 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             enc.set_bytes(4, 4, &n as *const u32 as *const _);
             enc.set_bytes(5, 4, &req.eps as *const f32 as *const _);
             enc.set_bytes(6, 4, &use_delta as *const u32 as *const _);
-            enc.dispatch_thread_groups(MTLSize::new(req.m as u64, 1, 1), MTLSize::new(256, 1, 1));
+            enc.dispatch_thread_groups(
+                MTLSize::new(req.m as u64, 1, 1),
+                MTLSize::new(256, 1, 1),
+            );
         };
         let (hs_buf, hs_off): (&Buffer, usize) = if let Some(f) = &fusion {
             if onebuf {
                 // The previous layer's FFN stages (pf_x combine, y writes)
                 // live on the same command buffer now - order them.
-                enc.memory_barrier_with_resources(&[y, &gpu.pf_x, &gpu.pf_hs, &gpu.route_buf]);
+                enc.memory_barrier_with_resources(&[
+                    y, &gpu.pf_x, &gpu.pf_hs, &gpu.route_buf,
+                ]);
             }
             norm_rows(enc, &f.attn_norm, 0, out_at);
             cstamp!(gpu, enc, "anorm");
-            if !no_barrier() {
-                enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
-            }
+            if !no_barrier() { enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
+}
             (&gpu.pf_hs, 0)
         } else {
             (&gpu.x_arena, hs_at)
         };
-        matmul(
-            enc, &states[0], &mats[0], hidden, wq_out, hs_buf, hs_off, q_at,
-        );
+        matmul(enc, &states[0], &mats[0], hidden, wq_out, hs_buf, hs_off, q_at);
         cstamp!(gpu, enc, "wq");
         matmul(enc, &states[1], &mats[1], hidden, kv, hs_buf, hs_off, k_at);
         cstamp!(gpu, enc, "wk");
         matmul(enc, &states[2], &mats[2], hidden, kv, hs_buf, hs_off, v_at);
         cstamp!(gpu, enc, "wv");
         split_here!("qkv");
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[y]);
-        }
+        if !no_barrier() { enc.memory_barrier_with_resources(&[y]);
+}
 
         // head_dim-256 path: batched qk_prep256 splits the fused gate out of
         // the q rows and writes normed q to qn_at; attend_rows256 runs one
         // threadgroup per (head, row); the sigmoid gate lands before wo.
         if hd == 256 {
-            enc.set_compute_pipeline_state(&prep256_state);
-            enc.set_buffer(0, Some(y), e(q_at));
-            enc.set_buffer(1, Some(y), e(k_at));
-            enc.set_buffer(2, Some(y), e(v_at));
-            enc.set_buffer(3, Some(&req.cache.buf), 0);
-            let args = QkPrepBatch256Args {
-                n_heads: req.n_heads as u32,
-                n_kv_heads: req.n_kv_heads as u32,
-                kv_dim: req.kv_dim as u32,
-                eps: req.eps,
-                base: req.base as u32,
-                has_qk_norm: req.q_norm.is_some() as u32,
-                rot_dim: req.rot_dim as u32,
-                gate_in_q: req.gate_in_q as u32,
-                k_base: req.k_off as u64,
-                v_base: req.v_off as u64,
-            };
-            enc.set_bytes(
-                4,
-                std::mem::size_of::<QkPrepBatch256Args>() as u64,
-                &args as *const QkPrepBatch256Args as *const _,
-            );
-            let ones = [1.0f32; 256];
-            let qw = req.q_norm.unwrap_or(&ones);
-            let kw = req.k_norm.unwrap_or(&ones);
-            enc.set_bytes(5, (256 * 4) as u64, qw.as_ptr() as *const _);
-            enc.set_bytes(6, (256 * 4) as u64, kw.as_ptr() as *const _);
-            enc.set_buffer(7, Some(&gpu.x_arena), e(ropes_at));
-            enc.set_buffer(8, Some(y), e(qn_at));
-            enc.set_buffer(9, Some(y), e(qgate_at));
+        enc.set_compute_pipeline_state(&prep256_state);
+        enc.set_buffer(0, Some(y), e(q_at));
+        enc.set_buffer(1, Some(y), e(k_at));
+        enc.set_buffer(2, Some(y), e(v_at));
+        enc.set_buffer(3, Some(&req.cache.buf), 0);
+        let args = QkPrepBatch256Args {
+            n_heads: req.n_heads as u32,
+            n_kv_heads: req.n_kv_heads as u32,
+            kv_dim: req.kv_dim as u32,
+            eps: req.eps,
+            base: req.base as u32,
+            has_qk_norm: req.q_norm.is_some() as u32,
+            rot_dim: req.rot_dim as u32,
+            gate_in_q: req.gate_in_q as u32,
+            k_base: req.k_off as u64,
+            v_base: req.v_off as u64,
+        };
+        enc.set_bytes(4, std::mem::size_of::<QkPrepBatch256Args>() as u64,
+            &args as *const QkPrepBatch256Args as *const _);
+        let ones = [1.0f32; 256];
+        let qw = req.q_norm.unwrap_or(&ones);
+        let kw = req.k_norm.unwrap_or(&ones);
+        enc.set_bytes(5, (256 * 4) as u64, qw.as_ptr() as *const _);
+        enc.set_bytes(6, (256 * 4) as u64, kw.as_ptr() as *const _);
+        enc.set_buffer(7, Some(&gpu.x_arena), e(ropes_at));
+        enc.set_buffer(8, Some(y), e(qn_at));
+        enc.set_buffer(9, Some(y), e(qgate_at));
+        enc.dispatch_thread_groups(
+            MTLSize::new((req.n_heads + 2 * req.n_kv_heads) as u64, req.m as u64, 1),
+            MTLSize::new(32, 1, 1),
+        );
+        cstamp!(gpu, enc, "prep");
+        if !no_barrier() { enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
+}
+        split_here!("prep");
+
+        enc.set_compute_pipeline_state(&attend256_state);
+        enc.set_buffer(0, Some(&req.cache.buf), 0);
+        enc.set_buffer(1, Some(&req.cache.buf), 0);
+        enc.set_buffer(2, Some(y), e(qn_at));
+        enc.set_buffer(3, Some(y), e(attn_at));
+        for (index, value) in [
+            (4u64, req.kv_dim as u32),
+            (5, 256u32),
+            (6, req.base as u32),
+            (7, (req.n_heads / req.n_kv_heads.max(1)) as u32),
+        ] {
+            enc.set_bytes(index, 4, &value as *const u32 as *const _);
+        }
+        enc.set_bytes(8, 4, &req.scale as *const f32 as *const _);
+        for (index, value) in [(9u64, req.k_off as u64), (10, req.v_off as u64)] {
+            enc.set_bytes(index, 8, &value as *const u64 as *const _);
+        }
+        let heads32 = req.n_heads as u32;
+        enc.set_bytes(11, 4, &heads32 as *const u32 as *const _);
+        if attend_mm() {
+            // MMA tiles: same bindings, 8 rows per threadgroup.
+            enc.set_compute_pipeline_state(&attend_mm256_state);
+            let rows32 = req.m as u32;
+            enc.set_bytes(12, 4, &rows32 as *const u32 as *const _);
             enc.dispatch_thread_groups(
-                MTLSize::new((req.n_heads + 2 * req.n_kv_heads) as u64, req.m as u64, 1),
-                MTLSize::new(32, 1, 1),
+                MTLSize::new(req.n_heads as u64, (req.m as u64).div_ceil(8), 1),
+                MTLSize::new(128, 1, 1),
             );
-            cstamp!(gpu, enc, "prep");
-            if !no_barrier() {
-                enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
-            }
-            split_here!("prep");
-
-            enc.set_compute_pipeline_state(&attend256_state);
-            enc.set_buffer(0, Some(&req.cache.buf), 0);
-            enc.set_buffer(1, Some(&req.cache.buf), 0);
-            enc.set_buffer(2, Some(y), e(qn_at));
-            enc.set_buffer(3, Some(y), e(attn_at));
-            for (index, value) in [
-                (4u64, req.kv_dim as u32),
-                (5, 256u32),
-                (6, req.base as u32),
-                (7, (req.n_heads / req.n_kv_heads.max(1)) as u32),
-            ] {
-                enc.set_bytes(index, 4, &value as *const u32 as *const _);
-            }
-            enc.set_bytes(8, 4, &req.scale as *const f32 as *const _);
-            for (index, value) in [(9u64, req.k_off as u64), (10, req.v_off as u64)] {
-                enc.set_bytes(index, 8, &value as *const u64 as *const _);
-            }
-            let heads32 = req.n_heads as u32;
-            enc.set_bytes(11, 4, &heads32 as *const u32 as *const _);
-            if attend_mm() {
-                // MMA tiles: same bindings, 8 rows per threadgroup.
-                enc.set_compute_pipeline_state(&attend_mm256_state);
-                let rows32 = req.m as u32;
-                enc.set_bytes(12, 4, &rows32 as *const u32 as *const _);
-                enc.dispatch_thread_groups(
-                    MTLSize::new(req.n_heads as u64, (req.m as u64).div_ceil(8), 1),
-                    MTLSize::new(128, 1, 1),
-                );
-            } else {
-                enc.dispatch_thread_groups(
-                    MTLSize::new(req.n_heads as u64, req.m as u64, 1),
-                    MTLSize::new(512, 1, 1),
-                );
-            }
-            if !no_barrier() {
-                enc.memory_barrier_with_resources(&[y]);
-            }
-            if req.gate_in_q {
-                enc.set_compute_pipeline_state(&gate_mul_state);
-                enc.set_buffer(0, Some(y), e(attn_at));
-                enc.set_buffer(1, Some(y), e(qgate_at));
-                let n32 = (req.m * q_dim) as u32;
-                enc.set_bytes(2, 4, &n32 as *const u32 as *const _);
-                enc.dispatch_thread_groups(
-                    MTLSize::new((n32 as u64).div_ceil(256), 1, 1),
-                    MTLSize::new(256, 1, 1),
-                );
-                if !no_barrier() {
-                    enc.memory_barrier_with_resources(&[y]);
-                }
-            }
-            cstamp!(gpu, enc, "attend");
-            split_here!("attend");
-
-            matmul(
-                enc,
-                &states[3],
-                &mats[3],
-                q_dim,
-                hidden,
-                &gpu.y_arena,
-                attn_at,
-                out_at,
+        } else {
+        enc.dispatch_thread_groups(
+            MTLSize::new(req.n_heads as u64, req.m as u64, 1),
+            MTLSize::new(512, 1, 1),
+        );
+        }
+        if !no_barrier() { enc.memory_barrier_with_resources(&[y]);
+}
+        if req.gate_in_q {
+            enc.set_compute_pipeline_state(&gate_mul_state);
+            enc.set_buffer(0, Some(y), e(attn_at));
+            enc.set_buffer(1, Some(y), e(qgate_at));
+            let n32 = (req.m * q_dim) as u32;
+            enc.set_bytes(2, 4, &n32 as *const u32 as *const _);
+            enc.dispatch_thread_groups(
+                MTLSize::new((n32 as u64).div_ceil(256), 1, 1),
+                MTLSize::new(256, 1, 1),
             );
-            cstamp!(gpu, enc, "wo");
-            split_here!("wo");
-            if let Some(f) = &fusion {
-                if !no_barrier() {
-                    enc.memory_barrier_with_resources(&[y]);
-                }
-                // xs += wo output, then the FFN norm - one fused pass - and the
-                // router matmul, all before the single wait.
-                norm_rows(enc, &f.ffn_norm, 1, out_at);
-                cstamp!(gpu, enc, "fnorm");
-                if !no_barrier() {
-                    enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
-                }
-                if let Some((router, router_state)) = &f.router {
-                    matmul(
-                        enc,
-                        router_state,
-                        router,
-                        hidden,
-                        f.n_expert,
-                        &gpu.pf_hs,
-                        0,
-                        router_at,
-                    );
-                    cstamp!(gpu, enc, "rmm");
-                }
-                split_here!("ffnnorm_router");
-            }
-            enc.end_encoding();
-            ENCODE_NS.fetch_add(t_encode.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            if !no_barrier() { enc.memory_barrier_with_resources(&[y]);
+}
+        }
+        cstamp!(gpu, enc, "attend");
+        split_here!("attend");
 
-            let t_wait = std::time::Instant::now();
-            if onebuf {
-                // Nothing: the chunk commits once, in prefill_end.
-            } else if defer {
-                gpu.commit_chained(cmd);
-            } else {
-                cmd.commit();
-                cmd.wait_until_completed();
-                note_gpu_times(cmd);
-            }
-            WAIT_NS.fetch_add(t_wait.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            if !defer && !onebuf && std::env::var_os("ALLPAKA_FFN_TIME").is_some() {
-                use objc::{msg_send, sel, sel_impl};
-                let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
-                let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
-                eprintln!("attbuf: {:.3} ms", (ge - gs) * 1e3);
-            }
-            if !onebuf {
-                CALLS.fetch_add(1, Ordering::Relaxed);
-            }
-            DISPATCHES.fetch_add(6, Ordering::Relaxed);
-
-            if fusion.is_some() && gpu_route() {
-                PF_ROUTER_AT.store(router_at as u64, Ordering::Relaxed);
-                return Vec::new();
-            }
-            let (src_at, out_len) = if fusion.is_some() {
-                (router_at, req.m * n_expert)
-            } else {
-                (out_at, req.m * hidden)
-            };
-            let mut out = vec![0f32; out_len];
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    (gpu.y_arena.contents() as *const f32).add(src_at),
-                    out.as_mut_ptr(),
-                    out.len(),
+        matmul(enc, &states[3], &mats[3], q_dim, hidden, &gpu.y_arena, attn_at, out_at);
+        cstamp!(gpu, enc, "wo");
+        split_here!("wo");
+        if let Some(f) = &fusion {
+            if !no_barrier() { enc.memory_barrier_with_resources(&[y]);
+}
+            // xs += wo output, then the FFN norm - one fused pass - and the
+            // router matmul, all before the single wait.
+            norm_rows(enc, &f.ffn_norm, 1, out_at);
+            cstamp!(gpu, enc, "fnorm");
+            if !no_barrier() { enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
+}
+            if let Some((router, router_state)) = &f.router {
+                matmul(
+                    enc,
+                    router_state,
+                    router,
+                    hidden,
+                    f.n_expert,
+                    &gpu.pf_hs,
+                    0,
+                    router_at,
                 );
+                cstamp!(gpu, enc, "rmm");
             }
-            return out;
+            split_here!("ffnnorm_router");
+        }
+        enc.end_encoding();
+        ENCODE_NS.fetch_add(t_encode.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+        let t_wait = std::time::Instant::now();
+        if onebuf {
+            // Nothing: the chunk commits once, in prefill_end.
+        } else if defer {
+            gpu.commit_chained(cmd);
+        } else {
+            cmd.commit();
+            cmd.wait_until_completed();
+            note_gpu_times(cmd);
+        }
+        WAIT_NS.fetch_add(t_wait.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        if !defer && !onebuf && std::env::var_os("ALLPAKA_FFN_TIME").is_some() {
+            use objc::{msg_send, sel, sel_impl};
+            let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
+            let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
+            eprintln!("attbuf: {:.3} ms", (ge - gs) * 1e3);
+        }
+        if !onebuf {
+            CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        DISPATCHES.fetch_add(6, Ordering::Relaxed);
+
+        if fusion.is_some() && gpu_route() {
+            PF_ROUTER_AT.store(router_at as u64, Ordering::Relaxed);
+            return Vec::new();
+        }
+        let (src_at, out_len) = if fusion.is_some() {
+            (router_at, req.m * n_expert)
+        } else {
+            (out_at, req.m * hidden)
+        };
+        let mut out = vec![0f32; out_len];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (gpu.y_arena.contents() as *const f32).add(src_at),
+                out.as_mut_ptr(),
+                out.len(),
+            );
+        }
+        return out;
         }
 
         enc.set_compute_pipeline_state(&prep_state);
@@ -12932,11 +12659,8 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             has_bias: req.attn_bias.is_some() as u32,
             pad2: 0,
         };
-        enc.set_bytes(
-            4,
-            std::mem::size_of::<QkPrepArgs>() as u64,
-            &args as *const QkPrepArgs as *const _,
-        );
+        enc.set_bytes(4, std::mem::size_of::<QkPrepArgs>() as u64,
+            &args as *const QkPrepArgs as *const _);
         let ones = [1.0f32; ATTN_HEAD_DIM];
         let qw = req.q_norm.unwrap_or(&ones);
         let kw = req.k_norm.unwrap_or(&ones);
@@ -12962,9 +12686,8 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             MTLSize::new(32, 1, 1),
         );
         cstamp!(gpu, enc, "prep");
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
-        }
+        if !no_barrier() { enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
+}
         split_here!("prep");
 
         // Causal attention over every row in ONE dispatch: rows in grid.y,
@@ -12999,54 +12722,42 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 MTLSize::new(128, 1, 1),
             );
         } else {
-            let tile = match attend_rows_kernel() {
-                "attend_rows_t8" => 8u64,
-                "attend_rows_t4" => 4,
-                _ => 1,
-            };
-            if tile > 1 {
-                let rows32 = req.m as u32;
-                enc.set_bytes(12, 4, &rows32 as *const u32 as *const _);
-                enc.dispatch_thread_groups(
-                    MTLSize::new(req.n_heads as u64, (req.m as u64).div_ceil(tile), 1),
-                    MTLSize::new(128, 1, 1),
-                );
-            } else {
-                enc.dispatch_thread_groups(
-                    MTLSize::new(req.n_heads as u64, req.m as u64, 1),
-                    MTLSize::new(128, 1, 1),
-                );
-            }
+        let tile = match attend_rows_kernel() {
+            "attend_rows_t8" => 8u64,
+            "attend_rows_t4" => 4,
+            _ => 1,
+        };
+        if tile > 1 {
+            let rows32 = req.m as u32;
+            enc.set_bytes(12, 4, &rows32 as *const u32 as *const _);
+            enc.dispatch_thread_groups(
+                MTLSize::new(req.n_heads as u64, (req.m as u64).div_ceil(tile), 1),
+                MTLSize::new(128, 1, 1),
+            );
+        } else {
+            enc.dispatch_thread_groups(
+                MTLSize::new(req.n_heads as u64, req.m as u64, 1),
+                MTLSize::new(128, 1, 1),
+            );
         }
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[y]);
         }
+        if !no_barrier() { enc.memory_barrier_with_resources(&[y]);
+}
         cstamp!(gpu, enc, "attend");
         split_here!("attend");
 
-        matmul(
-            enc,
-            &states[3],
-            &mats[3],
-            q_dim,
-            hidden,
-            &gpu.y_arena,
-            attn_at,
-            out_at,
-        );
+        matmul(enc, &states[3], &mats[3], q_dim, hidden, &gpu.y_arena, attn_at, out_at);
         cstamp!(gpu, enc, "wo");
         split_here!("wo");
         if let Some(f) = &fusion {
-            if !no_barrier() {
-                enc.memory_barrier_with_resources(&[y]);
-            }
+            if !no_barrier() { enc.memory_barrier_with_resources(&[y]);
+}
             // xs += wo output, then the FFN norm - one fused pass - and the
             // router matmul, all before the single wait.
             norm_rows(enc, &f.ffn_norm, 1, out_at);
             cstamp!(gpu, enc, "fnorm");
-            if !no_barrier() {
-                enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
-            }
+            if !no_barrier() { enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
+}
             if let Some((router, router_state)) = &f.router {
                 matmul(
                     enc,
@@ -13188,10 +12899,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
     ];
     let mut states = Vec::with_capacity(5);
     for mat in &mats {
-        states.push(
-            gpu.pipeline(mm_kernel_for(mat.ty, req.m)?.0, 1, 1)?
-                .to_owned(),
-        );
+        states.push(gpu.pipeline(mm_kernel_for(mat.ty, req.m)?.0, 1, 1)?.to_owned());
     }
     let conv1d = {
         let addr = req.conv1d.as_ptr() as usize;
@@ -13199,10 +12907,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             return None;
         }
         let chunk = gpu.chunk_for(addr, req.conv1d.len())?;
-        NormRef {
-            chunk,
-            off: (addr - gpu.chunks[chunk].start) as u64,
-        }
+        NormRef { chunk, off: (addr - gpu.chunks[chunk].start) as u64 }
     };
 
     struct FusionRefs {
@@ -13220,9 +12925,8 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             let ffn_norm = resolve_norm(&gpu, f.ffn_norm, hidden)?;
             let router = if f.n_expert > 0 {
                 let router = resolve_f32(&gpu, f.router, hidden)?;
-                let router_state = gpu
-                    .pipeline(mm_kernel_for(GgmlType::F32, req.m)?.0, 1, 1)?
-                    .to_owned();
+                let router_state =
+                    gpu.pipeline(mm_kernel_for(GgmlType::F32, req.m)?.0, 1, 1)?.to_owned();
                 Some((router, router_state))
             } else {
                 None
@@ -13344,57 +13048,30 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             enc.set_bytes(4, 4, &n as *const u32 as *const _);
             enc.set_bytes(5, 4, &req.eps as *const f32 as *const _);
             enc.set_bytes(6, 4, &use_delta as *const u32 as *const _);
-            enc.dispatch_thread_groups(MTLSize::new(req.m as u64, 1, 1), MTLSize::new(256, 1, 1));
+            enc.dispatch_thread_groups(
+                MTLSize::new(req.m as u64, 1, 1),
+                MTLSize::new(256, 1, 1),
+            );
         };
 
         let f = fusion.as_ref().expect("gdn prefill without fusion");
         if onebuf {
             // The previous layer's stages live on the same command buffer.
             enc.memory_barrier_with_resources(&[
-                y,
-                &gpu.pf_x,
-                &gpu.pf_hs,
-                &gpu.route_buf,
-                &req.ssm.buf,
+                y, &gpu.pf_x, &gpu.pf_hs, &gpu.route_buf, &req.ssm.buf,
             ]);
         }
         // h = rmsnorm(xs) * attn_norm, then the four projections off it.
         norm_rows(enc, &f.attn_norm, 0, out_at);
         cstamp!(gpu, enc, "anorm");
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
-        }
-        matmul(
-            enc, &states[0], &mats[0], hidden, channels, &gpu.pf_hs, 0, qkv_at,
-        );
+        if !no_barrier() { enc.memory_barrier_with_resources(&[&gpu.pf_hs]); }
+        matmul(enc, &states[0], &mats[0], hidden, channels, &gpu.pf_hs, 0, qkv_at);
         cstamp!(gpu, enc, "wqkv");
-        matmul(
-            enc, &states[1], &mats[1], hidden, value_dim, &gpu.pf_hs, 0, z_at,
-        );
-        matmul(
-            enc,
-            &states[2],
-            &mats[2],
-            hidden,
-            req.heads_v,
-            &gpu.pf_hs,
-            0,
-            ab_at,
-        );
-        matmul(
-            enc,
-            &states[3],
-            &mats[3],
-            hidden,
-            req.heads_v,
-            &gpu.pf_hs,
-            0,
-            ab_at + req.m * req.heads_v,
-        );
+        matmul(enc, &states[1], &mats[1], hidden, value_dim, &gpu.pf_hs, 0, z_at);
+        matmul(enc, &states[2], &mats[2], hidden, req.heads_v, &gpu.pf_hs, 0, ab_at);
+        matmul(enc, &states[3], &mats[3], hidden, req.heads_v, &gpu.pf_hs, 0, ab_at + req.m * req.heads_v);
         split_here!("qkv");
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[y]);
-        }
+        if !no_barrier() { enc.memory_barrier_with_resources(&[y]); }
 
         // Depthwise conv over the chunk, updating the session window.
         enc.set_compute_pipeline_state(&conv_state);
@@ -13409,11 +13086,8 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             pad0: 0,
             conv_off: req.conv_off as u64,
         };
-        enc.set_bytes(
-            4,
-            std::mem::size_of::<GdnConvBatchArgs>() as u64,
-            &cargs as *const GdnConvBatchArgs as *const _,
-        );
+        enc.set_bytes(4, std::mem::size_of::<GdnConvBatchArgs>() as u64,
+            &cargs as *const GdnConvBatchArgs as *const _);
         let (slots_buf, slot_total) = match req.ssm_slots {
             Some((r, total)) => (r, total as u32),
             None => (req.ssm, 0u32),
@@ -13425,9 +13099,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             MTLSize::new(256, 1, 1),
         );
         cstamp!(gpu, enc, "conv");
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[y, &req.ssm.buf]);
-        }
+        if !no_barrier() { enc.memory_barrier_with_resources(&[y, &req.ssm.buf]); }
         // The session window update, now that every row's read is done: the
         // last d_conv-1 RAW qkv rows become the next chunk's window.
         enc.set_compute_pipeline_state(&gpu.pipelines[&("copy_f32", 1, 1)]);
@@ -13436,11 +13108,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             qkv_at + (req.m - window_rows) * channels
         } else {
             let old = (window_rows - req.m) * channels;
-            enc.set_buffer(
-                0,
-                Some(&req.ssm.buf),
-                ((req.conv_off + req.m * channels) * 4) as u64,
-            );
+            enc.set_buffer(0, Some(&req.ssm.buf), ((req.conv_off + req.m * channels) * 4) as u64);
             enc.set_buffer(1, Some(y), e(window_at));
             let old32 = old as u32;
             enc.set_bytes(2, 4, &old32 as *const u32 as *const _);
@@ -13467,9 +13135,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             MTLSize::new((nwin as u64).div_ceil(256), 1, 1),
             MTLSize::new(256, 1, 1),
         );
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[y, &req.ssm.buf]);
-        }
+        if !no_barrier() { enc.memory_barrier_with_resources(&[y, &req.ssm.buf]); }
         split_here!("conv");
 
         // The recurrence over the chunk, state updated in place.
@@ -13487,11 +13153,8 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             eps: req.eps,
             state_off: req.state_off as u64,
         };
-        enc.set_bytes(
-            4,
-            std::mem::size_of::<GdnStepBatchArgs>() as u64,
-            &sargs as *const GdnStepBatchArgs as *const _,
-        );
+        enc.set_bytes(4, std::mem::size_of::<GdnStepBatchArgs>() as u64,
+            &sargs as *const GdnStepBatchArgs as *const _);
         enc.set_bytes(5, (req.a.len() * 4) as u64, req.a.as_ptr() as *const _);
         enc.set_bytes(6, (req.dt.len() * 4) as u64, req.dt.as_ptr() as *const _);
         enc.set_buffer(7, Some(y), e(gy_at));
@@ -13502,20 +13165,15 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             MTLSize::new(32, 4, 1),
         );
         cstamp!(gpu, enc, "step");
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[y, &req.ssm.buf]);
-        }
+        if !no_barrier() { enc.memory_barrier_with_resources(&[y, &req.ssm.buf]); }
         split_here!("step");
 
         // Gated rmsnorm over the head outputs, times silu(z).
         enc.set_compute_pipeline_state(&norm_out_state);
         enc.set_buffer(0, Some(y), e(gy_at));
         enc.set_buffer(1, Some(y), e(z_at));
-        enc.set_bytes(
-            2,
-            (req.ssm_norm.len() * 4) as u64,
-            req.ssm_norm.as_ptr() as *const _,
-        );
+        enc.set_bytes(2, (req.ssm_norm.len() * 4) as u64,
+            req.ssm_norm.as_ptr() as *const _);
         let hv = req.heads_v as u32;
         let dd = req.d as u32;
         enc.set_bytes(3, 4, &hv as *const u32 as *const _);
@@ -13526,36 +13184,19 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             MTLSize::new(req.d as u64, 1, 1),
         );
         cstamp!(gpu, enc, "onorm");
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[y]);
-        }
+        if !no_barrier() { enc.memory_barrier_with_resources(&[y]); }
         split_here!("onorm");
 
-        matmul(
-            enc, &states[4], &mats[4], value_dim, hidden, y, gy_at, out_at,
-        );
+        matmul(enc, &states[4], &mats[4], value_dim, hidden, y, gy_at, out_at);
         cstamp!(gpu, enc, "wo");
         split_here!("wo");
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[y]);
-        }
+        if !no_barrier() { enc.memory_barrier_with_resources(&[y]); }
         // xs += ssm_out output, then the FFN norm and the router matmul.
         norm_rows(enc, &f.ffn_norm, 1, out_at);
         cstamp!(gpu, enc, "fnorm");
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
-        }
+        if !no_barrier() { enc.memory_barrier_with_resources(&[&gpu.pf_hs]); }
         if let Some((router, router_state)) = &f.router {
-            matmul(
-                enc,
-                router_state,
-                router,
-                hidden,
-                f.n_expert,
-                &gpu.pf_hs,
-                0,
-                router_at,
-            );
+            matmul(enc, router_state, router, hidden, f.n_expert, &gpu.pf_hs, 0, router_at);
             cstamp!(gpu, enc, "rmm");
         }
         split_here!("ffnnorm_router");
@@ -13630,7 +13271,11 @@ pub fn attend_batch(reqs: &[AttnReq]) -> Option<Vec<Vec<f32>>> {
     unsafe {
         let xp = gpu.x_arena.contents() as *mut u8;
         for (r, (x_off, _)) in reqs.iter().zip(&offs) {
-            std::ptr::copy_nonoverlapping(r.q.as_ptr() as *const u8, xp.add(*x_off), r.q.len() * 4);
+            std::ptr::copy_nonoverlapping(
+                r.q.as_ptr() as *const u8,
+                xp.add(*x_off),
+                r.q.len() * 4,
+            );
         }
     }
 
@@ -13639,8 +13284,9 @@ pub fn attend_batch(reqs: &[AttnReq]) -> Option<Vec<Vec<f32>>> {
         let cmd = gpu.queue.new_command_buffer();
         // Every position attends independently over an already-written
         // cache: no hazards, full concurrency.
-        let enc =
-            cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
+        let enc = cmd.compute_command_encoder_with_dispatch_type(
+            metal::MTLDispatchType::Concurrent,
+        );
         for (r, (x_off, y_off)) in reqs.iter().zip(&offs) {
             encode_attend_at(enc, &gpu, r, *x_off, *y_off);
         }
@@ -13662,7 +13308,11 @@ pub fn attend_batch(reqs: &[AttnReq]) -> Option<Vec<Vec<f32>>> {
                 let n = r.n_q_heads * r.head_dim;
                 let mut v = vec![0f32; n];
                 unsafe {
-                    std::ptr::copy_nonoverlapping(yp.add(*y_off), v.as_mut_ptr() as *mut u8, n * 4);
+                    std::ptr::copy_nonoverlapping(
+                        yp.add(*y_off),
+                        v.as_mut_ptr() as *mut u8,
+                        n * 4,
+                    );
                 }
                 v
             })
@@ -13845,11 +13495,7 @@ fn q3_mv() -> bool {
 }
 
 fn q3_kernel() -> &'static str {
-    if q3_mv() {
-        "matvec_q3_k_mv"
-    } else {
-        "matvec_q3_k"
-    }
+    if q3_mv() { "matvec_q3_k_mv" } else { "matvec_q3_k" }
 }
 
 /// The q4_k llama-structure matvec. Default ON: decode 30B 90 -> 102 tok/s,
@@ -13860,11 +13506,7 @@ fn q4_mv() -> bool {
 }
 
 fn q4_kernel() -> &'static str {
-    if q4_mv() {
-        "matvec_q4_k_mv"
-    } else {
-        "matvec_q4_k"
-    }
+    if q4_mv() { "matvec_q4_k_mv" } else { "matvec_q4_k" }
 }
 
 /// The q6_k llama-structure matvec. Default ON after alternating 30B A/B on
@@ -13876,11 +13518,32 @@ fn q6_mv() -> bool {
 }
 
 fn q6_kernel() -> &'static str {
-    if q6_mv() {
-        "matvec_q6_k_mv"
-    } else {
-        "matvec_q6_k"
-    }
+    if q6_mv() { "matvec_q6_k_mv" } else { "matvec_q6_k" }
+}
+
+/// The q5_k llama-structure matvec. Default ON for GLM shared gate/up and
+/// qwen35moe expert down (Q5_K). Carries SWIGLU_X so decode SWFUSE can fuse
+/// the down projection. `ALLPAKA_Q5_MV=0` restores the reference
+/// block-per-lane kernel. Needs Mac A/B confirmation on glm/qwen35 shapes.
+fn q5_mv() -> bool {
+    static MV: OnceLock<bool> = OnceLock::new();
+    *MV.get_or_init(|| std::env::var("ALLPAKA_Q5_MV").map_or(true, |v| v != "0"))
+}
+
+fn q5_kernel() -> &'static str {
+    if q5_mv() { "matvec_q5_k_mv" } else { "matvec_q5_k" }
+}
+
+/// The q8_0 llama-structure matvec. Default ON: GLM expert/shared down and
+/// qwen35moe GDN/attn projections. Carries SWIGLU_X for decode fusion.
+/// `ALLPAKA_Q8_MV=0` restores the packed-load reference kernel.
+fn q8_mv() -> bool {
+    static MV: OnceLock<bool> = OnceLock::new();
+    *MV.get_or_init(|| std::env::var("ALLPAKA_Q8_MV").map_or(true, |v| v != "0"))
+}
+
+fn q8_kernel() -> &'static str {
+    if q8_mv() { "matvec_q8_0_mv" } else { "matvec_q8_0" }
 }
 
 /// Prefill attention over simdgroup MMA tiles (attend_mm, llama-style: K/V
@@ -13897,10 +13560,7 @@ fn attend_mm() -> bool {
 fn attend_rows_kernel() -> &'static str {
     static T4: OnceLock<usize> = OnceLock::new();
     match *T4.get_or_init(|| {
-        std::env::var("ALLPAKA_ATTN_T4")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8)
+        std::env::var("ALLPAKA_ATTN_T4").ok().and_then(|v| v.parse().ok()).unwrap_or(8)
     }) {
         8 => "attend_rows_t8",
         0 => "attend_rows",
@@ -13908,19 +13568,17 @@ fn attend_rows_kernel() -> &'static str {
     }
 }
 
-/// The llama-structure decode attention: `ALLPAKA_ATTN_MV=0` reverts to the
-/// position-per-step kernel.
+/// The llama-structure decode attention. Default ON: four-position-in-flight
+/// flash-attn vec path. `ALLPAKA_ATTN_MV=0` reverts to the position-per-step
+/// kernel.
 fn attend_kernel() -> &'static str {
     static MV: OnceLock<bool> = OnceLock::new();
-    if *MV.get_or_init(|| std::env::var("ALLPAKA_ATTN_MV").is_ok_and(|v| v == "1")) {
+    if *MV.get_or_init(|| std::env::var("ALLPAKA_ATTN_MV").map_or(true, |v| v != "0")) {
         return "attend_mv";
     }
     static SG: OnceLock<usize> = OnceLock::new();
     match *SG.get_or_init(|| {
-        std::env::var("ALLPAKA_ATTN_S8")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(32)
+        std::env::var("ALLPAKA_ATTN_S8").ok().and_then(|v| v.parse().ok()).unwrap_or(32)
     }) {
         32 => "attend_s32",
         16 => "attend_s16",
@@ -14008,44 +13666,45 @@ fn rtopk_fused() -> bool {
 }
 
 /// The decode-side fold of the FFN residual norm into the router top-k
-/// (resnorm_router). OFF by default: effect in the noise on M4 Max
-/// (qwen3-30b decode, 385 vs 382-387 ms GPU executing over 32 tokens).
-/// `ALLPAKA_RFUSE=1` enables.
+/// (resnorm_router). OFF by default: under max-performance `normflag`,
+/// enabling costs ~20–27% decode tok/s on GLM-Air / qwen3-30b (2026-09-12)
+/// despite fewer dispatches. `ALLPAKA_RFUSE=1` enables only when
+/// `normflag` is also off (`moe_plain`).
 fn rfuse() -> bool {
     static R: OnceLock<bool> = OnceLock::new();
     *R.get_or_init(|| std::env::var("ALLPAKA_RFUSE").is_ok_and(|v| v == "1"))
 }
 
-/// The multi-threadgroup resnorm + router + top-k dispatch
-/// (resnorm_router_mt): replaces the separate FFN norm, router matvec and
-/// top-k dispatches - three launches and two barrier drains per MoE layer -
-/// with one launch that still streams the router matrix in parallel.
-/// Correct (greedy tokens identical) but measured neutral on M4 Max /
-/// Qwen3-30B-A3B: the saved drains are paid back by the device-scope fence
-/// and the serial last-group tail, so it stays opt-in. `ALLPAKA_RMT=1`.
-fn rmt() -> bool {
-    static R: OnceLock<bool> = OnceLock::new();
-    *R.get_or_init(|| std::env::var("ALLPAKA_RMT").is_ok_and(|v| v == "1"))
+/// Fold the GLM shared expert's Q8_0 down into the indexed expert-down
+/// launch (+1 parallel slot). OFF by default until cool A/B confirms a win;
+/// `ALLPAKA_SHARED_TAIL=1` enables.
+fn shared_tail() -> bool {
+    static S: OnceLock<bool> = OnceLock::new();
+    *S.get_or_init(|| std::env::var("ALLPAKA_SHARED_TAIL").is_ok_and(|v| v == "1"))
 }
 
-/// The decode-side down + combine dispatch (COMBINE function constant on
-/// the q4_k/q6_k mv kernels): one simdgroup per routed slot in a shared
-/// threadgroup, the weighted slot sum reduced through threadgroup memory
-/// straight into delta. The per-slot down buffer, the combine dispatch and
-/// one barrier drain leave every MoE layer (~0.3 ms/token on Qwen3-30B-A3B).
-/// Default ON; `ALLPAKA_DCOMB=0` reverts to the separate stages.
-/// Apply swiglu on load inside the fused down+combine kernel instead of the
-/// standalone swiglu dispatch. Measured OFF: every row pair re-evaluates the
-/// exp for its slot's 768 activations, ~0.8 ms/token on Qwen3-30B-A3B versus
-/// 0.13 ms for the dedicated pass plus its barrier. `ALLPAKA_DCOMB_SW=1`.
-fn dcomb_sw() -> bool {
-    static D: OnceLock<bool> = OnceLock::new();
-    *D.get_or_init(|| std::env::var("ALLPAKA_DCOMB_SW").is_ok_and(|v| v == "1"))
+/// Stagger GLM shared Q5 gate/up out of the expert Q4 window: expert
+/// gate/up → barrier → expert Q8 down ∥ shared Q5 gate/up → barrier →
+/// shared Q8 down. OFF by default until cool Terminal A/B
+/// (`scripts/glm-ab-stagger.sh`) confirms a win; `ALLPAKA_SHARED_STAGGER=1`
+/// enables. Disabled automatically when `SHARED_TAIL` folds shared down
+/// into the indexed expert-down launch (shared gate/up must finish first).
+fn shared_stagger() -> bool {
+    static S: OnceLock<bool> = OnceLock::new();
+    *S.get_or_init(|| std::env::var("ALLPAKA_SHARED_STAGGER").is_ok_and(|v| v == "1"))
 }
 
-fn dcomb() -> bool {
-    static D: OnceLock<bool> = OnceLock::new();
-    *D.get_or_init(|| std::env::var("ALLPAKA_DCOMB").map_or(true, |v| v != "0"))
+/// Rows per SIMD group for `matvec_q8_0_mv` (NR0 = 32/LPR). Default 2;
+/// sweep with `ALLPAKA_Q8_NR0` ∈ {1,2,4} (GLM expert down is the hot shape).
+fn q8_nr0() -> usize {
+    static NR0: OnceLock<usize> = OnceLock::new();
+    *NR0.get_or_init(|| {
+        std::env::var("ALLPAKA_Q8_NR0")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n: &usize| [1, 2, 4].contains(n))
+            .unwrap_or(2)
+    })
 }
 
 /// K-step 64 for the LL mm kernels: `ALLPAKA_MM_K64=1` to enable.
@@ -14113,20 +13772,12 @@ fn mmid_swiglu_kernel_for(ty: GgmlType) -> Option<(&'static str, usize)> {
         return None;
     }
     match ty {
-        GgmlType::Q4K => Some((
-            if mm_pipe() {
-                "mmllps_id_q4_k"
-            } else {
-                "mmlls_id_q4_k"
-            },
-            64,
-        )),
+        GgmlType::Q4K => Some((if mm_pipe() { "mmllps_id_q4_k" } else { "mmlls_id_q4_k" }, 64)),
         _ => None,
     }
 }
 
-fn mmid_kernel_for(ty: GgmlType, gather: bool) -> Option<(&'static str, usize)> {
-    if mm_ll() {
+fn mmid_kernel_for(ty: GgmlType, gather: bool) -> Option<(&'static str, usize)> {    if mm_ll() {
         let name = match (ty, gather, mm_k64() || mmid_k64()) {
             (GgmlType::Q8_0, false, false) => "mmll_id_q8_0",
             (GgmlType::Q2K, false, false) => "mmll_id_q2_k",
@@ -14139,11 +13790,7 @@ fn mmid_kernel_for(ty: GgmlType, gather: bool) -> Option<(&'static str, usize)> 
             (GgmlType::Q2K, true, false) => "mmllg_id_q2_k",
             (GgmlType::Q3K, true, false) => "mmllg_id_q3_k",
             (GgmlType::Q4K, true, false) => {
-                if mm_pipe() {
-                    "mmllpg_id_q4_k"
-                } else {
-                    "mmllg_id_q4_k"
-                }
+                if mm_pipe() { "mmllpg_id_q4_k" } else { "mmllg_id_q4_k" }
             }
             (GgmlType::Q5K, true, false) => "mmllg_id_q5_k",
             (GgmlType::Q6K, true, false) => "mmllg_id_q6_k",
@@ -14192,7 +13839,9 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         // route_pick holds 8 candidates per token and the fused buffers are
         // the only ones it can read logits from; anything else keeps CPU
         // routing. total_rows is exactly m * n_used in this mode.
-        if r.n_used > 8 || req.fused.as_ref().map_or(0, |c| c.m) * r.n_used != req.total_rows {
+        if r.n_used > 8
+            || req.fused.as_ref().map_or(0, |c| c.m) * r.n_used != req.total_rows
+        {
             return None;
         }
     } else if req.groups.is_empty() || req.tok.len() != req.total_rows {
@@ -14268,10 +13917,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     let mut sh_states = Vec::with_capacity(3);
     if let Some(sh_mats) = &sh_mats {
         for mat in sh_mats {
-            sh_states.push(
-                gpu.pipeline(mm_kernel_for(mat.ty, m_fused)?.0, 1, 1)?
-                    .to_owned(),
-            );
+            sh_states.push(gpu.pipeline(mm_kernel_for(mat.ty, m_fused)?.0, 1, 1)?.to_owned());
         }
     }
     let swiglu_state = gpu.pipelines[&("swiglu", 1, 1)].to_owned();
@@ -14325,9 +13971,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     let (n_off, n_hits) = if route_mode {
         (0, 0)
     } else {
-        req.fused
-            .as_ref()
-            .map_or((0, 0), |c| (c.tok_off.len(), c.hit_row.len()))
+        req.fused.as_ref().map_or((0, 0), |c| (c.tok_off.len(), c.hit_row.len()))
     };
     let hrow_at = off_at + align(n_off);
     let hw_at = hrow_at + align(n_hits);
@@ -14370,11 +14014,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         // Counts/counters self-clean on the GPU (route_scan zeroes them
         // after every layer), so staging once per allocation/bias is enough;
         // per-layer CPU writes would race the deferred buffers.
-        let bptr = req
-            .route
-            .as_ref()
-            .and_then(|r| r.bias)
-            .map_or(0, |b| b.as_ptr() as usize);
+        let bptr = req.route.as_ref().and_then(|r| r.bias).map_or(0, |b| b.as_ptr() as usize);
         if gpu.route_staged != Some(bptr) {
             unsafe {
                 let rb = gpu.route_buf.contents() as *mut f32;
@@ -14427,15 +14067,9 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             );
             if let Some(c) = &req.fused {
                 std::ptr::copy_nonoverlapping(
-                    c.tok_off.as_ptr() as *const f32,
-                    xp.add(off_at),
-                    c.tok_off.len(),
-                );
+                    c.tok_off.as_ptr() as *const f32, xp.add(off_at), c.tok_off.len());
                 std::ptr::copy_nonoverlapping(
-                    c.hit_row.as_ptr() as *const f32,
-                    xp.add(hrow_at),
-                    c.hit_row.len(),
-                );
+                    c.hit_row.as_ptr() as *const f32, xp.add(hrow_at), c.hit_row.len());
                 std::ptr::copy_nonoverlapping(c.hit_w.as_ptr(), xp.add(hw_at), c.hit_w.len());
             }
         }
@@ -14504,15 +14138,11 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             // (pf_hs) and the residual stream (pf_x) against the FFN stages.
             match &obuf_rescue {
                 Some((oy, ..)) => enc.memory_barrier_with_resources(&[
-                    y,
-                    &gpu.pf_x,
-                    &gpu.pf_hs,
-                    &gpu.route_buf,
-                    oy,
+                    y, &gpu.pf_x, &gpu.pf_hs, &gpu.route_buf, oy,
                 ]),
-                None => {
-                    enc.memory_barrier_with_resources(&[y, &gpu.pf_x, &gpu.pf_hs, &gpu.route_buf])
-                }
+                None => enc.memory_barrier_with_resources(&[
+                    y, &gpu.pf_x, &gpu.pf_hs, &gpu.route_buf,
+                ]),
             }
             if let Some((oy, r_at, lg_off, n_logits)) = &obuf_rescue {
                 // GPU-side logits rescue out of the pre-growth y_arena.
@@ -14536,20 +14166,11 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         };
         let (off_buf, off_off, hr_buf, hr_off, hw_buf, hw_off) = match &rl {
             Some(rl) => (
-                &gpu.route_buf,
-                rl.tok_off,
-                &gpu.route_buf,
-                rl.hit_row,
-                &gpu.route_buf,
-                rl.hit_w,
+                &gpu.route_buf, rl.tok_off, &gpu.route_buf, rl.hit_row,
+                &gpu.route_buf, rl.hit_w,
             ),
             None => (
-                &gpu.x_arena,
-                off_at,
-                &gpu.x_arena,
-                hrow_at,
-                &gpu.x_arena,
-                hw_at,
+                &gpu.x_arena, off_at, &gpu.x_arena, hrow_at, &gpu.x_arena, hw_at,
             ),
         };
         let stage = |enc: &metal::ComputeCommandEncoderRef,
@@ -14623,9 +14244,8 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             enc.set_bytes(5, psz, pp);
             enc.dispatch_thread_groups(MTLSize::new(tgs, 1, 1), MTLSize::new(256, 1, 1));
             cstamp!(gpu, enc, "rp");
-            if !no_barrier() {
-                enc.memory_barrier_with_resources(&[rb]);
-            }
+            if !no_barrier() { enc.memory_barrier_with_resources(&[rb]);
+}
             enc.set_compute_pipeline_state(&gpu.pipelines[&("route_scan", 1, 1)]);
             enc.set_buffer(0, Some(rb), e(rl.counts));
             enc.set_buffer(1, Some(rb), e(rl.table));
@@ -14634,9 +14254,8 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             enc.set_bytes(3, 4, &ne32 as *const u32 as *const _);
             enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(32, 1, 1));
             cstamp!(gpu, enc, "rs");
-            if !no_barrier() {
-                enc.memory_barrier_with_resources(&[rb]);
-            }
+            if !no_barrier() { enc.memory_barrier_with_resources(&[rb]);
+}
             enc.set_compute_pipeline_state(&gpu.pipelines[&("route_scatter", 1, 1)]);
             enc.set_buffer(0, Some(rb), e(rl.picks));
             enc.set_buffer(1, Some(rb), e(rl.pickw));
@@ -14651,16 +14270,12 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             cstamp!(gpu, enc, "rc");
             // The gate stage reads the table/tok from route_buf and route_pick
             // read the logits from y - order both against what follows.
-            if !no_barrier() {
-                enc.memory_barrier_with_resources(&[rb, y]);
-            }
+            if !no_barrier() { enc.memory_barrier_with_resources(&[rb, y]);
+}
         }
 
-        let (xb, xo): (&Buffer, usize) = if req.fused.is_some() {
-            (&gpu.pf_hs, 0)
-        } else {
-            (&gpu.x_arena, x_at)
-        };
+        let (xb, xo): (&Buffer, usize) =
+            if req.fused.is_some() { (&gpu.pf_hs, 0) } else { (&gpu.x_arena, x_at) };
         split_here!("route");
         // The shared expert's plain tile matmuls (borrowed by the phases
         // below): they depend only on pf_hs, so they fill the same
@@ -14748,9 +14363,8 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 );
             }
         }
-        if !no_barrier() && !no_stage_barrier() {
-            enc.memory_barrier_with_resources(&[y]);
-        }
+        if !no_barrier() && !no_stage_barrier() { enc.memory_barrier_with_resources(&[y]);
+}
         split_here!("up");
         // Phase 2: the down stage (fused swiglu in its B staging, or the
         // standalone pass first) plus the shared expert's swiglu.
@@ -14765,29 +14379,20 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 MTLSize::new(256, 1, 1),
             );
             cstamp!(gpu, enc, "sw");
-            if !no_barrier() && !no_stage_barrier() {
-                enc.memory_barrier_with_resources(&[y]);
-            }
+            if !no_barrier() && !no_stage_barrier() { enc.memory_barrier_with_resources(&[y]);
+}
         }
         split_here!("swiglu");
         // The fused down kernel applies swiglu while staging B, so it reads
         // the raw gate and up regions; the plain kernel reads post-swiglu.
-        stage(
-            enc,
-            2,
-            req.ffn,
-            req.hidden,
-            &gpu.y_arena,
-            gate_at,
-            out_at,
+        stage(enc, 2, req.ffn, req.hidden, &gpu.y_arena, gate_at, out_at,
             if dual {
                 Some((gate_at + req.ffn, 2 * req.ffn))
             } else if fused_swiglu {
                 Some((up_at, req.ffn))
             } else {
                 None
-            },
-        );
+            });
         cstamp!(gpu, enc, "dn");
         if let Some(sh) = &req.shared {
             enc.set_compute_pipeline_state(&swiglu_state);
@@ -14800,28 +14405,19 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 MTLSize::new(256, 1, 1),
             );
         }
-        if !no_barrier() && !no_stage_barrier() {
-            enc.memory_barrier_with_resources(&[y]);
-        }
+        if !no_barrier() && !no_stage_barrier() { enc.memory_barrier_with_resources(&[y]);
+}
         split_here!("down");
         // Phase 3: the shared expert's down, into the rows right after the
         // expert rows.
         if let Some(sh) = &req.shared {
-            mm(
-                enc,
-                2,
-                sh.ffn,
-                req.hidden,
-                &gpu.y_arena,
-                shg_at,
-                out_at + req.total_rows * req.hidden,
-            );
+            mm(enc, 2, sh.ffn, req.hidden, &gpu.y_arena, shg_at,
+                out_at + req.total_rows * req.hidden);
         }
         split_here!("shared");
         if let Some(c) = &req.fused {
-            if !no_barrier() && !no_stage_barrier() {
-                enc.memory_barrier_with_resources(&[y]);
-            }
+            if !no_barrier() && !no_stage_barrier() { enc.memory_barrier_with_resources(&[y]);
+}
             // qwen35moe: fold sigmoid(shared gate logit) into the shared
             // slot's CSR weight (route_scatter wrote a constant 1). Runs
             // after the phase-1 gate projection; the barrier above covers it.
@@ -14863,9 +14459,8 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                     MTLSize::new((m_fused as u64).div_ceil(32), 1, 1),
                     MTLSize::new(32, 1, 1),
                 );
-                if !no_barrier() {
-                    enc.memory_barrier_with_resources(&[&gpu.route_buf]);
-                }
+                if !no_barrier() { enc.memory_barrier_with_resources(&[&gpu.route_buf]);
+}
             }
             enc.set_compute_pipeline_state(&gpu.pipelines[&("combine_rows", 1, 1)]);
             enc.set_buffer(0, Some(&gpu.pf_x), 0);
@@ -14875,7 +14470,10 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             enc.set_buffer(4, Some(hw_buf), e(hw_off));
             let h32 = req.hidden as u32;
             enc.set_bytes(5, 4, &h32 as *const u32 as *const _);
-            enc.dispatch_thread_groups(MTLSize::new(c.m as u64, 1, 1), MTLSize::new(256, 1, 1));
+            enc.dispatch_thread_groups(
+                MTLSize::new(c.m as u64, 1, 1),
+                MTLSize::new(256, 1, 1),
+            );
             cstamp!(gpu, enc, "cb");
         }
         enc.end_encoding();
@@ -14904,11 +14502,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         DISPATCHES.fetch_add(4, Ordering::Relaxed);
 
         // Fused: the combine already landed in pf_x; skip the download.
-        let out_rows = if req.fused.is_some() {
-            0
-        } else {
-            req.total_rows
-        };
+        let out_rows = if req.fused.is_some() { 0 } else { req.total_rows };
         let mut out = vec![0f32; out_rows * req.hidden];
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -14948,22 +14542,17 @@ struct MatRef {
 fn resolve(gpu: &Gpu, ty: GgmlType, w: &[u8]) -> Option<MatRef> {
     let kernel = match ty {
         GgmlType::Q5_0 => "matvec_q5_0",
-        GgmlType::Q8_0 => "matvec_q8_0",
+        GgmlType::Q8_0 => q8_kernel(),
         GgmlType::Q2K => q2_kernel(),
         GgmlType::Q3K => q3_kernel(),
         GgmlType::Q4K => q4_kernel(),
-        GgmlType::Q5K => "matvec_q5_k",
+        GgmlType::Q5K => q5_kernel(),
         GgmlType::Q6K => q6_kernel(),
         _ => return None,
     };
     let addr = w.as_ptr() as usize;
     let chunk = gpu.chunk_for(addr, w.len())?;
-    Some(MatRef {
-        kernel,
-        ty,
-        chunk,
-        w_off: (addr - gpu.chunks[chunk].start) as u64,
-    })
+    Some(MatRef { kernel, ty, chunk, w_off: (addr - gpu.chunks[chunk].start) as u64 })
 }
 
 /// Encode one logical matmul as tiled sub-dispatches. Offsets into the
@@ -15094,9 +14683,7 @@ pub fn ffn_batch(reqs: &[FfnReq]) -> Option<Vec<Vec<f32>>> {
             // Same routing as matvec_batch: a big batch is one tile-matmul
             // dispatch, a small one is exact matvec tiles.
             if r.m >= MM_MIN_M {
-                per_mat.push(vec![gpu
-                    .pipeline(mm_kernel_for(mat.ty, r.m)?.0, 1, 1)?
-                    .to_owned()]);
+                per_mat.push(vec![gpu.pipeline(mm_kernel_for(mat.ty, r.m)?.0, 1, 1)?.to_owned()]);
             } else {
                 let lpr = lanes_per_row(mat.ty, n_in);
                 let mut tiles = Vec::new();
@@ -15127,35 +14714,20 @@ pub fn ffn_batch(reqs: &[FfnReq]) -> Option<Vec<Vec<f32>>> {
         // AND up together, every swiglu, every down. One expert's matvec is
         // far too small to fill the GPU; eight experts' worth at once is
         // what the serial encoder was quietly forbidding.
-        let enc =
-            cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
+        let enc = cmd.compute_command_encoder_with_dispatch_type(
+            metal::MTLDispatchType::Concurrent,
+        );
         let mut dispatched = 0u64;
-        for (((r, p), (gate, up, _)), st) in reqs.iter().zip(&plans).zip(&mats).zip(&states) {
+        for (((r, p), (gate, up, _)), st) in
+            reqs.iter().zip(&plans).zip(&mats).zip(&states)
+        {
             dispatched += encode_matvec(
-                enc,
-                &gpu,
-                gate,
-                &st[0],
-                r.hidden,
-                r.ffn,
-                &gpu.x_arena,
-                p.x_off,
-                &gpu.y_arena,
-                p.gate_off,
-                r.m,
+                enc, &gpu, gate, &st[0], r.hidden, r.ffn,
+                &gpu.x_arena, p.x_off, &gpu.y_arena, p.gate_off, r.m,
             );
             dispatched += encode_matvec(
-                enc,
-                &gpu,
-                up,
-                &st[1],
-                r.hidden,
-                r.ffn,
-                &gpu.x_arena,
-                p.x_off,
-                &gpu.y_arena,
-                p.up_off,
-                r.m,
+                enc, &gpu, up, &st[1], r.hidden, r.ffn,
+                &gpu.x_arena, p.x_off, &gpu.y_arena, p.up_off, r.m,
             );
         }
         enc.memory_barrier_with_resources(&[&gpu.y_arena]);
@@ -15174,19 +14746,12 @@ pub fn ffn_batch(reqs: &[FfnReq]) -> Option<Vec<Vec<f32>>> {
             dispatched += 1;
         }
         enc.memory_barrier_with_resources(&[&gpu.y_arena]);
-        for (((r, p), (_, _, down)), st) in reqs.iter().zip(&plans).zip(&mats).zip(&states) {
+        for (((r, p), (_, _, down)), st) in
+            reqs.iter().zip(&plans).zip(&mats).zip(&states)
+        {
             dispatched += encode_matvec(
-                enc,
-                &gpu,
-                down,
-                &st[2],
-                r.ffn,
-                r.hidden,
-                &gpu.y_arena,
-                p.gate_off,
-                &gpu.y_arena,
-                p.out_off,
-                r.m,
+                enc, &gpu, down, &st[2], r.ffn, r.hidden,
+                &gpu.y_arena, p.gate_off, &gpu.y_arena, p.out_off, r.m,
             );
         }
         enc.end_encoding();

@@ -33,3 +33,4 @@ serde_json = "1"
 toml = "0.8"
 airbug-otel = { git = "https://github.com/themoretheless/airbug", rev = "75b1321b5d7ff2cee983379f539c07726a7d27e5" }
 airbug-bench = { git = "https://github.com/themoretheless/airbug", rev = "75b1321b5d7ff2cee983379f539c07726a7d27e5" }
+airbug = { git = "https://github.com/themoretheless/airbug", branch = "release", package = "airbug-bench", features = ["macros"] }
