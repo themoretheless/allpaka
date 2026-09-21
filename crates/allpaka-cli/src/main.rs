@@ -32,6 +32,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the multi-provider chat workspace without loading a local model.
+    Studio {
+        #[arg(long, default_value = "127.0.0.1:8100")]
+        bind: std::net::SocketAddr,
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        /// Conversation storage directory (defaults to OS user data directory).
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
     /// Explain the resolved GPU execution path for one GGUF model.
     Explain {
         #[arg(value_name = "GGUF")]
@@ -262,6 +272,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     airbug::install();
     match cli.command {
+        Command::Studio { bind, workspace, data_dir } => allpaka_chat::run(bind, workspace, data_dir),
         Command::Explain {
             engine,
             profile,

@@ -1,0 +1,1229 @@
+{
+  "retrieved": "2026-09-21",
+  "sources": [
+    "https://github.com/yatsyk/awesome-byok-apps",
+    "https://github.com/OpenRouterTeam/awesome-openrouter"
+  ],
+  "entries": [
+    {
+      "catalog": "byok",
+      "name": "AnythingLLM",
+      "url": "https://github.com/Mintplex-Labs/anything-llm",
+      "category": "Chat UIs",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "BetterChatGPT",
+      "url": "https://github.com/ztjhz/BetterChatGPT",
+      "category": "Chat UIs",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "big-AGI",
+      "url": "https://github.com/enricoros/big-AGI",
+      "category": "Chat UIs",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Chatbox",
+      "url": "https://github.com/Bin-Huang/chatbox",
+      "category": "Chat UIs",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Jan",
+      "url": "https://github.com/janhq/jan",
+      "category": "Chat UIs",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "LibreChat",
+      "url": "https://github.com/danny-avila/LibreChat",
+      "category": "Chat UIs",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "LobeChat",
+      "url": "https://github.com/lobehub/lobe-chat",
+      "category": "Chat UIs",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "NextChat",
+      "url": "https://github.com/ChatGPTNextWeb/NextChat",
+      "category": "Chat UIs",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Open WebUI",
+      "url": "https://github.com/open-webui/open-webui",
+      "category": "Chat UIs",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "SillyTavern",
+      "url": "https://github.com/SillyTavern/SillyTavern",
+      "category": "Chat UIs",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "TypingMind",
+      "url": "https://www.typingmind.com",
+      "category": "Chat UIs",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Aider",
+      "url": "https://github.com/Aider-AI/aider",
+      "category": "Code assistants",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Cline",
+      "url": "https://github.com/cline/cline",
+      "category": "Code assistants",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Continue",
+      "url": "https://github.com/continuedev/continue",
+      "category": "Code assistants",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Kilo Code",
+      "url": "https://github.com/Kilo-Org/kilocode",
+      "category": "Code assistants",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Open Interpreter",
+      "url": "https://github.com/openinterpreter/open-interpreter",
+      "category": "Code assistants",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Roo Code",
+      "url": "https://github.com/RooCodeInc/Roo-Code",
+      "category": "Code assistants",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Tabby",
+      "url": "https://github.com/TabbyML/tabby",
+      "category": "Code assistants",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Zed",
+      "url": "https://github.com/zed-industries/zed",
+      "category": "Code assistants",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Cursor",
+      "url": "https://docs.cursor.com/settings/models",
+      "category": "IDE and terminal",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "JetBrains AI",
+      "url": "https://blog.jetbrains.com/ai/2025/12/bring-your-own-key-byok-is-now-live-in-jetbrains-ides/",
+      "category": "IDE and terminal",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "VS Code",
+      "url": "https://code.visualstudio.com/blogs/2025/10/22/bring-your-own-key",
+      "category": "IDE and terminal",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Warp",
+      "url": "https://docs.warp.dev/support-and-community/plans-and-billing/bring-your-own-api-key",
+      "category": "IDE and terminal",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Zed Agent Panel",
+      "url": "https://zed.dev/docs/ai/llm-providers",
+      "category": "IDE and terminal",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Glarity",
+      "url": "https://github.com/sparticleinc/chatgpt-google-summary-extension",
+      "category": "Writing and research",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "GPT Researcher",
+      "url": "https://github.com/assafelovic/gpt-researcher",
+      "category": "Writing and research",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Khoj",
+      "url": "https://github.com/khoj-ai/khoj",
+      "category": "Writing and research",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Novel",
+      "url": "https://github.com/steven-tey/novel",
+      "category": "Writing and research",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "OpenGrammar",
+      "url": "https://github.com/swadhinbiswas/opengrammar",
+      "category": "Writing and research",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Perplexica",
+      "url": "https://github.com/ItzCrazyKns/Perplexica",
+      "category": "Writing and research",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Rewire Text",
+      "url": "https://sunsetmesasoftware.com/rewire-text/",
+      "category": "Writing and research",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "NextAI Translator",
+      "url": "https://github.com/nextai-translator/nextai-translator",
+      "category": "Translation",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Read Frog",
+      "url": "https://github.com/mengxi-ream/read-frog",
+      "category": "Translation",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "CrewAI",
+      "url": "https://github.com/crewAIInc/crewAI",
+      "category": "Agents and workflow builders",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Flowise",
+      "url": "https://github.com/FlowiseAI/Flowise",
+      "category": "Agents and workflow builders",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Langflow",
+      "url": "https://github.com/langflow-ai/langflow",
+      "category": "Agents and workflow builders",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "n8n",
+      "url": "https://n8n.io",
+      "category": "Agents and workflow builders",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "SuperAGI",
+      "url": "https://github.com/TransformerOptimus/SuperAGI",
+      "category": "Agents and workflow builders",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "ComfyUI",
+      "url": "https://github.com/comfyanonymous/ComfyUI",
+      "category": "Image, audio, and voice",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Fabric",
+      "url": "https://github.com/danielmiessler/fabric",
+      "category": "Image, audio, and voice",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "LM Studio",
+      "url": "https://lmstudio.ai",
+      "category": "Image, audio, and voice",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Open NotebookLM",
+      "url": "https://github.com/lfnovo/open-notebook",
+      "category": "Image, audio, and voice",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Cloudflare AI Gateway",
+      "url": "https://developers.cloudflare.com/ai-gateway/configuration/bring-your-own-keys/",
+      "category": "Gateways and proxies",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Helicone",
+      "url": "https://github.com/Helicone/helicone",
+      "category": "Gateways and proxies",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "LiteLLM",
+      "url": "https://github.com/BerriAI/litellm",
+      "category": "Gateways and proxies",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "OpenRouter",
+      "url": "https://openrouter.ai",
+      "category": "Gateways and proxies",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Portkey",
+      "url": "https://portkey.ai",
+      "category": "Gateways and proxies",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Vercel AI Gateway",
+      "url": "https://vercel.com/docs/ai-gateway",
+      "category": "Gateways and proxies",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Anthropic",
+      "url": "https://console.anthropic.com",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Cerebras",
+      "url": "https://cloud.cerebras.ai",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Cohere",
+      "url": "https://dashboard.cohere.com/api-keys",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "DeepInfra",
+      "url": "https://deepinfra.com/dash/api_keys",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "DeepSeek",
+      "url": "https://platform.deepseek.com",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "ElevenLabs",
+      "url": "https://elevenlabs.io/app/settings/api-keys",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Fireworks AI",
+      "url": "https://fireworks.ai/account/api-keys",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Google AI Studio",
+      "url": "https://aistudio.google.com/app/apikey",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Groq",
+      "url": "https://console.groq.com/keys",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Hugging Face",
+      "url": "https://huggingface.co/settings/tokens",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Mistral AI",
+      "url": "https://console.mistral.ai/api-keys",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "OpenAI",
+      "url": "https://platform.openai.com/api-keys",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "OpenRouter",
+      "url": "https://openrouter.ai/keys",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Perplexity",
+      "url": "https://www.perplexity.ai/settings/api",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Replicate",
+      "url": "https://replicate.com/account/api-tokens",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "Together AI",
+      "url": "https://api.together.xyz/settings/api-keys",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "byok",
+      "name": "xAI",
+      "url": "https://console.x.ai",
+      "category": "Providers",
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Aeon",
+      "url": "https://github.com/aeonfun/aeon",
+      "docs": "https://github.com/aeonfun/aeon/blob/main/docs/harnesses.md",
+      "repository": "https://github.com/aeonfun/aeon",
+      "tags": [
+        "coding",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Agent QA",
+      "url": "https://github.com/vostride/agent-qa",
+      "docs": "https://vostride.com/docs/agent-qa/quickstart#open-the-dashboard",
+      "repository": null,
+      "tags": [
+        "coding",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Agent Swarm",
+      "url": "https://agent-swarm.dev",
+      "docs": "https://docs.agent-swarm.dev/docs/guides/harness-configuration#opencode",
+      "repository": "https://github.com/desplega-ai/agent-swarm",
+      "tags": [
+        "coding",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Agent Zero",
+      "url": "https://www.agent-zero.ai/",
+      "docs": "https://www.agent-zero.ai/p/docs/get-started/#configuration",
+      "repository": "https://github.com/agent0ai/agent-zero",
+      "tags": [
+        "productivity",
+        "chat",
+        "research"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Agent37",
+      "url": "https://www.agent37.com/cloud",
+      "docs": "https://www.agent37.com/docs/agents-api/byo-model",
+      "repository": null,
+      "tags": [
+        "coding",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "AiAssistWorks",
+      "url": "https://www.aiassistworks.com/",
+      "docs": "https://support.aiassistworks.com/kb/article/8/setting-up-openrouter-api-key",
+      "repository": null,
+      "tags": [
+        "productivity",
+        "creative"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Aider",
+      "url": "https://aider.chat",
+      "docs": "https://aider.chat/docs/llms/openrouter.html",
+      "repository": "https://github.com/Aider-AI/aider",
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "AionUi",
+      "url": "https://www.aionui.com",
+      "docs": "https://github.com/iOfficeAI/AionUi",
+      "repository": "https://github.com/iOfficeAI/AionUi",
+      "tags": [
+        "chat",
+        "coding",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "All API Hub",
+      "url": "https://all-api-hub.qixing1217.top/",
+      "docs": "https://all-api-hub.qixing1217.top/en/service-guides/openrouter.html",
+      "repository": "https://github.com/qixing-jk/all-api-hub",
+      "tags": [
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "analystOS",
+      "url": "https://github.com/sheeki03/analystOS",
+      "docs": "https://github.com/sheeki03/analystOS#readme",
+      "repository": "https://github.com/sheeki03/analystOS",
+      "tags": [
+        "research",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Atomic Agent",
+      "url": "https://atomicagent.io",
+      "docs": "https://atomicagent.io/docs/guides/openrouter/",
+      "repository": "https://github.com/AtomicBot-ai/atomic-agent",
+      "tags": [
+        "productivity",
+        "coding",
+        "chat"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Autohand Code CLI",
+      "url": "https://www.autohand.ai/cli",
+      "docs": "https://autohand.ai/docs/integrations/openrouter",
+      "repository": "https://github.com/autohandai/code-cli",
+      "tags": [
+        "coding",
+        "chat",
+        "research"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Aventura",
+      "url": "https://aventura.camp",
+      "docs": "https://aventura.camp/setup/",
+      "repository": "https://github.com/unkarelian/Aventura",
+      "tags": [
+        "creative"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "BoltAI",
+      "url": "https://boltai.com",
+      "docs": "https://help.boltai.com/articles/2327851-how-to-use-openrouter-in-boltai",
+      "repository": null,
+      "tags": [
+        "chat"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Browser Use",
+      "url": "https://browser-use.com",
+      "docs": "https://docs.browser-use.com/open-source/supported-models#openrouter",
+      "repository": "https://github.com/browser-use/browser-use",
+      "tags": [
+        "productivity",
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Cai",
+      "url": "https://getcai.app",
+      "docs": "https://getcai.app/docs/getting-started/llm-setup/#openrouter",
+      "repository": "https://github.com/cai-layer/cai",
+      "tags": [
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Chatbox",
+      "url": "https://chatboxai.app",
+      "docs": "https://docs.chatboxai.app/en/guides/providers/openrouter",
+      "repository": "https://github.com/chatboxai/chatbox",
+      "tags": [
+        "chat",
+        "coding",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "ChatLima",
+      "url": "https://www.chatlima.com",
+      "docs": "https://www.chatlima.com/faq",
+      "repository": "https://github.com/brooksy4503/chatlima",
+      "tags": [
+        "chat",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Chorus",
+      "url": "https://github.com/meltylabs/chorus",
+      "docs": "https://github.com/meltylabs/chorus#readme",
+      "repository": "https://github.com/meltylabs/chorus",
+      "tags": [
+        "chat"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Cline",
+      "url": "https://cline.bot",
+      "docs": "https://github.com/cline/cline?tab=readme-ov-file#use-any-api-and-model",
+      "repository": "https://github.com/cline/cline",
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Cloudflare AI Gateway",
+      "url": "https://developers.cloudflare.com/ai-gateway/",
+      "docs": "https://developers.cloudflare.com/ai-gateway/providers/openrouter/",
+      "repository": null,
+      "tags": [
+        "productivity",
+        "research"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Dexto",
+      "url": "https://dexto.ai",
+      "docs": "https://docs.dexto.ai/docs/guides/configuring-dexto/llm#gateway-providers",
+      "repository": "https://github.com/truffle-ai/dexto",
+      "tags": [
+        "coding",
+        "productivity",
+        "research"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Fud AI",
+      "url": "https://fud-ai.app",
+      "docs": "https://github.com/apoorvdarshan/fud-ai#ai-providers",
+      "repository": "https://github.com/apoorvdarshan/fud-ai",
+      "tags": [
+        "productivity",
+        "other"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "GitBug",
+      "url": "https://gitbug.ai",
+      "docs": "https://gitbug.ai/docs",
+      "repository": null,
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "GitHub Copilot",
+      "url": "https://github.com/features/copilot",
+      "docs": "https://code.visualstudio.com/docs/copilot/language-models#_bring-your-own-language-model-key",
+      "repository": null,
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "hax",
+      "url": "https://usehax.dev",
+      "docs": "https://github.com/OleksandrChekhovskyi/hax/blob/master/docs/providers.md#openrouter",
+      "repository": "https://github.com/OleksandrChekhovskyi/hax",
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Helicone",
+      "url": "https://www.helicone.ai",
+      "docs": "https://docs.helicone.ai/getting-started/integration-method/openrouter#openrouter-integration",
+      "repository": "https://github.com/Helicone/helicone",
+      "tags": [
+        "productivity",
+        "research"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "InternAgent",
+      "url": "https://discovery.intern-ai.org.cn",
+      "docs": "https://github.com/InternScience/InternAgent/blob/main/docs/openrouter.md",
+      "repository": "https://github.com/InternScience/InternAgent",
+      "tags": [
+        "research",
+        "productivity",
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Junie",
+      "url": "https://junie.jetbrains.com",
+      "docs": "https://junie.jetbrains.com/docs/byok-openrouter.html",
+      "repository": null,
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Kilo Code",
+      "url": "https://kilo.ai",
+      "docs": "https://kilo.ai/docs/providers/openrouter",
+      "repository": "https://github.com/Kilo-Org/kilocode",
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Letta",
+      "url": "https://letta.com",
+      "docs": "https://docs.letta.com/configuration/models",
+      "repository": "https://github.com/letta-ai/letta-code",
+      "tags": [
+        "coding",
+        "productivity",
+        "research"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "LibreChat",
+      "url": "https://www.librechat.ai",
+      "docs": "https://www.librechat.ai/docs/configuration/librechat_yaml/ai_endpoints/openrouter",
+      "repository": "https://github.com/danny-avila/LibreChat",
+      "tags": [
+        "chat"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "LlamaIndex",
+      "url": "https://www.llamaindex.ai",
+      "docs": "https://docs.llamaindex.ai/en/stable/api_reference/llms/openrouter/",
+      "repository": "https://github.com/run-llama/llama_index",
+      "tags": [
+        "coding",
+        "research"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Llumen",
+      "url": "https://pinkfuwa.github.io/llumen/",
+      "docs": "https://pinkfuwa.github.io/llumen/",
+      "repository": "https://github.com/pinkfuwa/llumen",
+      "tags": [
+        "chat"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Mastra",
+      "url": "https://mastra.ai",
+      "docs": "https://mastra.ai/docs/frameworks/agentic-uis/openrouter",
+      "repository": "https://github.com/mastra-ai/mastra",
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Maxim AI",
+      "url": "https://www.getmaxim.ai/",
+      "docs": "https://www.getmaxim.ai/docs/settings/model-configuration#model-configuration",
+      "repository": null,
+      "tags": [
+        "coding",
+        "productivity",
+        "research"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "OpenClaw (Moltbot)",
+      "url": "https://openclaw.ai/",
+      "docs": "https://docs.openclaw.ai/providers/openrouter",
+      "repository": "https://github.com/openclaw/openclaw",
+      "tags": [
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "n8n",
+      "url": "https://n8n.io",
+      "docs": "https://docs.n8n.io/integrations/builtin/credentials/openrouter/",
+      "repository": "https://github.com/n8n-io/n8n",
+      "tags": [
+        "productivity",
+        "other"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "NanoClaw",
+      "url": "https://nanoclaw.dev",
+      "docs": "https://github.com/qwibitai/nanoclaw#readme",
+      "repository": "https://github.com/qwibitai/nanoclaw",
+      "tags": [
+        "chat",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "nanocode",
+      "url": "https://github.com/1rgs/nanocode",
+      "docs": "https://github.com/1rgs/nanocode#openrouter",
+      "repository": "https://github.com/1rgs/nanocode",
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Nikke-DB Story/Roleplaying Generator",
+      "url": "https://nikke-db.pages.dev/story-gen",
+      "docs": "https://nikke-db.pages.dev/story-gen",
+      "repository": "https://github.com/Nikke-db/nikke-db-vue",
+      "tags": [
+        "chat",
+        "creative"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Novelcrafter",
+      "url": "https://www.novelcrafter.com",
+      "docs": "https://www.novelcrafter.com/help/docs/ai-connections/openrouter",
+      "repository": null,
+      "tags": [
+        "chat",
+        "creative",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Octomind",
+      "url": "https://octomind.run",
+      "docs": "https://octomind.run/docs/providers/openrouter",
+      "repository": "https://github.com/muvon/octomind",
+      "tags": [
+        "coding",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "OpenRouter MCP Multimodal",
+      "url": "https://github.com/stabgan/openrouter-mcp-multimodal",
+      "docs": "https://github.com/stabgan/openrouter-mcp-multimodal#quick-start",
+      "repository": "https://github.com/stabgan/openrouter-mcp-multimodal",
+      "tags": [
+        "productivity",
+        "chat",
+        "creative"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "openrouter-rs",
+      "url": "https://github.com/realmorrisliu/openrouter-rs",
+      "docs": "https://github.com/realmorrisliu/openrouter-rs/blob/main/docs/community/awesome-openrouter/README.md",
+      "repository": "https://github.com/realmorrisliu/openrouter-rs",
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Ottex",
+      "url": "https://ottex.ai",
+      "docs": "https://ottex.ai/docs",
+      "repository": null,
+      "tags": [
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "PostHog",
+      "url": "https://posthog.com",
+      "docs": "https://posthog.com/tutorials/openrouter-observability",
+      "repository": "https://github.com/PostHog/posthog",
+      "tags": [
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "PostQode",
+      "url": "https://postqode.ai",
+      "docs": "https://docs.postqode.ai/settings/model-configuration",
+      "repository": null,
+      "tags": [
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Project AIRI",
+      "url": "https://airi.moeru.ai/",
+      "docs": "https://airi.moeru.ai/docs/en/",
+      "repository": "https://github.com/moeru-ai/airi",
+      "tags": [
+        "chat"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Quests",
+      "url": "https://quests.dev",
+      "docs": "https://quests.dev/providers/openrouter",
+      "repository": "https://github.com/quests-org/quests",
+      "tags": [
+        "chat",
+        "coding",
+        "productivity",
+        "creative"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Roboflow Workflows",
+      "url": "https://roboflow.com/workflows",
+      "docs": "https://inference.roboflow.com/workflows/blocks/open_router/",
+      "repository": "https://github.com/roboflow/inference",
+      "tags": [
+        "productivity",
+        "research"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Roo Code",
+      "url": "https://roocode.com",
+      "docs": "https://docs.roocode.com/providers/openrouter",
+      "repository": "https://github.com/RooCodeInc/Roo-Code",
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Shakespeare",
+      "url": "https://shakespeare.diy",
+      "docs": "https://soapbox.pub/shakespeare-resources/",
+      "repository": "https://gitlab.com/soapbox-pub/shakespeare",
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "ShibaClaw",
+      "url": "https://github.com/RikyZ90/ShibaClaw",
+      "docs": "https://github.com/RikyZ90/ShibaClaw#supported-providers",
+      "repository": "https://github.com/RikyZ90/ShibaClaw",
+      "tags": [
+        "productivity",
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "SillyTavern",
+      "url": "https://sillytavern.app",
+      "docs": "https://docs.sillytavern.app/usage/api-connections/openrouter/",
+      "repository": "https://github.com/SillyTavern/SillyTavern",
+      "tags": [
+        "chat",
+        "creative"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Skales",
+      "url": "https://skales.app",
+      "docs": "https://docs.skales.app",
+      "repository": "https://github.com/skalesapp/skales",
+      "tags": [
+        "chat",
+        "productivity",
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "SoulForge",
+      "url": "https://soulforge.proxysoul.com",
+      "docs": "https://soulforge.proxysoul.com/providers/overview#openrouter",
+      "repository": "https://github.com/proxysoul/soulforge",
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Space Agent",
+      "url": "https://space-agent.ai/",
+      "docs": "https://github.com/agent0ai/space-agent/blob/main/app/L0/_all/mod/_core/documentation/docs/agent/onscreen-agent-runtime.md",
+      "repository": "https://github.com/agent0ai/space-agent",
+      "tags": [
+        "productivity",
+        "chat"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Speakeasy",
+      "url": "https://www.speakeasy.com",
+      "docs": "https://www.speakeasy.com/docs/ai-control-plane/org-admin/ai-integrations/openrouter",
+      "repository": null,
+      "tags": [
+        "chat",
+        "coding",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Spokenly",
+      "url": "https://spokenly.app",
+      "docs": "https://spokenly.app/docs",
+      "repository": null,
+      "tags": [
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Stirrup",
+      "url": "https://github.com/ArtificialAnalysis/Stirrup",
+      "docs": "https://stirrup.artificialanalysis.ai/",
+      "repository": "https://github.com/ArtificialAnalysis/Stirrup",
+      "tags": [
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "SurfMind",
+      "url": "https://surfmind.ai",
+      "docs": "https://surfmind.ai/blog/how-to-use-openrouter-in-your-browser",
+      "repository": null,
+      "tags": [
+        "chat",
+        "productivity"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "TypingMind",
+      "url": "https://www.typingmind.com/",
+      "docs": "https://docs.typingmind.com/",
+      "repository": null,
+      "tags": [
+        "chat"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "VT Code",
+      "url": "https://github.com/vinhnx/vtcode",
+      "docs": "https://github.com/vinhnx/vtcode/blob/main/docs/providers/openrouter.md",
+      "repository": "https://github.com/vinhnx/vtcode",
+      "tags": [
+        "coding"
+      ],
+      "audit": "pending"
+    },
+    {
+      "catalog": "openrouter",
+      "name": "Warden",
+      "url": "https://karatsidhu.gumroad.com/l/warden",
+      "docs": "https://github.com/SidhuK/WardenApp/blob/main/Setup.MD",
+      "repository": "https://github.com/SidhuK/WardenApp",
+      "tags": [
+        "chat"
+      ],
+      "audit": "pending"
+    }
+  ]
+}

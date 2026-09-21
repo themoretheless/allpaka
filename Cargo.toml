@@ -2,6 +2,7 @@
 members = [
     "crates/allpaka-core",
     "crates/allpaka-cli",
+    "crates/allpaka-chat",
     "crates/allpaka-gguf",
     "crates/allpaka-backend",
     "crates/allpaka-model",
