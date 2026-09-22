@@ -1,28 +1,267 @@
 <!doctype html>
-<html lang="ru" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>allpaka · Studio</title><link rel="stylesheet" href="/style.css"><script src="/content.js" defer></script><script src="/app.js" defer></script></head>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>allpaka · Studio</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/content.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
 <body>
+
 <aside class="sidebar">
   <a class="brand" href="/">a<span>allpaka</span><small>STUDIO</small></a>
-  <label class="eyebrow" for="project">ПРОЕКТ</label><div class="project-picker"><select id="project" aria-label="Проект"></select><button id="edit-project" title="Контексты проекта">⚙</button></div>
+
+  <label class="eyebrow" for="project">Проект</label>
+  <div class="project-picker">
+    <select id="project" aria-label="Проект"></select>
+    <button id="edit-project" title="Контексты проекта">⚙</button>
+    <button id="add-project" title="Новый проект">＋</button>
+  </div>
+
   <button id="new-chat" class="new-chat">＋ Новый чат</button>
+
   <input id="search" type="search" placeholder="Найти разговор…" aria-label="Поиск чатов">
-  <select id="history-folder" aria-label="Раздел истории"><option value="active">Чаты</option><option value="archived">Архив</option><option value="trash">Корзина</option></select>
+
+  <div class="history-controls">
+    <select id="history-folder" aria-label="Раздел истории">
+      <option value="active">Чаты</option>
+      <option value="archived">Архив</option>
+      <option value="trash">Корзина</option>
+    </select>
+    <select id="history-sort" aria-label="Сортировка истории">
+      <option value="recent">Сначала новые</option>
+      <option value="oldest">Сначала старые</option>
+      <option value="title">Название A→Я</option>
+      <option value="title_desc">Название Я→A</option>
+    </select>
+  </div>
+
+  <div id="sessions-status" class="muted" role="status" hidden></div>
   <nav id="sessions" aria-label="История разговоров"></nav>
-  <div class="sidebar-bottom"><button id="import-chat">Импорт разговора</button><input id="import-file" type="file" accept=".json,application/json" hidden><button id="new-project">＋ Создать проект</button><button id="connections">◈ Подключения</button><span class="muted">История хранится на этом компьютере</span></div>
+  <div id="sessions-more" class="muted" hidden></div>
+
+  <div class="sidebar-bottom">
+    <button id="import-chat">Импорт разговора</button>
+    <input id="import-file" type="file" accept=".json,application/json" hidden>
+    <button id="new-project">＋ Создать проект</button>
+    <button id="connections">◈ Подключения</button>
+    <span class="muted">История хранится на этом компьютере</span>
+  </div>
 </aside>
+
 <main>
-  <header><button id="menu-toggle" aria-label="Проекты и чаты">☰</button><div><span class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span><h1 id="title">Новый разговор</h1></div><div class="header-actions"><button id="theme-toggle" type="button" aria-label="Включить светлую тему" title="Включить светлую тему">☀</button><button id="context-toggle">Контекст / план</button><span id="status" class="badge">Готов</span><button id="compact" title="Сжать историю для следующих запросов; оригинал сохранится">Компакт</button><button id="manage-chat" title="Переименование, архив и корзина">Разговор</button><button id="export" title="Скачать разговор">Экспорт ↓</button></div></header>
-  <div class="toolbar"><label>Модель<select id="provider"></select></label><label class="model-field">Model ID<input id="model" list="models" placeholder="Выберите или введите model ID" autocomplete="off"><datalist id="models"></datalist></label><button id="load-models" title="Загрузить модели провайдера">Обновить список</button></div>
+  <header>
+    <button id="menu-toggle" aria-label="Проекты и чаты">☰</button>
+    <div class="header-title">
+      <span class="eyebrow">Рабочее пространство</span>
+      <h1 id="title">Новый разговор</h1>
+    </div>
+    <div class="header-actions">
+      <button id="theme-toggle" type="button" aria-label="Включить светлую тему" title="Включить светлую тему">☀</button>
+      <button id="context-toggle">Контекст</button>
+      <span id="status" class="badge">Готов</span>
+      <button id="compact" title="Сжать историю для следующих запросов; оригинал сохранится">Компакт</button>
+      <button id="manage-chat" title="Переименование, архив и корзина">Разговор</button>
+      <button id="export" title="Скачать разговор">Экспорт ↓</button>
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <label>Модель<select id="provider"></select></label>
+    <label class="model-field">Model ID<input id="model" list="models" placeholder="Выберите или введите model ID" autocomplete="off"><datalist id="models"></datalist></label>
+    <button id="load-models" title="Загрузить модели провайдера">Обновить</button>
+  </div>
+
   <div id="model-info" class="muted" hidden></div>
   <div id="branch-origin" hidden></div>
-  <section id="messages" aria-label="Сообщения" aria-live="polite"><div class="welcome"><div class="mark">a</div><h2>Один контекст.<br>Любая модель.</h2><p>Обсуждайте идеи, составляйте план<br>или поручите агенту работу с проектом.</p><div class="suggestions"><button data-prompt="Изучи подключённые папки и расскажи, как устроен проект." data-mode="chat">Изучить проект ↗</button><button data-prompt="Изучи проект и предложи план следующего улучшения. Пока ничего не меняй." data-mode="plan">Составить план ↗</button></div></div></section>
+
+  <section id="messages" aria-label="Сообщения" aria-live="polite">
+    <div class="welcome">
+      <div class="mark">a</div>
+      <h2>Один контекст.<br>Любая модель.</h2>
+      <p>Обсуждайте идеи, составляйте план<br>или поручите агенту работу с проектом.</p>
+      <div class="suggestions">
+        <button data-prompt="Изучи подключённые папки и расскажи, как устроен проект." data-mode="chat">Изучить проект ↗</button>
+        <button data-prompt="Изучи проект и предложи план следующего улучшения. Пока ничего не меняй." data-mode="plan">Составить план ↗</button>
+      </div>
+    </div>
+  </section>
+
   <div id="error" role="alert" hidden></div>
   <div id="notice" role="status" hidden></div>
-  <section class="composer-wrap"><div id="attachments"></div><div id="queue"></div><div class="composer"><textarea id="prompt" rows="3" placeholder="Задача, вопрос или уточнение…" aria-label="Сообщение"></textarea><div class="composer-bottom"><div class="compose-options"><select id="mode" aria-label="Режим"><option value="chat">◌ Chat</option><option value="plan">☷ Plan</option><option value="auto">↗ Auto</option></select><label class="attach" title="Изображения и текстовые файлы">＋ Файл<input id="files" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.csv,.rs,.py,.js,.ts,.html,.css,.toml,.yaml,.yml,.log,.xml,.sql,.sh,.cs,.go,.java,.c,.cpp,.h"></label><button id="stop" hidden>■ Стоп</button><button id="resume" hidden>Продолжить</button></div><div class="send-options"><button id="steer" title="Уточнить текущую задачу на следующей границе шага" hidden>Steer</button><button id="send-now" title="Прервать генерацию и сразу отправить сообщение" hidden>Send now</button><button id="send" class="primary">Отправить ↑</button></div></div></div><div class="composer-foot"><span id="mode-help">Chat · чтение контекста и ответы</span><label id="writes-label" hidden><input type="checkbox" id="writes"> Разрешить запись</label><label title="Максимум выходных токенов на запрос; допустимое значение зависит от модели">Лимит ответа <input id="output-tokens" type="number" value="8192" min="256" max="131072" step="256"></label><label>Лимит шагов <input id="steps" type="number" value="12" min="1" max="50"></label><span>⌘ / Ctrl + Enter</span></div></section>
+
+  <section class="composer-wrap">
+    <details id="context-statistics">
+      <summary id="context-statistics-title">Контекст: новый разговор · модель уточняется</summary>
+      <div id="context-statistics-body" class="muted"></div>
+    </details>
+
+    <div id="attachments"></div>
+    <div id="queue"></div>
+
+    <div class="composer">
+      <textarea id="prompt" rows="3" placeholder="Задача, вопрос или уточнение…" aria-label="Сообщение"></textarea>
+      <div id="command-menu" hidden></div>
+      <div class="composer-bottom">
+        <div class="compose-options">
+          <select id="mode" aria-label="Режим">
+            <option value="chat">◌ Chat</option>
+            <option value="plan">☷ Plan</option>
+            <option value="auto">↗ Auto</option>
+            <option value="goal">◎ Goal</option>
+            <option value="swarm">⇶ Swarm</option>
+          </select>
+          <label class="attach" title="Изображения и текстовые файлы">＋ Файл<input id="files" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.csv,.rs,.py,.js,.ts,.html,.css,.toml,.yaml,.yml,.log,.xml,.sql,.sh,.cs,.go,.java,.c,.cpp,.h"></label>
+          <button id="stop" hidden>■ Стоп</button>
+          <button id="resume" hidden>Продолжить</button>
+        </div>
+        <div class="send-options">
+          <button id="steer" title="Уточнить текущую задачу на следующей границе шага" hidden>Steer</button>
+          <button id="send-now" title="Прервать генерацию и сразу отправить сообщение" hidden>Send now</button>
+          <button id="send" class="primary">Отправить ↑</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="composer-foot">
+      <div class="composer-foot-left">
+        <label>Ответ<select id="verbosity" title="Подробность ответа модели">
+          <option value="brief">Кратко</option>
+          <option value="normal" selected>Обычно</option>
+          <option value="detailed">Подробно</option>
+          <option value="maximum">Максимально</option>
+        </select></label>
+        <label>Анализ<select id="analysis-display" title="Только отображение; не влияет на расход токенов">
+          <option value="hidden">Скрыт</option>
+          <option value="collapsed" selected>Свёрнут</option>
+          <option value="expanded">Раскрыт</option>
+        </select></label>
+        <span id="mode-help">Chat · чтение контекста и ответы</span>
+      </div>
+      <div class="composer-foot-right">
+        <label id="writes-label" hidden><input type="checkbox" id="writes"> Запись</label>
+        <label title="JSON-режим DeepSeek (deepseek-chat)"><input type="checkbox" id="json-mode"> JSON</label>
+        <label title="Максимум выходных токенов на запрос; допустимое значение зависит от модели">Токены <input id="output-tokens" type="number" value="8192" min="256" max="393216" step="256"></label>
+        <label>Шаги <input id="steps" type="number" value="12" min="1" max="50"></label>
+        <button id="layout-convert" type="button" title="Преобразовать раскладку в поле (RU ↔ EN)">⇄</button>
+        <button id="layout-toggle" type="button" title="Авто-исправление раскладки при вводе">Авто-раскладка</button>
+        <span class="composer-hint">⌘ Enter</span>
+      </div>
+    </div>
+
+    <details id="swarm-config" hidden>
+      <summary>Swarm · участники, волны и синтез</summary>
+      <p class="muted">Каждый участник — отдельный агент со своим провайдером, моделью и ролью. Участники только читают подключённый контекст; запись в Swarm-режиме недоступна. Итог собирает синтезатор в один MASTER-ответ.</p>
+      <div id="swarm-members"></div>
+      <div class="swarm-actions">
+        <button id="swarm-add-member" type="button">＋ Участник</button>
+        <button id="swarm-fill-defaults" type="button">Заполнить по умолчанию</button>
+      </div>
+      <div class="swarm-options">
+        <label>Волн<select id="swarm-rounds">
+          <option value="1" selected>1</option>
+          <option value="2">2</option>
+        </select></label>
+        <label title="Сколько ответов модели разрешено участнику за волну (чтение контекста)">Ответов участнику<input id="swarm-steps" type="number" min="1" max="8" value="2"></label>
+        <label title="Сколько символов отчёта участника попадает в синтез">Отчёт, КБ<input id="swarm-report-kb" type="number" min="1" max="24" value="6"></label>
+        <label title="Дополнительный проход, который вычёркивает неподтверждённое"><input id="swarm-critic" type="checkbox"> Критик</label>
+      </div>
+      <div class="swarm-options">
+        <label>Синтез: провайдер<select id="swarm-synth-provider"></select></label>
+        <label>Model ID<input id="swarm-synth-model" placeholder="как у сессии" autocomplete="off"></label>
+      </div>
+      <div id="swarm-cost" class="muted"></div>
+    </details>
+  </section>
 </main>
-<aside class="context-panel"><div class="eyebrow">КОНТЕКСТ ПРОЕКТА</div><h2 id="project-name">allpaka</h2><p class="muted">Папки доступны модели через инструменты чтения. Файлы загружаются по мере необходимости.</p><div id="roots"></div><button id="manage-context">Управлять контекстом</button><div class="divider"></div><div class="eyebrow">ПЛАН ЗАДАЧИ</div><ol id="plan"><li class="muted">План появится во время работы</li></ol><label><span><input id="auto-compact" type="checkbox" checked> Автокомпакт</span></label><label>Порог ≈ токенов<input id="compact-threshold" type="number" min="4096" max="1000000" value="24000" step="1024"></label><details><summary>Краткий контекст</summary><pre id="compact-summary"></pre></details><div id="usage" class="muted"></div></aside>
-<dialog id="connection-dialog"><form method="dialog"><button class="close" aria-label="Закрыть">×</button></form><h2>Подключения</h2><p class="muted">Выберите хранение в памяти или системном хранилище. Переменные окружения имеют приоритет при запуске. Удаление здесь не изменяет переменные окружения.</p><div id="key-fields"></div><button id="save-keys" class="primary">Сохранить ключи</button></dialog>
-<dialog id="project-dialog"><form method="dialog"><button class="close" aria-label="Закрыть">×</button></form><h2>Проект и контекст</h2><label>Название<input id="project-title" maxlength="100"></label><label>Инструкции проекта<textarea id="project-instructions" rows="3" placeholder="Правила, цели, предпочтения…"></textarea></label><p class="muted">Подключите локальные папки или клонированные репозитории. Укажите абсолютный путь. Изменения контекста применяются к следующей задаче.</p><div id="root-editor"></div><button id="add-root">＋ Папка / репозиторий</button><p class="muted">Запись возможна только в Auto, при включённом разрешении и для папок с отметкой «Запись». Скрытые пути и симлинки недоступны.</p><button id="save-project" class="primary">Сохранить проект</button></dialog>
-<dialog id="history-dialog"><form method="dialog"><button class="close" aria-label="Закрыть">×</button></form><h2>Управление разговором</h2><label>Название<input id="chat-title" maxlength="100"></label><button id="rename-chat">Переименовать</button><div class="history-actions"><button id="archive-chat">В архив</button><button id="trash-chat">В корзину</button><button id="restore-chat">Восстановить</button></div><p class="muted">Архив и корзина сохраняют историю. Восстановление не запускает очередь.</p></dialog>
+
+<aside class="context-panel">
+  <div class="eyebrow">Контекст проекта</div>
+  <h2 id="project-name">allpaka</h2>
+  <p class="muted">Папки доступны модели через инструменты чтения. Файлы загружаются по мере необходимости.</p>
+  <div id="roots"></div>
+  <button id="manage-context">Управлять контекстом</button>
+
+  <div class="divider"></div>
+
+  <div class="eyebrow">План задачи</div>
+  <ol id="plan">
+    <li class="muted">План появится во время работы</li>
+  </ol>
+  <button id="plan-add" hidden>＋ Шаг плана</button>
+
+  <div class="context-settings">
+    <label><span><input id="auto-compact" type="checkbox" checked> Автокомпакт</span></label>
+    <label>Порог ≈ токенов<input id="compact-threshold" type="number" min="4096" max="1000000" value="24000" step="1024"></label>
+    <details>
+      <summary>Краткий контекст</summary>
+      <pre id="compact-summary"></pre>
+    </details>
+  </div>
+
+  <div id="usage" class="muted"></div>
+</aside>
+
+<!-- Connection Dialog -->
+<dialog id="connection-dialog">
+  <form method="dialog"><button class="close" aria-label="Закрыть">×</button></form>
+  <h2>Подключения</h2>
+  <p class="muted">Выберите хранение в памяти или системном хранилище. Переменные окружения имеют приоритет при запуске. Удаление здесь не изменяет переменные окружения.</p>
+  <div id="key-fields"></div>
+  <details class="custom-provider">
+    <summary>＋ Свой OpenAI-совместимый провайдер</summary>
+    <label>Название<input id="custom-provider-name" maxlength="100" placeholder="LM Studio"></label>
+    <label>Base URL<input id="custom-provider-base" placeholder="http://127.0.0.1:1234/v1"></label>
+    <button id="add-custom-provider">Добавить</button>
+  </details>
+  <details class="plugin-manager">
+    <summary>＋ Плагины</summary>
+    <div id="plugin-list"></div>
+    <label>Тип<select id="plugin-kind">
+      <option value="mcp">MCP-сервер</option>
+      <option value="skill">Инструкции (skill)</option>
+    </select></label>
+    <label>Название<input id="plugin-name" maxlength="100" placeholder="rag"></label>
+    <label id="plugin-url-label">MCP URL<input id="plugin-url" placeholder="http://127.0.0.1:7432/mcp"></label>
+    <label id="plugin-instructions-label" hidden>Инструкции<textarea id="plugin-instructions" rows="6" placeholder="Правила и инструкции для агента…"></textarea></label>
+    <label id="plugin-unlocks-label" hidden>Открывает инструмент<input id="plugin-unlocks" placeholder="run_command"></label>
+    <button id="add-plugin">Добавить плагин</button>
+  </details>
+  <button id="save-keys" class="primary">Сохранить ключи</button>
+</dialog>
+
+<!-- Project Dialog -->
+<dialog id="project-dialog">
+  <form method="dialog"><button class="close" aria-label="Закрыть">×</button></form>
+  <h2>Проект и контекст</h2>
+  <label>Название<input id="project-title" maxlength="100"></label>
+  <label>Инструкции проекта<textarea id="project-instructions" rows="3" placeholder="Правила, цели, предпочтения…"></textarea></label>
+  <p class="muted">Подключите локальные папки или клонированные репозитории. Укажите абсолютный путь. Изменения контекста применяются к следующей задаче.</p>
+  <div id="root-editor"></div>
+  <button id="add-root">＋ Папка / репозиторий</button>
+  <p class="muted">Запись возможна только в Auto, при включённом разрешении и для папок с отметкой «Запись». Скрытые пути и симлинки недоступны.</p>
+  <button id="save-project" class="primary">Сохранить проект</button>
+</dialog>
+
+<!-- History Dialog -->
+<dialog id="history-dialog">
+  <form method="dialog"><button class="close" aria-label="Закрыть">×</button></form>
+  <h2>Управление разговором</h2>
+  <label>Название<input id="chat-title" maxlength="100"></label>
+  <button id="rename-chat">Переименовать</button>
+  <div class="history-actions">
+    <button id="archive-chat">В архив</button>
+    <button id="trash-chat">В корзину</button>
+    <button id="restore-chat">Восстановить</button>
+    <button id="delete-chat" hidden>Удалить навсегда</button>
+  </div>
+  <p class="muted">Архив и корзина сохраняют историю. Восстановление не запускает очередь.</p>
+</dialog>
+
+<div id="undo" role="status" hidden></div>
 <div id="toast" role="status" hidden></div>
-</body></html>
+
+</body>
+</html>
