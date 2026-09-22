@@ -7,22 +7,24 @@ use std::{collections::BTreeMap, time::Duration};
 
 #[derive(Clone)]
 pub struct Provider {
-    pub id: &'static str,
-    pub name: &'static str,
+    pub id: String,
+    pub name: String,
     pub base: String,
     pub key: String,
-    pub env: &'static str,
+    pub env: String,
     pub anthropic: bool,
+    pub custom: bool,
     pub key_source: String,
     pub key_error: Option<String>,
     pub saved: bool,
 }
 #[derive(Serialize)]
 pub struct PublicProvider {
-    pub id: &'static str,
-    pub name: &'static str,
+    pub id: String,
+    pub name: String,
     pub configured: bool,
-    pub key_env: &'static str,
+    pub key_env: String,
+    pub custom: bool,
     pub key_source: String,
     pub key_error: Option<String>,
     pub saved: bool,
@@ -30,10 +32,11 @@ pub struct PublicProvider {
 impl Provider {
     pub fn public(&self) -> PublicProvider {
         PublicProvider {
-            id: self.id,
-            name: self.name,
-            configured: self.id == "local" || !self.key.is_empty(),
-            key_env: self.env,
+            id: self.id.clone(),
+            name: self.name.clone(),
+            configured: self.id == "local" || self.custom || !self.key.is_empty(),
+            key_env: self.env.clone(),
+            custom: self.custom,
             key_source: self.key_source.clone(),
             key_error: self.key_error.clone(),
             saved: self.saved,
@@ -95,8 +98,8 @@ pub fn defaults() -> Vec<Provider> {
     ]
     .into_iter()
     .map(|(id, name, base, env, anthropic)| Provider {
-        id,
-        name,
+        id: id.into(),
+        name: name.into(),
         base: if id == "local" {
             std::env::var("ALLPAKA_LOCAL_BASE_URL").unwrap_or(base.into())
         } else {
@@ -111,8 +114,9 @@ pub fn defaults() -> Vec<Provider> {
         .into(),
         key_error: None,
         saved: false,
-        env,
+        env: env.into(),
         anthropic,
+        custom: false,
     })
     .collect()
 }
@@ -225,8 +229,10 @@ pub fn body(
                 .remove("incomplete_tool_calls");
             item.as_object_mut().unwrap().remove("provider");
             item.as_object_mut().unwrap().remove("model");
+            // Per-agent swarm reports are local transcript data, never a wire field.
+            item.as_object_mut().unwrap().remove("swarm");
             let same_router = p.id == "openrouter"
-                && m.provider.as_deref() == Some(p.id)
+                && m.provider.as_deref() == Some(p.id.as_str())
                 && m.model.as_deref() == Some(model)
                 && !m.truncated;
             if !same_router {
@@ -236,10 +242,10 @@ pub fn body(
                     item["reasoning"] = json!(reasoning);
                 }
             }
-            if !["deepseek", "kimi"].contains(&p.id) || m.provider.as_deref() != Some(p.id) {
+            if !["deepseek", "kimi"].contains(&p.id.as_str()) || m.provider.as_deref() != Some(p.id.as_str()) {
                 item.as_object_mut().unwrap().remove("reasoning_content");
             }
-            if p.id != "gemini" || m.provider.as_deref() != Some(p.id) {
+            if p.id != "gemini" || m.provider.as_deref() != Some(p.id.as_str()) {
                 if let Some(calls) = item.get_mut("tool_calls").and_then(Value::as_array_mut) {
                     for c in calls {
                         c.as_object_mut().unwrap().remove("extra_content");
@@ -264,6 +270,9 @@ pub fn body(
         }
         if !tools.is_empty() {
             body["tools"] = json!(tools);
+        }
+        if p.id == "deepseek" {
+            body["stream_options"] = json!({"include_usage": true});
         }
         body
     }
@@ -445,22 +454,29 @@ pub async fn generate<F>(
     mut delta: F,
 ) -> Result<(Message, Value)>
 where
-    F: FnMut(String) + Send,
+    F: FnMut(String, String) + Send,
 {
     let route = if provider.anthropic {
         "/messages"
     } else {
         "/chat/completions"
     };
+    let mut request_body = body(
+        provider,
+        &settings.model,
+        system,
+        messages,
+        tools,
+        settings.max_output_tokens,
+    );
+    if settings.json_mode
+        && provider.id == "deepseek"
+        && !settings.model.starts_with("deepseek-reasoner")
+    {
+        request_body["response_format"] = json!({"type":"json_object"});
+    }
     let response = request(client, provider, reqwest::Method::POST, route)
-        .json(&body(
-            provider,
-            &settings.model,
-            system,
-            messages,
-            tools,
-            settings.max_output_tokens,
-        ))
+        .json(&request_body)
         .send()
         .await
         .context("Provider connection failed")?;
@@ -486,10 +502,12 @@ where
             let line = std::str::from_utf8(&line)?.trim_end_matches(['\r', '\n']);
             if line.is_empty() {
                 if !event_data.is_empty() {
+                    let reasoning_start = acc.reasoning.len();
                     let text = acc.event(&event_data.join("\n"), provider.anthropic)?;
                     event_data.clear();
-                    if !text.is_empty() {
-                        delta(text);
+                    let reasoning = acc.reasoning[reasoning_start..].to_owned();
+                    if !text.is_empty() || !reasoning.is_empty() {
+                        delta(text, reasoning);
                     }
                     if acc.done {
                         return acc.finish();

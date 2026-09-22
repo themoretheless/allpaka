@@ -1,6 +1,14 @@
-use crate::{types::*, *};
-use axum::extract::Query;
+use crate::{attach, context, error, save, types::*, ApiResult, App};
+use anyhow::{bail, Context, Result};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    Json,
+};
+use serde::Deserialize;
+use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Default, Deserialize)]
 pub struct Search {
@@ -9,10 +17,16 @@ pub struct Search {
     project: Option<String>,
     #[serde(default)]
     folder: HistoryFolder,
+    sort: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
 }
 pub async fn list(State(app): State<App>, Query(search): Query<Search>) -> ApiResult<Value> {
     if search.q.len() > 1000 {
         return Err(error(StatusCode::BAD_REQUEST, "Search query too long"));
+    }
+    if search.limit.is_some_and(|l| l > 500) {
+        return Err(error(StatusCode::BAD_REQUEST, "History page limit too large"));
     }
     let query = search.q.to_lowercase();
     let mut rows = Vec::new();
@@ -36,9 +50,32 @@ pub async fn list(State(app): State<App>, Query(search): Query<Search>) -> ApiRe
         if !query.is_empty() && !s.title.to_lowercase().contains(&query) && matched.is_none() {
             continue;
         }
-        rows.push(json!({"id":s.id,"title":s.title,"status":s.status,"provider":s.settings.provider,"project_id":s.settings.project_id,"folder":s.folder,"match_preview":matched.map(|m|m.content.chars().take(160).collect::<String>())}));
+        rows.push(json!({
+            "id": s.id,
+            "title": s.title,
+            "status": s.status,
+            "provider": s.settings.provider,
+            "project_id": s.settings.project_id,
+            "folder": s.folder,
+            "match_preview": matched.map(|m| m.content.chars().take(160).collect::<String>())
+        }));
     }
-    rows.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
+    match search.sort.as_deref().unwrap_or("recent") {
+        "oldest" => rows.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str())),
+        "title" => rows.sort_by_key(|r| r["title"].as_str().unwrap_or("").to_lowercase()),
+        "title_desc" => rows.sort_by(|a, b| {
+            b["title"]
+                .as_str()
+                .unwrap_or("")
+                .to_lowercase()
+                .cmp(&a["title"].as_str().unwrap_or("").to_lowercase())
+        }),
+        _ => rows.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str())),
+    }
+    if let Some(limit) = search.limit {
+        let offset = search.offset.unwrap_or(0);
+        rows = rows.into_iter().skip(offset).take(limit).collect();
+    }
     Ok(Json(json!(rows)))
 }
 #[derive(Deserialize)]
@@ -131,7 +168,7 @@ pub async fn import(State(app): State<App>, Json(input): Json<Import>) -> ApiRes
     settings.allow_writes = false;
     settings.mode = Mode::Chat;
     settings.max_steps = settings.max_steps.clamp(1, 50);
-    settings.max_output_tokens = settings.max_output_tokens.clamp(256, 131072);
+    settings.max_output_tokens = settings.max_output_tokens.clamp(256, if settings.provider == "deepseek" && ["deepseek-v4-pro", "deepseek-flash", "deepseek-v4-flash"].contains(&settings.model.as_str()) {393216} else {131072});
     settings.compact_threshold = settings.compact_threshold.clamp(4096, 1000000);
     if !app
         .providers
@@ -145,6 +182,7 @@ pub async fn import(State(app): State<App>, Json(input): Json<Import>) -> ApiRes
     let mut session = Session::new(id.clone(), settings);
     session.title = input.session.title;
     session.messages = input.session.messages;
+    session.folder = HistoryFolder::Active;
     // Restore original history; imported summaries are not authoritative replacements.
     session.notice = Some(
         "Импортирована копия. Выбран режим Chat; очередь и разрешения записи не перенесены.".into(),

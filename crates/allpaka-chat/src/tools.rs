@@ -7,7 +7,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-pub fn schemas(settings: &Settings) -> Vec<Value> {
+pub fn schemas(settings: &Settings, cmd_enabled: bool) -> Vec<Value> {
     let mut list = vec![
         schema(
             "list_files",
@@ -31,9 +31,12 @@ pub fn schemas(settings: &Settings) -> Vec<Value> {
     if settings.mode == Mode::Chat {
         list.truncate(2);
     }
-    if settings.mode == Mode::Auto && settings.allow_writes {
+    if matches!(settings.mode, Mode::Auto | Mode::Goal) && settings.allow_writes {
         list.push(schema("edit_file", "Replace one exact, unique non-empty fragment in an existing UTF-8 file. Fails if absent or ambiguous. Returns the actual diff.", json!({"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}}),json!(["path","old_text","new_text"])));
         list.push(schema("write_file", "Create or replace a UTF-8 file inside the workspace. Read existing content first. Cannot access hidden paths or leave the workspace.", json!({"path":{"type":"string"},"content":{"type":"string"}}),json!(["path","content"])));
+    }
+    if matches!(settings.mode, Mode::Auto | Mode::Goal) && cmd_enabled {
+        list.push(schema("run_command", "Run a shell command in the project root directory. Returns stdout, stderr and exit code. Timeout 30s by default (max 120s). Output truncated at 128 KiB.", json!({"command":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":120}}),json!(["command"])));
     }
     list
 }
@@ -123,8 +126,8 @@ pub fn execute(root: &Path, settings: &Settings, name: &str, args: &Value) -> Re
             )
         }
         "edit_file" => {
-            if settings.mode != Mode::Auto || !settings.allow_writes {
-                bail!("Writing requires Auto mode and enabled workspace writes");
+            if !matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes {
+                bail!("Writing requires Auto or Goal mode and enabled workspace writes");
             }
             let name = args["path"].as_str().context("path is required")?;
             let path = resolve(root, name, false)?;
@@ -143,8 +146,8 @@ pub fn execute(root: &Path, settings: &Settings, name: &str, args: &Value) -> Re
         }
 
         "write_file" => {
-            if settings.mode != Mode::Auto || !settings.allow_writes {
-                bail!("Writing requires Auto mode and enabled workspace writes");
+            if !matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes {
+                bail!("Writing requires Auto or Goal mode and enabled workspace writes");
             }
             let path = resolve(
                 root,
@@ -173,6 +176,10 @@ pub fn execute(root: &Path, settings: &Settings, name: &str, args: &Value) -> Re
 }
 pub fn writes(name: &str) -> bool {
     matches!(name, "write_file" | "edit_file")
+}
+/// Tools that only inspect the connected context. Swarm members get these.
+pub fn reads(name: &str) -> bool {
+    matches!(name, "list_files" | "read_file")
 }
 fn line_arg(args: &Value, key: &str) -> Result<Option<usize>> {
     match args.get(key) {
@@ -260,6 +267,7 @@ mod tests {
     #[test]
     fn plan_enforces_read_only_even_with_write_flag() {
         let s = Settings {
+            verbosity: crate::types::Verbosity::Normal,
             project_id: "default".into(),
             provider: "test".into(),
             model: "test".into(),
@@ -267,8 +275,10 @@ mod tests {
             max_steps: 5,
             max_output_tokens: 8192,
             allow_writes: true,
+            swarm: Default::default(),
             auto_compact: true,
             compact_threshold: 24000,
+            json_mode: false,
         };
         assert_eq!(schemas(&s).len(), 3);
         assert!(execute(
@@ -360,5 +370,26 @@ mod tests {
         ] {
             assert!(resolve(Path::new("/tmp"), p, false).is_err(), "{p}");
         }
+    }
+    #[test]
+    fn swarm_members_are_read_only_even_with_write_flag() {
+        let mut s: Settings = serde_json::from_value(json!({
+            "provider": "test",
+            "model": "test",
+            "mode": "swarm",
+            "allow_writes": true
+        }))
+        .unwrap();
+        assert!(matches!(s.mode, Mode::Swarm));
+        assert_eq!(schemas(&s).len(), 3);
+        assert!(execute(
+            Path::new("/tmp"),
+            &s,
+            "write_file",
+            &json!({"path": "should-not-exist", "content": "bad"})
+        )
+        .is_err());
+        s.mode = Mode::Chat;
+        assert_eq!(schemas(&s).len(), 2);
     }
 }
