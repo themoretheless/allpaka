@@ -133,7 +133,11 @@ pub struct Defaults {
 
 impl Default for Defaults {
     fn default() -> Self {
-        Self { context_tokens: 8192, prompt_tokens: 2048, kv_cache_dtype_bytes: 2 }
+        Self {
+            context_tokens: 8192,
+            prompt_tokens: 2048,
+            kv_cache_dtype_bytes: 2,
+        }
     }
 }
 
@@ -177,7 +181,10 @@ impl NodeConfig {
                         self.name
                     );
                 }
-                Node { name: self.name.clone(), ..Node::default() }
+                Node {
+                    name: self.name.clone(),
+                    ..Node::default()
+                }
             }
         };
         if let Some(g) = self.usable_gib {
@@ -188,13 +195,19 @@ impl NodeConfig {
         }
         if let Some(e) = self.bandwidth_efficiency {
             if !(0.0..=1.0).contains(&e) {
-                bail!("node {:?}: bandwidth_efficiency must be in 0..=1, got {e}", self.name);
+                bail!(
+                    "node {:?}: bandwidth_efficiency must be in 0..=1, got {e}",
+                    self.name
+                );
             }
             node.bandwidth_efficiency = e;
         }
         if let Some(t) = self.prefill_tflops {
             if t < 0.0 {
-                bail!("node {:?}: prefill_tflops must not be negative, got {t}", self.name);
+                bail!(
+                    "node {:?}: prefill_tflops must not be negative, got {t}",
+                    self.name
+                );
             }
             node.prefill_flops = t * 1e12;
         }
@@ -213,8 +226,8 @@ impl NodeConfig {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let cfg: Config =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         if cfg.nodes.is_empty() {
@@ -229,7 +242,9 @@ impl Config {
 
     /// Resolve an agent's pinned pool name to a node index.
     pub fn pin_index(&self, agent: &AgentConfig) -> Result<Option<usize>> {
-        let Some(name) = &agent.pin else { return Ok(None) };
+        let Some(name) = &agent.pin else {
+            return Ok(None);
+        };
         let idx = self
             .nodes
             .iter()

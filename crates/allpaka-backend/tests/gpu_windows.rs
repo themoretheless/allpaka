@@ -44,7 +44,9 @@ fn late_windows_read_the_same_bytes_as_the_cpu() {
         let bytes = n_out * n_in / be * bb;
         let mut state = off as u64 | 1;
         for b in region[off..off + bytes].iter_mut() {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *b = (state >> 56) as u8;
         }
         let half = 0x211Fu16.to_le_bytes(); // 0.01 in f16
@@ -83,6 +85,9 @@ fn late_windows_read_the_same_bytes_as_the_cpu() {
                 "{ty:?} at offset {off}: element {i} gpu {g} vs cpu {w}"
             );
         }
-        println!("{ty:?} at {:.2} GiB: parity ok", off as f64 / (1u64 << 30) as f64);
+        println!(
+            "{ty:?} at {:.2} GiB: parity ok",
+            off as f64 / (1u64 << 30) as f64
+        );
     }
 }

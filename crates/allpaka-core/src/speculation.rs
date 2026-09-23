@@ -122,7 +122,11 @@ mod tests {
     use super::*;
 
     fn spec(k: u32, a: f64) -> Speculation {
-        Speculation { draft_weight_bytes: 1 << 30, draft_tokens: k, acceptance_rate: a }
+        Speculation {
+            draft_weight_bytes: 1 << 30,
+            draft_tokens: k,
+            acceptance_rate: a,
+        }
     }
 
     #[test]

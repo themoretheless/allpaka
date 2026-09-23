@@ -33,6 +33,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the multi-provider chat workspace without loading a local model.
+    Studio {
+        #[arg(long, default_value = "127.0.0.1:8100")]
+        bind: std::net::SocketAddr,
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        /// Conversation storage directory (defaults to OS user data directory).
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
     /// Explain the resolved GPU execution path for one GGUF model.
     Explain {
         #[arg(value_name = "GGUF")]
@@ -61,6 +71,10 @@ enum Command {
     Inspect {
         /// Path to a .gguf model file.
         model: PathBuf,
+        /// Census a vision projector (`mmproj`) instead of a text model: the
+        /// `clip.*` metadata and the tensors grouped by top-level name prefix.
+        #[arg(long)]
+        mmproj: bool,
     },
 
     /// Measure the network path between two machines.
@@ -300,6 +314,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     airbug::install();
     match cli.command {
+        Command::Studio { bind, workspace, data_dir } => allpaka_chat::run(bind, workspace, data_dir),
         Command::Explain {
             engine,
             profile,
@@ -318,10 +333,15 @@ fn main() -> Result<()> {
             report::presets(presets::PRESETS);
             Ok(())
         }
-        Command::Inspect { model } => {
-            let info = gguf::read(&model)?;
-            report::gguf(&model, &info);
-            Ok(())
+        Command::Inspect { model, mmproj } => {
+            if mmproj {
+                report::vision_census(&model, &gguf::vision::VisionCensus::read(&model)?);
+                Ok(())
+            } else {
+                let info = gguf::read(&model)?;
+                report::gguf(&model, &info);
+                Ok(())
+            }
         }
         Command::Bench {
             serve,

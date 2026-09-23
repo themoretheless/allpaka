@@ -39,8 +39,15 @@ impl std::fmt::Display for DeclineReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoDevice => write!(f, "no accelerator device"),
-            Self::UnsupportedTensorType { operation, tensor, ty } => {
-                write!(f, "{operation}: tensor {tensor} has unsupported type {ty:?}")
+            Self::UnsupportedTensorType {
+                operation,
+                tensor,
+                ty,
+            } => {
+                write!(
+                    f,
+                    "{operation}: tensor {tensor} has unsupported type {ty:?}"
+                )
             }
             Self::UnsupportedShape { operation, detail }
             | Self::InvalidState { operation, detail }
@@ -48,7 +55,10 @@ impl std::fmt::Display for DeclineReason {
             Self::ForeignMemory { operation } => {
                 write!(f, "{operation}: weights are outside attached mappings")
             }
-            Self::MissingCapability { operation, capability } => {
+            Self::MissingCapability {
+                operation,
+                capability,
+            } => {
                 write!(f, "{operation}: missing capability {capability}")
             }
         }
@@ -101,11 +111,13 @@ mod tests {
     fn fallback_runs_only_for_declines() {
         assert_eq!(AccelOutcome::Executed(7).fallback(|_| 99), Ok(7));
 
-        let declined = AccelOutcome::<i32>::Declined(DeclineReason::NoDevice)
-            .fallback(|reason| match reason {
-                DeclineReason::NoDevice => 42,
-                _ => 0,
-            });
+        let declined =
+            AccelOutcome::<i32>::Declined(DeclineReason::NoDevice).fallback(
+                |reason| match reason {
+                    DeclineReason::NoDevice => 42,
+                    _ => 0,
+                },
+            );
         assert_eq!(declined, Err(42));
     }
 }

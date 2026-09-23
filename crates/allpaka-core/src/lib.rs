@@ -19,9 +19,9 @@ pub mod speculation;
 
 pub use fabric::Fabric;
 pub use fleet::{fleet, FleetPlan, Placement};
-pub use replicate::{replicate, Replica, ReplicaPlan};
-pub use speculation::{SpeculativeCost, Speculation};
 pub use link::Link;
 pub use model::Model;
 pub use node::{Backend, Node};
 pub use plan::{gib, plan, Plan, PlanRequest, Stage, Verdict};
+pub use replicate::{replicate, Replica, ReplicaPlan};
+pub use speculation::{Speculation, SpeculativeCost};

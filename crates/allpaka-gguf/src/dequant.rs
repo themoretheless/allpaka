@@ -15,7 +15,10 @@ use anyhow::{bail, Result};
 pub fn dequant(ty: GgmlType, data: &[u8], elements: usize) -> Result<Vec<f32>> {
     let expected = expected_bytes(ty, elements)?;
     if data.len() != expected {
-        bail!("expected {expected} bytes for {elements} elements of {ty:?}, got {}", data.len());
+        bail!(
+            "expected {expected} bytes for {elements} elements of {ty:?}, got {}",
+            data.len()
+        );
     }
     let mut out = Vec::with_capacity(elements);
     match ty {
@@ -199,7 +202,11 @@ fn dequant_q3_k_block(block: &[u8], out: &mut Vec<f32>) {
     // bytes 0..8, the high 2 bits are packed four-per-byte in bytes 8..12.
     let mut scales = [0i32; 16];
     for (i, s) in scales.iter_mut().enumerate() {
-        let lo = if i < 8 { packed[i] & 0xf } else { packed[i - 8] >> 4 };
+        let lo = if i < 8 {
+            packed[i] & 0xf
+        } else {
+            packed[i - 8] >> 4
+        };
         let hi = (packed[8 + i % 4] >> (2 * (i / 4))) & 3;
         *s = ((lo | (hi << 4)) as i32) - 32;
     }
@@ -213,8 +220,8 @@ fn dequant_q3_k_block(block: &[u8], out: &mut Vec<f32>) {
                 let dl = d_all * scales[is] as f32;
                 for l in 0..16 {
                     let idx = group * 16 + l;
-                    let quant = ((q[idx] >> shift) & 3) as i32
-                        - if hmask[idx] & m != 0 { 0 } else { 4 };
+                    let quant =
+                        ((q[idx] >> shift) & 3) as i32 - if hmask[idx] & m != 0 { 0 } else { 4 };
                     out.push(dl * quant as f32);
                 }
                 is += 1;
@@ -329,7 +336,10 @@ mod tests {
             return sign << 15;
         }
         let e = exp - 127 + 15;
-        assert!((1..31).contains(&e), "test value not representable as normal f16");
+        assert!(
+            (1..31).contains(&e),
+            "test value not representable as normal f16"
+        );
         (sign << 15) | ((e as u16) << 10) | ((frac >> 13) as u16)
     }
 
@@ -400,7 +410,7 @@ mod tests {
         block[80..82].copy_from_slice(&f32_to_f16(1.0).to_le_bytes()); // d
         block[82..84].copy_from_slice(&f32_to_f16(2.0).to_le_bytes()); // dmin
         block[0] = 0x51; // scale 1, min 5 -> value = q - 10
-        // qs zero: quant 0 everywhere -> first sub-block = -10.
+                         // qs zero: quant 0 everywhere -> first sub-block = -10.
         let out = dequant(GgmlType::Q2K, &block, 256).unwrap();
         assert!(out[..16].iter().all(|&v| v == -10.0));
     }
@@ -484,7 +494,7 @@ mod tests {
         let mut block = vec![0u8; 144];
         block[0..2].copy_from_slice(&f32_to_f16(1.0).to_le_bytes()); // d
         block[2..4].copy_from_slice(&f32_to_f16(1.0).to_le_bytes()); // dmin
-        // scales: sub-block 0 -> scale 2, min 1; sub-block 1 -> scale 3, min 2.
+                                                                     // scales: sub-block 0 -> scale 2, min 1; sub-block 1 -> scale 3, min 2.
         block[4] = 2;
         block[5] = 3;
         block[8] = 1;

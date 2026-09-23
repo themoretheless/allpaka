@@ -837,6 +837,36 @@ impl Sampler {
     }
 }
 
+/// OpenAI messages carry `content` either as a plain string or as an array of
+/// typed parts. The engine is text-only today, so a parts array is flattened to
+/// its text and the images are only *counted*: the handler refuses them
+/// explicitly. Reading `content` with `as_str()` made a whole vision message -
+/// picture and text together - collapse into an empty turn.
+fn content_parts(content: &Value) -> (String, usize) {
+    if let Some(text) = content.as_str() {
+        return (text.to_string(), 0);
+    }
+    let mut text = String::new();
+    let mut images = 0usize;
+    for part in content.as_array().into_iter().flatten() {
+        match part["type"].as_str().unwrap_or_default() {
+            "text" | "input_text" => {
+                if let Some(chunk) = part["text"].as_str() {
+                    text.push_str(chunk);
+                }
+            }
+            "image_url" | "input_image" | "image" => images += 1,
+            _ => {}
+        }
+    }
+    (text, images)
+}
+
+/// Image parts anywhere in the request, across all messages.
+fn image_part_count(raw: &[Value]) -> usize {
+    raw.iter().map(|m| content_parts(&m["content"]).1).sum()
+}
+
 /// Convert an OpenAI-shape message list (+ optional `tools`) into plain
 /// (role, content) turns in the Hermes convention Qwen3 was trained on:
 /// tool schemas inside `<tools>...</tools>` in the system turn, assistant
@@ -859,7 +889,7 @@ fn render_messages(raw: &[Value], tools: Option<&[Value]>) -> Vec<(String, Strin
     };
     for m in raw {
         let role = m["role"].as_str().unwrap_or("user");
-        let content = m["content"].as_str().unwrap_or_default().to_string();
+        let content = content_parts(&m["content"]).0;
         if role == "tool" {
             pending_tool.push(content);
             continue;
@@ -1410,6 +1440,24 @@ fn handle(
     let Some(raw_messages) = req["messages"].as_array() else {
         return respond(&mut stream, 400, &json!({"error": "messages[] required"}));
     };
+    let images = image_part_count(raw_messages);
+    if images > 0 {
+        // The engine has no vision projector, so an image could only be
+        // ignored. Fail closed and say so: silently dropping the picture (and
+        // the text that travelled with it) is worse than an explicit refusal.
+        return respond(
+            &mut stream,
+            400,
+            &json!({
+                "error": format!(
+                    "no image support: the request carries {images} image part(s) and this \
+                     engine has no vision projector. Send text only, or point the client at a \
+                     vision-capable provider."
+                ),
+                "code": "images_unsupported",
+            }),
+        );
+    }
     let tool_specs: Option<Vec<Value>> = match req["tools"].as_array() {
         Some(t) if !t.is_empty() => Some(t.to_vec()),
         _ if rag.cfg.enabled && rag.cfg.inject_tools_when_missing => {
@@ -1569,6 +1617,23 @@ fn handle(
     )
 }
 
+/// Largest accepted JSON request body. Image attachments arrive base64-encoded
+/// (Studio allows four images, ~6 MB before encoding, so ~8 MB on the wire), and
+/// the previous fixed 4 MiB ceiling rejected them before the handler could
+/// answer. Override with `ALLPAKA_MAX_BODY_MIB` (1..1024, default 16).
+fn max_body_bytes_from(configured: Option<&str>) -> usize {
+    const DEFAULT_MIB: usize = 16;
+    let mib = configured
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|mib| (1..=1024).contains(mib))
+        .unwrap_or(DEFAULT_MIB);
+    mib * 1024 * 1024
+}
+
+fn max_body_bytes() -> usize {
+    max_body_bytes_from(std::env::var("ALLPAKA_MAX_BODY_MIB").ok().as_deref())
+}
+
 fn read_request(stream: &mut TcpStream) -> Result<(String, String)> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -1597,7 +1662,12 @@ fn read_request(stream: &mut TcpStream) -> Result<(String, String)> {
         })
         .and_then(|(_, v)| v.trim().parse().ok())
         .unwrap_or(0);
-    anyhow::ensure!(content_length <= 4 * 1024 * 1024, "request body exceeds 4 MiB");
+    let limit = max_body_bytes();
+    anyhow::ensure!(
+        content_length <= limit,
+        "request body exceeds {} MiB (raise ALLPAKA_MAX_BODY_MIB)",
+        limit >> 20
+    );
 
     let mut body = buf[header_end + 4..].to_vec();
     while body.len() < content_length {
@@ -1657,6 +1727,51 @@ fn respond_html(stream: &mut TcpStream, page: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn array_content_keeps_its_text_and_counts_images() {
+        let parts = json!([
+            {"type": "text", "text": "what is on this picture?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]);
+        let (text, images) = content_parts(&parts);
+        assert_eq!(text, "what is on this picture?");
+        assert_eq!(images, 1);
+
+        // The same message through render_messages must not collapse to "".
+        let msgs = vec![json!({"role": "user", "content": parts})];
+        assert_eq!(image_part_count(&msgs), 1);
+        let out = render_messages(&msgs, None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0],
+            ("user".to_string(), "what is on this picture?".to_string())
+        );
+    }
+
+    #[test]
+    fn string_content_and_unknown_parts_are_handled() {
+        let (text, images) = content_parts(&json!("plain"));
+        assert_eq!((text.as_str(), images), ("plain", 0));
+        // A future/unknown part type is ignored, not counted as an image.
+        let (text, images) = content_parts(&json!([
+            {"type": "text", "text": "a"},
+            {"type": "audio", "audio": {"data": "x"}},
+            {"type": "text", "text": "b"},
+        ]));
+        assert_eq!((text.as_str(), images), ("ab", 0));
+        assert_eq!(image_part_count(&[json!({"role": "user", "content": "hi"})]), 0);
+    }
+
+    #[test]
+    fn body_limit_defaults_to_16_mib_and_accepts_overrides() {
+        assert_eq!(max_body_bytes_from(None), 16 << 20);
+        assert_eq!(max_body_bytes_from(Some(" 32 ")), 32 << 20);
+        // Out-of-range or unparsable values fall back to the default.
+        assert_eq!(max_body_bytes_from(Some("0")), 16 << 20);
+        assert_eq!(max_body_bytes_from(Some("2048")), 16 << 20);
+        assert_eq!(max_body_bytes_from(Some("nope")), 16 << 20);
+    }
 
     #[test]
     fn tools_section_lands_in_the_system_turn() {

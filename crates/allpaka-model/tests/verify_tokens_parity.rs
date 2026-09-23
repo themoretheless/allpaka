@@ -127,7 +127,10 @@ fn verify_rows_match_greedy_decode() {
             .verify_tokens(batch, &mut sb)
             .unwrap()
             .expect("verify_tokens engages on this machine");
-        eprintln!("m={m}: batch {batch:?} rows {rows:?} want {:?}", &stream[1..m]);
+        eprintln!(
+            "m={m}: batch {batch:?} rows {rows:?} want {:?}",
+            &stream[1..m]
+        );
         for (r, &got) in rows.iter().enumerate() {
             let want = stream[r + 1];
             assert_eq!(got, want, "m={m} row {r}: verify {got} != decode {want}");

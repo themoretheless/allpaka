@@ -103,7 +103,10 @@ impl TensorInfo {
     /// Bytes this tensor occupies on disk, or an error for a dtype this crate
     /// does not know the geometry of.
     pub fn byte_size(&self) -> Result<u64> {
-        let (be, bb) = match (self.ggml_type.block_elements(), self.ggml_type.block_bytes()) {
+        let (be, bb) = match (
+            self.ggml_type.block_elements(),
+            self.ggml_type.block_bytes(),
+        ) {
             (Some(be), Some(bb)) => (be, bb),
             _ => bail!(
                 "tensor {:?} has unsupported ggml type {:?}",
@@ -164,7 +167,12 @@ impl GgufFile {
             mmaps.push(mmap);
         }
         let header = header.context("no split parts")?;
-        Ok(Self { header, mmaps, data_offsets, merged })
+        Ok(Self {
+            header,
+            mmaps,
+            data_offsets,
+            merged,
+        })
     }
 
     pub fn architecture(&self) -> &str {

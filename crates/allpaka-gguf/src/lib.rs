@@ -14,9 +14,11 @@
 pub mod dequant;
 pub mod metadata;
 pub mod tensors;
+pub mod vision;
 
 pub use metadata::{read, GgufInfo};
 pub use tensors::{GgmlType, GgufFile, TensorInfo};
+pub use vision::VisionCensus;
 
 #[cfg(test)]
 mod tests {

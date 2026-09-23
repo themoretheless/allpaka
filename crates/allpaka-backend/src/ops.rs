@@ -59,15 +59,12 @@ pub fn rmsnorm_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
 /// available cores. Prefill batches are hundreds of rows of thousands of
 /// elements - memory-bound, and single-threaded it was a visible slice of
 /// the whole prefill.
-pub fn rmsnorm_rows_into(
-    dst: &mut [f32],
-    src: &[f32],
-    weight: &[f32],
-    eps: f32,
-) {
+pub fn rmsnorm_rows_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
     let n = weight.len();
     let rows = src.len() / n;
-    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).min(rows.max(1));
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |t| t.get())
+        .min(rows.max(1));
     if threads <= 1 || rows < 4 {
         for (d, s) in dst.chunks_mut(n).zip(src.chunks(n)) {
             rmsnorm_into(d, s, weight, eps);
@@ -490,9 +487,24 @@ mod tests {
     #[test]
     fn half_conversion_round_trips_through_the_gguf_reader() {
         let cases: Vec<f32> = vec![
-            0.0, -0.0, 1.0, -1.0, 0.5, 2.0, 65504.0, -65504.0,
-            1e-5, -1e-5, 6.0e-8, 1.0 / 3.0, 1e8, -1e8, f32::INFINITY,
-            -f32::INFINITY, 0.30078125, 1.0009765625,
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            2.0,
+            65504.0,
+            -65504.0,
+            1e-5,
+            -1e-5,
+            6.0e-8,
+            1.0 / 3.0,
+            1e8,
+            -1e8,
+            f32::INFINITY,
+            -f32::INFINITY,
+            0.30078125,
+            1.0009765625,
         ];
         for &x in &cases {
             let h = f16::scalar_from_f32(x);
@@ -522,9 +534,16 @@ mod tests {
         }
 
         let a: Vec<f32> = (0..n).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
-        let want: f32 = a.iter().zip(&halves).map(|(x, &h)| x * f16::to_f32(h)).sum();
+        let want: f32 = a
+            .iter()
+            .zip(&halves)
+            .map(|(x, &h)| x * f16::to_f32(h))
+            .sum();
         let got = f16::dot(&a, &halves);
-        assert!((got - want).abs() < 1e-3 * (1.0 + want.abs()), "{got} vs {want}");
+        assert!(
+            (got - want).abs() < 1e-3 * (1.0 + want.abs()),
+            "{got} vs {want}"
+        );
 
         let mut acc = vec![1.0f32; n];
         let mut want_acc = acc.clone();
@@ -540,7 +559,13 @@ mod tests {
     #[test]
     fn matmul_matches_a_hand_example() {
         // x = [[1,2],[3,4]], w rows = [[1,0],[0,1],[1,1]]
-        let y = matmul_f32(&[1.0, 2.0, 3.0, 4.0], &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2, 2, 3);
+        let y = matmul_f32(
+            &[1.0, 2.0, 3.0, 4.0],
+            &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            2,
+            2,
+            3,
+        );
         assert_eq!(y, vec![1.0, 2.0, 3.0, 3.0, 4.0, 7.0]);
     }
 
@@ -696,7 +721,10 @@ mod tests {
 
         assert!(close(dot_at(5, 3), dot_at(102, 100)));
         assert!(close(dot_at(9, 0), dot_at(59, 50)));
-        assert!(!close(dot_at(5, 3), dot_at(5, 0)), "different gaps must differ");
+        assert!(
+            !close(dot_at(5, 3), dot_at(5, 0)),
+            "different gaps must differ"
+        );
     }
 }
 
@@ -704,6 +732,7 @@ mod tests {
 ///
 /// Used by every CPU inner product on the hot path - the quantised matvec
 /// reference, the F32 router, and attention's q-dot-k.
+#[inline(always)]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     // Eight running sums, not one. A single accumulator is a serial
     // dependency chain that the compiler may not reassociate - f32 addition
@@ -734,7 +763,13 @@ mod gdn_tests {
     /// llama.cpp autoregressive formula with explicit temporaries:
     /// S1 = S*exp(g); sk = S1.k; d = (v-sk)*beta; S2 = S1 + k.d; y = S2.q/sqrt(d).
     fn reference_step(
-        s0: &[f32], q: &[f32], k: &[f32], v: &[f32], g: f32, b: f32, d: usize,
+        s0: &[f32],
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        g: f32,
+        b: f32,
+        d: usize,
     ) -> (Vec<f32>, Vec<f32>) {
         let mut s1 = s0.to_vec();
         for x in s1.iter_mut() {

@@ -47,8 +47,18 @@ fn gpu_decode_matches_the_cpu_reference() {
     let gpu = decode_logits(true);
     let cpu = decode_logits(false);
     for (step, (g, c)) in gpu.iter().zip(&cpu).enumerate() {
-        let g_arg = g.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
-        let c_arg = c.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let g_arg = g
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0;
+        let c_arg = c
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0;
         assert_eq!(g_arg, c_arg, "argmax diverged at step {step}");
         let worst = g
             .iter()

@@ -1,0 +1,23 @@
+[
+  {
+    "label": "Allpaka Studio: build and run",
+    "command": "cargo",
+    "args": [
+      "run",
+      "-p",
+      "allpaka-cli",
+      "--no-default-features",
+      "--",
+      "studio",
+      "--bind",
+      "127.0.0.1:8100",
+      "--workspace",
+      "$ZED_WORKTREE_ROOT",
+      "--data-dir",
+      "/private/tmp/allpaka-studio-preview"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
+  }
+]

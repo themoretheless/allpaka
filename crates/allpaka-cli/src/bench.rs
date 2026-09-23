@@ -443,7 +443,7 @@ pub fn measure_engine(
     allpaka_backend::telemetry::reset_global();
     let decode_stats_before = allpaka_backend::gpu::decode_path_stats();
     let mut decode_inputs = Vec::with_capacity(decode_tokens);
-    let mut next = seed_logits
+    let next = seed_logits
         .iter()
         .enumerate()
         .max_by(|a, b| a.1.total_cmp(b.1))

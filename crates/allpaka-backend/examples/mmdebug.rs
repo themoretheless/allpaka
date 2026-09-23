@@ -19,7 +19,9 @@ fn main() {
             }
         }
     }
-    let x: Vec<f32> = (0..m * n_in).map(|i| ((i % 23) as f32 - 11.0) * 0.05).collect();
+    let x: Vec<f32> = (0..m * n_in)
+        .map(|i| ((i % 23) as f32 - 11.0) * 0.05)
+        .collect();
     // CPU reference (f16 rounding of x like the kernel stages)
     let f16r = |v: f32| -> f32 {
         let b = v.to_bits();
@@ -67,7 +69,9 @@ fn main() {
         .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
         .unwrap();
     let fun = lib.get_function("mmll_q8_0", None).unwrap();
-    let pipe = device.new_compute_pipeline_state_with_function(&fun).unwrap();
+    let pipe = device
+        .new_compute_pipeline_state_with_function(&fun)
+        .unwrap();
     let w_buf = device.new_buffer_with_data(
         w.as_ptr() as *const _,
         w.len() as u64,
@@ -78,7 +82,10 @@ fn main() {
         (x.len() * 4) as u64,
         MTLResourceOptions::StorageModeShared,
     );
-    let y_buf = device.new_buffer((m * n_out * 4) as u64, MTLResourceOptions::StorageModeShared);
+    let y_buf = device.new_buffer(
+        (m * n_out * 4) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
     let cmd = queue.new_command_buffer();
     let enc = cmd.new_compute_command_encoder();
     enc.set_compute_pipeline_state(&pipe);
@@ -105,7 +112,13 @@ fn main() {
     for i in 0..m * n_out {
         if (got[i] - want[i]).abs() > 1e-2 + 2e-3 * want[i].abs() {
             if bad < 12 {
-                println!("row {} col {}: gpu {:.4} want {:.4}", i / n_out, i % n_out, got[i], want[i]);
+                println!(
+                    "row {} col {}: gpu {:.4} want {:.4}",
+                    i / n_out,
+                    i % n_out,
+                    got[i],
+                    want[i]
+                );
             }
             bad += 1;
         }

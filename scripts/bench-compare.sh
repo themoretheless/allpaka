@@ -49,7 +49,7 @@ jq -n --arg model "$model" --arg sha "$sha" --argjson pp "$pp" --argjson tg "$tg
     --slurpfile lt <(jq -s 'add' "$out"/llama-tg-*.json) '
   def stats: sort | {samples: ., median: (if length%2==1 then .[length/2|floor]
     else (.[length/2-1]+.[length/2])/2 end), min: .[0], max: .[-1]};
-  {model: $model, model_sha256: $sha, pp: $pp, tg: $tg,
+  {model: $model, model_sha256: $sha, pp: $pp, tg: $tg, decode_context_tokens: 1,
    comparison_validated: false,
    limitations: ["llama-bench generates its own token stream; MoE routing is not identical",
                  "KV precision must be verified against the allpaka capability report"],

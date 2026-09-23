@@ -1,0 +1,3598 @@
+diff --git a/crates/allpaka-backend/examples/mmbench.rs b/crates/allpaka-backend/examples/mmbench.rs
+index 2c4fea5..9ac132f 100644
+--- a/crates/allpaka-backend/examples/mmbench.rs
++++ b/crates/allpaka-backend/examples/mmbench.rs
+@@ -20,16 +20,16 @@ struct LlamaMmArgs {
+     r3: i16,
+ }
+ 
+-fn time_kernel(
+-    queue: &CommandQueue,
+-    f: impl Fn(&ComputeCommandEncoderRef),
+-    iters: u64,
+-) -> f64 {
+-    let iters = std::env::var("MM_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(iters);
++fn time_kernel(queue: &CommandQueue, f: impl Fn(&ComputeCommandEncoderRef), iters: u64) -> f64 {
++    let iters = std::env::var("MM_ITERS")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(iters);
+     // warmup
+     for _ in 0..3 {
+         let cmd = queue.new_command_buffer();
+-        let enc = cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
++        let enc =
++            cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
+         f(enc);
+         enc.end_encoding();
+         cmd.commit();
+@@ -38,7 +38,8 @@ fn time_kernel(
+     let mut best = f64::INFINITY;
+     for _ in 0..5 {
+         let cmd = queue.new_command_buffer();
+-        let enc = cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
++        let enc =
++            cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
+         for _ in 0..iters {
+             f(enc);
+         }
+@@ -47,33 +48,56 @@ fn time_kernel(
+         cmd.commit();
+         cmd.wait_until_completed();
+         let wall = t0.elapsed().as_secs_f64();
+-        
++
+         best = best.min(wall / iters as f64);
+     }
+     best
+ }
+ 
+ fn main() {
+-    let n_in: usize = std::env::var("MM_NIN").ok().and_then(|v| v.parse().ok()).unwrap_or(4096);
+-    let n_out: usize = std::env::var("MM_NOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(12288);
+-    let m: usize = std::env::var("MM_M").ok().and_then(|v| v.parse().ok()).unwrap_or(480);
+-    let n_par: usize = std::env::var("MM_PAR").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
++    let n_in: usize = std::env::var("MM_NIN")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(4096);
++    let n_out: usize = std::env::var("MM_NOUT")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(12288);
++    let m: usize = std::env::var("MM_M")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(480);
++    let n_par: usize = std::env::var("MM_PAR")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(1);
+     // MM_ID=1: bench the grouped (mmid) gate kernel mmllg_id_q4_k instead -
+     // MM_EXP experts of which MM_ACT are active with m*ACT/EXP rows each,
+     // the rest empty. Measures the low-occupancy regime of MoE prefill.
+     let id_mode = std::env::var("MM_ID").is_ok_and(|v| v == "1" || v == "2");
+-    let n_exp: usize = std::env::var("MM_EXP").ok().and_then(|v| v.parse().ok()).unwrap_or(128);
+-    let n_act: usize = std::env::var("MM_ACT").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
++    let n_exp: usize = std::env::var("MM_EXP")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(128);
++    let n_act: usize = std::env::var("MM_ACT")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(8);
+     // Tokens pick MM_USED experts each, so the (token, expert) pairs are
+     // m*USED regardless of how many experts they land on.
+-    let n_used: usize = std::env::var("MM_USED").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
++    let n_used: usize = std::env::var("MM_USED")
++        .ok()
++        .and_then(|v| v.parse().ok())
++        .unwrap_or(8);
+     // MM_STRUCT=1: the attention buffer's mm+barrier skeleton (q,k,v mms,
+     // barrier, wo mm) in ONE command buffer per rep - discriminates
+     // stage-structure cost from kernel cost.
+     let struct_mode = std::env::var("MM_STRUCT").is_ok_and(|v| v == "1");
+     // MM_WSPAN: total weight pool in MiB; each of the 10 iterations reads a
+     // different window (cold streaming, like a real MoE layer).
+-    let w_span = std::env::var("MM_WSPAN").ok().and_then(|v| v.parse::<usize>().ok())
++    let w_span = std::env::var("MM_WSPAN")
++        .ok()
++        .and_then(|v| v.parse::<usize>().ok())
+         .map_or(0, |mb| mb << 20);
+     // MM_FMT: weight format (row_bytes and the kernel list follow it).
+     let fmt = std::env::var("MM_FMT").unwrap_or_else(|_| "q4_k".into());
+@@ -82,10 +106,21 @@ fn main() {
+         "q5_k" => n_in / 256 * 176,
+         _ => n_in / 256 * 144,
+     };
+-    let w_len = n_out * row_bytes
+-        * if id_mode { n_exp } else if struct_mode { 3 } else { 1 };
++    let w_len = n_out
++        * row_bytes
++        * if id_mode {
++            n_exp
++        } else if struct_mode {
++            3
++        } else {
++            1
++        };
+     let w_pool = if w_span > w_len { w_span } else { w_len };
+-    let w_step = if w_span > w_len { (w_span - w_len) / 10 } else { 0 };
++    let w_step = if w_span > w_len {
++        (w_span - w_len) / 10
++    } else {
++        0
++    };
+ 
+     let device = Device::system_default().unwrap();
+     let queue = device.new_command_queue();
+@@ -188,10 +223,7 @@ fn main() {
+                 enc.set_bytes(6, 4, &mm as *const u32 as *const _);
+                 for p in 0..n_par {
+                     enc.set_buffer(2, Some(&y_bufs[p]), 0);
+-                    enc.dispatch_thread_groups(
+-                        MTLSize::new(gx, gy, 1),
+-                        MTLSize::new(128, 1, 1),
+-                    );
++                    enc.dispatch_thread_groups(MTLSize::new(gx, gy, 1), MTLSize::new(128, 1, 1));
+                 }
+             },
+             10,
+@@ -211,7 +243,8 @@ fn main() {
+             .unwrap();
+         // [expert, row0, rows] per group; the pairs spread evenly over the
+         // active experts (in-model: ACT ~= EXP, ~30 rows each at pp480).
+-        let rows_per = (m * n_used / n_act).max(1);        let mut table: Vec<[u32; 3]> = vec![[0, 0, 0]; n_exp];
++        let rows_per = (m * n_used / n_act).max(1);
++        let mut table: Vec<[u32; 3]> = vec![[0, 0, 0]; n_exp];
+         let mut row0 = 0u32;
+         for e in 0..n_act {
+             table[e] = [e as u32, row0, rows_per as u32];
+@@ -235,7 +268,9 @@ fn main() {
+         );
+         let id_kernel = std::env::var("MM_KERNEL").unwrap_or_else(|_| "mmllg_id_q4_k".into());
+         let fun = lib.get_function(&id_kernel, None).unwrap();
+-        let pipe = device.new_compute_pipeline_state_with_function(&fun).unwrap();
++        let pipe = device
++            .new_compute_pipeline_state_with_function(&fun)
++            .unwrap();
+         if std::env::var("MM_ID").is_ok_and(|v| v == "2") {
+             // llama.cpp kernel_mul_mm_id_q4_K harness (MIT). Needs
+             // /tmp/mm_id_llama.metal assembled from ggml-metal.metal - the
+@@ -248,9 +283,22 @@ fn main() {
+                 .unwrap_or_else(|e| panic!("llama mm_id compile: {e}"));
+             #[repr(C)]
+             struct LlamaIdArgs {
+-                ne00: i32, ne02: i32, nb01: u64, nb02: u64, nb03: u64,
+-                ne11: i32, nb10: u64, nb11: u64, nb12: u64, nb13: u64,
+-                ne20: i32, ne21: i32, ne0: i32, ne1: i32, r2: i16, r3: i16,
++                ne00: i32,
++                ne02: i32,
++                nb01: u64,
++                nb02: u64,
++                nb03: u64,
++                ne11: i32,
++                nb10: u64,
++                nb11: u64,
++                nb12: u64,
++                nb13: u64,
++                ne20: i32,
++                ne21: i32,
++                ne0: i32,
++                ne1: i32,
++                r2: i16,
++                r3: i16,
+             }
+             // id = token index (ne20 = 1 flattens the used-slot dim).
+             let n_tok = m;
+@@ -263,34 +311,59 @@ fn main() {
+                 }
+             }
+             let tpe_buf = device.new_buffer_with_data(
+-                tpe.as_ptr() as *const _, (n_exp * 4) as u64,
+-                MTLResourceOptions::StorageModeShared);
++                tpe.as_ptr() as *const _,
++                (n_exp * 4) as u64,
++                MTLResourceOptions::StorageModeShared,
++            );
+             let ids_buf = device.new_buffer_with_data(
+-                ids.as_ptr() as *const _, (n_exp * n_tok * 4) as u64,
+-                MTLResourceOptions::StorageModeShared);
++                ids.as_ptr() as *const _,
++                (n_exp * n_tok * 4) as u64,
++                MTLResourceOptions::StorageModeShared,
++            );
+             let dst_buf = device.new_buffer(
+-                (n_tok * n_out * 4) as u64, MTLResourceOptions::StorageModeShared);
++                (n_tok * n_out * 4) as u64,
++                MTLResourceOptions::StorageModeShared,
++            );
+             let largs = LlamaIdArgs {
+-                ne00: n_in as i32, ne02: n_exp as i32,
+-                nb01: row_bytes as u64, nb02: (n_out * row_bytes) as u64, nb03: 0,
+-                ne11: 1, nb10: 4, nb11: 4, nb12: (n_in * 4) as u64, nb13: 0,
+-                ne20: 1, ne21: n_tok as i32, ne0: n_out as i32, ne1: 1,
+-                r2: 1, r3: 1,
++                ne00: n_in as i32,
++                ne02: n_exp as i32,
++                nb01: row_bytes as u64,
++                nb02: (n_out * row_bytes) as u64,
++                nb03: 0,
++                ne11: 1,
++                nb10: 4,
++                nb11: 4,
++                nb12: (n_in * 4) as u64,
++                nb13: 0,
++                ne20: 1,
++                ne21: n_tok as i32,
++                ne0: n_out as i32,
++                ne1: 1,
++                r2: 1,
++                r3: 1,
+             };
+             let bc = false;
+             let consts = FunctionConstantValues::new();
+             consts.set_constant_value_at_index(
+-                &bc as *const bool as *const _, MTLDataType::Bool, 700);
++                &bc as *const bool as *const _,
++                MTLDataType::Bool,
++                700,
++            );
+             let lfun = llib
+                 .get_function("llama_mul_mm_id_q4_K", Some(consts))
+                 .unwrap_or_else(|e| panic!("llama mm_id fc: {e}"));
+-            let lpipe = device.new_compute_pipeline_state_with_function(&lfun).unwrap();
++            let lpipe = device
++                .new_compute_pipeline_state_with_function(&lfun)
++                .unwrap();
+             let t = time_kernel(
+                 &queue,
+                 |enc| {
+                     enc.set_compute_pipeline_state(&lpipe);
+-                    enc.set_bytes(0, std::mem::size_of::<LlamaIdArgs>() as u64,
+-                        &largs as *const LlamaIdArgs as *const _);
++                    enc.set_bytes(
++                        0,
++                        std::mem::size_of::<LlamaIdArgs>() as u64,
++                        &largs as *const LlamaIdArgs as *const _,
++                    );
+                     enc.set_buffer(1, Some(&w_buf), 0);
+                     enc.set_buffer(2, Some(&x_buf), 0);
+                     enc.set_buffer(3, Some(&tpe_buf), 0);
+@@ -298,8 +371,11 @@ fn main() {
+                     enc.set_buffer(5, Some(&dst_buf), 0);
+                     enc.set_threadgroup_memory_length(0, 8192);
+                     enc.dispatch_thread_groups(
+-                        MTLSize::new((n_tok as u64).div_ceil(32),
+-                            (n_out as u64).div_ceil(64), n_exp as u64),
++                        MTLSize::new(
++                            (n_tok as u64).div_ceil(32),
++                            (n_out as u64).div_ceil(64),
++                            n_exp as u64,
++                        ),
+                         MTLSize::new(128, 1, 1),
+                     );
+                 },
+@@ -339,7 +415,11 @@ fn main() {
+                 enc.set_bytes(11, 8, &zero_off as *const u64 as *const _);
+                 enc.set_bytes(12, 4, &bstr as *const u32 as *const _);
+                 enc.dispatch_thread_groups(
+-                    MTLSize::new((n_out as u64).div_ceil(64), (m as u64).div_ceil(32), n_exp as u64),
++                    MTLSize::new(
++                        (n_out as u64).div_ceil(64),
++                        (m as u64).div_ceil(32),
++                        n_exp as u64,
++                    ),
+                     MTLSize::new(128, 1, 1),
+                 );
+             },
+@@ -361,7 +441,9 @@ fn main() {
+             .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
+             .unwrap();
+         let fun = lib.get_function("mmll_q4_k", None).unwrap();
+-        let pipe = device.new_compute_pipeline_state_with_function(&fun).unwrap();
++        let pipe = device
++            .new_compute_pipeline_state_with_function(&fun)
++            .unwrap();
+         let kv = n_out / 4;
+         let row_b = row_bytes as u64;
+         let (q_wo, k_wo, v_wo, o_wo) = (
+@@ -434,7 +516,9 @@ fn main() {
+         let n_pos = m; // attend over the full causal prefix
+         let mut rng: u64 = 0x12345678;
+         let mut rnd = move || {
+-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++            rng = rng
++                .wrapping_mul(6364136223846793005)
++                .wrapping_add(1442695040888963407);
+             ((rng >> 40) as u32) as f32 / (1u64 << 24) as f32 - 0.5
+         };
+         let q: Vec<f32> = (0..m * q_dim).map(|_| rnd()).collect();
+@@ -443,8 +527,12 @@ fn main() {
+             let b = x.to_bits();
+             let sign = ((b >> 16) & 0x8000) as u16;
+             let e = ((b >> 23) & 0xff) as i32 - 127 + 15;
+-            if e <= 0 { return sign; }
+-            if e >= 31 { return sign | 0x7c00; }
++            if e <= 0 {
++                return sign;
++            }
++            if e >= 31 {
++                return sign | 0x7c00;
++            }
+             sign | ((e as u16) << 10) | (((b >> 13) & 0x3ff) as u16)
+         };
+         let f32_of = |h: u16| -> f32 {
+@@ -458,27 +546,47 @@ fn main() {
+         };
+         let kv: Vec<u16> = (0..2 * n_pos * kv_dim).map(|_| f16(rnd())).collect();
+         let k_buf = device.new_buffer_with_data(
+-            kv.as_ptr() as *const _, (n_pos * kv_dim * 2) as u64, MTLResourceOptions::StorageModeShared);
++            kv.as_ptr() as *const _,
++            (n_pos * kv_dim * 2) as u64,
++            MTLResourceOptions::StorageModeShared,
++        );
+         let v_buf = device.new_buffer_with_data(
+             unsafe { kv.as_ptr().add(n_pos * kv_dim) } as *const _,
+-            (n_pos * kv_dim * 2) as u64, MTLResourceOptions::StorageModeShared);
++            (n_pos * kv_dim * 2) as u64,
++            MTLResourceOptions::StorageModeShared,
++        );
+         let q_buf = device.new_buffer_with_data(
+-            q.as_ptr() as *const _, (m * q_dim * 4) as u64, MTLResourceOptions::StorageModeShared);
+-        let out_a = device.new_buffer((m * q_dim * 4) as u64, MTLResourceOptions::StorageModeShared);
+-        let out_b = device.new_buffer((m * q_dim * 4) as u64, MTLResourceOptions::StorageModeShared);
++            q.as_ptr() as *const _,
++            (m * q_dim * 4) as u64,
++            MTLResourceOptions::StorageModeShared,
++        );
++        let out_a = device.new_buffer(
++            (m * q_dim * 4) as u64,
++            MTLResourceOptions::StorageModeShared,
++        );
++        let out_b = device.new_buffer(
++            (m * q_dim * 4) as u64,
++            MTLResourceOptions::StorageModeShared,
++        );
+         let scale: f32 = 1.0 / (hd as f32).sqrt();
+         let mut run = |name: &str, out: &Buffer, grid_y: u64| {
+             let fun = lib.get_function(name, None).unwrap();
+-            let pipe = device.new_compute_pipeline_state_with_function(&fun).unwrap();
++            let pipe = device
++                .new_compute_pipeline_state_with_function(&fun)
++                .unwrap();
+             let cmd = queue.new_command_buffer();
+-            let enc = cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
++            let enc =
++                cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
+             enc.set_compute_pipeline_state(&pipe);
+             enc.set_buffer(0, Some(&k_buf), 0);
+             enc.set_buffer(1, Some(&v_buf), 0);
+             enc.set_buffer(2, Some(&q_buf), 0);
+             enc.set_buffer(3, Some(out), 0);
+             for (index, value) in [
+-                (4u64, kv_dim as u32), (5, hd as u32), (6, 0u32), (7, (n_heads / n_kv) as u32),
++                (4u64, kv_dim as u32),
++                (5, hd as u32),
++                (6, 0u32),
++                (7, (n_heads / n_kv) as u32),
+             ] {
+                 enc.set_bytes(index, 4, &value as *const u32 as *const _);
+             }
+@@ -489,7 +597,9 @@ fn main() {
+             enc.set_bytes(11, 4, &(n_heads as u32) as *const u32 as *const _);
+             enc.set_bytes(12, 4, &(m as u32) as *const u32 as *const _);
+             enc.dispatch_thread_groups(
+-                MTLSize::new(n_heads as u64, grid_y, 1), MTLSize::new(128, 1, 1));
++                MTLSize::new(n_heads as u64, grid_y, 1),
++                MTLSize::new(128, 1, 1),
++            );
+             enc.end_encoding();
+             cmd.commit();
+             cmd.wait_until_completed();
+@@ -521,12 +631,10 @@ fn main() {
+             }
+             num / den
+         };
+-        let a: &[f32] = unsafe {
+-            std::slice::from_raw_parts(out_a.contents() as *const f32, m * q_dim)
+-        };
+-        let b: &[f32] = unsafe {
+-            std::slice::from_raw_parts(out_b.contents() as *const f32, m * q_dim)
+-        };
++        let a: &[f32] =
++            unsafe { std::slice::from_raw_parts(out_a.contents() as *const f32, m * q_dim) };
++        let b: &[f32] =
++            unsafe { std::slice::from_raw_parts(out_b.contents() as *const f32, m * q_dim) };
+         let mut max_abs = 0f32;
+         let mut bad = 0usize;
+         let mut bad_head = [0usize; 32];
+@@ -535,7 +643,9 @@ fn main() {
+         let mut bad_rowmod = [0usize; 8];
+         for (i, (x, y)) in a.iter().zip(b).enumerate() {
+             let d = (x - y).abs();
+-            if d > max_abs { max_abs = d; }
++            if d > max_abs {
++                max_abs = d;
++            }
+             if !y.is_finite() || d > 0.02 {
+                 let row = i / q_dim;
+                 let head = (i % q_dim) / hd;
+@@ -553,24 +663,36 @@ fn main() {
+                 bad += 1;
+             }
+         }
+-        println!("attend_mm vs t8: max_abs={max_abs:.5} bad={bad}/{}", a.len());
++        println!(
++            "attend_mm vs t8: max_abs={max_abs:.5} bad={bad}/{}",
++            a.len()
++        );
+         println!("bad/head: {:?}", bad_head);
+         println!("bad/dimblk: {:?}", bad_dimblk);
+         println!("bad/row%8: {:?}", bad_rowmod);
+         // Spot-check both kernels against the CPU reference.
+         for &(row, head) in &[(0usize, 0usize), (0, 2), (4, 0), (7, 31), (33, 5)] {
+-            if row >= m { continue; }
++            if row >= m {
++                continue;
++            }
+             let dim = 3;
+             let i = row * q_dim + head * hd + dim;
+             println!(
+                 "  (row {row}, head {head}, dim {dim}): cpu={:.5} t8={:.5} mm={:.5}",
+-                cpu_at(row, head, dim), a[i], b[i]
++                cpu_at(row, head, dim),
++                a[i],
++                b[i]
+             );
+         }
+         // Timings at the same shape (single dispatch per buffer).
+-        for (name, gy) in [("attend_rows_t8", (m as u64).div_ceil(8)), ("attend_mm", (m as u64).div_ceil(8))] {
++        for (name, gy) in [
++            ("attend_rows_t8", (m as u64).div_ceil(8)),
++            ("attend_mm", (m as u64).div_ceil(8)),
++        ] {
+             let fun = lib.get_function(name, None).unwrap();
+-            let pipe = device.new_compute_pipeline_state_with_function(&fun).unwrap();
++            let pipe = device
++                .new_compute_pipeline_state_with_function(&fun)
++                .unwrap();
+             let t = time_kernel(
+                 &queue,
+                 |enc| {
+@@ -580,7 +702,10 @@ fn main() {
+                     enc.set_buffer(2, Some(&q_buf), 0);
+                     enc.set_buffer(3, Some(&out_a), 0);
+                     for (index, value) in [
+-                        (4u64, kv_dim as u32), (5, hd as u32), (6, 0u32), (7, (n_heads / n_kv) as u32),
++                        (4u64, kv_dim as u32),
++                        (5, hd as u32),
++                        (6, 0u32),
++                        (7, (n_heads / n_kv) as u32),
+                     ] {
+                         enc.set_bytes(index, 4, &value as *const u32 as *const _);
+                     }
+@@ -591,7 +716,9 @@ fn main() {
+                     enc.set_bytes(11, 4, &(n_heads as u32) as *const u32 as *const _);
+                     enc.set_bytes(12, 4, &(m as u32) as *const u32 as *const _);
+                     enc.dispatch_thread_groups(
+-                        MTLSize::new(n_heads as u64, gy, 1), MTLSize::new(128, 1, 1));
++                        MTLSize::new(n_heads as u64, gy, 1),
++                        MTLSize::new(128, 1, 1),
++                    );
+                 },
+                 10,
+             );
+@@ -632,17 +759,18 @@ fn main() {
+             &queue,
+             |enc| {
+                 enc.set_compute_pipeline_state(&pipe);
+-                enc.set_bytes(0, std::mem::size_of::<LlamaMmArgs>() as u64, &args as *const _ as *const _);
++                enc.set_bytes(
++                    0,
++                    std::mem::size_of::<LlamaMmArgs>() as u64,
++                    &args as *const _ as *const _,
++                );
+                 enc.set_buffer(1, Some(&w_buf), 0);
+                 enc.set_buffer(2, Some(&x_buf), 0);
+                 enc.set_buffer(3, Some(&y_buf), 0);
+                 enc.set_threadgroup_memory_length(0, 8192);
+                 for p in 0..n_par {
+                     enc.set_buffer(3, Some(&y_bufs[p]), 0);
+-                    enc.dispatch_thread_groups(
+-                        MTLSize::new(gx, gy, 1),
+-                        MTLSize::new(128, 1, 1),
+-                    );
++                    enc.dispatch_thread_groups(MTLSize::new(gx, gy, 1), MTLSize::new(128, 1, 1));
+                 }
+             },
+             10,
+diff --git a/crates/allpaka-backend/examples/mmdebug.rs b/crates/allpaka-backend/examples/mmdebug.rs
+index 52366b6..0353171 100644
+--- a/crates/allpaka-backend/examples/mmdebug.rs
++++ b/crates/allpaka-backend/examples/mmdebug.rs
+@@ -19,7 +19,9 @@ fn main() {
+             }
+         }
+     }
+-    let x: Vec<f32> = (0..m * n_in).map(|i| ((i % 23) as f32 - 11.0) * 0.05).collect();
++    let x: Vec<f32> = (0..m * n_in)
++        .map(|i| ((i % 23) as f32 - 11.0) * 0.05)
++        .collect();
+     // CPU reference (f16 rounding of x like the kernel stages)
+     let f16r = |v: f32| -> f32 {
+         let b = v.to_bits();
+@@ -67,7 +69,9 @@ fn main() {
+         .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
+         .unwrap();
+     let fun = lib.get_function("mmll_q8_0", None).unwrap();
+-    let pipe = device.new_compute_pipeline_state_with_function(&fun).unwrap();
++    let pipe = device
++        .new_compute_pipeline_state_with_function(&fun)
++        .unwrap();
+     let w_buf = device.new_buffer_with_data(
+         w.as_ptr() as *const _,
+         w.len() as u64,
+@@ -78,7 +82,10 @@ fn main() {
+         (x.len() * 4) as u64,
+         MTLResourceOptions::StorageModeShared,
+     );
+-    let y_buf = device.new_buffer((m * n_out * 4) as u64, MTLResourceOptions::StorageModeShared);
++    let y_buf = device.new_buffer(
++        (m * n_out * 4) as u64,
++        MTLResourceOptions::StorageModeShared,
++    );
+     let cmd = queue.new_command_buffer();
+     let enc = cmd.new_compute_command_encoder();
+     enc.set_compute_pipeline_state(&pipe);
+@@ -105,7 +112,13 @@ fn main() {
+     for i in 0..m * n_out {
+         if (got[i] - want[i]).abs() > 1e-2 + 2e-3 * want[i].abs() {
+             if bad < 12 {
+-                println!("row {} col {}: gpu {:.4} want {:.4}", i / n_out, i % n_out, got[i], want[i]);
++                println!(
++                    "row {} col {}: gpu {:.4} want {:.4}",
++                    i / n_out,
++                    i % n_out,
++                    got[i],
++                    want[i]
++                );
+             }
+             bad += 1;
+         }
+diff --git a/crates/allpaka-backend/examples/tensor_test.rs b/crates/allpaka-backend/examples/tensor_test.rs
+index 3e19c6e..bb899b9 100644
+--- a/crates/allpaka-backend/examples/tensor_test.rs
++++ b/crates/allpaka-backend/examples/tensor_test.rs
+@@ -25,16 +25,18 @@ fn main() {
+         let sign = ((b >> 16) & 0x8000) as u16;
+         let exp = ((b >> 23) & 0xff) as i32 - 127 + 15;
+         let mant = ((b >> 13) & 0x3ff) as u16;
+-        if exp <= 0 { return sign; }
+-        if exp >= 31 { return sign | 0x7c00; }
++        if exp <= 0 {
++            return sign;
++        }
++        if exp >= 31 {
++            return sign | 0x7c00;
++        }
+         sign | ((exp as u16) << 10) | mant
+     }
+     let a: Vec<u16> = (0..n * n)
+         .map(|i| f16(if i % n == i / n { 1.0 } else { 0.0 }))
+         .collect();
+-    let b: Vec<u16> = (0..n * n)
+-        .map(|i| f16((i % 7) as f32))
+-        .collect();
++    let b: Vec<u16> = (0..n * n).map(|i| f16((i % 7) as f32)).collect();
+     let a_buf = device.new_buffer_with_data(
+         a.as_ptr() as *const _,
+         (a.len() * 2) as u64,
+@@ -59,9 +61,7 @@ fn main() {
+     cmd.commit();
+     cmd.wait_until_completed();
+ 
+-    let c = unsafe {
+-        std::slice::from_raw_parts(c_buf.contents() as *const f32, n * n)
+-    };
++    let c = unsafe { std::slice::from_raw_parts(c_buf.contents() as *const f32, n * n) };
+     // A = identity, so C should equal B
+     let ok = (0..n * n).all(|i| (c[i] - ((i % 7) as f32)).abs() < 1e-3);
+     println!("tensor API works: {ok}; C[0..4] = {:?}", &c[0..4]);
+diff --git a/crates/allpaka-backend/src/accel.rs b/crates/allpaka-backend/src/accel.rs
+index fcc1e36..1cf9c90 100644
+--- a/crates/allpaka-backend/src/accel.rs
++++ b/crates/allpaka-backend/src/accel.rs
+@@ -39,8 +39,15 @@ impl std::fmt::Display for DeclineReason {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         match self {
+             Self::NoDevice => write!(f, "no accelerator device"),
+-            Self::UnsupportedTensorType { operation, tensor, ty } => {
+-                write!(f, "{operation}: tensor {tensor} has unsupported type {ty:?}")
++            Self::UnsupportedTensorType {
++                operation,
++                tensor,
++                ty,
++            } => {
++                write!(
++                    f,
++                    "{operation}: tensor {tensor} has unsupported type {ty:?}"
++                )
+             }
+             Self::UnsupportedShape { operation, detail }
+             | Self::InvalidState { operation, detail }
+@@ -48,7 +55,10 @@ impl std::fmt::Display for DeclineReason {
+             Self::ForeignMemory { operation } => {
+                 write!(f, "{operation}: weights are outside attached mappings")
+             }
+-            Self::MissingCapability { operation, capability } => {
++            Self::MissingCapability {
++                operation,
++                capability,
++            } => {
+                 write!(f, "{operation}: missing capability {capability}")
+             }
+         }
+@@ -101,11 +111,13 @@ mod tests {
+     fn fallback_runs_only_for_declines() {
+         assert_eq!(AccelOutcome::Executed(7).fallback(|_| 99), Ok(7));
+ 
+-        let declined = AccelOutcome::<i32>::Declined(DeclineReason::NoDevice)
+-            .fallback(|reason| match reason {
+-                DeclineReason::NoDevice => 42,
+-                _ => 0,
+-            });
++        let declined =
++            AccelOutcome::<i32>::Declined(DeclineReason::NoDevice).fallback(
++                |reason| match reason {
++                    DeclineReason::NoDevice => 42,
++                    _ => 0,
++                },
++            );
+         assert_eq!(declined, Err(42));
+     }
+ }
+diff --git a/crates/allpaka-backend/src/gpu/metal.rs b/crates/allpaka-backend/src/gpu/metal.rs
+index c930fcd..84795c0 100644
+--- a/crates/allpaka-backend/src/gpu/metal.rs
++++ b/crates/allpaka-backend/src/gpu/metal.rs
+@@ -12379,6 +12379,11 @@ macro_rules! cstamp {
+     };
+ }
+ 
++// Metal does not cache prefill graphs; use the regular fused prefill path.
++pub fn prefill_replay(_xs: &[f32]) -> Option<Vec<f32>> {
++    None
++}
++
+ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
+     let mut gpu = GPU.get()?.as_ref()?.lock().ok()?;
+     gpu.prefill_drain();
+diff --git a/crates/allpaka-backend/src/ops.rs b/crates/allpaka-backend/src/ops.rs
+index ecc127a..51f7a05 100644
+--- a/crates/allpaka-backend/src/ops.rs
++++ b/crates/allpaka-backend/src/ops.rs
+@@ -59,15 +59,12 @@ pub fn rmsnorm_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
+ /// available cores. Prefill batches are hundreds of rows of thousands of
+ /// elements - memory-bound, and single-threaded it was a visible slice of
+ /// the whole prefill.
+-pub fn rmsnorm_rows_into(
+-    dst: &mut [f32],
+-    src: &[f32],
+-    weight: &[f32],
+-    eps: f32,
+-) {
++pub fn rmsnorm_rows_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
+     let n = weight.len();
+     let rows = src.len() / n;
+-    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).min(rows.max(1));
++    let threads = std::thread::available_parallelism()
++        .map_or(1, |t| t.get())
++        .min(rows.max(1));
+     if threads <= 1 || rows < 4 {
+         for (d, s) in dst.chunks_mut(n).zip(src.chunks(n)) {
+             rmsnorm_into(d, s, weight, eps);
+@@ -490,9 +487,24 @@ mod tests {
+     #[test]
+     fn half_conversion_round_trips_through_the_gguf_reader() {
+         let cases: Vec<f32> = vec![
+-            0.0, -0.0, 1.0, -1.0, 0.5, 2.0, 65504.0, -65504.0,
+-            1e-5, -1e-5, 6.0e-8, 1.0 / 3.0, 1e8, -1e8, f32::INFINITY,
+-            -f32::INFINITY, 0.30078125, 1.0009765625,
++            0.0,
++            -0.0,
++            1.0,
++            -1.0,
++            0.5,
++            2.0,
++            65504.0,
++            -65504.0,
++            1e-5,
++            -1e-5,
++            6.0e-8,
++            1.0 / 3.0,
++            1e8,
++            -1e8,
++            f32::INFINITY,
++            -f32::INFINITY,
++            0.30078125,
++            1.0009765625,
+         ];
+         for &x in &cases {
+             let h = f16::scalar_from_f32(x);
+@@ -522,9 +534,16 @@ mod tests {
+         }
+ 
+         let a: Vec<f32> = (0..n).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
+-        let want: f32 = a.iter().zip(&halves).map(|(x, &h)| x * f16::to_f32(h)).sum();
++        let want: f32 = a
++            .iter()
++            .zip(&halves)
++            .map(|(x, &h)| x * f16::to_f32(h))
++            .sum();
+         let got = f16::dot(&a, &halves);
+-        assert!((got - want).abs() < 1e-3 * (1.0 + want.abs()), "{got} vs {want}");
++        assert!(
++            (got - want).abs() < 1e-3 * (1.0 + want.abs()),
++            "{got} vs {want}"
++        );
+ 
+         let mut acc = vec![1.0f32; n];
+         let mut want_acc = acc.clone();
+@@ -540,7 +559,13 @@ mod tests {
+     #[test]
+     fn matmul_matches_a_hand_example() {
+         // x = [[1,2],[3,4]], w rows = [[1,0],[0,1],[1,1]]
+-        let y = matmul_f32(&[1.0, 2.0, 3.0, 4.0], &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2, 2, 3);
++        let y = matmul_f32(
++            &[1.0, 2.0, 3.0, 4.0],
++            &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
++            2,
++            2,
++            3,
++        );
+         assert_eq!(y, vec![1.0, 2.0, 3.0, 3.0, 4.0, 7.0]);
+     }
+ 
+@@ -696,7 +721,10 @@ mod tests {
+ 
+         assert!(close(dot_at(5, 3), dot_at(102, 100)));
+         assert!(close(dot_at(9, 0), dot_at(59, 50)));
+-        assert!(!close(dot_at(5, 3), dot_at(5, 0)), "different gaps must differ");
++        assert!(
++            !close(dot_at(5, 3), dot_at(5, 0)),
++            "different gaps must differ"
++        );
+     }
+ }
+ 
+@@ -704,6 +732,7 @@ mod tests {
+ ///
+ /// Used by every CPU inner product on the hot path - the quantised matvec
+ /// reference, the F32 router, and attention's q-dot-k.
++#[inline(always)]
+ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+     // Eight running sums, not one. A single accumulator is a serial
+     // dependency chain that the compiler may not reassociate - f32 addition
+@@ -734,7 +763,13 @@ mod gdn_tests {
+     /// llama.cpp autoregressive formula with explicit temporaries:
+     /// S1 = S*exp(g); sk = S1.k; d = (v-sk)*beta; S2 = S1 + k.d; y = S2.q/sqrt(d).
+     fn reference_step(
+-        s0: &[f32], q: &[f32], k: &[f32], v: &[f32], g: f32, b: f32, d: usize,
++        s0: &[f32],
++        q: &[f32],
++        k: &[f32],
++        v: &[f32],
++        g: f32,
++        b: f32,
++        d: usize,
+     ) -> (Vec<f32>, Vec<f32>) {
+         let mut s1 = s0.to_vec();
+         for x in s1.iter_mut() {
+diff --git a/crates/allpaka-backend/src/quantmat.rs b/crates/allpaka-backend/src/quantmat.rs
+index a39d4a3..f010633 100644
+--- a/crates/allpaka-backend/src/quantmat.rs
++++ b/crates/allpaka-backend/src/quantmat.rs
+@@ -41,7 +41,13 @@ impl<'a> QuantMat<'a> {
+                 data.len()
+             );
+         }
+-        Ok(Self { data, ty, n_out, n_in, row_bytes })
++        Ok(Self {
++            data,
++            ty,
++            n_out,
++            n_in,
++            row_bytes,
++        })
+     }
+ 
+     /// One weight row dequantised to f32.
+@@ -186,7 +192,11 @@ impl<'a> QuantMat<'a> {
+     pub fn matmul_many(items: &[(&QuantMat<'_>, &[f32])]) -> Result<Vec<Vec<f32>>> {
+         for (m, x) in items {
+             if x.is_empty() || x.len() % m.n_in != 0 {
+-                bail!("x has {} values, expected a multiple of {}", x.len(), m.n_in);
++                bail!(
++                    "x has {} values, expected a multiple of {}",
++                    x.len(),
++                    m.n_in
++                );
+             }
+         }
+         if crate::gpu::is_attached() {
+@@ -543,6 +553,7 @@ impl<'a> QuantMat<'a> {
+ 
+ /// Fused Q8_0 dot product: `Σ_blocks d * Σ q_i * x_i`, straight off the
+ /// quantised bytes.
++#[inline(always)]
+ fn dot_q8_0(row: &[u8], x: &[f32]) -> f32 {
+     let mut total = 0f32;
+     for (bi, block) in row.chunks_exact(34).enumerate() {
+@@ -560,6 +571,7 @@ fn dot_q8_0(row: &[u8], x: &[f32]) -> f32 {
+ /// Fused Q4_K dot product, following the same 8-sub-block layout as the
+ /// dequantiser: `Σ d*sc*Σ(q·x) - dmin*mn*Σx` per sub-block, so the min term
+ /// needs only the activation sum, not a per-element subtraction.
++#[inline(always)]
+ fn dot_q4_k(row: &[u8], x: &[f32]) -> f32 {
+     let mut total = 0f32;
+     for (bi, block) in row.chunks_exact(144).enumerate() {
+@@ -604,6 +616,7 @@ fn dot_q4_k(row: &[u8], x: &[f32]) -> f32 {
+ }
+ 
+ /// Fused Q2_K dot product: `Σ dl*Σ(q·x) - ml*Σx` per 16-element sub-block.
++#[inline(always)]
+ fn dot_q2_k(row: &[u8], x: &[f32]) -> f32 {
+     let mut total = 0f32;
+     for (bi, block) in row.chunks_exact(84).enumerate() {
+@@ -639,6 +652,7 @@ fn dot_q2_k(row: &[u8], x: &[f32]) -> f32 {
+ }
+ 
+ /// Fused Q6_K dot product, mirroring the dequantiser's half/quarter walk.
++#[inline(always)]
+ fn dot_q6_k(row: &[u8], x: &[f32]) -> f32 {
+     let mut total = 0f32;
+     for (bi, block) in row.chunks_exact(210).enumerate() {
+@@ -747,6 +761,7 @@ impl Q8ActsSlice<'_> {
+ }
+ 
+ /// Q8_0 × Q8 activations: `Σ_blocks d_w * d_x * Σ q_w · q_x`.
++#[inline(always)]
+ fn dot_q8_0_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
+     let mut total = 0f32;
+     for (bi, block) in row.chunks_exact(34).enumerate() {
+@@ -760,6 +775,7 @@ fn dot_q8_0_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
+ 
+ /// Q4_K × Q8 activations, same sub-block walk as `dot_q4_k` with the q·x
+ /// reduction done in integers and the min term taken off the exact block sum.
++#[inline(always)]
+ fn dot_q4_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
+     let mut total = 0f32;
+     for (bi, block) in row.chunks_exact(144).enumerate() {
+@@ -793,6 +809,7 @@ fn dot_q4_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
+ /// Q6_K × Q8 activations. Scales cover 16 elements, so each quarter's
+ /// 32-value dot splits into two 16-lane integer dots against the halves of
+ /// one activation block.
++#[inline(always)]
+ fn dot_q6_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
+     let mut total = 0f32;
+     for (bi, block) in row.chunks_exact(210).enumerate() {
+@@ -832,7 +849,7 @@ fn dot_q6_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
+ /// On aarch64 this is the NEON widening-multiply chain (`smull`/`sadalp`),
+ /// which is the whole point of quantising the activations: sixteen products
+ /// per instruction instead of one f32 FMA lane per element.
+-#[inline]
++#[inline(always)]
+ fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
+     debug_assert_eq!(a.len(), b.len());
+     #[cfg(target_arch = "aarch64")]
+@@ -978,7 +995,8 @@ mod tests {
+         // The matvec path quantises activations to Q8, so the comparison
+         // against the f32 reference carries that quantisation error too.
+         assert!(
+-            (fused - reference).abs() < q8_act_error_bound(&row, &x) + 1e-3 * (1.0 + reference.abs()),
++            (fused - reference).abs()
++                < q8_act_error_bound(&row, &x) + 1e-3 * (1.0 + reference.abs()),
+             "{fused} vs {reference}"
+         );
+     }
+@@ -1047,8 +1065,14 @@ mod tests {
+     #[test]
+     fn size_mismatches_are_errors_not_silent_wrap() {
+         let bytes = vec![0u8; 34];
+-        assert!(QuantMat::new(&bytes, GgmlType::Q8_0, 2, 32).is_err(), "too few bytes");
+-        assert!(QuantMat::new(&bytes, GgmlType::Q8_0, 1, 33).is_err(), "ragged row");
++        assert!(
++            QuantMat::new(&bytes, GgmlType::Q8_0, 2, 32).is_err(),
++            "too few bytes"
++        );
++        assert!(
++            QuantMat::new(&bytes, GgmlType::Q8_0, 1, 33).is_err(),
++            "ragged row"
++        );
+         let mat = QuantMat::new(&bytes, GgmlType::Q8_0, 1, 32).unwrap();
+         assert!(mat.matmul(&[0.0; 16], 1).is_err(), "x shorter than a row");
+         assert!(mat.row(1).is_err());
+diff --git a/crates/allpaka-backend/src/runtime.rs b/crates/allpaka-backend/src/runtime.rs
+index db1b65d..5c68d03 100644
+--- a/crates/allpaka-backend/src/runtime.rs
++++ b/crates/allpaka-backend/src/runtime.rs
+@@ -40,8 +40,7 @@ impl RuntimePolicy {
+             .and_then(|v| v.parse().ok());
+         policy.decode_serial = std::env::var("ALLPAKA_DECODE_SERIAL").is_ok_and(|v| v == "1");
+         policy.prefill_defer = std::env::var("ALLPAKA_PF_DEFER").map_or(true, |v| v != "0");
+-        policy.prefill_one_buffer =
+-            std::env::var("ALLPAKA_PF_ONEBUF").map_or(true, |v| v != "0");
++        policy.prefill_one_buffer = std::env::var("ALLPAKA_PF_ONEBUF").map_or(true, |v| v != "0");
+         policy.gpu_route = std::env::var("ALLPAKA_GPU_ROUTE").map_or(true, |v| v != "0");
+         policy.mm_pipeline = std::env::var("ALLPAKA_MM_PIPE").map_or(true, |v| v != "0");
+         policy
+diff --git a/crates/allpaka-backend/tests/gpu_ffnbench.rs b/crates/allpaka-backend/tests/gpu_ffnbench.rs
+index 968b418..8f234f2 100644
+--- a/crates/allpaka-backend/tests/gpu_ffnbench.rs
++++ b/crates/allpaka-backend/tests/gpu_ffnbench.rs
+@@ -28,7 +28,9 @@ fn ffn_shaped_matvecs_report_effective_bandwidth() {
+     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+     let mut state = 0x9E37_79B9_7F4A_7C15u64;
+     for b in region.iter_mut() {
+-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++        state = state
++            .wrapping_mul(6364136223846793005)
++            .wrapping_add(1442695040888963407);
+         *b = (state >> 56) as u8;
+     }
+     // Scales of random bits include inf/NaN; zero every f16 scale field so
+@@ -70,7 +72,16 @@ fn ffn_shaped_matvecs_report_effective_bandwidth() {
+     // Warm up once, then measure several rounds.
+     let items: Vec<(&QuantMat, &[f32])> = qmats
+         .iter()
+-        .map(|m| (m, if m.n_in == 4096 { x_gate.as_slice() } else { x_down.as_slice() }))
++        .map(|m| {
++            (
++                m,
++                if m.n_in == 4096 {
++                    x_gate.as_slice()
++                } else {
++                    x_down.as_slice()
++                },
++            )
++        })
+         .collect();
+     QuantMat::matmul_many(&items).unwrap();
+ 
+@@ -88,7 +99,15 @@ fn ffn_shaped_matvecs_report_effective_bandwidth() {
+     let q8_bytes = 1536 * (4096 / 32) * 34;
+     let q8_count = (len / q8_bytes).min(64) - 1;
+     let q8_mats: Vec<QuantMat> = (0..q8_count)
+-        .map(|i| QuantMat::new(&region[i * q8_bytes..(i + 1) * q8_bytes], GgmlType::Q8_0, 1536, 4096).unwrap())
++        .map(|i| {
++            QuantMat::new(
++                &region[i * q8_bytes..(i + 1) * q8_bytes],
++                GgmlType::Q8_0,
++                1536,
++                4096,
++            )
++            .unwrap()
++        })
+         .collect();
+     let q8_items: Vec<(&QuantMat, &[f32])> =
+         q8_mats.iter().map(|m| (m, x_gate.as_slice())).collect();
+@@ -141,7 +160,9 @@ fn mm_shaped_matmuls_report_effective_bandwidth() {
+     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+     let mut state = 0xB5AD_4ECE_DA1C_E2A9u64;
+     for b in region.iter_mut() {
+-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++        state = state
++            .wrapping_mul(6364136223846793005)
++            .wrapping_add(1442695040888963407);
+         *b = (state >> 56) as u8;
+     }
+     if !gpu::attach(region) {
+@@ -154,8 +175,13 @@ fn mm_shaped_matmuls_report_effective_bandwidth() {
+     let count = (len / q2_bytes).min(64) - 1;
+     let mats: Vec<QuantMat> = (0..count)
+         .map(|i| {
+-            QuantMat::new(&region[i * q2_bytes..(i + 1) * q2_bytes], GgmlType::Q2K, 1536, 4096)
+-                .unwrap()
++            QuantMat::new(
++                &region[i * q2_bytes..(i + 1) * q2_bytes],
++                GgmlType::Q2K,
++                1536,
++                4096,
++            )
++            .unwrap()
+         })
+         .collect();
+     let m = 32usize;
+@@ -177,4 +203,3 @@ fn mm_shaped_matmuls_report_effective_bandwidth() {
+         elems * m as f64 / busy / 1e12,
+     );
+ }
+-
+diff --git a/crates/allpaka-backend/tests/gpu_glm_mvbench.rs b/crates/allpaka-backend/tests/gpu_glm_mvbench.rs
+index 573caa0..8a3ab77 100644
+--- a/crates/allpaka-backend/tests/gpu_glm_mvbench.rs
++++ b/crates/allpaka-backend/tests/gpu_glm_mvbench.rs
+@@ -62,7 +62,9 @@ fn glm_decode_matvecs_report_effective_bandwidth() {
+     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+     let mut state = 0x9E37_79B9_7F4A_7C15u64;
+     for b in region.iter_mut() {
+-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++        state = state
++            .wrapping_mul(6364136223846793005)
++            .wrapping_add(1442695040888963407);
+         *b = (state >> 56) as u8;
+     }
+     // Scales of random bits include inf/NaN; the kernels do finite arithmetic
+diff --git a/crates/allpaka-backend/tests/gpu_hugeoff.rs b/crates/allpaka-backend/tests/gpu_hugeoff.rs
+index 1b7c51d..04c8b58 100644
+--- a/crates/allpaka-backend/tests/gpu_hugeoff.rs
++++ b/crates/allpaka-backend/tests/gpu_hugeoff.rs
+@@ -49,7 +49,9 @@ fn kernels_are_correct_past_the_4_gib_offset() {
+         // Pseudo-random quant bytes, then small sane f16 scales.
+         let mut state = off as u64 | 1;
+         for b in region[off..off + bytes].iter_mut() {
+-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++            state = state
++                .wrapping_mul(6364136223846793005)
++                .wrapping_add(1442695040888963407);
+             *b = (state >> 56) as u8;
+         }
+         let half = 0x211Fu16.to_le_bytes(); // 0.01
+@@ -90,6 +92,9 @@ fn kernels_are_correct_past_the_4_gib_offset() {
+                 "{ty:?} at offset {off}: element {i} gpu {g} vs cpu {w}"
+             );
+         }
+-        println!("{ty:?} at {:.2} GiB: parity ok", off as f64 / (1u64 << 30) as f64);
++        println!(
++            "{ty:?} at {:.2} GiB: parity ok",
++            off as f64 / (1u64 << 30) as f64
++        );
+     }
+ }
+diff --git a/crates/allpaka-backend/tests/gpu_parity.rs b/crates/allpaka-backend/tests/gpu_parity.rs
+index 7ee3f3b..9dd880a 100644
+--- a/crates/allpaka-backend/tests/gpu_parity.rs
++++ b/crates/allpaka-backend/tests/gpu_parity.rs
+@@ -32,7 +32,9 @@ fn attached_region() -> Option<&'static [u8]> {
+             // below per matrix).
+             let mut state = 0x243F_6A88_85A3_08D3u64;
+             for b in region.iter_mut() {
+-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++                state = state
++                    .wrapping_mul(6364136223846793005)
++                    .wrapping_add(1442695040888963407);
+                 *b = (state >> 56) as u8;
+             }
+             if !gpu::attach(region) {
+@@ -51,7 +53,10 @@ fn tame_scales(region: &mut [u8], ty: GgmlType, off: usize, rows: usize, n_in: u
+     // F32 has no scales; the random bytes themselves would be inf/NaN soup,
+     // so the whole tensor is rewritten with small finite values instead.
+     if ty == GgmlType::F32 {
+-        for (i, c) in region[off..off + rows * n_in * 4].chunks_exact_mut(4).enumerate() {
++        for (i, c) in region[off..off + rows * n_in * 4]
++            .chunks_exact_mut(4)
++            .enumerate()
++        {
+             c.copy_from_slice(&(((i % 61) as f32 - 30.0) * 0.03).to_le_bytes());
+         }
+         return;
+@@ -85,7 +90,9 @@ fn tame_scales(region: &mut [u8], ty: GgmlType, off: usize, rows: usize, n_in: u
+ }
+ 
+ fn check_parity(ty: GgmlType, n_out: usize, n_in: usize, m: usize, off: usize) {
+-    let Some(region) = attached_region() else { return };
++    let Some(region) = attached_region() else {
++        return;
++    };
+     // Redo the taming through a raw pointer: the region is logically ours.
+     let region_mut =
+         unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
+@@ -113,7 +120,9 @@ fn check_parity(ty: GgmlType, n_out: usize, n_in: usize, m: usize, off: usize) {
+     let on_gpu = QuantMat::new(inside, ty, n_out, n_in).unwrap();
+     let on_cpu = QuantMat::new(&copy, ty, n_out, n_in).unwrap();
+ 
+-    let x: Vec<f32> = (0..m * n_in).map(|i| ((i % 23) as f32 - 11.0) * 0.05).collect();
++    let x: Vec<f32> = (0..m * n_in)
++        .map(|i| ((i % 23) as f32 - 11.0) * 0.05)
++        .collect();
+     let got = on_gpu.matmul(&x, m).unwrap();
+     // The reference is dequantise-then-dot in f32: QuantMat::matmul on the
+     // CPU now quantises activations to Q8 (an approximation of its own), so
+@@ -126,7 +135,11 @@ fn check_parity(ty: GgmlType, n_out: usize, n_in: usize, m: usize, off: usize) {
+     // half rounding a fraction of a percent.
+     let round = |v: f32| -> f32 {
+         use allpaka_backend::ops::f16;
+-        if m >= 16 { f16::to_f32(f16::scalar_from_f32(v)) } else { v }
++        if m >= 16 {
++            f16::to_f32(f16::scalar_from_f32(v))
++        } else {
++            v
++        }
+     };
+     let x_ref: Vec<f32> = x.iter().map(|&v| round(v)).collect();
+     let mut want = vec![0f32; m * n_out];
+@@ -150,7 +163,9 @@ fn check_parity(ty: GgmlType, n_out: usize, n_in: usize, m: usize, off: usize) {
+ /// The fused gate/up/swiglu/down path against dequant-and-compute in f32.
+ #[test]
+ fn fused_ffn_matches_cpu_reference() {
+-    let Some(region) = attached_region() else { return };
++    let Some(region) = attached_region() else {
++        return;
++    };
+     let region_mut =
+         unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
+     let (hidden, ffn) = (512usize, 256usize);
+@@ -161,15 +176,32 @@ fn fused_ffn_matches_cpu_reference() {
+ 
+     let gate_bytes = ffn * hidden / 256 * 144;
+     let down_bytes = hidden * ffn / 256 * 210;
+-    let gate = QuantMat::new(&region[gate_off..gate_off + gate_bytes], GgmlType::Q4K, ffn, hidden)
+-        .unwrap();
+-    let up = QuantMat::new(&region[up_off..up_off + gate_bytes], GgmlType::Q4K, ffn, hidden)
+-        .unwrap();
+-    let down = QuantMat::new(&region[down_off..down_off + down_bytes], GgmlType::Q6K, hidden, ffn)
+-        .unwrap();
++    let gate = QuantMat::new(
++        &region[gate_off..gate_off + gate_bytes],
++        GgmlType::Q4K,
++        ffn,
++        hidden,
++    )
++    .unwrap();
++    let up = QuantMat::new(
++        &region[up_off..up_off + gate_bytes],
++        GgmlType::Q4K,
++        ffn,
++        hidden,
++    )
++    .unwrap();
++    let down = QuantMat::new(
++        &region[down_off..down_off + down_bytes],
++        GgmlType::Q6K,
++        hidden,
++        ffn,
++    )
++    .unwrap();
+ 
+     for m in [1usize, 5] {
+-        let x: Vec<f32> = (0..m * hidden).map(|i| ((i % 17) as f32 - 8.0) * 0.06).collect();
++        let x: Vec<f32> = (0..m * hidden)
++            .map(|i| ((i % 17) as f32 - 8.0) * 0.06)
++            .collect();
+         let got = QuantMat::ffn_many(&[(&gate, &up, &down, x.as_slice())])
+             .expect("GPU must take the fused FFN")
+             .pop()
+diff --git a/crates/allpaka-backend/tests/gpu_q35_mvbench.rs b/crates/allpaka-backend/tests/gpu_q35_mvbench.rs
+index 5d85b5d..53e83fa 100644
+--- a/crates/allpaka-backend/tests/gpu_q35_mvbench.rs
++++ b/crates/allpaka-backend/tests/gpu_q35_mvbench.rs
+@@ -57,7 +57,9 @@ fn q35_decode_matvecs_report_effective_bandwidth() {
+     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+     let mut state = 0x9E37_79B9_7F4A_7C15u64;
+     for b in region.iter_mut() {
+-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++        state = state
++            .wrapping_mul(6364136223846793005)
++            .wrapping_add(1442695040888963407);
+         *b = (state >> 56) as u8;
+     }
+     if !gpu::attach(region) {
+diff --git a/crates/allpaka-backend/tests/gpu_roundtrip.rs b/crates/allpaka-backend/tests/gpu_roundtrip.rs
+index ee61d32..3274c89 100644
+--- a/crates/allpaka-backend/tests/gpu_roundtrip.rs
++++ b/crates/allpaka-backend/tests/gpu_roundtrip.rs
+@@ -118,7 +118,10 @@ kernel void nothing(device float* y [[buffer(0)]], uint i [[thread_position_in_g
+     println!("+ empty compute encoder:   {e:>7.1} us median");
+     println!("+ one trivial dispatch:    {d:>7.1} us median");
+     for (n, us) in &scaling {
+-        println!("{n:>4} dispatches in one command buffer: {us:>8.1} us  ({:.2} us each)", us / *n as f64);
++        println!(
++            "{n:>4} dispatches in one command buffer: {us:>8.1} us  ({:.2} us each)",
++            us / *n as f64
++        );
+     }
+     // The numbers that decide whether merging submissions is worth writing:
+     // waits per token as reported by `allpaka bench --engine`.
+diff --git a/crates/allpaka-backend/tests/gpu_windows.rs b/crates/allpaka-backend/tests/gpu_windows.rs
+index 23cdcd0..f3a02d7 100644
+--- a/crates/allpaka-backend/tests/gpu_windows.rs
++++ b/crates/allpaka-backend/tests/gpu_windows.rs
+@@ -44,7 +44,9 @@ fn late_windows_read_the_same_bytes_as_the_cpu() {
+         let bytes = n_out * n_in / be * bb;
+         let mut state = off as u64 | 1;
+         for b in region[off..off + bytes].iter_mut() {
+-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++            state = state
++                .wrapping_mul(6364136223846793005)
++                .wrapping_add(1442695040888963407);
+             *b = (state >> 56) as u8;
+         }
+         let half = 0x211Fu16.to_le_bytes(); // 0.01 in f16
+@@ -83,6 +85,9 @@ fn late_windows_read_the_same_bytes_as_the_cpu() {
+                 "{ty:?} at offset {off}: element {i} gpu {g} vs cpu {w}"
+             );
+         }
+-        println!("{ty:?} at {:.2} GiB: parity ok", off as f64 / (1u64 << 30) as f64);
++        println!(
++            "{ty:?} at {:.2} GiB: parity ok",
++            off as f64 / (1u64 << 30) as f64
++        );
+     }
+ }
+diff --git a/crates/allpaka-cli/src/client.rs b/crates/allpaka-cli/src/client.rs
+index 0817f4a..ac5e71e 100644
+--- a/crates/allpaka-cli/src/client.rs
++++ b/crates/allpaka-cli/src/client.rs
+@@ -31,15 +31,18 @@ fn rag_tools() -> Value {
+ 
+ /// One HTTP request over a fresh connection; no keep-alive.
+ fn request(method: &str, addr: &str, path: &str, body: Option<&Value>) -> Result<Value> {
+-    let mut stream =
+-        TcpStream::connect(addr).with_context(|| format!("connecting to allpaka serve at {addr}"))?;
++    let mut stream = TcpStream::connect(addr)
++        .with_context(|| format!("connecting to allpaka serve at {addr}"))?;
+     stream
+         .set_read_timeout(Some(Duration::from_secs(600)))
+         .context("setting read timeout")?;
+     let payload = body.map(|b| b.to_string()).unwrap_or_default();
+     let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+     if body.is_some() {
+-        head += &format!("Content-Type: application/json\r\nContent-Length: {}\r\n", payload.len());
++        head += &format!(
++            "Content-Type: application/json\r\nContent-Length: {}\r\n",
++            payload.len()
++        );
+     }
+     stream.write_all(format!("{head}\r\n{payload}").as_bytes())?;
+ 
+@@ -53,7 +56,10 @@ fn request(method: &str, addr: &str, path: &str, body: Option<&Value>) -> Result
+     if !status.contains("200") {
+         bail!("{path} returned {status}: {}", &rest[..rest.len().min(300)]);
+     }
+-    let body_text = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
++    let body_text = if head
++        .to_ascii_lowercase()
++        .contains("transfer-encoding: chunked")
++    {
+         dechunk(rest)?
+     } else {
+         rest.to_string()
+@@ -93,7 +99,14 @@ pub fn status(addr: &str) -> Result<()> {
+ 
+ /// One chat round trip. With `rag`, hands the server the rag_search/rag_read
+ /// schemas so its built-in tool-loop can run.
+-pub fn chat(addr: &str, prompt: &str, system: Option<&str>, rag: bool, max_tokens: u32, model: &str) -> Result<()> {
++pub fn chat(
++    addr: &str,
++    prompt: &str,
++    system: Option<&str>,
++    rag: bool,
++    max_tokens: u32,
++    model: &str,
++) -> Result<()> {
+     let mut messages = Vec::new();
+     if let Some(s) = system {
+         messages.push(json!({"role": "system", "content": s}));
+@@ -133,10 +146,15 @@ pub fn rag_test(addr: &str, model: &str) -> Result<()> {
+         "tools": rag_tools(),
+     });
+     let out = post(addr, "/v1/chat/completions", &body)?;
+-    let answer = out["choices"][0]["message"]["content"].as_str().unwrap_or("");
++    let answer = out["choices"][0]["message"]["content"]
++        .as_str()
++        .unwrap_or("");
+     println!("{answer}");
+     let prompt_tokens = out["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+-    eprintln!("--- usage: prompt={prompt_tokens} completion={}", out["usage"]["completion_tokens"]);
++    eprintln!(
++        "--- usage: prompt={prompt_tokens} completion={}",
++        out["usage"]["completion_tokens"]
++    );
+     if prompt_tokens <= 500 {
+         bail!("RAG tool-loop did not run: round-2 prompt is only {prompt_tokens} tokens");
+     }
+diff --git a/crates/allpaka-cli/src/config.rs b/crates/allpaka-cli/src/config.rs
+index 0ae7384..899ec8b 100644
+--- a/crates/allpaka-cli/src/config.rs
++++ b/crates/allpaka-cli/src/config.rs
+@@ -133,7 +133,11 @@ pub struct Defaults {
+ 
+ impl Default for Defaults {
+     fn default() -> Self {
+-        Self { context_tokens: 8192, prompt_tokens: 2048, kv_cache_dtype_bytes: 2 }
++        Self {
++            context_tokens: 8192,
++            prompt_tokens: 2048,
++            kv_cache_dtype_bytes: 2,
++        }
+     }
+ }
+ 
+@@ -177,7 +181,10 @@ impl NodeConfig {
+                         self.name
+                     );
+                 }
+-                Node { name: self.name.clone(), ..Node::default() }
++                Node {
++                    name: self.name.clone(),
++                    ..Node::default()
++                }
+             }
+         };
+         if let Some(g) = self.usable_gib {
+@@ -188,13 +195,19 @@ impl NodeConfig {
+         }
+         if let Some(e) = self.bandwidth_efficiency {
+             if !(0.0..=1.0).contains(&e) {
+-                bail!("node {:?}: bandwidth_efficiency must be in 0..=1, got {e}", self.name);
++                bail!(
++                    "node {:?}: bandwidth_efficiency must be in 0..=1, got {e}",
++                    self.name
++                );
+             }
+             node.bandwidth_efficiency = e;
+         }
+         if let Some(t) = self.prefill_tflops {
+             if t < 0.0 {
+-                bail!("node {:?}: prefill_tflops must not be negative, got {t}", self.name);
++                bail!(
++                    "node {:?}: prefill_tflops must not be negative, got {t}",
++                    self.name
++                );
+             }
+             node.prefill_flops = t * 1e12;
+         }
+@@ -213,8 +226,8 @@ impl NodeConfig {
+ 
+ impl Config {
+     pub fn load(path: &Path) -> Result<Self> {
+-        let text = std::fs::read_to_string(path)
+-            .with_context(|| format!("reading {}", path.display()))?;
++        let text =
++            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+         let cfg: Config =
+             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+         if cfg.nodes.is_empty() {
+@@ -229,7 +242,9 @@ impl Config {
+ 
+     /// Resolve an agent's pinned pool name to a node index.
+     pub fn pin_index(&self, agent: &AgentConfig) -> Result<Option<usize>> {
+-        let Some(name) = &agent.pin else { return Ok(None) };
++        let Some(name) = &agent.pin else {
++            return Ok(None);
++        };
+         let idx = self
+             .nodes
+             .iter()
+diff --git a/crates/allpaka-cli/src/rag_mcp.rs b/crates/allpaka-cli/src/rag_mcp.rs
+index 2f061c3..7e0f686 100644
+--- a/crates/allpaka-cli/src/rag_mcp.rs
++++ b/crates/allpaka-cli/src/rag_mcp.rs
+@@ -34,14 +34,20 @@ impl RagMcpConfig {
+     /// Defaults point at the sibling rag repo; env wins.
+     pub fn from_env(notes_dir: &Path) -> Self {
+         RagMcpConfig {
+-            bin: std::env::var("RAG_MCP_BIN").map(PathBuf::from).unwrap_or_else(|_| {
+-                PathBuf::from("/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp")
+-            }),
+-            db: std::env::var("RAG_DB_PATH").map(PathBuf::from).unwrap_or_else(|_| {
+-                PathBuf::from(
+-                    "/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb",
+-                )
+-            }),
++            bin: std::env::var("RAG_MCP_BIN")
++                .map(PathBuf::from)
++                .unwrap_or_else(|_| {
++                    PathBuf::from(
++                        "/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp",
++                    )
++                }),
++            db: std::env::var("RAG_DB_PATH")
++                .map(PathBuf::from)
++                .unwrap_or_else(|_| {
++                    PathBuf::from(
++                        "/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb",
++                    )
++                }),
+             notes_dir: notes_dir.to_path_buf(),
+             search_mode: std::env::var("RAG_MCP_SEARCH_MODE").unwrap_or_else(|_| "lex".into()),
+         }
+@@ -90,7 +96,12 @@ impl RagMcp {
+             }
+         });
+ 
+-        let mut mcp = RagMcp { child, stdin, lines: rx, next_id: 0 };
++        let mut mcp = RagMcp {
++            child,
++            stdin,
++            lines: rx,
++            next_id: 0,
++        };
+         let init = mcp.rpc(
+             "initialize",
+             json!({
+@@ -177,8 +188,7 @@ impl RagMcp {
+     /// Full text of one document.
+     pub fn get_document(&mut self, document_id: &str) -> Result<String> {
+         let text = self.call("get_document", json!({"document_id": document_id}))?;
+-        let doc: Value =
+-            serde_json::from_str(&text).with_context(|| "parsing rag-mcp document")?;
++        let doc: Value = serde_json::from_str(&text).with_context(|| "parsing rag-mcp document")?;
+         doc["content"]
+             .as_str()
+             .map(str::to_string)
+diff --git a/crates/allpaka-cli/src/report.rs b/crates/allpaka-cli/src/report.rs
+index 3bd9af3..c098d5e 100644
+--- a/crates/allpaka-cli/src/report.rs
++++ b/crates/allpaka-cli/src/report.rs
+@@ -3,10 +3,12 @@
+ //! The reports say what they are confident about and mark what they are not.
+ //! An estimate presented without its assumptions is worse than no estimate.
+ 
+-use allpaka_gguf::GgufInfo;
+-use allpaka_core::presets::Preset;
+ use allpaka_core::fleet::FleetMember;
+-use allpaka_core::{gib, Fabric, FleetPlan, Link, Model, Node, Plan, PlanRequest, ReplicaPlan, Verdict};
++use allpaka_core::presets::Preset;
++use allpaka_core::{
++    gib, Fabric, FleetPlan, Link, Model, Node, Plan, PlanRequest, ReplicaPlan, Verdict,
++};
++use allpaka_gguf::GgufInfo;
+ use std::path::Path;
+ 
+ pub fn presets(list: &[Preset]) {
+@@ -30,7 +32,10 @@ pub fn gguf(path: &Path, info: &GgufInfo) {
+     println!("  layers            {}", info.block_count);
+     println!("  hidden size       {}", info.embedding_length);
+     println!("  kv heads          {}", info.head_count_kv);
+-    println!("  head dims         k={} v={}", info.key_length, info.value_length);
++    println!(
++        "  head dims         k={} v={}",
++        info.key_length, info.value_length
++    );
+     println!("  weights on disk   {:.1} GiB", gib(info.file_bytes));
+     println!("  parameters        {:.1}B", info.param_count as f64 / 1e9);
+     println!(
+@@ -63,11 +68,18 @@ pub fn gguf(path: &Path, info: &GgufInfo) {
+ 
+ pub fn link(l: &Link) {
+     println!("\nmeasured link");
+-    println!("  throughput        {:.1} MB/s", l.throughput_bytes_per_sec / 1e6);
++    println!(
++        "  throughput        {:.1} MB/s",
++        l.throughput_bytes_per_sec / 1e6
++    );
+     println!("  round trip p50    {:.2} ms", l.rtt_p50_secs * 1e3);
+     println!("  round trip p99    {:.2} ms", l.rtt_p99_secs * 1e3);
+ 
+-    let jitter = if l.rtt_p50_secs > 0.0 { l.rtt_p99_secs / l.rtt_p50_secs } else { f64::NAN };
++    let jitter = if l.rtt_p50_secs > 0.0 {
++        l.rtt_p99_secs / l.rtt_p50_secs
++    } else {
++        f64::NAN
++    };
+     println!("  tail / median     {jitter:.1}x");
+ 
+     // A cut costs at least one round trip per token, so the tail latency puts a
+@@ -89,7 +101,10 @@ pub fn link(l: &Link) {
+     println!("\nadd this to allpaka.toml, with the two node names filled in:\n");
+     println!("[[links]]");
+     println!("between = [\"nodeA\", \"nodeB\"]");
+-    println!("throughput_bytes_per_sec = {:.0}", l.throughput_bytes_per_sec);
++    println!(
++        "throughput_bytes_per_sec = {:.0}",
++        l.throughput_bytes_per_sec
++    );
+     println!("rtt_p50_secs = {:.6}", l.rtt_p50_secs);
+     println!("rtt_p99_secs = {:.6}", l.rtt_p99_secs);
+     println!(
+@@ -105,7 +120,11 @@ pub fn missing_link(nodes: &[Node], model: &Model, req: &PlanRequest) {
+     println!("capacity check at {} token context:", req.context_tokens);
+     for n in nodes {
+         let need = model.total_weight_bytes + model.kv_bytes(model.n_layers, req.context_tokens);
+-        let fits = if need <= n.usable_bytes { "fits" } else { "DOES NOT FIT" };
++        let fits = if need <= n.usable_bytes {
++            "fits"
++        } else {
++            "DOES NOT FIT"
++        };
+         println!(
+             "  {:<10} {:>7.1} GiB usable, needs {:>7.1} GiB  {}",
+             n.name,
+@@ -117,13 +136,7 @@ pub fn missing_link(nodes: &[Node], model: &Model, req: &PlanRequest) {
+     println!("\nrun `allpaka bench` on both machines and record the result to plan a split.");
+ }
+ 
+-pub fn verdict(
+-    nodes: &[Node],
+-    model: &Model,
+-    req: &PlanRequest,
+-    fabric: &Fabric,
+-    v: &Verdict,
+-) {
++pub fn verdict(nodes: &[Node], model: &Model, req: &PlanRequest, fabric: &Fabric, v: &Verdict) {
+     header(model, req);
+     fabric_summary(nodes, fabric);
+ 
+@@ -239,7 +252,10 @@ fn header(model: &Model, req: &PlanRequest) {
+             model.active_weight_fraction * 100.0
+         );
+     }
+-    println!("  budgeting {} token context, {} token prompt", req.context_tokens, req.prompt_tokens);
++    println!(
++        "  budgeting {} token context, {} token prompt",
++        req.context_tokens, req.prompt_tokens
++    );
+ }
+ 
+ fn placement(p: &Plan) {
+@@ -289,8 +305,7 @@ fn placement(p: &Plan) {
+     if p.is_split() {
+         println!(
+             "  {:<10} plus {:.2} s to ship the prompt across the cut",
+-            "",
+-            p.prompt_transfer_secs
++            "", p.prompt_transfer_secs
+         );
+     }
+     match p.ttft_secs() {
+@@ -394,12 +409,7 @@ pub fn replication(rp: Option<&ReplicaPlan>, split: &Plan) {
+ }
+ 
+ /// Fleet placement: one model per pool, one endpoint per agent.
+-pub fn fleet(
+-    members: &[FleetMember],
+-    nodes: &[Node],
+-    plan: &FleetPlan,
+-    ports: &[Option<u16>],
+-) {
++pub fn fleet(members: &[FleetMember], nodes: &[Node], plan: &FleetPlan, ports: &[Option<u16>]) {
+     println!("fleet placement: one agent per memory pool\n");
+ 
+     if plan.placements.is_empty() {
+@@ -411,10 +421,7 @@ pub fn fleet(
+         let node = &nodes[p.node_index];
+         let m = &members[p.model_index];
+         let how = if p.pinned { "pinned" } else { "chosen" };
+-        println!(
+-            "  {:<12} on {:<10} ({})",
+-            p.model_name, p.node_name, how
+-        );
++        println!("  {:<12} on {:<10} ({})", p.model_name, p.node_name, how);
+         println!(
+             "  {:<12}    {:>6.1} GiB weights + {:>4.1} GiB kv at ctx {}  of {:.1} GiB usable",
+             "",
+@@ -424,11 +431,18 @@ pub fn fleet(
+             gib(node.usable_bytes),
+         );
+         let sparse = if m.model.is_sparse() {
+-            format!("  ·  MoE, {:.0}% active", m.model.active_weight_fraction * 100.0)
++            format!(
++                "  ·  MoE, {:.0}% active",
++                m.model.active_weight_fraction * 100.0
++            )
+         } else {
+             String::new()
+         };
+-        let draft = if m.speculation.is_some() { "  ·  speculating" } else { "" };
++        let draft = if m.speculation.is_some() {
++            "  ·  speculating"
++        } else {
++            ""
++        };
+         let shared = if p.co_resident {
+             format!("  ·  shares machine \"{}\"", p.host)
+         } else {
+@@ -492,8 +506,7 @@ pub fn fleet(
+         }
+     }
+ 
+-    let co: Vec<&str> =
+-        plan.co_resident().map(|p| p.model_name.as_str()).collect();
++    let co: Vec<&str> = plan.co_resident().map(|p| p.model_name.as_str()).collect();
+     if !co.is_empty() {
+         println!();
+         println!(
+@@ -531,7 +544,9 @@ pub fn launch(cfg: &crate::config::Config, nodes: &[allpaka_core::Node], plan: &
+                 "llama-server -m {} -c {} --port {} --host 0.0.0.0 -a {}",
+                 agent.model.display(),
+                 p.context_tokens,
+-                agent.port.map_or_else(|| "<port>".into(), |v| v.to_string()),
++                agent
++                    .port
++                    .map_or_else(|| "<port>".into(), |v| v.to_string()),
+                 agent.name,
+             );
+             match node.backend {
+@@ -542,9 +557,18 @@ pub fn launch(cfg: &crate::config::Config, nodes: &[allpaka_core::Node], plan: &
+                 Backend::Cpu => cmd.push_str(" -ngl 0"),
+             }
+             if let Some(d) = &agent.draft {
+-                cmd.push_str(&format!(" -md {} --draft-max {}", d.display(), agent.draft_len));
++                cmd.push_str(&format!(
++                    " -md {} --draft-max {}",
++                    d.display(),
++                    agent.draft_len
++                ));
+             }
+-            println!("  # {} - {:.1} tok/s expected on {}", agent.name, p.tokens_per_sec(), p.node_name);
++            println!(
++                "  # {} - {:.1} tok/s expected on {}",
++                agent.name,
++                p.tokens_per_sec(),
++                p.node_name
++            );
+             println!("  {cmd}\n");
+         }
+     }
+diff --git a/crates/allpaka-cli/src/verify.rs b/crates/allpaka-cli/src/verify.rs
+index 87c1bbb..3c19f33 100644
+--- a/crates/allpaka-cli/src/verify.rs
++++ b/crates/allpaka-cli/src/verify.rs
+@@ -17,8 +17,8 @@ use std::path::Path;
+ 
+ /// POST a JSON body over a fresh connection; plain HTTP/1.1, no keep-alive.
+ fn post(addr: &str, path: &str, body: &Value) -> Result<Value> {
+-    let mut stream =
+-        TcpStream::connect(addr).with_context(|| format!("connecting to llama-server at {addr}"))?;
++    let mut stream = TcpStream::connect(addr)
++        .with_context(|| format!("connecting to llama-server at {addr}"))?;
+     let payload = body.to_string();
+     let request = format!(
+         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+@@ -39,7 +39,10 @@ fn post(addr: &str, path: &str, body: &Value) -> Result<Value> {
+     }
+     // With Connection: close the body is everything after the headers, but a
+     // chunked response needs its framing stripped.
+-    let body_text = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
++    let body_text = if head
++        .to_ascii_lowercase()
++        .contains("transfer-encoding: chunked")
++    {
+         dechunk(rest)?
+     } else {
+         rest.to_string()
+@@ -63,7 +66,11 @@ fn dechunk(raw: &str) -> Result<String> {
+ 
+ /// Ask the server to tokenise the prompt, so both engines see identical ids.
+ fn tokenize(addr: &str, prompt: &str) -> Result<Vec<u32>> {
+-    let resp = post(addr, "/tokenize", &json!({ "content": prompt, "add_special": true }))?;
++    let resp = post(
++        addr,
++        "/tokenize",
++        &json!({ "content": prompt, "add_special": true }),
++    )?;
+     resp["tokens"]
+         .as_array()
+         .context("/tokenize returned no tokens array")?
+@@ -101,7 +108,10 @@ fn reference_top(addr: &str, tokens: &[u32], n: usize) -> Result<Vec<(u32, f64)>
+ 
+     let mut out = Vec::with_capacity(probs.len());
+     for p in probs {
+-        let id = p["id"].as_u64().or_else(|| p["tok"].as_u64()).context("prob entry has no id")? as u32;
++        let id = p["id"]
++            .as_u64()
++            .or_else(|| p["tok"].as_u64())
++            .context("prob entry has no id")? as u32;
+         let lp = match (p["logprob"].as_f64(), p["prob"].as_f64()) {
+             (Some(lp), _) => lp,
+             (None, Some(pr)) if pr > 0.0 => pr.ln(),
+@@ -144,7 +154,11 @@ pub fn run(
+         if std::env::var_os("ALLPAKA_PHASES").is_some() {
+             let t = allpaka_model::profile::take();
+             for (i, ns) in t.iter().enumerate() {
+-                eprintln!("  phase {}: {:.3} ms", allpaka_model::profile::NAMES[i], *ns as f64 / 1e6);
++                eprintln!(
++                    "  phase {}: {:.3} ms",
++                    allpaka_model::profile::NAMES[i],
++                    *ns as f64 / 1e6
++                );
+             }
+         }
+         let ours = log_softmax(&logits);
+@@ -167,7 +181,11 @@ pub fn run(
+     // A MoE re-routes on numeric near-ties, so two correct implementations
+     // legitimately drift further apart than two dense ones. llama.cpp's own
+     // Metal and CPU backends disagree by up to ~0.45 on Qwen3-30B-A3B.
+-    let tolerance = tolerance.unwrap_or(if model.config.moe.is_some() { 0.5 } else { 0.15 });
++    let tolerance = tolerance.unwrap_or(if model.config.moe.is_some() {
++        0.5
++    } else {
++        0.15
++    });
+     let mut session = model.new_session(tokens.len() + decode + 1);
+     let t0 = std::time::Instant::now();
+     let logits = model.forward_batch(&tokens, &mut session)?;
+@@ -177,13 +195,18 @@ pub fn run(
+         t0.elapsed().as_secs_f64()
+     );
+     let ours = log_softmax(&logits);
+-    let our_argmax = (0..ours.len()).max_by(|&a, &b| ours[a].total_cmp(&ours[b])).unwrap();
++    let our_argmax = (0..ours.len())
++        .max_by(|&a, &b| ours[a].total_cmp(&ours[b]))
++        .unwrap();
+ 
+     // Reference side.
+     let theirs = reference_top(addr, &tokens, top)?;
+     let (ref_argmax, _) = *theirs.first().context("reference returned no tokens")?;
+ 
+-    println!("\n{:>6}  {:>12}  {:>12}  {:>9}", "token", "llama.cpp", "allpaka", "diff");
++    println!(
++        "\n{:>6}  {:>12}  {:>12}  {:>9}",
++        "token", "llama.cpp", "allpaka", "diff"
++    );
+     let mut max_diff = 0f64;
+     for &(id, ref_lp) in &theirs {
+         let our_lp = ours.get(id as usize).copied().unwrap_or(f64::NEG_INFINITY);
+@@ -200,7 +223,10 @@ pub fn run(
+         );
+     }
+     println!("argmax agrees: token {ref_argmax}");
+-    println!("max |log-prob diff| over the reference's top {}: {max_diff:.4}", theirs.len());
++    println!(
++        "max |log-prob diff| over the reference's top {}: {max_diff:.4}",
++        theirs.len()
++    );
+     if max_diff > tolerance {
+         bail!(
+             "log-prob difference {max_diff:.4} exceeds the tolerance {tolerance}. \
+@@ -227,8 +253,9 @@ pub fn run(
+     let mut worst = 0f64;
+     for step in 0..decode {
+         let ours = log_softmax(&logits);
+-        let our_argmax =
+-            (0..ours.len()).max_by(|&a, &b| ours[a].total_cmp(&ours[b])).unwrap() as u32;
++        let our_argmax = (0..ours.len())
++            .max_by(|&a, &b| ours[a].total_cmp(&ours[b]))
++            .unwrap() as u32;
+         let theirs = reference_top(addr, &context, top)?;
+         let (ref_argmax, ref_top_lp) = *theirs.first().context("reference returned nothing")?;
+ 
+diff --git a/crates/allpaka-cli/tests/plugin_smoke.rs b/crates/allpaka-cli/tests/plugin_smoke.rs
+index 48c3a75..8b011f0 100644
+--- a/crates/allpaka-cli/tests/plugin_smoke.rs
++++ b/crates/allpaka-cli/tests/plugin_smoke.rs
+@@ -31,27 +31,39 @@ fn small_model() -> Option<PathBuf> {
+ }
+ 
+ fn rag_bin() -> Option<PathBuf> {
+-    let p = std::env::var("RAG_MCP_BIN").map(PathBuf::from).unwrap_or_else(|_| {
+-        PathBuf::from("/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp")
+-    });
++    let p = std::env::var("RAG_MCP_BIN")
++        .map(PathBuf::from)
++        .unwrap_or_else(|_| {
++            PathBuf::from("/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp")
++        });
+     p.is_file().then_some(p)
+ }
+ 
+ fn rag_db() -> Option<PathBuf> {
+-    let p = std::env::var("RAG_DB_PATH").map(PathBuf::from).unwrap_or_else(|_| {
+-        PathBuf::from("/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb")
+-    });
++    let p = std::env::var("RAG_DB_PATH")
++        .map(PathBuf::from)
++        .unwrap_or_else(|_| {
++            PathBuf::from("/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb")
++        });
+     p.is_file().then_some(p)
+ }
+ 
+ // ---------- minimal HTTP ----------
+ 
+-fn http(method: &str, path: &str, body: Option<&str>, timeout: Duration) -> std::io::Result<String> {
++fn http(
++    method: &str,
++    path: &str,
++    body: Option<&str>,
++    timeout: Duration,
++) -> std::io::Result<String> {
+     let mut s = TcpStream::connect(HOST)?;
+     s.set_read_timeout(Some(timeout))?;
+     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {HOST}\r\nConnection: close\r\n");
+     if let Some(b) = body {
+-        req += &format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{b}", b.len());
++        req += &format!(
++            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{b}",
++            b.len()
++        );
+     } else {
+         req += "\r\n";
+     }
+@@ -61,7 +73,12 @@ fn http(method: &str, path: &str, body: Option<&str>, timeout: Duration) -> std:
+     Ok(raw)
+ }
+ 
+-fn http_json(method: &str, path: &str, body: Option<&str>, timeout: Duration) -> Option<serde_json_free::Value> {
++fn http_json(
++    method: &str,
++    path: &str,
++    body: Option<&str>,
++    timeout: Duration,
++) -> Option<serde_json_free::Value> {
+     let raw = http(method, path, body, timeout).ok()?;
+     let json_start = raw.find("\r\n\r\n")? + 4;
+     serde_json_free::parse(&raw[json_start..])
+@@ -150,11 +167,18 @@ mod serde_json_free {
+         fn num(&mut self) -> Option<Value> {
+             let start = self.i;
+             while self.i < self.b.len()
+-                && matches!(self.b[self.i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
++                && matches!(
++                    self.b[self.i],
++                    b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'
++                )
+             {
+                 self.i += 1;
+             }
+-            std::str::from_utf8(&self.b[start..self.i]).ok()?.parse().ok().map(Value::Num)
++            std::str::from_utf8(&self.b[start..self.i])
++                .ok()?
++                .parse()
++                .ok()
++                .map(Value::Num)
+         }
+         fn string(&mut self) -> Option<String> {
+             if self.peek()? != b'"' {
+@@ -174,7 +198,8 @@ mod serde_json_free {
+                             b't' => out.push('\t'),
+                             b'r' => out.push('\r'),
+                             b'u' => {
+-                                let hex = std::str::from_utf8(self.b.get(self.i..self.i + 4)?).ok()?;
++                                let hex =
++                                    std::str::from_utf8(self.b.get(self.i..self.i + 4)?).ok()?;
+                                 let cp = u32::from_str_radix(hex, 16).ok()?;
+                                 self.i += 4;
+                                 out.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
+@@ -187,7 +212,9 @@ mod serde_json_free {
+                         let start = self.i - 1;
+                         let len = utf8_len(c);
+                         let end = (start + len).min(self.b.len());
+-                        out.push_str(std::str::from_utf8(&self.b[start..end]).unwrap_or("\u{fffd}"));
++                        out.push_str(
++                            std::str::from_utf8(&self.b[start..end]).unwrap_or("\u{fffd}"),
++                        );
+                         self.i = end;
+                     }
+                 }
+@@ -282,7 +309,10 @@ impl Serve {
+             cmd.env(k, v);
+         }
+         let child = cmd.spawn().ok()?;
+-        let s = Serve { child, _permit: permit };
++        let s = Serve {
++            child,
++            _permit: permit,
++        };
+         let deadline = Instant::now() + HEALTH_TIMEOUT;
+         while Instant::now() < deadline {
+             if http("GET", "/health", None, Duration::from_secs(2)).is_ok() {
+@@ -326,7 +356,8 @@ fn rag_loop_round2() -> (f64, String) {
+         .and_then(|p| p.as_f64())
+         .unwrap_or(0.0);
+     let answer = rag
+-        .get("choices").and_then(|c| c.as_arr())
++        .get("choices")
++        .and_then(|c| c.as_arr())
+         .and_then(|a| a.first())
+         .and_then(|c| c.get("message"))
+         .and_then(|m| m.get("content"))
+@@ -344,14 +375,23 @@ fn engine_health_stats_chat_and_rag_loop() {
+     };
+ 
+     let stats = http_json("GET", "/stats", None, Duration::from_secs(5)).expect("/stats JSON");
+-    assert!(stats.get("model").and_then(|m| m.as_str()).is_some(), "stats has model");
++    assert!(
++        stats.get("model").and_then(|m| m.as_str()).is_some(),
++        "stats has model"
++    );
+     println!("stats model = {:?}", stats.get("model"));
+ 
+     let chat_body = r#"{"model":"qwen3","max_tokens":40,"messages":[{"role":"user","content":"Say PONG only."}]}"#;
+-    let chat = http_json("POST", "/v1/chat/completions", Some(chat_body), CHAT_TIMEOUT)
+-        .expect("chat JSON");
++    let chat = http_json(
++        "POST",
++        "/v1/chat/completions",
++        Some(chat_body),
++        CHAT_TIMEOUT,
++    )
++    .expect("chat JSON");
+     let content = chat
+-        .get("choices").and_then(|c| c.as_arr())
++        .get("choices")
++        .and_then(|c| c.as_arr())
+         .and_then(|a| a.first())
+         .and_then(|c| c.get("message"))
+         .and_then(|m| m.get("content"))
+@@ -360,10 +400,16 @@ fn engine_health_stats_chat_and_rag_loop() {
+     assert!(!content.trim().is_empty(), "chat returns content");
+ 
+     let (prompt_tokens, answer) = rag_loop_round2();
+-    assert!(prompt_tokens > 500.0, "RAG tool-loop ran (round-2 prompt = {prompt_tokens})");
++    assert!(
++        prompt_tokens > 500.0,
++        "RAG tool-loop ran (round-2 prompt = {prompt_tokens})"
++    );
+     // Citing ".md" file names in prose is the model's wording choice; the
+     // loop itself is what this test asserts.
+-    assert!(!answer.trim().is_empty(), "non-empty answer after the tool-loop");
++    assert!(
++        !answer.trim().is_empty(),
++        "non-empty answer after the tool-loop"
++    );
+ }
+ 
+ /// With ALLPAKA_RAG_BACKEND=mcp the tool-loop must be served by rag-mcp's
+@@ -380,9 +426,15 @@ fn engine_rag_backend_mcp() {
+         return;
+     };
+     let (prompt_tokens, answer) = rag_loop_round2();
+-    assert!(prompt_tokens > 500.0, "tool-loop via rag-mcp (prompt = {prompt_tokens})");
++    assert!(
++        prompt_tokens > 500.0,
++        "tool-loop via rag-mcp (prompt = {prompt_tokens})"
++    );
+     assert!(!answer.trim().is_empty(), "non-empty answer via rag-mcp");
+-    assert!(!answer.contains("rag-mcp backend is unavailable"), "mcp backend actually served");
++    assert!(
++        !answer.contains("rag-mcp backend is unavailable"),
++        "mcp backend actually served"
++    );
+ }
+ 
+ /// Same forced backend, but the binary is gone: the tool must report the
+@@ -397,8 +449,16 @@ fn engine_rag_backend_mcp_missing() {
+         return;
+     };
+     let chat_body = r#"{"model":"qwen3","max_tokens":40,"messages":[{"role":"user","content":"Say PONG only."}]}"#;
+-    assert!(http_json("POST", "/v1/chat/completions", Some(chat_body), CHAT_TIMEOUT).is_some(),
+-        "server answers plain chat without the mcp backend");
++    assert!(
++        http_json(
++            "POST",
++            "/v1/chat/completions",
++            Some(chat_body),
++            CHAT_TIMEOUT
++        )
++        .is_some(),
++        "server answers plain chat without the mcp backend"
++    );
+ }
+ 
+ /// Auto backend with a broken rag-mcp must degrade to the grep directory
+@@ -413,8 +473,14 @@ fn engine_rag_backend_auto_fallback() {
+         return;
+     };
+     let (prompt_tokens, answer) = rag_loop_round2();
+-    assert!(prompt_tokens > 500.0, "grep fallback runs the loop (prompt = {prompt_tokens})");
+-    assert!(!answer.trim().is_empty(), "non-empty answer via grep fallback");
++    assert!(
++        prompt_tokens > 500.0,
++        "grep fallback runs the loop (prompt = {prompt_tokens})"
++    );
++    assert!(
++        !answer.trim().is_empty(),
++        "non-empty answer via grep fallback"
++    );
+ }
+ 
+ #[test]
+@@ -469,37 +535,66 @@ fn rag_mcp_stdio_search() {
+         None
+     };
+ 
+-    send(&mut stdin, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#);
++    send(
++        &mut stdin,
++        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
++    );
+     let init = wait_for(1, Duration::from_secs(30)).expect("initialize reply");
+     assert_eq!(
+-        init.get("serverInfo").and_then(|s| s.get("name")).and_then(|n| n.as_str()),
++        init.get("serverInfo")
++            .and_then(|s| s.get("name"))
++            .and_then(|n| n.as_str()),
+         Some("rag-mcp")
+     );
+ 
+-    send(&mut stdin, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
++    send(
++        &mut stdin,
++        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
++    );
+     thread::sleep(Duration::from_millis(500));
+ 
+-    send(&mut stdin, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
++    send(
++        &mut stdin,
++        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
++    );
+     let tools = wait_for(2, Duration::from_secs(30)).expect("tools/list reply");
+     let names: Vec<&str> = tools
+         .get("tools")
+         .and_then(|t| t.as_arr())
+-        .map(|a| a.iter().filter_map(|t| t.get("name").and_then(|n| n.as_str())).collect())
++        .map(|a| {
++            a.iter()
++                .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
++                .collect()
++        })
+         .unwrap_or_default();
+     println!("rag-mcp tools ({}): {:?}", names.len(), names);
+-    for need in ["search", "search_wiki", "query_with_index", "pack_context", "get_document"] {
++    for need in [
++        "search",
++        "search_wiki",
++        "query_with_index",
++        "pack_context",
++        "get_document",
++    ] {
+         assert!(names.contains(&need), "missing tool: {need}");
+     }
+ 
+-    send(&mut stdin, r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"metal","mode":"lex"}}}"#);
++    send(
++        &mut stdin,
++        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"metal","mode":"lex"}}}"#,
++    );
+     let res = wait_for(3, Duration::from_secs(30)).expect("search reply");
+     let text = res
+-        .get("content").and_then(|c| c.as_arr())
++        .get("content")
++        .and_then(|c| c.as_arr())
+         .and_then(|a| a.first())
+         .and_then(|c| c.get("text"))
+         .and_then(|t| t.as_str())
+         .unwrap_or("");
+-    assert!(text.contains("document_title"), "search returns real hits: {}", &text[..text.len().min(150)]);
++    assert!(
++        text.contains("document_title"),
++        "search returns real hits: {}",
++        &text[..text.len().min(150)]
++    );
+ 
+     drop(stdin);
+     let _ = child.wait();
+diff --git a/crates/allpaka-core/src/fabric.rs b/crates/allpaka-core/src/fabric.rs
+index 274d25d..00f64dd 100644
+--- a/crates/allpaka-core/src/fabric.rs
++++ b/crates/allpaka-core/src/fabric.rs
+@@ -27,7 +27,10 @@ impl Fabric {
+ 
+     /// A cluster where every pair shares one measured link.
+     pub fn uniform(link: Link) -> Self {
+-        Self { edges: Vec::new(), fallback: Some(link) }
++        Self {
++            edges: Vec::new(),
++            fallback: Some(link),
++        }
+     }
+ 
+     pub fn with_fallback(mut self, link: Link) -> Self {
+@@ -75,7 +78,11 @@ mod tests {
+     use super::*;
+ 
+     fn link(mbps: f64) -> Link {
+-        Link { throughput_bytes_per_sec: mbps * 1e6, rtt_p50_secs: 0.001, rtt_p99_secs: 0.002 }
++        Link {
++            throughput_bytes_per_sec: mbps * 1e6,
++            rtt_p50_secs: 0.001,
++            rtt_p99_secs: 0.002,
++        }
+     }
+ 
+     #[test]
+@@ -96,14 +103,18 @@ mod tests {
+ 
+     #[test]
+     fn a_fallback_covers_unmeasured_pairs_only() {
+-        let f = Fabric::new().connect(0, 1, link(1200.0)).with_fallback(link(40.0));
++        let f = Fabric::new()
++            .connect(0, 1, link(1200.0))
++            .with_fallback(link(40.0));
+         assert_eq!(f.between(0, 1).unwrap().throughput_bytes_per_sec, 1200e6);
+         assert_eq!(f.between(0, 2).unwrap().throughput_bytes_per_sec, 40e6);
+     }
+ 
+     #[test]
+     fn reconnecting_a_pair_replaces_the_old_measurement() {
+-        let f = Fabric::new().connect(0, 1, link(40.0)).connect(1, 0, link(1200.0));
++        let f = Fabric::new()
++            .connect(0, 1, link(40.0))
++            .connect(1, 0, link(1200.0));
+         assert_eq!(f.edges().count(), 1);
+         assert_eq!(f.between(0, 1).unwrap().throughput_bytes_per_sec, 1200e6);
+     }
+diff --git a/crates/allpaka-core/src/fleet.rs b/crates/allpaka-core/src/fleet.rs
+index 123647e..8edf907 100644
+--- a/crates/allpaka-core/src/fleet.rs
++++ b/crates/allpaka-core/src/fleet.rs
+@@ -201,7 +201,11 @@ pub fn fleet(members: &[FleetMember], nodes: &[Node]) -> Result<FleetPlan, Strin
+         let mut row = Vec::with_capacity(nodes.len());
+         for (ni, node) in nodes.iter().enumerate() {
+             let allowed = member.pin.is_none_or(|p| p == ni);
+-            row.push(if allowed { place(mi, member, ni, node) } else { None });
++            row.push(if allowed {
++                place(mi, member, ni, node)
++            } else {
++                None
++            });
+         }
+         options.push(row);
+     }
+@@ -217,8 +221,8 @@ pub fn fleet(members: &[FleetMember], nodes: &[Node]) -> Result<FleetPlan, Strin
+ 
+ /// Memory an agent needs on whichever pool hosts it.
+ pub fn required_bytes(m: &FleetMember) -> u64 {
+-    let mut need = m.model.total_weight_bytes
+-        + m.model.kv_bytes(m.model.n_layers, m.context_tokens);
++    let mut need =
++        m.model.total_weight_bytes + m.model.kv_bytes(m.model.n_layers, m.context_tokens);
+     if let Some(s) = &m.speculation {
+         need += s.draft_weight_bytes;
+     }
+@@ -239,7 +243,10 @@ fn search(
+         // Co-residency is a property of the whole assignment, not of one pair,
+         // so it can only be charged once the candidate is complete.
+         charge_co_residency(&mut placements, nodes);
+-        let candidate = FleetPlan { placements, unplaced: Vec::new() };
++        let candidate = FleetPlan {
++            placements,
++            unplaced: Vec::new(),
++        };
+         if candidate.better_than(best) {
+             *best = candidate;
+         }
+@@ -390,10 +397,17 @@ mod tests {
+     /// the rest arrange themselves around it.
+     #[test]
+     fn a_constrained_model_takes_the_only_pool_that_holds_it() {
+-        let plan = fleet(&[member("big", 80), member("small", 10)], &[mac(), gpu(), ram()])
+-            .unwrap();
++        let plan = fleet(
++            &[member("big", 80), member("small", 10)],
++            &[mac(), gpu(), ram()],
++        )
++        .unwrap();
+         assert_eq!(plan.endpoints(), 2);
+-        let big = plan.placements.iter().find(|p| p.model_name == "big").unwrap();
++        let big = plan
++            .placements
++            .iter()
++            .find(|p| p.model_name == "big")
++            .unwrap();
+         assert_eq!(big.node_name, "mac");
+     }
+ 
+@@ -401,9 +415,16 @@ mod tests {
+     /// rather than on system RAM, because that is where it is fastest.
+     #[test]
+     fn a_small_model_is_given_the_fastest_free_pool() {
+-        let plan = fleet(&[member("big", 80), member("small", 10)], &[mac(), gpu(), ram()])
++        let plan = fleet(
++            &[member("big", 80), member("small", 10)],
++            &[mac(), gpu(), ram()],
++        )
++        .unwrap();
++        let small = plan
++            .placements
++            .iter()
++            .find(|p| p.model_name == "small")
+             .unwrap();
+-        let small = plan.placements.iter().find(|p| p.model_name == "small").unwrap();
+         assert_eq!(small.node_name, "pc-gpu");
+     }
+ 
+@@ -411,17 +432,23 @@ mod tests {
+     /// agents placed slightly faster.
+     #[test]
+     fn placing_every_model_wins_over_placing_fewer_of_them_faster() {
+-        let plan =
+-            fleet(&[member("a", 10), member("b", 10), member("c", 10)], &[mac(), gpu(), ram()])
+-                .unwrap();
++        let plan = fleet(
++            &[member("a", 10), member("b", 10), member("c", 10)],
++            &[mac(), gpu(), ram()],
++        )
++        .unwrap();
+         assert_eq!(plan.endpoints(), 3, "all three should be placed");
+         assert!(plan.unplaced.is_empty());
+     }
+ 
+     #[test]
+     fn one_pool_holds_at_most_one_model() {
+-        let members =
+-            [member("a", 10), member("b", 10), member("c", 10), member("d", 10)];
++        let members = [
++            member("a", 10),
++            member("b", 10),
++            member("c", 10),
++            member("d", 10),
++        ];
+         let plan = fleet(&members, &[mac(), gpu()]).unwrap();
+         assert_eq!(plan.endpoints(), 2);
+         assert_eq!(plan.unplaced.len(), 2);
+@@ -471,10 +498,23 @@ mod tests {
+         long.context_tokens = 65536;
+ 
+         let plan = fleet(&[short, long], &[mac(), gpu()]).unwrap();
+-        let t = plan.placements.iter().find(|p| p.model_name == "tools").unwrap();
+-        let r = plan.placements.iter().find(|p| p.model_name == "reasoner").unwrap();
++        let t = plan
++            .placements
++            .iter()
++            .find(|p| p.model_name == "tools")
++            .unwrap();
++        let r = plan
++            .placements
++            .iter()
++            .find(|p| p.model_name == "reasoner")
++            .unwrap();
+         assert_eq!(t.context_tokens, 4096);
+-        assert!(r.kv_bytes > t.kv_bytes * 8, "{} vs {}", r.kv_bytes, t.kv_bytes);
++        assert!(
++            r.kv_bytes > t.kv_bytes * 8,
++            "{} vs {}",
++            r.kv_bytes,
++            t.kv_bytes
++        );
+     }
+ 
+     /// A pin overrides the optimiser, even when it costs throughput.
+@@ -483,7 +523,11 @@ mod tests {
+         let mut small = member("small", 10);
+         small.pin = Some(2); // system RAM, far from optimal
+         let plan = fleet(&[small, member("other", 10)], &[mac(), gpu(), ram()]).unwrap();
+-        let s = plan.placements.iter().find(|p| p.model_name == "small").unwrap();
++        let s = plan
++            .placements
++            .iter()
++            .find(|p| p.model_name == "small")
++            .unwrap();
+         assert_eq!(s.node_name, "pc-ram");
+         assert!(s.pinned);
+     }
+@@ -538,24 +582,33 @@ mod tests {
+     /// Reporting it as three machines is the lie this exists to stop.
+     #[test]
+     fn endpoints_and_machines_are_counted_separately() {
+-        let plan =
+-            fleet(&[member("a", 10), member("b", 10), member("c", 10)], &[mac(), gpu(), ram()])
+-                .unwrap();
++        let plan = fleet(
++            &[member("a", 10), member("b", 10), member("c", 10)],
++            &[mac(), gpu(), ram()],
++        )
++        .unwrap();
+         assert_eq!(plan.endpoints(), 3);
+         assert_eq!(plan.machines(), 2, "pc-gpu and pc-ram are one desktop");
+     }
+ 
+     #[test]
+     fn agents_sharing_a_desktop_are_marked_co_resident() {
+-        let plan =
+-            fleet(&[member("a", 10), member("b", 10), member("c", 10)], &[mac(), gpu(), ram()])
+-                .unwrap();
+-        let names: Vec<&str> =
+-            plan.co_resident().map(|p| p.node_name.as_str()).collect();
++        let plan = fleet(
++            &[member("a", 10), member("b", 10), member("c", 10)],
++            &[mac(), gpu(), ram()],
++        )
++        .unwrap();
++        let names: Vec<&str> = plan.co_resident().map(|p| p.node_name.as_str()).collect();
+         assert_eq!(names.len(), 2, "got {names:?}");
+-        assert!(names.contains(&"pc-gpu") && names.contains(&"pc-ram"), "got {names:?}");
+-        let mac_placement =
+-            plan.placements.iter().find(|p| p.node_name == "mac").unwrap();
++        assert!(
++            names.contains(&"pc-gpu") && names.contains(&"pc-ram"),
++            "got {names:?}"
++        );
++        let mac_placement = plan
++            .placements
++            .iter()
++            .find(|p| p.node_name == "mac")
++            .unwrap();
+         assert!(!mac_placement.co_resident, "the Mac is on its own");
+     }
+ 
+@@ -584,8 +637,7 @@ mod tests {
+         assert_eq!(shared.machines(), 1);
+         assert_eq!(separate.machines(), 2);
+         assert!(
+-            (shared.aggregate_tokens_per_sec() - separate.aggregate_tokens_per_sec()).abs()
+-                < 1e-9
++            (shared.aggregate_tokens_per_sec() - separate.aggregate_tokens_per_sec()).abs() < 1e-9
+         );
+     }
+ 
+@@ -596,8 +648,7 @@ mod tests {
+         let mut g = gpu();
+         g.contention = 0.5;
+         let free = fleet(&[member("solo", 10)], &[g.clone()]).unwrap();
+-        let crowded =
+-            fleet(&[member("solo", 10), member("other", 10)], &[g, ram()]).unwrap();
++        let crowded = fleet(&[member("solo", 10), member("other", 10)], &[g, ram()]).unwrap();
+ 
+         let alone = free.placements[0].secs_per_token;
+         let shared = crowded
+diff --git a/crates/allpaka-core/src/lib.rs b/crates/allpaka-core/src/lib.rs
+index f88fee1..7cabb0e 100644
+--- a/crates/allpaka-core/src/lib.rs
++++ b/crates/allpaka-core/src/lib.rs
+@@ -19,9 +19,9 @@ pub mod speculation;
+ 
+ pub use fabric::Fabric;
+ pub use fleet::{fleet, FleetPlan, Placement};
+-pub use replicate::{replicate, Replica, ReplicaPlan};
+-pub use speculation::{SpeculativeCost, Speculation};
+ pub use link::Link;
+ pub use model::Model;
+ pub use node::{Backend, Node};
+ pub use plan::{gib, plan, Plan, PlanRequest, Stage, Verdict};
++pub use replicate::{replicate, Replica, ReplicaPlan};
++pub use speculation::{Speculation, SpeculativeCost};
+diff --git a/crates/allpaka-core/src/link.rs b/crates/allpaka-core/src/link.rs
+index 21944dc..bff9bf9 100644
+--- a/crates/allpaka-core/src/link.rs
++++ b/crates/allpaka-core/src/link.rs
+@@ -87,7 +87,11 @@ mod tests {
+ 
+     #[test]
+     fn a_dead_link_costs_infinity_rather_than_dividing_by_zero() {
+-        let l = Link { throughput_bytes_per_sec: 0.0, rtt_p50_secs: 1.0, rtt_p99_secs: 1.0 };
++        let l = Link {
++            throughput_bytes_per_sec: 0.0,
++            rtt_p50_secs: 1.0,
++            rtt_p99_secs: 1.0,
++        };
+         assert!(l.one_way_p99(1).is_infinite());
+     }
+ }
+diff --git a/crates/allpaka-core/src/model.rs b/crates/allpaka-core/src/model.rs
+index 50f1994..6d0d34f 100644
+--- a/crates/allpaka-core/src/model.rs
++++ b/crates/allpaka-core/src/model.rs
+@@ -155,6 +155,9 @@ mod tests {
+         let streamed = m.streamed_bytes_per_step(m.n_layers, 32768);
+         let weights_only = m.active_bytes_for_layers(m.n_layers);
+         assert_eq!(streamed - weights_only, m.kv_bytes(m.n_layers, 32768));
+-        assert!(streamed > weights_only * 2, "KV should dominate a sparse step here");
++        assert!(
++            streamed > weights_only * 2,
++            "KV should dominate a sparse step here"
++        );
+     }
+ }
+diff --git a/crates/allpaka-core/src/plan.rs b/crates/allpaka-core/src/plan.rs
+index 4228b32..b63570d 100644
+--- a/crates/allpaka-core/src/plan.rs
++++ b/crates/allpaka-core/src/plan.rs
+@@ -54,7 +54,7 @@
+ //! pipeline changes the answer, so the planner tries every ordering rather than
+ //! trusting the order nodes appear in the config.
+ 
+-use crate::speculation::{SpeculativeCost, Speculation};
++use crate::speculation::{Speculation, SpeculativeCost};
+ use crate::{Fabric, Model, Node};
+ 
+ /// One machine's share of the pipeline.
+@@ -163,7 +163,10 @@ pub enum Verdict {
+     /// Splitting is both possible and faster than any single machine.
+     SplitWins { plan: Plan, single_node: Plan },
+     /// A single machine holds the whole model and is faster. Use it.
+-    UseSingleNode { plan: Plan, best_split: Option<Plan> },
++    UseSingleNode {
++        plan: Plan,
++        best_split: Option<Plan>,
++    },
+     /// No single machine can hold the model. Splitting is the only option.
+     SplitRequired { plan: Plan },
+     /// Nothing fits, split or not.
+@@ -180,7 +183,11 @@ pub struct PlanRequest {
+ 
+ impl Default for PlanRequest {
+     fn default() -> Self {
+-        Self { context_tokens: 8192, prompt_tokens: 2048, speculation: None }
++        Self {
++            context_tokens: 8192,
++            prompt_tokens: 2048,
++            speculation: None,
++        }
+     }
+ }
+ 
+@@ -196,10 +203,14 @@ const MAX_NODES_FOR_PERMUTATION: usize = 6;
+ 
+ pub fn plan(nodes: &[Node], model: &Model, fabric: &Fabric, req: &PlanRequest) -> Verdict {
+     if nodes.is_empty() {
+-        return Verdict::Infeasible { reason: "no nodes configured".into() };
++        return Verdict::Infeasible {
++            reason: "no nodes configured".into(),
++        };
+     }
+     if model.n_layers == 0 {
+-        return Verdict::Infeasible { reason: "model has zero layers".into() };
++        return Verdict::Infeasible {
++            reason: "model has zero layers".into(),
++        };
+     }
+     if nodes.len() > MAX_NODES_FOR_PERMUTATION {
+         return Verdict::Infeasible {
+@@ -215,10 +226,14 @@ pub fn plan(nodes: &[Node], model: &Model, fabric: &Fabric, req: &PlanRequest) -
+     let split = best_split(nodes, model, fabric, req);
+ 
+     match (single, split) {
+-        (Some(s), Some(sp)) if sp.secs_per_token() < s.secs_per_token() => {
+-            Verdict::SplitWins { plan: sp, single_node: s }
+-        }
+-        (Some(s), best_split) => Verdict::UseSingleNode { plan: s, best_split },
++        (Some(s), Some(sp)) if sp.secs_per_token() < s.secs_per_token() => Verdict::SplitWins {
++            plan: sp,
++            single_node: s,
++        },
++        (Some(s), best_split) => Verdict::UseSingleNode {
++            plan: s,
++            best_split,
++        },
+         (None, Some(sp)) => Verdict::SplitRequired { plan: sp },
+         (None, None) => Verdict::Infeasible {
+             reason: format!(
+@@ -262,7 +277,10 @@ fn best_split(nodes: &[Node], model: &Model, fabric: &Fabric, req: &PlanRequest)
+                 return;
+             }
+             if let Some(p) = build_plan(&dense, nodes, model, fabric, req) {
+-                if best.as_ref().is_none_or(|b| p.secs_per_token() < b.secs_per_token()) {
++                if best
++                    .as_ref()
++                    .is_none_or(|b| p.secs_per_token() < b.secs_per_token())
++                {
+                     best = Some(p);
+                 }
+             }
+@@ -360,7 +378,9 @@ fn build_plan(
+         // The sampled tokens return from the tail of the pipeline to the head.
+         let tail = stages.last().unwrap().node_index;
+         let head = stages[0].node_index;
+-        total += fabric.between(tail, head)?.one_way_p99(RETURN_PAYLOAD_BYTES * batch as u64);
++        total += fabric
++            .between(tail, head)?
++            .one_way_p99(RETURN_PAYLOAD_BYTES * batch as u64);
+         Some(total)
+     };
+ 
+@@ -456,17 +476,32 @@ mod tests {
+     }
+ 
+     fn wifi() -> Link {
+-        Link { throughput_bytes_per_sec: 40e6, rtt_p50_secs: 0.004, rtt_p99_secs: 0.030 }
++        Link {
++            throughput_bytes_per_sec: 40e6,
++            rtt_p50_secs: 0.004,
++            rtt_p99_secs: 0.030,
++        }
+     }
+ 
+     fn ten_gbe() -> Link {
+-        Link { throughput_bytes_per_sec: 1.1e9, rtt_p50_secs: 0.00015, rtt_p99_secs: 0.0004 }
++        Link {
++            throughput_bytes_per_sec: 1.1e9,
++            rtt_p50_secs: 0.00015,
++            rtt_p99_secs: 0.0004,
++        }
+     }
+ 
+     #[test]
+     fn single_node_has_no_network_cost() {
+-        let v = plan(&[mac()], &model_60gib(), &Fabric::uniform(wifi()), &PlanRequest::default());
+-        let Verdict::UseSingleNode { plan, .. } = v else { panic!("expected single node") };
++        let v = plan(
++            &[mac()],
++            &model_60gib(),
++            &Fabric::uniform(wifi()),
++            &PlanRequest::default(),
++        );
++        let Verdict::UseSingleNode { plan, .. } = v else {
++            panic!("expected single node")
++        };
+         assert_eq!(plan.stages.len(), 1);
+         assert_eq!(plan.network_secs_per_token, 0.0);
+     }
+@@ -474,7 +509,11 @@ mod tests {
+     /// A link bad enough that the round trip outweighs the compute the split
+     /// saves. Congested Wi-Fi and anything routed over a VPN land here.
+     fn congested_wifi() -> Link {
+-        Link { throughput_bytes_per_sec: 20e6, rtt_p50_secs: 0.030, rtt_p99_secs: 0.120 }
++        Link {
++            throughput_bytes_per_sec: 20e6,
++            rtt_p50_secs: 0.030,
++            rtt_p99_secs: 0.120,
++        }
+     }
+ 
+     /// The decision rule in one test: a split wins exactly when the network
+@@ -517,10 +556,15 @@ mod tests {
+         let req = PlanRequest::default();
+ 
+         let slow = plan(&nodes, &m, &Fabric::uniform(congested_wifi()), &req);
+-        assert!(matches!(slow, Verdict::UseSingleNode { .. }), "got {slow:?}");
++        assert!(
++            matches!(slow, Verdict::UseSingleNode { .. }),
++            "got {slow:?}"
++        );
+ 
+         let fast = plan(&nodes, &m, &Fabric::uniform(ten_gbe()), &req);
+-        let Verdict::SplitWins { plan, single_node } = fast else { panic!("got {fast:?}") };
++        let Verdict::SplitWins { plan, single_node } = fast else {
++            panic!("got {fast:?}")
++        };
+         assert!(plan.secs_per_token() < single_node.secs_per_token());
+         assert!(
+             plan.network_overhead_fraction() < 0.05,
+@@ -533,8 +577,11 @@ mod tests {
+     /// bandwidth. A high-throughput but laggy path stays a bad path.
+     #[test]
+     fn throughput_without_low_latency_does_not_help_decode() {
+-        let laggy =
+-            Link { throughput_bytes_per_sec: 1.1e9, rtt_p50_secs: 0.100, rtt_p99_secs: 0.150 };
++        let laggy = Link {
++            throughput_bytes_per_sec: 1.1e9,
++            rtt_p50_secs: 0.100,
++            rtt_p99_secs: 0.150,
++        };
+         let v = plan(
+             &[mac(), pc()],
+             &model_60gib(),
+@@ -564,7 +611,10 @@ mod tests {
+             panic!("expected a split, got {v:?}")
+         };
+         let used: Vec<usize> = plan.stages.iter().map(|s| s.node_index).collect();
+-        assert!(!used.contains(&2), "the Wi-Fi-attached laptop should be left out: {used:?}");
++        assert!(
++            !used.contains(&2),
++            "the Wi-Fi-attached laptop should be left out: {used:?}"
++        );
+     }
+ 
+     #[test]
+@@ -581,8 +631,15 @@ mod tests {
+     fn split_is_required_when_nothing_holds_the_whole_model() {
+         let mut m = model_60gib();
+         m.total_weight_bytes = 100 << 30;
+-        let v = plan(&[mac(), pc()], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
+-        let Verdict::SplitRequired { plan } = v else { panic!("expected a forced split, got {v:?}") };
++        let v = plan(
++            &[mac(), pc()],
++            &m,
++            &Fabric::uniform(ten_gbe()),
++            &PlanRequest::default(),
++        );
++        let Verdict::SplitRequired { plan } = v else {
++            panic!("expected a forced split, got {v:?}")
++        };
+         assert_eq!(plan.stages.len(), 2);
+     }
+ 
+@@ -590,7 +647,12 @@ mod tests {
+     fn oversized_model_is_reported_infeasible() {
+         let mut m = model_60gib();
+         m.total_weight_bytes = 400 << 30;
+-        let v = plan(&[mac(), pc()], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
++        let v = plan(
++            &[mac(), pc()],
++            &m,
++            &Fabric::uniform(ten_gbe()),
++            &PlanRequest::default(),
++        );
+         assert!(matches!(v, Verdict::Infeasible { .. }));
+     }
+ 
+@@ -598,8 +660,15 @@ mod tests {
+     fn layers_are_conserved_and_contiguous_across_stages() {
+         let mut m = model_60gib();
+         m.total_weight_bytes = 100 << 30;
+-        let v = plan(&[mac(), pc()], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
+-        let Verdict::SplitRequired { plan } = v else { panic!() };
++        let v = plan(
++            &[mac(), pc()],
++            &m,
++            &Fabric::uniform(ten_gbe()),
++            &PlanRequest::default(),
++        );
++        let Verdict::SplitRequired { plan } = v else {
++            panic!()
++        };
+         let mut next = 0;
+         for s in &plan.stages {
+             assert_eq!(s.first_layer, next);
+@@ -613,8 +682,15 @@ mod tests {
+         let mut m = model_60gib();
+         m.total_weight_bytes = 100 << 30;
+         let nodes = [mac(), pc()];
+-        let v = plan(&nodes, &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
+-        let Verdict::SplitRequired { plan } = v else { panic!() };
++        let v = plan(
++            &nodes,
++            &m,
++            &Fabric::uniform(ten_gbe()),
++            &PlanRequest::default(),
++        );
++        let Verdict::SplitRequired { plan } = v else {
++            panic!()
++        };
+         for s in &plan.stages {
+             assert!(s.resident_bytes() <= nodes[s.node_index].usable_bytes);
+         }
+@@ -623,7 +699,11 @@ mod tests {
+     fn draft(k: u32, a: f64) -> Speculation {
+         // A ~2 GiB draft against a 60 GiB target: roughly a thirtieth the size,
+         // so a draft step is roughly a thirtieth of a verify step.
+-        Speculation { draft_weight_bytes: 2 << 30, draft_tokens: k, acceptance_rate: a }
++        Speculation {
++            draft_weight_bytes: 2 << 30,
++            draft_tokens: k,
++            acceptance_rate: a,
++        }
+     }
+ 
+     /// A fire-and-forget hop costs one-way latency, and a two-stage pipeline
+@@ -634,8 +714,15 @@ mod tests {
+         let mut m = model_60gib();
+         m.total_weight_bytes = 100 << 30;
+         let link = ten_gbe();
+-        let v = plan(&[mac(), pc()], &m, &Fabric::uniform(link.clone()), &PlanRequest::default());
+-        let Verdict::SplitRequired { plan } = v else { panic!() };
++        let v = plan(
++            &[mac(), pc()],
++            &m,
++            &Fabric::uniform(link.clone()),
++            &PlanRequest::default(),
++        );
++        let Verdict::SplitRequired { plan } = v else {
++            panic!()
++        };
+         // Two one-way hops, plus serialisation of ~10 KB each way.
+         assert!(plan.network_secs_per_token < link.rtt_p99_secs * 1.2);
+         assert!(plan.network_secs_per_token > link.rtt_p99_secs * 0.8);
+@@ -646,7 +733,10 @@ mod tests {
+     fn split_of(v: &Verdict) -> Plan {
+         match v {
+             Verdict::SplitWins { plan, .. } | Verdict::SplitRequired { plan } => plan.clone(),
+-            Verdict::UseSingleNode { best_split: Some(p), .. } => p.clone(),
++            Verdict::UseSingleNode {
++                best_split: Some(p),
++                ..
++            } => p.clone(),
+             other => panic!("no split in {other:?}"),
+         }
+     }
+@@ -660,7 +750,10 @@ mod tests {
+         let fabric = Fabric::uniform(congested_wifi());
+ 
+         let plain = split_of(&plan(&nodes, &m, &fabric, &PlanRequest::default()));
+-        let spec_req = PlanRequest { speculation: Some(draft(4, 0.7)), ..Default::default() };
++        let spec_req = PlanRequest {
++            speculation: Some(draft(4, 0.7)),
++            ..Default::default()
++        };
+         let spec = split_of(&plan(&nodes, &m, &fabric, &spec_req));
+ 
+         assert!(
+@@ -683,10 +776,15 @@ mod tests {
+         let nodes = [mac(), pc()];
+         let m = model_60gib();
+ 
+-        for fabric in [Fabric::uniform(ten_gbe()), Fabric::uniform(congested_wifi())] {
++        for fabric in [
++            Fabric::uniform(ten_gbe()),
++            Fabric::uniform(congested_wifi()),
++        ] {
+             let plain = plan(&nodes, &m, &fabric, &PlanRequest::default());
+-            let spec_req =
+-                PlanRequest { speculation: Some(draft(4, 0.7)), ..Default::default() };
++            let spec_req = PlanRequest {
++                speculation: Some(draft(4, 0.7)),
++                ..Default::default()
++            };
+             let spec = plan(&nodes, &m, &fabric, &spec_req);
+             assert_eq!(
+                 std::mem::discriminant(&plain),
+@@ -708,7 +806,10 @@ mod tests {
+         else {
+             panic!()
+         };
+-        let req = PlanRequest { speculation: Some(draft(4, 0.8)), ..Default::default() };
++        let req = PlanRequest {
++            speculation: Some(draft(4, 0.8)),
++            ..Default::default()
++        };
+         let Verdict::SplitWins { plan: spec, .. } = plan(&nodes, &m, &fabric, &req) else {
+             panic!()
+         };
+@@ -729,9 +830,14 @@ mod tests {
+         let fabric = Fabric::uniform(ten_gbe());
+ 
+         let plain = plan(&nodes, &m, &fabric, &PlanRequest::default());
+-        let Verdict::UseSingleNode { plan: plain, .. } = plain else { panic!() };
++        let Verdict::UseSingleNode { plan: plain, .. } = plain else {
++            panic!()
++        };
+ 
+-        let req = PlanRequest { speculation: Some(draft(8, 0.0)), ..Default::default() };
++        let req = PlanRequest {
++            speculation: Some(draft(8, 0.0)),
++            ..Default::default()
++        };
+         let Verdict::UseSingleNode { plan: spec, .. } = plan(&nodes, &m, &fabric, &req) else {
+             panic!()
+         };
+@@ -756,7 +862,11 @@ mod tests {
+ 
+     /// The PCIe bus inside one box. Microseconds, not milliseconds.
+     fn pcie() -> Link {
+-        Link { throughput_bytes_per_sec: 50e9, rtt_p50_secs: 0.000012, rtt_p99_secs: 0.00003 }
++        Link {
++            throughput_bytes_per_sec: 50e9,
++            rtt_p50_secs: 0.000012,
++            rtt_p99_secs: 0.00003,
++        }
+     }
+ 
+     /// A slow tier must never be used while a faster one has room. Capacity is
+@@ -791,11 +901,26 @@ mod tests {
+         let mut m = model_60gib();
+         m.total_weight_bytes = 170 << 30; // over mac + GPU, under mac + GPU + RAM
+ 
+-        let without = plan(&[mac(), pc()], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
+-        assert!(matches!(without, Verdict::Infeasible { .. }), "got {without:?}");
++        let without = plan(
++            &[mac(), pc()],
++            &m,
++            &Fabric::uniform(ten_gbe()),
++            &PlanRequest::default(),
++        );
++        assert!(
++            matches!(without, Verdict::Infeasible { .. }),
++            "got {without:?}"
++        );
+ 
+-        let with = plan(&[mac(), pc(), pc_ram()], &m, &fabric, &PlanRequest::default());
+-        let Verdict::SplitRequired { plan } = with else { panic!("got {with:?}") };
++        let with = plan(
++            &[mac(), pc(), pc_ram()],
++            &m,
++            &fabric,
++            &PlanRequest::default(),
++        );
++        let Verdict::SplitRequired { plan } = with else {
++            panic!("got {with:?}")
++        };
+         assert!(plan.stages.iter().any(|s| s.node_name == "pc-ram"));
+     }
+ 
+@@ -810,12 +935,19 @@ mod tests {
+         let mut m = model_60gib();
+         m.total_weight_bytes = 170 << 30;
+ 
+-        let Verdict::SplitRequired { plan } =
+-            plan(&[mac(), pc(), pc_ram()], &m, &fabric, &PlanRequest::default())
+-        else {
++        let Verdict::SplitRequired { plan } = plan(
++            &[mac(), pc(), pc_ram()],
++            &m,
++            &fabric,
++            &PlanRequest::default(),
++        ) else {
+             panic!()
+         };
+-        let ram_stage = plan.stages.iter().find(|s| s.node_name == "pc-ram").unwrap();
++        let ram_stage = plan
++            .stages
++            .iter()
++            .find(|s| s.node_name == "pc-ram")
++            .unwrap();
+         assert!(
+             ram_stage.compute_secs > plan.compute_secs_per_token * 0.5,
+             "the RAM stage should dominate: {:.1} of {:.1} ms",
+@@ -828,9 +960,7 @@ mod tests {
+     /// planner should not hesitate to cut between VRAM and system RAM.
+     #[test]
+     fn the_pcie_hop_costs_almost_nothing() {
+-        let fabric = Fabric::new()
+-            .connect(0, 1, pcie())
+-            .with_fallback(ten_gbe());
++        let fabric = Fabric::new().connect(0, 1, pcie()).with_fallback(ten_gbe());
+         let mut m = model_60gib();
+         m.total_weight_bytes = 70 << 30;
+         let Verdict::SplitRequired { plan } =
+@@ -870,7 +1000,10 @@ mod tests {
+         // dense - no router skips it - so the ratio floors above the raw 0.1.
+         let expected = sparse.streamed_bytes_per_step(sparse.n_layers, req.context_tokens) as f64
+             / dense.streamed_bytes_per_step(dense.n_layers, req.context_tokens) as f64;
+-        assert!(expected > 0.1, "the KV term should keep this above the weight fraction");
++        assert!(
++            expected > 0.1,
++            "the KV term should keep this above the weight fraction"
++        );
+         let ratio = sp.compute_secs_per_token / d.compute_secs_per_token;
+         assert!((ratio - expected).abs() < 1e-9, "{ratio} vs {expected}");
+     }
+@@ -881,7 +1014,12 @@ mod tests {
+         let mut sparse = model_60gib();
+         sparse.total_weight_bytes = 400 << 30;
+         sparse.active_weight_fraction = 0.05;
+-        let v = plan(&[mac(), pc()], &sparse, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
++        let v = plan(
++            &[mac(), pc()],
++            &sparse,
++            &Fabric::uniform(ten_gbe()),
++            &PlanRequest::default(),
++        );
+         assert!(
+             matches!(v, Verdict::Infeasible { .. }),
+             "a 400 GiB MoE still needs 400 GiB of memory, got {v:?}"
+@@ -922,14 +1060,28 @@ mod tests {
+     #[test]
+     fn ttft_is_unknown_until_flops_and_params_are_both_known() {
+         let m = model_60gib(); // param_count: 0
+-        let v = plan(&[mac()], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
+-        let Verdict::UseSingleNode { plan: p, .. } = v else { panic!() };
++        let v = plan(
++            &[mac()],
++            &m,
++            &Fabric::uniform(ten_gbe()),
++            &PlanRequest::default(),
++        );
++        let Verdict::UseSingleNode { plan: p, .. } = v else {
++            panic!()
++        };
+         assert!(p.ttft_secs().is_none());
+ 
+         let mut node = mac();
+         node.prefill_flops = 16e12; // flops alone is still not enough
+-        let v = plan(&[node], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
+-        let Verdict::UseSingleNode { plan: p, .. } = v else { panic!() };
++        let v = plan(
++            &[node],
++            &m,
++            &Fabric::uniform(ten_gbe()),
++            &PlanRequest::default(),
++        );
++        let Verdict::UseSingleNode { plan: p, .. } = v else {
++            panic!()
++        };
+         assert!(p.ttft_secs().is_none(), "param count is still unknown");
+     }
+ 
+@@ -947,8 +1099,15 @@ mod tests {
+         m.param_count = 60_000_000_000; // does not fit the GPU alone
+         m.active_weight_fraction = 0.11;
+ 
+-        let v = plan(&[gpu, cpu], &m, &Fabric::uniform(pcie()), &PlanRequest::default());
+-        let Verdict::SplitRequired { plan: p } = v else { panic!("expected a forced split") };
++        let v = plan(
++            &[gpu, cpu],
++            &m,
++            &Fabric::uniform(pcie()),
++            &PlanRequest::default(),
++        );
++        let Verdict::SplitRequired { plan: p } = v else {
++            panic!("expected a forced split")
++        };
+         let ttft = p.ttft_secs().expect("both pools have flops set");
+ 
+         // The CPU stage holds only half the layers, yet its prefill dwarfs
+@@ -976,8 +1135,7 @@ mod tests {
+         else {
+             panic!()
+         };
+-        let Verdict::UseSingleNode { plan: sp, .. } = plan(&[node], &sparse, &fabric, &req)
+-        else {
++        let Verdict::UseSingleNode { plan: sp, .. } = plan(&[node], &sparse, &fabric, &req) else {
+             panic!()
+         };
+         let ratio = sp.ttft_secs().unwrap() / d.ttft_secs().unwrap();
+@@ -988,8 +1146,15 @@ mod tests {
+     fn each_node_appears_at_most_once_in_a_plan() {
+         let mut m = model_60gib();
+         m.total_weight_bytes = 100 << 30;
+-        let v = plan(&[mac(), pc()], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
+-        let Verdict::SplitRequired { plan } = v else { panic!() };
++        let v = plan(
++            &[mac(), pc()],
++            &m,
++            &Fabric::uniform(ten_gbe()),
++            &PlanRequest::default(),
++        );
++        let Verdict::SplitRequired { plan } = v else {
++            panic!()
++        };
+         let mut seen: Vec<usize> = plan.stages.iter().map(|s| s.node_index).collect();
+         seen.sort_unstable();
+         let len = seen.len();
+diff --git a/crates/allpaka-core/src/replicate.rs b/crates/allpaka-core/src/replicate.rs
+index e8fb54d..fc7d611 100644
+--- a/crates/allpaka-core/src/replicate.rs
++++ b/crates/allpaka-core/src/replicate.rs
+@@ -86,7 +86,9 @@ impl ReplicaPlan {
+     /// Instances fast enough to route traffic to.
+     pub fn useful(&self) -> impl Iterator<Item = &Replica> {
+         let cutoff = self.fastest_tokens_per_sec() * USEFUL_SHARE_OF_FASTEST;
+-        self.replicas.iter().filter(move |r| r.tokens_per_sec() >= cutoff)
++        self.replicas
++            .iter()
++            .filter(move |r| r.tokens_per_sec() >= cutoff)
+     }
+ 
+     /// Whether an instance is worth routing to. Reported per replica so a slow
+@@ -105,7 +107,10 @@ impl ReplicaPlan {
+     }
+ 
+     fn fastest_tokens_per_sec(&self) -> f64 {
+-        self.replicas.iter().map(Replica::tokens_per_sec).fold(0.0, f64::max)
++        self.replicas
++            .iter()
++            .map(Replica::tokens_per_sec)
++            .fold(0.0, f64::max)
+     }
+ 
+     /// Latency of the fastest instance: what one waiting user sees when routed
+@@ -285,7 +290,11 @@ mod tests {
+ 
+         let plan = replicate(&[pc(), slow], &model(20), &PlanRequest::default()).unwrap();
+         assert_eq!(plan.concurrency(), 2);
+-        assert_eq!(plan.useful_concurrency(), 1, "the DDR4 instance should be excluded");
++        assert_eq!(
++            plan.useful_concurrency(),
++            1,
++            "the DDR4 instance should be excluded"
++        );
+         assert!(plan.useful_tokens_per_sec() < plan.aggregate_tokens_per_sec());
+         assert_eq!(plan.useful().next().unwrap().node_name, "pc-gpu");
+     }
+@@ -315,7 +324,10 @@ mod tests {
+         let plain = replicate(&[pc()], &m, &PlanRequest::default());
+         assert!(plain.is_some(), "26 GiB alone fits the 30 GiB GPU");
+ 
+-        let with_draft = PlanRequest { speculation: Some(spec), ..Default::default() };
++        let with_draft = PlanRequest {
++            speculation: Some(spec),
++            ..Default::default()
++        };
+         assert!(
+             replicate(&[pc()], &m, &with_draft).is_none(),
+             "26 + 6 GiB of draft should not fit"
+diff --git a/crates/allpaka-core/src/speculation.rs b/crates/allpaka-core/src/speculation.rs
+index 52656e9..741c8bd 100644
+--- a/crates/allpaka-core/src/speculation.rs
++++ b/crates/allpaka-core/src/speculation.rs
+@@ -122,7 +122,11 @@ mod tests {
+     use super::*;
+ 
+     fn spec(k: u32, a: f64) -> Speculation {
+-        Speculation { draft_weight_bytes: 1 << 30, draft_tokens: k, acceptance_rate: a }
++        Speculation {
++            draft_weight_bytes: 1 << 30,
++            draft_tokens: k,
++            acceptance_rate: a,
++        }
+     }
+ 
+     #[test]
+diff --git a/crates/allpaka-gguf/examples/dump.rs b/crates/allpaka-gguf/examples/dump.rs
+index 0f1cf21..0e90851 100644
+--- a/crates/allpaka-gguf/examples/dump.rs
++++ b/crates/allpaka-gguf/examples/dump.rs
+@@ -3,6 +3,8 @@ fn main() {
+     let f = GgufFile::open(std::path::Path::new(&std::env::args().nth(1).unwrap())).unwrap();
+     let arg = std::env::args().nth(2).unwrap();
+     for t in f.tensors() {
+-        if t.name.starts_with(&arg) { println!("{} {:?} {:?}", t.name, t.ggml_type, t.dims); }
++        if t.name.starts_with(&arg) {
++            println!("{} {:?} {:?}", t.name, t.ggml_type, t.dims);
++        }
+     }
+ }
+diff --git a/crates/allpaka-gguf/src/dequant.rs b/crates/allpaka-gguf/src/dequant.rs
+index e60699c..5b8ce9e 100644
+--- a/crates/allpaka-gguf/src/dequant.rs
++++ b/crates/allpaka-gguf/src/dequant.rs
+@@ -15,7 +15,10 @@ use anyhow::{bail, Result};
+ pub fn dequant(ty: GgmlType, data: &[u8], elements: usize) -> Result<Vec<f32>> {
+     let expected = expected_bytes(ty, elements)?;
+     if data.len() != expected {
+-        bail!("expected {expected} bytes for {elements} elements of {ty:?}, got {}", data.len());
++        bail!(
++            "expected {expected} bytes for {elements} elements of {ty:?}, got {}",
++            data.len()
++        );
+     }
+     let mut out = Vec::with_capacity(elements);
+     match ty {
+@@ -199,7 +202,11 @@ fn dequant_q3_k_block(block: &[u8], out: &mut Vec<f32>) {
+     // bytes 0..8, the high 2 bits are packed four-per-byte in bytes 8..12.
+     let mut scales = [0i32; 16];
+     for (i, s) in scales.iter_mut().enumerate() {
+-        let lo = if i < 8 { packed[i] & 0xf } else { packed[i - 8] >> 4 };
++        let lo = if i < 8 {
++            packed[i] & 0xf
++        } else {
++            packed[i - 8] >> 4
++        };
+         let hi = (packed[8 + i % 4] >> (2 * (i / 4))) & 3;
+         *s = ((lo | (hi << 4)) as i32) - 32;
+     }
+@@ -213,8 +220,8 @@ fn dequant_q3_k_block(block: &[u8], out: &mut Vec<f32>) {
+                 let dl = d_all * scales[is] as f32;
+                 for l in 0..16 {
+                     let idx = group * 16 + l;
+-                    let quant = ((q[idx] >> shift) & 3) as i32
+-                        - if hmask[idx] & m != 0 { 0 } else { 4 };
++                    let quant =
++                        ((q[idx] >> shift) & 3) as i32 - if hmask[idx] & m != 0 { 0 } else { 4 };
+                     out.push(dl * quant as f32);
+                 }
+                 is += 1;
+@@ -329,7 +336,10 @@ mod tests {
+             return sign << 15;
+         }
+         let e = exp - 127 + 15;
+-        assert!((1..31).contains(&e), "test value not representable as normal f16");
++        assert!(
++            (1..31).contains(&e),
++            "test value not representable as normal f16"
++        );
+         (sign << 15) | ((e as u16) << 10) | ((frac >> 13) as u16)
+     }
+ 
+@@ -400,7 +410,7 @@ mod tests {
+         block[80..82].copy_from_slice(&f32_to_f16(1.0).to_le_bytes()); // d
+         block[82..84].copy_from_slice(&f32_to_f16(2.0).to_le_bytes()); // dmin
+         block[0] = 0x51; // scale 1, min 5 -> value = q - 10
+-        // qs zero: quant 0 everywhere -> first sub-block = -10.
++                         // qs zero: quant 0 everywhere -> first sub-block = -10.
+         let out = dequant(GgmlType::Q2K, &block, 256).unwrap();
+         assert!(out[..16].iter().all(|&v| v == -10.0));
+     }
+@@ -484,7 +494,7 @@ mod tests {
+         let mut block = vec![0u8; 144];
+         block[0..2].copy_from_slice(&f32_to_f16(1.0).to_le_bytes()); // d
+         block[2..4].copy_from_slice(&f32_to_f16(1.0).to_le_bytes()); // dmin
+-        // scales: sub-block 0 -> scale 2, min 1; sub-block 1 -> scale 3, min 2.
++                                                                     // scales: sub-block 0 -> scale 2, min 1; sub-block 1 -> scale 3, min 2.
+         block[4] = 2;
+         block[5] = 3;
+         block[8] = 1;
+diff --git a/crates/allpaka-gguf/src/metadata.rs b/crates/allpaka-gguf/src/metadata.rs
+index d3935b1..99584a8 100644
+--- a/crates/allpaka-gguf/src/metadata.rs
++++ b/crates/allpaka-gguf/src/metadata.rs
+@@ -178,8 +178,8 @@ pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
+     for i in 0..kv_count {
+         let key = read_string(r).with_context(|| format!("reading key {i}"))?;
+         let keep_array = key == "tokenizer.ggml.tokens" || key == "tokenizer.ggml.merges";
+-        let value = read_value(r, keep_array)
+-            .with_context(|| format!("reading value for {key:?}"))?;
++        let value =
++            read_value(r, keep_array).with_context(|| format!("reading value for {key:?}"))?;
+         if let Value::StrArray(items) = value {
+             if key == "tokenizer.ggml.tokens" {
+                 tokens = Some(items);
+@@ -220,14 +220,27 @@ pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
+         }
+         let type_id = read_u32(r)?;
+         let offset = read_u64(r)?;
+-        tensors.push(TensorInfo { name, dims, ggml_type: GgmlType::from_id(type_id), offset, part: 0 });
++        tensors.push(TensorInfo {
++            name,
++            dims,
++            ggml_type: GgmlType::from_id(type_id),
++            offset,
++            part: 0,
++        });
+     }
+ 
+     // The data section starts at the next aligned position after the header.
+     let here = r.stream_position()?;
+     let data_offset = here.div_ceil(alignment) * alignment;
+ 
+-    Ok(Header { architecture, tensors, data_offset, tokens, merges, fields })
++    Ok(Header {
++        architecture,
++        tensors,
++        data_offset,
++        tokens,
++        merges,
++        fields,
++    })
+ }
+ 
+ /// Read the planner's view of a model. Only the header is touched.
+@@ -244,10 +257,16 @@ pub fn read(path: &Path) -> Result<GgufInfo> {
+         .get_u32("embedding_length")
+         .with_context(|| format!("GGUF file has no {}.embedding_length", header.architecture))?;
+     let head_count = header.get_u32("attention.head_count").unwrap_or(0);
+-    let head_count_kv = header.get_u32("attention.head_count_kv").unwrap_or(head_count);
++    let head_count_kv = header
++        .get_u32("attention.head_count_kv")
++        .unwrap_or(head_count);
+ 
+     // Most models omit key_length/value_length and imply embedding / heads.
+-    let implied = if head_count > 0 { embedding_length / head_count } else { 0 };
++    let implied = if head_count > 0 {
++        embedding_length / head_count
++    } else {
++        0
++    };
+     let key_length = header.get_u32("attention.key_length").unwrap_or(implied);
+     let value_length = header.get_u32("attention.value_length").unwrap_or(implied);
+ 
+@@ -266,7 +285,11 @@ pub fn read(path: &Path) -> Result<GgufInfo> {
+             expert += t.elements() as u128;
+         }
+     }
+-    let expert_element_fraction = if total > 0 { expert as f64 / total as f64 } else { 0.0 };
++    let expert_element_fraction = if total > 0 {
++        expert as f64 / total as f64
++    } else {
++        0.0
++    };
+ 
+     Ok(GgufInfo {
+         architecture: header.architecture,
+@@ -401,7 +424,10 @@ mod tests {
+ 
+     impl Builder {
+         fn new() -> Self {
+-            Self { kvs: Vec::new(), count: 0 }
++            Self {
++                kvs: Vec::new(),
++                count: 0,
++            }
+         }
+ 
+         fn key(&mut self, k: &str) {
+@@ -432,7 +458,8 @@ mod tests {
+             self.key(k);
+             self.kvs.extend_from_slice(&9u32.to_le_bytes());
+             self.kvs.extend_from_slice(&8u32.to_le_bytes()); // element type: string
+-            self.kvs.extend_from_slice(&(items.len() as u64).to_le_bytes());
++            self.kvs
++                .extend_from_slice(&(items.len() as u64).to_le_bytes());
+             for s in items {
+                 self.kvs.extend_from_slice(&(s.len() as u64).to_le_bytes());
+                 self.kvs.extend_from_slice(s.as_bytes());
+@@ -445,7 +472,8 @@ mod tests {
+             self.key(k);
+             self.kvs.extend_from_slice(&9u32.to_le_bytes());
+             self.kvs.extend_from_slice(&4u32.to_le_bytes());
+-            self.kvs.extend_from_slice(&(items.len() as u64).to_le_bytes());
++            self.kvs
++                .extend_from_slice(&(items.len() as u64).to_le_bytes());
+             for v in items {
+                 self.kvs.extend_from_slice(&v.to_le_bytes());
+             }
+@@ -516,7 +544,10 @@ mod tests {
+ 
+     #[test]
+     fn explicit_key_length_wins_over_the_implied_one() {
+-        let path = write_temp("explicit", &qwen_like().u32("qwen3.attention.key_length", 256).finish());
++        let path = write_temp(
++            "explicit",
++            &qwen_like().u32("qwen3.attention.key_length", 256).finish(),
++        );
+         let info = read(&path).unwrap();
+         assert_eq!(info.key_length, 256);
+         assert_eq!(info.value_length, 128); // still implied
+@@ -568,7 +599,11 @@ mod tests {
+         assert_eq!(info.expert_used_count, 2);
+         assert!((info.expert_element_fraction - 0.9).abs() < 1e-9);
+         // 0.1 dense + 0.9 * (2/8) = 0.325
+-        assert!((info.active_weight_fraction() - 0.325).abs() < 1e-9, "{}", info.active_weight_fraction());
++        assert!(
++            (info.active_weight_fraction() - 0.325).abs() < 1e-9,
++            "{}",
++            info.active_weight_fraction()
++        );
+         std::fs::remove_file(path).ok();
+     }
+ 
+@@ -602,10 +637,8 @@ mod tests {
+     /// Parameters come from the tensor shapes, dense models included.
+     #[test]
+     fn parameter_count_is_the_sum_of_tensor_elements() {
+-        let bytes = qwen_like().finish_with_tensors(&[
+-            ("blk.0.attn_q.weight", 700),
+-            ("blk.0.ffn_up.weight", 300),
+-        ]);
++        let bytes = qwen_like()
++            .finish_with_tensors(&[("blk.0.attn_q.weight", 700), ("blk.0.ffn_up.weight", 300)]);
+         let path = write_temp("params", &bytes);
+         assert_eq!(read(&path).unwrap().param_count, 1000);
+         std::fs::remove_file(path).ok();
+@@ -620,7 +653,9 @@ mod tests {
+ 
+     #[test]
+     fn a_model_without_block_count_is_rejected() {
+-        let bytes = Builder::new().string("general.architecture", "qwen3").finish();
++        let bytes = Builder::new()
++            .string("general.architecture", "qwen3")
++            .finish();
+         let path = write_temp("noblocks", &bytes);
+         let err = read(&path).unwrap_err().to_string();
+         assert!(format!("{err:#}").contains("block_count") || err.contains("block_count"));
+diff --git a/crates/allpaka-gguf/src/tensors.rs b/crates/allpaka-gguf/src/tensors.rs
+index c3a0f08..c9f0c45 100644
+--- a/crates/allpaka-gguf/src/tensors.rs
++++ b/crates/allpaka-gguf/src/tensors.rs
+@@ -103,7 +103,10 @@ impl TensorInfo {
+     /// Bytes this tensor occupies on disk, or an error for a dtype this crate
+     /// does not know the geometry of.
+     pub fn byte_size(&self) -> Result<u64> {
+-        let (be, bb) = match (self.ggml_type.block_elements(), self.ggml_type.block_bytes()) {
++        let (be, bb) = match (
++            self.ggml_type.block_elements(),
++            self.ggml_type.block_bytes(),
++        ) {
+             (Some(be), Some(bb)) => (be, bb),
+             _ => bail!(
+                 "tensor {:?} has unsupported ggml type {:?}",
+@@ -164,7 +167,12 @@ impl GgufFile {
+             mmaps.push(mmap);
+         }
+         let header = header.context("no split parts")?;
+-        Ok(Self { header, mmaps, data_offsets, merged })
++        Ok(Self {
++            header,
++            mmaps,
++            data_offsets,
++            merged,
++        })
+     }
+ 
+     pub fn architecture(&self) -> &str {
+diff --git a/crates/allpaka-model/src/config.rs b/crates/allpaka-model/src/config.rs
+index 3c7d919..478f567 100644
+--- a/crates/allpaka-model/src/config.rs
++++ b/crates/allpaka-model/src/config.rs
+@@ -152,7 +152,8 @@ impl Config {
+         let arch = f.architecture().to_string();
+         let key = |suffix: &str| format!("{arch}.{suffix}");
+         let need = |suffix: &str| -> Result<u32> {
+-            f.meta_u32(&key(suffix)).with_context(|| format!("GGUF has no {}", key(suffix)))
++            f.meta_u32(&key(suffix))
++                .with_context(|| format!("GGUF has no {}", key(suffix)))
+         };
+ 
+         let n_expert = f.meta_u32(&key("expert_count")).unwrap_or(0);
+@@ -175,9 +176,9 @@ impl Config {
+                 expert_ffn: need("expert_feed_forward_length")?,
+                 leading_dense: f.meta_u32(&key("leading_dense_block_count")).unwrap_or(0),
+                 // qwen35moe omits expert_shared_count but ships the tensors.
+-                n_shared: f.meta_u32(&key("expert_shared_count")).unwrap_or_else(|| {
+-                    u32::from(f.tensor("blk.0.ffn_up_shexp.weight").is_some())
+-                }),
++                n_shared: f
++                    .meta_u32(&key("expert_shared_count"))
++                    .unwrap_or_else(|| u32::from(f.tensor("blk.0.ffn_up_shexp.weight").is_some())),
+                 gating,
+                 weights_norm: f.meta_bool(&key("expert_weights_norm")).unwrap_or(true),
+                 weights_scale: f.meta_f32(&key("expert_weights_scale")).unwrap_or(1.0),
+@@ -226,7 +227,8 @@ impl Config {
+         let nextn = f.meta_u32(&key("nextn_predict_layers")).unwrap_or(0);
+         let mut n_layers = need("block_count")?;
+         while n_layers > 0
+-            && f.tensor(&format!("blk.{}.attn_q.weight", n_layers - 1)).is_none()
++            && f.tensor(&format!("blk.{}.attn_q.weight", n_layers - 1))
++                .is_none()
+         {
+             n_layers -= 1;
+         }
+@@ -236,7 +238,9 @@ impl Config {
+         Ok(Config {
+             n_layers,
+             nextn: nextn > 0,
+-            n_kv_heads: f.meta_u32(&key("attention.head_count_kv")).unwrap_or(n_heads),
++            n_kv_heads: f
++                .meta_u32(&key("attention.head_count_kv"))
++                .unwrap_or(n_heads),
+             // Absent on linear-attention hybrids (qwen35moe has no dense FFN).
+             ffn_hidden: f.meta_u32(&key("feed_forward_length")).unwrap_or(0),
+             moe,
+@@ -250,9 +254,7 @@ impl Config {
+                 .meta_u32_arr(&key("rope.dimension_sections"))
+                 .map(|s| [s[0], s[1], s[2], s[3]])
+                 .unwrap_or([0, 0, 0, 0]),
+-            full_attention_interval: f
+-                .meta_u32(&key("full_attention_interval"))
+-                .unwrap_or(0),
++            full_attention_interval: f.meta_u32(&key("full_attention_interval")).unwrap_or(0),
+             ssm: match f.meta_u32(&key("ssm.inner_size")) {
+                 Some(d_inner) => Some(SsmConfig {
+                     d_inner,
+diff --git a/crates/allpaka-model/src/kv.rs b/crates/allpaka-model/src/kv.rs
+index eadbe0f..f2d61ec 100644
+--- a/crates/allpaka-model/src/kv.rs
++++ b/crates/allpaka-model/src/kv.rs
+@@ -49,11 +49,15 @@ impl Region {
+ 
+     fn zeroed(elems: usize) -> Self {
+         let bytes = (elems * 2).div_ceil(Self::PAGE) * Self::PAGE;
+-        let layout = std::alloc::Layout::from_size_align(bytes, Self::PAGE)
+-            .expect("kv cache layout");
++        let layout =
++            std::alloc::Layout::from_size_align(bytes, Self::PAGE).expect("kv cache layout");
+         let ptr = unsafe { std::alloc::alloc_zeroed(layout) } as *mut u16;
+         assert!(!ptr.is_null(), "out of memory for a {bytes}-byte kv cache");
+-        Self { ptr, elems: bytes / 2, layout }
++        Self {
++            ptr,
++            elems: bytes / 2,
++            layout,
++        }
+     }
+ 
+     fn as_slice(&self) -> &[u16] {
+@@ -107,7 +111,13 @@ pub struct SsmCache {
+ }
+ 
+ impl SsmCache {
+-    pub fn new(n_layers: usize, d_conv: usize, conv_channels: usize, dt_rank: usize, d_state: usize) -> Self {
++    pub fn new(
++        n_layers: usize,
++        d_conv: usize,
++        conv_channels: usize,
++        dt_rank: usize,
++        d_state: usize,
++    ) -> Self {
+         let conv_elems = n_layers * (d_conv - 1) * conv_channels;
+         let state_elems = n_layers * dt_rank * d_state * d_state;
+         let store = Region::zeroed((conv_elems + state_elems) * 2);
+@@ -241,7 +251,16 @@ impl SsmCache {
+     pub fn slot_write_ptrs(
+         &mut self,
+         li: usize,
+-    ) -> Option<(*const f32, *const f32, *mut f32, usize, usize, usize, usize, usize)> {
++    ) -> Option<(
++        *const f32,
++        *const f32,
++        *mut f32,
++        usize,
++        usize,
++        usize,
++        usize,
++        usize,
++    )> {
+         if !self.slots_armed {
+             return None;
+         }
+@@ -431,7 +450,11 @@ impl KvCache {
+     /// Store one position's k and v for one layer. The position is implicit:
+     /// always appended at the end, `advance` seals the step.
+     pub fn store(&mut self, layer: usize, k: &[f32], v: &[f32]) {
+-        assert!(self.len < self.capacity, "kv cache full at {} positions", self.capacity);
++        assert!(
++            self.len < self.capacity,
++            "kv cache full at {} positions",
++            self.capacity
++        );
+         self.store_at(layer, self.len, k, v);
+     }
+ 
+@@ -443,7 +466,11 @@ impl KvCache {
+         assert_eq!(k.len(), self.kv_dim);
+         assert_eq!(v.len(), self.kv_dim);
+         assert!(pos >= self.len, "position {pos} is already sealed");
+-        assert!(pos < self.capacity, "position {pos} past capacity {}", self.capacity);
++        assert!(
++            pos < self.capacity,
++            "position {pos} past capacity {}",
++            self.capacity
++        );
+         let at = pos * self.kv_dim;
+         let (kr, vr) = (self.k_range(layer), self.v_range(layer));
+         let kv_dim = self.kv_dim;
+@@ -485,7 +512,11 @@ impl KvCache {
+     pub fn store_at_rewrite(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) {
+         assert_eq!(k.len(), self.kv_dim);
+         assert_eq!(v.len(), self.kv_dim);
+-        assert!(pos < self.capacity, "position {pos} past capacity {}", self.capacity);
++        assert!(
++            pos < self.capacity,
++            "position {pos} past capacity {}",
++            self.capacity
++        );
+         let at = pos * self.kv_dim;
+         let (kr, vr) = (self.k_range(layer), self.v_range(layer));
+         let kv_dim = self.kv_dim;
+@@ -512,7 +543,11 @@ impl KvCache {
+     /// rolling back to the common prefix keeps every token before the fork.
+     /// Storage is not cleared - later stores overwrite it.
+     pub fn truncate(&mut self, keep: usize) {
+-        assert!(keep <= self.len, "cannot truncate {} up to {keep}", self.len);
++        assert!(
++            keep <= self.len,
++            "cannot truncate {} up to {keep}",
++            self.len
++        );
+         self.len = keep;
+     }
+ 
+diff --git a/crates/allpaka-model/src/speculate.rs b/crates/allpaka-model/src/speculate.rs
+index 1558cac..fd030dc 100644
+--- a/crates/allpaka-model/src/speculate.rs
++++ b/crates/allpaka-model/src/speculate.rs
+@@ -73,7 +73,9 @@ impl Speculator<'_> {
+         let mut batch = Vec::with_capacity(k + 1);
+         batch.push(next);
+         batch.extend_from_slice(&drafts);
+-        let all = self.target.forward_batch_full(&batch, self.target_session)?;
++        let all = self
++            .target
++            .forward_batch_full(&batch, self.target_session)?;
+         let vocab = self.target.config.vocab as usize;
+ 
+         let mut emitted = vec![next];
+@@ -111,7 +113,12 @@ impl Speculator<'_> {
+             self.draft.forward_batch(missing, self.draft_session)?;
+         }
+ 
+-        Ok(Round { emitted, next: new_next, drafted: k, accepted })
++        Ok(Round {
++            emitted,
++            next: new_next,
++            drafted: k,
++            accepted,
++        })
+     }
+ }
+ 
+@@ -311,6 +318,11 @@ impl MtpSpeculator<'_> {
+             eprintln!("  round total: {:?}\n", t0.elapsed());
+         }
+         debug_assert_eq!(s.pos(), start + 1 + accepted);
+-        Ok(Round { emitted, next: new_next, drafted: k, accepted })
++        Ok(Round {
++            emitted,
++            next: new_next,
++            drafted: k,
++            accepted,
++        })
+     }
+ }
+diff --git a/crates/allpaka-model/src/tokenizer.rs b/crates/allpaka-model/src/tokenizer.rs
+index 211791f..7e299db 100644
+--- a/crates/allpaka-model/src/tokenizer.rs
++++ b/crates/allpaka-model/src/tokenizer.rs
+@@ -36,7 +36,9 @@ impl Tokenizer {
+             .vocab_tokens()
+             .context("GGUF carries no tokenizer.ggml.tokens; cannot tokenise text")?
+             .to_vec();
+-        let merges = f.merges().context("GGUF carries no tokenizer.ggml.merges")?;
++        let merges = f
++            .merges()
++            .context("GGUF carries no tokenizer.ggml.merges")?;
+ 
+         let mut ids = HashMap::with_capacity(pieces.len());
+         for (i, p) in pieces.iter().enumerate() {
+@@ -134,7 +136,9 @@ impl Tokenizer {
+     pub fn decode(&self, tokens: &[u32]) -> String {
+         let mut bytes = Vec::new();
+         for &t in tokens {
+-            let Some(piece) = self.pieces.get(t as usize) else { continue };
++            let Some(piece) = self.pieces.get(t as usize) else {
++                continue;
++            };
+             for ch in piece.chars() {
+                 match self.char_to_byte.get(&ch) {
+                     Some(&b) => bytes.push(b),
+diff --git a/crates/allpaka-model/tests/decode_paths_agree.rs b/crates/allpaka-model/tests/decode_paths_agree.rs
+index ac4cb3a..ca62e4b 100644
+--- a/crates/allpaka-model/tests/decode_paths_agree.rs
++++ b/crates/allpaka-model/tests/decode_paths_agree.rs
+@@ -48,8 +48,18 @@ fn fused_decode_matches_the_step_by_step_path() {
+     let fused = decode_logits(false);
+     let stepped = decode_logits(true);
+     for (step, (f, s)) in fused.iter().zip(&stepped).enumerate() {
+-        let f_arg = f.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+-        let s_arg = s.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
++        let f_arg = f
++            .iter()
++            .enumerate()
++            .max_by(|a, b| a.1.total_cmp(b.1))
++            .unwrap()
++            .0;
++        let s_arg = s
++            .iter()
++            .enumerate()
++            .max_by(|a, b| a.1.total_cmp(b.1))
++            .unwrap()
++            .0;
+         assert_eq!(f_arg, s_arg, "argmax diverged at step {step}");
+         let worst = f
+             .iter()
+diff --git a/crates/allpaka-model/tests/gdn_gpu_parity.rs b/crates/allpaka-model/tests/gdn_gpu_parity.rs
+index b1efc24..312772c 100644
+--- a/crates/allpaka-model/tests/gdn_gpu_parity.rs
++++ b/crates/allpaka-model/tests/gdn_gpu_parity.rs
+@@ -47,8 +47,18 @@ fn gpu_decode_matches_the_cpu_reference() {
+     let gpu = decode_logits(true);
+     let cpu = decode_logits(false);
+     for (step, (g, c)) in gpu.iter().zip(&cpu).enumerate() {
+-        let g_arg = g.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+-        let c_arg = c.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
++        let g_arg = g
++            .iter()
++            .enumerate()
++            .max_by(|a, b| a.1.total_cmp(b.1))
++            .unwrap()
++            .0;
++        let c_arg = c
++            .iter()
++            .enumerate()
++            .max_by(|a, b| a.1.total_cmp(b.1))
++            .unwrap()
++            .0;
+         assert_eq!(g_arg, c_arg, "argmax diverged at step {step}");
+         let worst = g
+             .iter()
+diff --git a/crates/allpaka-model/tests/verify_tokens_parity.rs b/crates/allpaka-model/tests/verify_tokens_parity.rs
+index 04cff65..e3bfc0a 100644
+--- a/crates/allpaka-model/tests/verify_tokens_parity.rs
++++ b/crates/allpaka-model/tests/verify_tokens_parity.rs
+@@ -127,7 +127,10 @@ fn verify_rows_match_greedy_decode() {
+             .verify_tokens(batch, &mut sb)
+             .unwrap()
+             .expect("verify_tokens engages on this machine");
+-        eprintln!("m={m}: batch {batch:?} rows {rows:?} want {:?}", &stream[1..m]);
++        eprintln!(
++            "m={m}: batch {batch:?} rows {rows:?} want {:?}",
++            &stream[1..m]
++        );
+         for (r, &got) in rows.iter().enumerate() {
+             let want = stream[r + 1];
+             assert_eq!(got, want, "m={m} row {r}: verify {got} != decode {want}");
+diff --git a/scripts/bench-compare.sh b/scripts/bench-compare.sh
+index c681158..355a39e 100755
+--- a/scripts/bench-compare.sh
++++ b/scripts/bench-compare.sh
+@@ -25,7 +25,7 @@ run_allpaka() {
+       ([.measurements[] | select(.name=="prefill")][0] |
+        .tokens==$pp and .context_tokens==0 and (.input_tokens|length)==$pp) and
+       ([.measurements[] | select(.name=="decode")][0] |
+-       .tokens==$tg and .context_tokens==$pp and (.input_tokens|length)==$tg and
++       .tokens==$tg and .context_tokens==1 and (.input_tokens|length)==$tg and
+        .fast_path.attempts==$tg and .fast_path.successes==$tg and .fast_path.declines==0)
+     ' "$out/allpaka-$1.json" >/dev/null
+ }
+@@ -33,7 +33,7 @@ run_allpaka() {
+ run_llama() {
+     "$llama" -m "$model" -p "$pp" -n 0 -d 0 -r 1 -ngl 99 -ctk f16 -ctv f16 -o json \
+         >"$out/llama-pp-$1.json" 2>"$out/llama-pp-$1.log"
+-    "$llama" -m "$model" -p 0 -n "$tg" -d "$pp" -r 1 -ngl 99 -ctk f16 -ctv f16 -o json \
++    "$llama" -m "$model" -p 0 -n "$tg" -d 1 -r 1 -ngl 99 -ctk f16 -ctv f16 -o json \
+         >"$out/llama-tg-$1.json" 2>"$out/llama-tg-$1.log"
+ }
+ 
+@@ -49,14 +49,14 @@ jq -n --arg model "$model" --arg sha "$sha" --argjson pp "$pp" --argjson tg "$tg
+     --slurpfile lt <(jq -s 'add' "$out"/llama-tg-*.json) '
+   def stats: sort | {samples: ., median: (if length%2==1 then .[length/2|floor]
+     else (.[length/2-1]+.[length/2])/2 end), min: .[0], max: .[-1]};
+-  {model: $model, model_sha256: $sha, pp: $pp, tg: $tg,
++  {model: $model, model_sha256: $sha, pp: $pp, tg: $tg, decode_context_tokens: 1,
+    comparison_validated: false,
+    limitations: ["llama-bench generates its own token stream; MoE routing is not identical",
+                  "KV precision must be verified against the allpaka capability report"],
+    allpaka_prefill: ([$ap[0][].measurements[]|select(.name=="prefill")|.summary.median]|stats),
+    allpaka_decode: ([$ap[0][].measurements[]|select(.name=="decode")|.summary.median]|stats),
+    llama_prefill: ([$lp[0][]|select(.n_prompt==$pp and .n_gen==0 and .n_depth==0)|.samples_ts[]]|stats),
+-   llama_decode: ([$lt[0][]|select(.n_prompt==0 and .n_gen==$tg and .n_depth==$pp)|.samples_ts[]]|stats)}
++   llama_decode: ([$lt[0][]|select(.n_prompt==0 and .n_gen==$tg and .n_depth==1)|.samples_ts[]]|stats)}
+ ' >"$out/comparison.json"
+ cat "$out/comparison.json"
+ printf '\nArtifacts: %s\n' "$out"

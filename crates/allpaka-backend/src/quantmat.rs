@@ -41,7 +41,13 @@ impl<'a> QuantMat<'a> {
                 data.len()
             );
         }
-        Ok(Self { data, ty, n_out, n_in, row_bytes })
+        Ok(Self {
+            data,
+            ty,
+            n_out,
+            n_in,
+            row_bytes,
+        })
     }
 
     /// One weight row dequantised to f32.
@@ -186,7 +192,11 @@ impl<'a> QuantMat<'a> {
     pub fn matmul_many(items: &[(&QuantMat<'_>, &[f32])]) -> Result<Vec<Vec<f32>>> {
         for (m, x) in items {
             if x.is_empty() || x.len() % m.n_in != 0 {
-                bail!("x has {} values, expected a multiple of {}", x.len(), m.n_in);
+                bail!(
+                    "x has {} values, expected a multiple of {}",
+                    x.len(),
+                    m.n_in
+                );
             }
         }
         if crate::gpu::is_attached() {
@@ -543,6 +553,7 @@ impl<'a> QuantMat<'a> {
 
 /// Fused Q8_0 dot product: `Σ_blocks d * Σ q_i * x_i`, straight off the
 /// quantised bytes.
+#[inline(always)]
 fn dot_q8_0(row: &[u8], x: &[f32]) -> f32 {
     let mut total = 0f32;
     for (bi, block) in row.chunks_exact(34).enumerate() {
@@ -560,6 +571,7 @@ fn dot_q8_0(row: &[u8], x: &[f32]) -> f32 {
 /// Fused Q4_K dot product, following the same 8-sub-block layout as the
 /// dequantiser: `Σ d*sc*Σ(q·x) - dmin*mn*Σx` per sub-block, so the min term
 /// needs only the activation sum, not a per-element subtraction.
+#[inline(always)]
 fn dot_q4_k(row: &[u8], x: &[f32]) -> f32 {
     let mut total = 0f32;
     for (bi, block) in row.chunks_exact(144).enumerate() {
@@ -604,6 +616,7 @@ fn dot_q4_k(row: &[u8], x: &[f32]) -> f32 {
 }
 
 /// Fused Q2_K dot product: `Σ dl*Σ(q·x) - ml*Σx` per 16-element sub-block.
+#[inline(always)]
 fn dot_q2_k(row: &[u8], x: &[f32]) -> f32 {
     let mut total = 0f32;
     for (bi, block) in row.chunks_exact(84).enumerate() {
@@ -639,6 +652,7 @@ fn dot_q2_k(row: &[u8], x: &[f32]) -> f32 {
 }
 
 /// Fused Q6_K dot product, mirroring the dequantiser's half/quarter walk.
+#[inline(always)]
 fn dot_q6_k(row: &[u8], x: &[f32]) -> f32 {
     let mut total = 0f32;
     for (bi, block) in row.chunks_exact(210).enumerate() {
@@ -747,6 +761,7 @@ impl Q8ActsSlice<'_> {
 }
 
 /// Q8_0 × Q8 activations: `Σ_blocks d_w * d_x * Σ q_w · q_x`.
+#[inline(always)]
 fn dot_q8_0_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
     let mut total = 0f32;
     for (bi, block) in row.chunks_exact(34).enumerate() {
@@ -760,6 +775,7 @@ fn dot_q8_0_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
 
 /// Q4_K × Q8 activations, same sub-block walk as `dot_q4_k` with the q·x
 /// reduction done in integers and the min term taken off the exact block sum.
+#[inline(always)]
 fn dot_q4_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
     let mut total = 0f32;
     for (bi, block) in row.chunks_exact(144).enumerate() {
@@ -793,6 +809,7 @@ fn dot_q4_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
 /// Q6_K × Q8 activations. Scales cover 16 elements, so each quarter's
 /// 32-value dot splits into two 16-lane integer dots against the halves of
 /// one activation block.
+#[inline(always)]
 fn dot_q6_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
     let mut total = 0f32;
     for (bi, block) in row.chunks_exact(210).enumerate() {
@@ -832,7 +849,7 @@ fn dot_q6_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
 /// On aarch64 this is the NEON widening-multiply chain (`smull`/`sadalp`),
 /// which is the whole point of quantising the activations: sixteen products
 /// per instruction instead of one f32 FMA lane per element.
-#[inline]
+#[inline(always)]
 fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "aarch64")]
@@ -978,7 +995,8 @@ mod tests {
         // The matvec path quantises activations to Q8, so the comparison
         // against the f32 reference carries that quantisation error too.
         assert!(
-            (fused - reference).abs() < q8_act_error_bound(&row, &x) + 1e-3 * (1.0 + reference.abs()),
+            (fused - reference).abs()
+                < q8_act_error_bound(&row, &x) + 1e-3 * (1.0 + reference.abs()),
             "{fused} vs {reference}"
         );
     }
@@ -1047,8 +1065,14 @@ mod tests {
     #[test]
     fn size_mismatches_are_errors_not_silent_wrap() {
         let bytes = vec![0u8; 34];
-        assert!(QuantMat::new(&bytes, GgmlType::Q8_0, 2, 32).is_err(), "too few bytes");
-        assert!(QuantMat::new(&bytes, GgmlType::Q8_0, 1, 33).is_err(), "ragged row");
+        assert!(
+            QuantMat::new(&bytes, GgmlType::Q8_0, 2, 32).is_err(),
+            "too few bytes"
+        );
+        assert!(
+            QuantMat::new(&bytes, GgmlType::Q8_0, 1, 33).is_err(),
+            "ragged row"
+        );
         let mat = QuantMat::new(&bytes, GgmlType::Q8_0, 1, 32).unwrap();
         assert!(mat.matmul(&[0.0; 16], 1).is_err(), "x shorter than a row");
         assert!(mat.row(1).is_err());

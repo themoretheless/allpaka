@@ -1,0 +1,5 @@
+# Allpaka builds on the nightly channel. The themoretheless-tokenizer
+# dependency uses edition 2024, and the workspace tracks nightly features.
+[toolchain]
+channel = "nightly"
+components = ["rustfmt", "clippy"]

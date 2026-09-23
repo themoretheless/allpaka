@@ -1,5 +1,8 @@
 # Runtime roadmap
 
+Трек A плана развития. Сводные статусы, критерии готовности и остальные треки —
+в [roadmap.md](roadmap.md). Таблица ниже остаётся детализацией трека A.
+
 Each implementation increment is tested, committed, and pushed before the next.
 
 | Order | Outcome | Status |

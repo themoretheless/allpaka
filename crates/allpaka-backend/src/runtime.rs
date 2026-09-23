@@ -40,8 +40,7 @@ impl RuntimePolicy {
             .and_then(|v| v.parse().ok());
         policy.decode_serial = std::env::var("ALLPAKA_DECODE_SERIAL").is_ok_and(|v| v == "1");
         policy.prefill_defer = std::env::var("ALLPAKA_PF_DEFER").map_or(true, |v| v != "0");
-        policy.prefill_one_buffer =
-            std::env::var("ALLPAKA_PF_ONEBUF").map_or(true, |v| v != "0");
+        policy.prefill_one_buffer = std::env::var("ALLPAKA_PF_ONEBUF").map_or(true, |v| v != "0");
         policy.gpu_route = std::env::var("ALLPAKA_GPU_ROUTE").map_or(true, |v| v != "0");
         policy.mm_pipeline = std::env::var("ALLPAKA_MM_PIPE").map_or(true, |v| v != "0");
         policy

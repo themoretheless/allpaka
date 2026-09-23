@@ -17,8 +17,8 @@ use std::path::Path;
 
 /// POST a JSON body over a fresh connection; plain HTTP/1.1, no keep-alive.
 fn post(addr: &str, path: &str, body: &Value) -> Result<Value> {
-    let mut stream =
-        TcpStream::connect(addr).with_context(|| format!("connecting to llama-server at {addr}"))?;
+    let mut stream = TcpStream::connect(addr)
+        .with_context(|| format!("connecting to llama-server at {addr}"))?;
     let payload = body.to_string();
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
@@ -39,7 +39,10 @@ fn post(addr: &str, path: &str, body: &Value) -> Result<Value> {
     }
     // With Connection: close the body is everything after the headers, but a
     // chunked response needs its framing stripped.
-    let body_text = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    let body_text = if head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         dechunk(rest)?
     } else {
         rest.to_string()
@@ -63,7 +66,11 @@ fn dechunk(raw: &str) -> Result<String> {
 
 /// Ask the server to tokenise the prompt, so both engines see identical ids.
 fn tokenize(addr: &str, prompt: &str) -> Result<Vec<u32>> {
-    let resp = post(addr, "/tokenize", &json!({ "content": prompt, "add_special": true }))?;
+    let resp = post(
+        addr,
+        "/tokenize",
+        &json!({ "content": prompt, "add_special": true }),
+    )?;
     resp["tokens"]
         .as_array()
         .context("/tokenize returned no tokens array")?
@@ -101,7 +108,10 @@ fn reference_top(addr: &str, tokens: &[u32], n: usize) -> Result<Vec<(u32, f64)>
 
     let mut out = Vec::with_capacity(probs.len());
     for p in probs {
-        let id = p["id"].as_u64().or_else(|| p["tok"].as_u64()).context("prob entry has no id")? as u32;
+        let id = p["id"]
+            .as_u64()
+            .or_else(|| p["tok"].as_u64())
+            .context("prob entry has no id")? as u32;
         let lp = match (p["logprob"].as_f64(), p["prob"].as_f64()) {
             (Some(lp), _) => lp,
             (None, Some(pr)) if pr > 0.0 => pr.ln(),
@@ -144,7 +154,11 @@ pub fn run(
         if std::env::var_os("ALLPAKA_PHASES").is_some() {
             let t = allpaka_model::profile::take();
             for (i, ns) in t.iter().enumerate() {
-                eprintln!("  phase {}: {:.3} ms", allpaka_model::profile::NAMES[i], *ns as f64 / 1e6);
+                eprintln!(
+                    "  phase {}: {:.3} ms",
+                    allpaka_model::profile::NAMES[i],
+                    *ns as f64 / 1e6
+                );
             }
         }
         let ours = log_softmax(&logits);
@@ -167,7 +181,11 @@ pub fn run(
     // A MoE re-routes on numeric near-ties, so two correct implementations
     // legitimately drift further apart than two dense ones. llama.cpp's own
     // Metal and CPU backends disagree by up to ~0.45 on Qwen3-30B-A3B.
-    let tolerance = tolerance.unwrap_or(if model.config.moe.is_some() { 0.5 } else { 0.15 });
+    let tolerance = tolerance.unwrap_or(if model.config.moe.is_some() {
+        0.5
+    } else {
+        0.15
+    });
     let mut session = model.new_session(tokens.len() + decode + 1);
     let t0 = std::time::Instant::now();
     let logits = model.forward_batch(&tokens, &mut session)?;
@@ -177,13 +195,18 @@ pub fn run(
         t0.elapsed().as_secs_f64()
     );
     let ours = log_softmax(&logits);
-    let our_argmax = (0..ours.len()).max_by(|&a, &b| ours[a].total_cmp(&ours[b])).unwrap();
+    let our_argmax = (0..ours.len())
+        .max_by(|&a, &b| ours[a].total_cmp(&ours[b]))
+        .unwrap();
 
     // Reference side.
     let theirs = reference_top(addr, &tokens, top)?;
     let (ref_argmax, _) = *theirs.first().context("reference returned no tokens")?;
 
-    println!("\n{:>6}  {:>12}  {:>12}  {:>9}", "token", "llama.cpp", "allpaka", "diff");
+    println!(
+        "\n{:>6}  {:>12}  {:>12}  {:>9}",
+        "token", "llama.cpp", "allpaka", "diff"
+    );
     let mut max_diff = 0f64;
     for &(id, ref_lp) in &theirs {
         let our_lp = ours.get(id as usize).copied().unwrap_or(f64::NEG_INFINITY);
@@ -200,7 +223,10 @@ pub fn run(
         );
     }
     println!("argmax agrees: token {ref_argmax}");
-    println!("max |log-prob diff| over the reference's top {}: {max_diff:.4}", theirs.len());
+    println!(
+        "max |log-prob diff| over the reference's top {}: {max_diff:.4}",
+        theirs.len()
+    );
     if max_diff > tolerance {
         bail!(
             "log-prob difference {max_diff:.4} exceeds the tolerance {tolerance}. \
@@ -227,8 +253,9 @@ pub fn run(
     let mut worst = 0f64;
     for step in 0..decode {
         let ours = log_softmax(&logits);
-        let our_argmax =
-            (0..ours.len()).max_by(|&a, &b| ours[a].total_cmp(&ours[b])).unwrap() as u32;
+        let our_argmax = (0..ours.len())
+            .max_by(|&a, &b| ours[a].total_cmp(&ours[b]))
+            .unwrap() as u32;
         let theirs = reference_top(addr, &context, top)?;
         let (ref_argmax, ref_top_lp) = *theirs.first().context("reference returned nothing")?;
 

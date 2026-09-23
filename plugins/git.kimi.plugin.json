@@ -1,0 +1,36 @@
+{
+  "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
+  "name": "git",
+  "version": "0.1.0",
+  "description": "Git как инструмент агента: статус, диффы и отчёт по незакоммиченным файлам (+/− строк по каждому файлу), история, ветки, stash, worktree.",
+  "keywords": [
+    "git",
+    "vcs",
+    "diff",
+    "status",
+    "numstat",
+    "branch",
+    "stash",
+    "worktree",
+    "uncommitted"
+  ],
+  "author": "themoretheless",
+  "license": "MIT",
+  "skillInstructions": "Git в рабочем дереве пользователя. Использовать, когда нужен статус репозитория, отчёт по незакоммиченным файлам (сколько строк +/− в каких файлах), история и диффы, ветки, stash, worktree, или когда перед правками надо понять состояние дерева.\n\nГраницы: по умолчанию только чтение (status, diff, log, show, ls-files, rev-parse, stash list, worktree list). Изменяющие команды (add, commit, switch/checkout, merge, rebase, reset, stash push/pop/drop, clean) выполняются только по явной просьбе и с показом того, что будет затронуто. Никогда не запускать reset --hard, checkout -- ., restore ., clean -fdx, push --force без прямого указания.\n\nОтчёт по незакоммиченным файлам: bin/git-uncommitted-report.sh (каталог плагина) или вручную комбинация git status --porcelain=v1 --untracked-files=all + git diff --numstat + git diff --cached --numstat. Разделять index и worktree, не выдавать размер файла за число изменённых строк, отмечать бинарные и новые файлы отдельно. Работает без изоляции: обычный доступ к командной строке, git в PATH, без MCP-серверов и песочниц.",
+  "interface": {
+    "displayName": "Git",
+    "shortDescription": "Git-операции и отчёт по незакоммиченным файлам",
+    "longDescription": "Git как скилл агента: безопасные read-only операции, отчёт по незакоммиченным файлам с разбивкой index/worktree и +/− строк по каждому файлу, история, ветки, stash, worktree.",
+    "developerName": "themoretheless",
+    "websiteURL": "",
+    "iconUrl": "",
+    "category": "DEVELOPER",
+    "hostKind": "local",
+    "platforms": [
+      "macos",
+      "linux",
+      "windows"
+    ]
+  },
+  "skills": "./skills/"
+}

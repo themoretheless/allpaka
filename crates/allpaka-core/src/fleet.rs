@@ -201,7 +201,11 @@ pub fn fleet(members: &[FleetMember], nodes: &[Node]) -> Result<FleetPlan, Strin
         let mut row = Vec::with_capacity(nodes.len());
         for (ni, node) in nodes.iter().enumerate() {
             let allowed = member.pin.is_none_or(|p| p == ni);
-            row.push(if allowed { place(mi, member, ni, node) } else { None });
+            row.push(if allowed {
+                place(mi, member, ni, node)
+            } else {
+                None
+            });
         }
         options.push(row);
     }
@@ -217,8 +221,8 @@ pub fn fleet(members: &[FleetMember], nodes: &[Node]) -> Result<FleetPlan, Strin
 
 /// Memory an agent needs on whichever pool hosts it.
 pub fn required_bytes(m: &FleetMember) -> u64 {
-    let mut need = m.model.total_weight_bytes
-        + m.model.kv_bytes(m.model.n_layers, m.context_tokens);
+    let mut need =
+        m.model.total_weight_bytes + m.model.kv_bytes(m.model.n_layers, m.context_tokens);
     if let Some(s) = &m.speculation {
         need += s.draft_weight_bytes;
     }
@@ -239,7 +243,10 @@ fn search(
         // Co-residency is a property of the whole assignment, not of one pair,
         // so it can only be charged once the candidate is complete.
         charge_co_residency(&mut placements, nodes);
-        let candidate = FleetPlan { placements, unplaced: Vec::new() };
+        let candidate = FleetPlan {
+            placements,
+            unplaced: Vec::new(),
+        };
         if candidate.better_than(best) {
             *best = candidate;
         }
@@ -390,10 +397,17 @@ mod tests {
     /// the rest arrange themselves around it.
     #[test]
     fn a_constrained_model_takes_the_only_pool_that_holds_it() {
-        let plan = fleet(&[member("big", 80), member("small", 10)], &[mac(), gpu(), ram()])
-            .unwrap();
+        let plan = fleet(
+            &[member("big", 80), member("small", 10)],
+            &[mac(), gpu(), ram()],
+        )
+        .unwrap();
         assert_eq!(plan.endpoints(), 2);
-        let big = plan.placements.iter().find(|p| p.model_name == "big").unwrap();
+        let big = plan
+            .placements
+            .iter()
+            .find(|p| p.model_name == "big")
+            .unwrap();
         assert_eq!(big.node_name, "mac");
     }
 
@@ -401,9 +415,16 @@ mod tests {
     /// rather than on system RAM, because that is where it is fastest.
     #[test]
     fn a_small_model_is_given_the_fastest_free_pool() {
-        let plan = fleet(&[member("big", 80), member("small", 10)], &[mac(), gpu(), ram()])
+        let plan = fleet(
+            &[member("big", 80), member("small", 10)],
+            &[mac(), gpu(), ram()],
+        )
+        .unwrap();
+        let small = plan
+            .placements
+            .iter()
+            .find(|p| p.model_name == "small")
             .unwrap();
-        let small = plan.placements.iter().find(|p| p.model_name == "small").unwrap();
         assert_eq!(small.node_name, "pc-gpu");
     }
 
@@ -411,17 +432,23 @@ mod tests {
     /// agents placed slightly faster.
     #[test]
     fn placing_every_model_wins_over_placing_fewer_of_them_faster() {
-        let plan =
-            fleet(&[member("a", 10), member("b", 10), member("c", 10)], &[mac(), gpu(), ram()])
-                .unwrap();
+        let plan = fleet(
+            &[member("a", 10), member("b", 10), member("c", 10)],
+            &[mac(), gpu(), ram()],
+        )
+        .unwrap();
         assert_eq!(plan.endpoints(), 3, "all three should be placed");
         assert!(plan.unplaced.is_empty());
     }
 
     #[test]
     fn one_pool_holds_at_most_one_model() {
-        let members =
-            [member("a", 10), member("b", 10), member("c", 10), member("d", 10)];
+        let members = [
+            member("a", 10),
+            member("b", 10),
+            member("c", 10),
+            member("d", 10),
+        ];
         let plan = fleet(&members, &[mac(), gpu()]).unwrap();
         assert_eq!(plan.endpoints(), 2);
         assert_eq!(plan.unplaced.len(), 2);
@@ -471,10 +498,23 @@ mod tests {
         long.context_tokens = 65536;
 
         let plan = fleet(&[short, long], &[mac(), gpu()]).unwrap();
-        let t = plan.placements.iter().find(|p| p.model_name == "tools").unwrap();
-        let r = plan.placements.iter().find(|p| p.model_name == "reasoner").unwrap();
+        let t = plan
+            .placements
+            .iter()
+            .find(|p| p.model_name == "tools")
+            .unwrap();
+        let r = plan
+            .placements
+            .iter()
+            .find(|p| p.model_name == "reasoner")
+            .unwrap();
         assert_eq!(t.context_tokens, 4096);
-        assert!(r.kv_bytes > t.kv_bytes * 8, "{} vs {}", r.kv_bytes, t.kv_bytes);
+        assert!(
+            r.kv_bytes > t.kv_bytes * 8,
+            "{} vs {}",
+            r.kv_bytes,
+            t.kv_bytes
+        );
     }
 
     /// A pin overrides the optimiser, even when it costs throughput.
@@ -483,7 +523,11 @@ mod tests {
         let mut small = member("small", 10);
         small.pin = Some(2); // system RAM, far from optimal
         let plan = fleet(&[small, member("other", 10)], &[mac(), gpu(), ram()]).unwrap();
-        let s = plan.placements.iter().find(|p| p.model_name == "small").unwrap();
+        let s = plan
+            .placements
+            .iter()
+            .find(|p| p.model_name == "small")
+            .unwrap();
         assert_eq!(s.node_name, "pc-ram");
         assert!(s.pinned);
     }
@@ -538,24 +582,33 @@ mod tests {
     /// Reporting it as three machines is the lie this exists to stop.
     #[test]
     fn endpoints_and_machines_are_counted_separately() {
-        let plan =
-            fleet(&[member("a", 10), member("b", 10), member("c", 10)], &[mac(), gpu(), ram()])
-                .unwrap();
+        let plan = fleet(
+            &[member("a", 10), member("b", 10), member("c", 10)],
+            &[mac(), gpu(), ram()],
+        )
+        .unwrap();
         assert_eq!(plan.endpoints(), 3);
         assert_eq!(plan.machines(), 2, "pc-gpu and pc-ram are one desktop");
     }
 
     #[test]
     fn agents_sharing_a_desktop_are_marked_co_resident() {
-        let plan =
-            fleet(&[member("a", 10), member("b", 10), member("c", 10)], &[mac(), gpu(), ram()])
-                .unwrap();
-        let names: Vec<&str> =
-            plan.co_resident().map(|p| p.node_name.as_str()).collect();
+        let plan = fleet(
+            &[member("a", 10), member("b", 10), member("c", 10)],
+            &[mac(), gpu(), ram()],
+        )
+        .unwrap();
+        let names: Vec<&str> = plan.co_resident().map(|p| p.node_name.as_str()).collect();
         assert_eq!(names.len(), 2, "got {names:?}");
-        assert!(names.contains(&"pc-gpu") && names.contains(&"pc-ram"), "got {names:?}");
-        let mac_placement =
-            plan.placements.iter().find(|p| p.node_name == "mac").unwrap();
+        assert!(
+            names.contains(&"pc-gpu") && names.contains(&"pc-ram"),
+            "got {names:?}"
+        );
+        let mac_placement = plan
+            .placements
+            .iter()
+            .find(|p| p.node_name == "mac")
+            .unwrap();
         assert!(!mac_placement.co_resident, "the Mac is on its own");
     }
 
@@ -584,8 +637,7 @@ mod tests {
         assert_eq!(shared.machines(), 1);
         assert_eq!(separate.machines(), 2);
         assert!(
-            (shared.aggregate_tokens_per_sec() - separate.aggregate_tokens_per_sec()).abs()
-                < 1e-9
+            (shared.aggregate_tokens_per_sec() - separate.aggregate_tokens_per_sec()).abs() < 1e-9
         );
     }
 
@@ -596,8 +648,7 @@ mod tests {
         let mut g = gpu();
         g.contention = 0.5;
         let free = fleet(&[member("solo", 10)], &[g.clone()]).unwrap();
-        let crowded =
-            fleet(&[member("solo", 10), member("other", 10)], &[g, ram()]).unwrap();
+        let crowded = fleet(&[member("solo", 10), member("other", 10)], &[g, ram()]).unwrap();
 
         let alone = free.placements[0].secs_per_token;
         let shared = crowded

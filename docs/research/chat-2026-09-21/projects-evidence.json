@@ -1,0 +1,926 @@
+{
+  "checked_at": "2026-09-21",
+  "method": "Direct GitHub repository HTML metadata, curated relevance order, not runtime tests or global star ranking",
+  "projects": [
+    {
+      "repo": "danny-avila/LibreChat",
+      "category": "Chat clients",
+      "url": "https://github.com/danny-avila/LibreChat",
+      "status": "200",
+      "title": "GitHub - danny-avila/LibreChat: Enhanced ChatGPT Clone: Features Agents, MCP, Skills, DeepSeek, Anthropic, AWS, OpenAI, Responses API, Azure, Groq, o1, GPT-5, Mistral, OpenRouter, Vertex AI, Gemini, Artifacts, AI model switching, message search, Code Interpreter, langchain, DALL-E-3, OpenAPI Actions, Functions, Secure Multi-User Auth, Presets, open-source for self-hosting. Active · GitHub",
+      "description": "Enhanced ChatGPT Clone: Features Agents, MCP, Skills, DeepSeek, Anthropic, AWS, OpenAI, Responses API, Azure, Groq, o1, GPT-5, Mistral, OpenRouter, Vertex AI, Gemini, Artifacts, AI model switching, message search, Code Interpreter, langchain, DALL-E-3, OpenAPI Actions, Functions, Secure Multi-User Auth, Presets, open-source for self-hosting. Active - danny-avila/LibreChat"
+    },
+    {
+      "repo": "CherryHQ/cherry-studio",
+      "category": "Chat clients",
+      "url": "https://github.com/CherryHQ/cherry-studio",
+      "status": "200",
+      "title": "GitHub - CherryHQ/cherry-studio: AI productivity studio with smart chat, autonomous agents, and 300+ assistants. Unified access to frontier LLMs · GitHub",
+      "description": "AI productivity studio with smart chat, autonomous agents, and 300+ assistants. Unified access to frontier LLMs - CherryHQ/cherry-studio"
+    },
+    {
+      "repo": "lobehub/lobehub",
+      "category": "Chat clients",
+      "url": "https://github.com/lobehub/lobehub",
+      "status": "200",
+      "title": "GitHub - lobehub/lobehub: 🤯 LobeHub is your Chief Agent Operator, organizing your agents into 7×24 operations by hiring, scheduling, and reporting on your entire AI team. · GitHub",
+      "description": "🤯 LobeHub is your Chief Agent Operator, organizing your agents into 7×24 operations by hiring, scheduling, and reporting on your entire AI team. - lobehub/lobehub"
+    },
+    {
+      "repo": "open-webui/open-webui",
+      "category": "Chat clients",
+      "url": "https://github.com/open-webui/open-webui",
+      "status": "200",
+      "title": "GitHub - open-webui/open-webui: User-friendly AI Interface (Supports Ollama, OpenAI API, ...) · GitHub",
+      "description": "User-friendly AI Interface (Supports Ollama, OpenAI API, ...) - open-webui/open-webui"
+    },
+    {
+      "repo": "enricoros/big-AGI",
+      "category": "Chat clients",
+      "url": "https://github.com/enricoros/big-AGI",
+      "status": "200",
+      "title": "GitHub - enricoros/big-AGI: AI suite powered by state-of-the-art models and providing advanced AI/AGI functions. Includes AI personas, AGI functions, world-class Beam multi-model chats, text-to-image, voice, response streaming, code highlighting and execution, PDF import, presets for developers, much more. Deploy on-prem or in the cloud. · GitHub",
+      "description": "AI suite powered by state-of-the-art models and providing advanced AI/AGI functions. Includes AI personas, AGI functions, world-class Beam multi-model chats, text-to-image, voice, response streaming, code highlighting and execution, PDF import, presets for developers, much more. Deploy on-prem or in the cloud. - enricoros/big-AGI"
+    },
+    {
+      "repo": "Bin-Huang/chatbox",
+      "category": "Chat clients",
+      "url": "https://github.com/chatboxai/chatbox",
+      "status": "200",
+      "title": "GitHub - chatboxai/chatbox: Powerful AI Client · GitHub",
+      "description": "Powerful AI Client. Contribute to chatboxai/chatbox development by creating an account on GitHub."
+    },
+    {
+      "repo": "Mintplex-Labs/anything-llm",
+      "category": "Chat clients",
+      "url": "https://github.com/Mintplex-Labs/anything-llm",
+      "status": "200",
+      "title": "GitHub - Mintplex-Labs/anything-llm: Stop renting your intelligence. Own it with AnythingLLM. Everything you need for a powerful local-first agent experience · GitHub",
+      "description": "Stop renting your intelligence. Own it with AnythingLLM. Everything you need for a powerful local-first agent experience  - GitHub - Mintplex-Labs/anything-llm: Stop renting your intelligence. Own it with AnythingLLM. Everything you need for a powerful local-first agent experience"
+    },
+    {
+      "repo": "menloresearch/jan",
+      "category": "Chat clients",
+      "url": "https://github.com/janhq/jan",
+      "status": "200",
+      "title": "GitHub - janhq/jan: Jan is an open source alternative to ChatGPT that runs 100% offline on your computer. · GitHub",
+      "description": "Jan is an open source alternative to ChatGPT that runs 100% offline on your computer. - janhq/jan"
+    },
+    {
+      "repo": "huggingface/chat-ui",
+      "category": "Chat clients",
+      "url": "https://github.com/huggingface/chat-ui",
+      "status": "200",
+      "title": "GitHub - huggingface/chat-ui: The open source codebase powering HuggingChat · GitHub",
+      "description": "The open source codebase powering HuggingChat. Contribute to huggingface/chat-ui development by creating an account on GitHub."
+    },
+    {
+      "repo": "mckaywrigley/chatbot-ui",
+      "category": "Chat clients",
+      "url": "https://github.com/mckaywrigley/chatbot-ui",
+      "status": "200",
+      "title": "GitHub - mckaywrigley/chatbot-ui: AI chat for any model. · GitHub",
+      "description": "AI chat for any model. Contribute to mckaywrigley/chatbot-ui development by creating an account on GitHub."
+    },
+    {
+      "repo": "SillyTavern/SillyTavern",
+      "category": "Chat clients",
+      "url": "https://github.com/SillyTavern/SillyTavern",
+      "status": "200",
+      "title": "GitHub - SillyTavern/SillyTavern: LLM Frontend for Power Users. · GitHub",
+      "description": "LLM Frontend for Power Users. Contribute to SillyTavern/SillyTavern development by creating an account on GitHub."
+    },
+    {
+      "repo": "nomic-ai/gpt4all",
+      "category": "Chat clients",
+      "url": "https://github.com/nomic-ai/gpt4all",
+      "status": "200",
+      "title": "GitHub - nomic-ai/gpt4all: GPT4All: Run Local LLMs on Any Device. Open-source and available for commercial use. · GitHub",
+      "description": "GPT4All: Run Local LLMs on Any Device. Open-source and available for commercial use. - nomic-ai/gpt4all"
+    },
+    {
+      "repo": "lencx/ChatGPT",
+      "category": "Chat clients",
+      "url": "https://github.com/lencx/ChatGPT",
+      "status": "200",
+      "title": "GitHub - lencx/ChatGPT: ❄️ ChatGPT Desktop Application (Mac, Windows and Linux) · GitHub",
+      "description": "❄️ ChatGPT Desktop Application (Mac, Windows and Linux) - lencx/ChatGPT"
+    },
+    {
+      "repo": "Synaptrix/ChatGPT-Desktop",
+      "category": "Chat clients",
+      "url": "https://github.com/Synaptrix/ChatGPT-Desktop",
+      "status": "200",
+      "title": "GitHub - Synaptrix/ChatGPT-Desktop: Fuel your productivity with ChatGPT-Desktop - Blazingly fast and supercharged! · GitHub",
+      "description": "Fuel your productivity with ChatGPT-Desktop - Blazingly fast and supercharged! - Synaptrix/ChatGPT-Desktop"
+    },
+    {
+      "repo": "ChatGPTBox-dev/chatGPTBox",
+      "category": "Chat clients",
+      "url": "https://github.com/ChatGPTBox-dev/chatGPTBox",
+      "status": "200",
+      "title": "GitHub - ChatGPTBox-dev/chatGPTBox: Integrating ChatGPT into your browser deeply, everything you need is here · GitHub",
+      "description": "Integrating ChatGPT into your browser deeply, everything you need is here - ChatGPTBox-dev/chatGPTBox"
+    },
+    {
+      "repo": "BennyKok/llm-desk",
+      "category": "Chat clients",
+      "url": "https://github.com/BennyKok/llm-desk",
+      "status": "404",
+      "title": "Page not found · GitHub · GitHub",
+      "description": "GitHub is where people build software. More than 150 million people use GitHub to discover, fork, and contribute to over 420 million projects."
+    },
+    {
+      "repo": "n4ze3m/page-assist",
+      "category": "Chat clients",
+      "url": "https://github.com/n4ze3m/page-assist",
+      "status": "200",
+      "title": "GitHub - n4ze3m/page-assist: Use your locally running AI models to assist you in your web browsing · GitHub",
+      "description": "Use your locally running AI models to assist you in your web browsing - n4ze3m/page-assist"
+    },
+    {
+      "repo": "openai-translator/openai-translator",
+      "category": "Chat clients",
+      "url": "https://github.com/nextai-translator/nextai-translator",
+      "status": "200",
+      "title": "GitHub - nextai-translator/nextai-translator: 基于 ChatGPT API 的划词翻译浏览器插件和跨平台桌面端应用    -    Browser extension and cross-platform desktop application for translation based on ChatGPT API. · GitHub",
+      "description": "基于 ChatGPT API 的划词翻译浏览器插件和跨平台桌面端应用    -    Browser extension and cross-platform desktop application for translation based on ChatGPT API. - nextai-translator/nextai-translator"
+    },
+    {
+      "repo": "egoist/chatgpt-desktop",
+      "category": "Chat clients",
+      "url": "https://github.com/egoist/chatgpt-desktop",
+      "status": "404",
+      "title": "Page not found · GitHub · GitHub",
+      "description": "GitHub is where people build software. More than 150 million people use GitHub to discover, fork, and contribute to over 420 million projects."
+    },
+    {
+      "repo": "Chanzhaoyu/chatgpt-web",
+      "category": "Chat clients",
+      "url": "https://github.com/Chanzhaoyu/chatgpt-web",
+      "status": "200",
+      "title": "GitHub - Chanzhaoyu/chatgpt-web: 用 Express 和  Vue3 搭建的 ChatGPT 演示网页 · GitHub",
+      "description": "用 Express 和  Vue3 搭建的 ChatGPT 演示网页. Contribute to Chanzhaoyu/chatgpt-web development by creating an account on GitHub."
+    },
+    {
+      "repo": "Niek/chatgpt-web",
+      "category": "Chat clients",
+      "url": "https://github.com/Niek/chatgpt-web",
+      "status": "200",
+      "title": "GitHub - Niek/chatgpt-web: ChatGPT web interface using the OpenAI API · GitHub",
+      "description": "ChatGPT web interface using the OpenAI API. Contribute to Niek/chatgpt-web development by creating an account on GitHub."
+    },
+    {
+      "repo": "ztjhz/BetterChatGPT",
+      "category": "Chat clients",
+      "url": "https://github.com/ztjhz/BetterChatGPT",
+      "status": "200",
+      "title": "GitHub - ztjhz/BetterChatGPT: An amazing UI for OpenAI's ChatGPT (Website + Windows + MacOS + Linux) · GitHub",
+      "description": "An amazing UI for OpenAI's ChatGPT (Website + Windows + MacOS + Linux) - ztjhz/BetterChatGPT"
+    },
+    {
+      "repo": "khoj-ai/khoj",
+      "category": "Chat clients",
+      "url": "https://github.com/khoj-ai/khoj",
+      "status": "200",
+      "title": "GitHub - khoj-ai/khoj: Your AI second brain. Self-hostable. Get answers from the web or your docs. Build custom agents, schedule automations, do deep research. Turn any online or local LLM into your personal, autonomous AI (gpt, claude, gemini, llama, qwen, mistral). Get started - free. · GitHub",
+      "description": "Your AI second brain. Self-hostable. Get answers from the web or your docs. Build custom agents, schedule automations, do deep research. Turn any online or local LLM into your personal, autonomous AI (gpt, claude, gemini, llama, qwen, mistral). Get started - free. - khoj-ai/khoj"
+    },
+    {
+      "repo": "LlmKira/Openaibot",
+      "category": "Chat clients",
+      "url": "https://github.com/LlmKira/Openaibot",
+      "status": "200",
+      "title": "GitHub - LlmKira/Openaibot: ⚡️ Build Your Own chatgpt Bot|🧀 Discord/Slack/Kook/Telegram |⛓ ToolCall|🔖 Plugin Support | 🌻 out-of-box | gpt-4o · GitHub",
+      "description": "⚡️ Build Your Own chatgpt Bot|🧀 Discord/Slack/Kook/Telegram |⛓ ToolCall|🔖 Plugin Support | 🌻 out-of-box | gpt-4o - LlmKira/Openaibot"
+    },
+    {
+      "repo": "Shaunwei/RealChar",
+      "category": "Chat clients",
+      "url": "https://github.com/Shaunwei/RealChar",
+      "status": "200",
+      "title": "GitHub - Shaunwei/RealChar: 🎙️🤖Create, Customize and Talk to your AI Character/Companion in Realtime (All in One Codebase!). Have a natural seamless conversation with AI everywhere (mobile, web and terminal) using LLM OpenAI GPT3.5/4, Anthropic Claude2, Chroma Vector DB, Whisper Speech2Text, ElevenLabs Text2Speech🎙️🤖 · GitHub",
+      "description": "🎙️🤖Create, Customize and Talk to your AI Character/Companion in Realtime (All in One Codebase!). Have a natural seamless conversation with AI everywhere (mobile, web and terminal) using LLM OpenAI GPT3.5/4, Anthropic Claude2, Chroma Vector DB, Whisper Speech2Text, ElevenLabs Text2Speech🎙️🤖 - Shaunwei/RealChar"
+    },
+    {
+      "repo": "cline/cline",
+      "category": "Agents and coding",
+      "url": "https://github.com/cline/cline",
+      "status": "200",
+      "title": "GitHub - cline/cline: Autonomous coding agent as an SDK, IDE extension, or CLI assistant. · GitHub",
+      "description": "Autonomous coding agent as an SDK, IDE extension, or CLI assistant. - cline/cline"
+    },
+    {
+      "repo": "RooCodeInc/Roo-Code",
+      "category": "Agents and coding",
+      "url": "https://github.com/RooCodeInc/Roo-Code",
+      "status": "200",
+      "title": "GitHub - RooCodeInc/Roo-Code: Roo Code gives you a whole dev team of AI agents in your code editor. · GitHub",
+      "description": "Roo Code gives you a whole dev team of AI agents in your code editor. - RooCodeInc/Roo-Code"
+    },
+    {
+      "repo": "Kilo-Org/kilocode",
+      "category": "Agents and coding",
+      "url": "https://github.com/Kilo-Org/kilocode",
+      "status": "200",
+      "title": "GitHub - Kilo-Org/kilocode: Kilo is the all-in-one agentic engineering platform. Build, ship, and iterate faster with the most popular open source coding agent. · GitHub",
+      "description": "Kilo is the all-in-one agentic engineering platform. Build, ship, and iterate faster with the most popular open source coding agent. - Kilo-Org/kilocode"
+    },
+    {
+      "repo": "anomalyco/opencode",
+      "category": "Agents and coding",
+      "url": "https://github.com/anomalyco/opencode",
+      "status": "200",
+      "title": "GitHub - anomalyco/opencode: The open source coding agent. · GitHub",
+      "description": "The open source coding agent. Contribute to anomalyco/opencode development by creating an account on GitHub."
+    },
+    {
+      "repo": "block/goose",
+      "category": "Agents and coding",
+      "url": "https://github.com/aaif-goose/goose",
+      "status": "200",
+      "title": "GitHub - aaif-goose/goose: an open source, extensible AI agent that goes beyond code suggestions - install, execute, edit, and test with any LLM · GitHub",
+      "description": "an open source, extensible AI agent that goes beyond code suggestions - install, execute, edit, and test with any LLM - aaif-goose/goose"
+    },
+    {
+      "repo": "Aider-AI/aider",
+      "category": "Agents and coding",
+      "url": "https://github.com/Aider-AI/aider",
+      "status": "200",
+      "title": "GitHub - Aider-AI/aider: aider is AI pair programming in your terminal · GitHub",
+      "description": "aider is AI pair programming in your terminal. Contribute to Aider-AI/aider development by creating an account on GitHub."
+    },
+    {
+      "repo": "continuedev/continue",
+      "category": "Agents and coding",
+      "url": "https://github.com/continuedev/continue",
+      "status": "200",
+      "title": "GitHub - continuedev/continue: open-source coding agent · GitHub",
+      "description": "open-source coding agent. Contribute to continuedev/continue development by creating an account on GitHub."
+    },
+    {
+      "repo": "openai/codex",
+      "category": "Agents and coding",
+      "url": "https://github.com/openai/codex",
+      "status": "200",
+      "title": "GitHub - openai/codex: Lightweight coding agent that runs in your terminal · GitHub",
+      "description": "Lightweight coding agent that runs in your terminal - openai/codex"
+    },
+    {
+      "repo": "anthropics/claude-code",
+      "category": "Agents and coding",
+      "url": "https://github.com/anthropics/claude-code",
+      "status": "200",
+      "title": "GitHub - anthropics/claude-code: Claude Code is an agentic coding tool that lives in your terminal, understands your codebase, and helps you code faster by executing routine tasks, explaining complex code, and handling git workflows - all through natural language commands. · GitHub",
+      "description": "Claude Code is an agentic coding tool that lives in your terminal, understands your codebase, and helps you code faster by executing routine tasks, explaining complex code, and handling git workflows - all through natural language commands. - anthropics/claude-code"
+    },
+    {
+      "repo": "google-gemini/gemini-cli",
+      "category": "Agents and coding",
+      "url": "https://github.com/google-gemini/gemini-cli",
+      "status": "200",
+      "title": "GitHub - google-gemini/gemini-cli: An open-source AI agent that brings the power of Gemini directly into your terminal. · GitHub",
+      "description": "An open-source AI agent that brings the power of Gemini directly into your terminal. - google-gemini/gemini-cli"
+    },
+    {
+      "repo": "MoonshotAI/kimi-cli",
+      "category": "Agents and coding",
+      "url": "https://github.com/MoonshotAI/kimi-cli",
+      "status": "200",
+      "title": "GitHub - MoonshotAI/kimi-cli: [Archived] Legacy Python Kimi CLI, no longer maintained. Please use Kimi Code CLI: https://github.com/MoonshotAI/kimi-code · GitHub",
+      "description": "[Archived] Legacy Python Kimi CLI, no longer maintained. Please use Kimi Code CLI: https://github.com/MoonshotAI/kimi-code - MoonshotAI/kimi-cli"
+    },
+    {
+      "repo": "QwenLM/qwen-code",
+      "category": "Agents and coding",
+      "url": "https://github.com/QwenLM/qwen-code",
+      "status": "200",
+      "title": "GitHub - QwenLM/qwen-code: An open-source AI coding agent that lives in your terminal. · GitHub",
+      "description": "An open-source AI coding agent that lives in your terminal. - QwenLM/qwen-code"
+    },
+    {
+      "repo": "mariozechner/pi-mono",
+      "category": "Agents and coding",
+      "url": "https://github.com/mariozechner/pi-mono",
+      "status": "404",
+      "title": "Page not found · GitHub · GitHub",
+      "description": "GitHub is where people build software. More than 150 million people use GitHub to discover, fork, and contribute to over 420 million projects."
+    },
+    {
+      "repo": "Pythagora-io/gpt-pilot",
+      "category": "Agents and coding",
+      "url": "https://github.com/Pythagora-io/gpt-pilot",
+      "status": "200",
+      "title": "GitHub - Pythagora-io/gpt-pilot: The first real AI developer · GitHub",
+      "description": "The first real AI developer. Contribute to Pythagora-io/gpt-pilot development by creating an account on GitHub."
+    },
+    {
+      "repo": "OpenInterpreter/open-interpreter",
+      "category": "Agents and coding",
+      "url": "https://github.com/openinterpreter/openinterpreter",
+      "status": "200",
+      "title": "GitHub - openinterpreter/openinterpreter: A coding agent for open models like Kimi K3 and GLM 5.3 · GitHub",
+      "description": "A coding agent for open models like Kimi K3 and GLM 5.3 - openinterpreter/openinterpreter"
+    },
+    {
+      "repo": "Significant-Gravitas/AutoGPT",
+      "category": "Agents and coding",
+      "url": "https://github.com/Significant-Gravitas/AutoGPT",
+      "status": "200",
+      "title": "GitHub - Significant-Gravitas/AutoGPT: AutoGPT is the vision of accessible AI for everyone, to use and to build on. Our mission is to provide the tools, so that you can focus on what matters. · GitHub",
+      "description": "AutoGPT is the vision of accessible AI for everyone, to use and to build on. Our mission is to provide the tools, so that you can focus on what matters. - Significant-Gravitas/AutoGPT"
+    },
+    {
+      "repo": "FoundationAgents/MetaGPT",
+      "category": "Agents and coding",
+      "url": "https://github.com/FoundationAgents/MetaGPT",
+      "status": "200",
+      "title": "GitHub - FoundationAgents/MetaGPT: 🌟 The Multi-Agent Framework: First AI Software Company, Towards Natural Language Programming · GitHub",
+      "description": "🌟 The Multi-Agent Framework: First AI Software Company, Towards Natural Language Programming - FoundationAgents/MetaGPT"
+    },
+    {
+      "repo": "agent0ai/agent-zero",
+      "category": "Agents and coding",
+      "url": "https://github.com/agent0ai/agent-zero",
+      "status": "200",
+      "title": "GitHub - agent0ai/agent-zero: Agent Zero AI framework · GitHub",
+      "description": "Agent Zero AI framework. Contribute to agent0ai/agent-zero development by creating an account on GitHub."
+    },
+    {
+      "repo": "TransformerOptimus/SuperAGI",
+      "category": "Agents and coding",
+      "url": "https://github.com/TransformerOptimus/SuperAGI",
+      "status": "200",
+      "title": "GitHub - TransformerOptimus/SuperAGI: <⚡️> SuperAGI - A dev-first open source autonomous AI agent framework. Enabling developers to build, manage & run useful autonomous agents quickly and reliably. · GitHub",
+      "description": "<⚡️> SuperAGI - A dev-first open source autonomous AI agent framework. Enabling developers to build, manage & run useful autonomous agents quickly and reliably. - TransformerOptimus/SuperAGI"
+    },
+    {
+      "repo": "assafelovic/gpt-researcher",
+      "category": "Agents and coding",
+      "url": "https://github.com/assafelovic/gpt-researcher",
+      "status": "200",
+      "title": "GitHub - assafelovic/gpt-researcher: An autonomous agent that conducts deep research on any data using any LLM providers · GitHub",
+      "description": "An autonomous agent that conducts deep research on any data using any LLM providers - assafelovic/gpt-researcher"
+    },
+    {
+      "repo": "ItzCrazyKns/Perplexica",
+      "category": "Agents and coding",
+      "url": "https://github.com/ItzCrazyKns/Vane",
+      "status": "200",
+      "title": "GitHub - ItzCrazyKns/Vane: Vane is an AI-powered answering engine. · GitHub",
+      "description": "Vane is an AI-powered answering engine. Contribute to ItzCrazyKns/Vane development by creating an account on GitHub."
+    },
+    {
+      "repo": "langchain-ai/open_deep_research",
+      "category": "Agents and coding",
+      "url": "https://github.com/langchain-ai/open_deep_research",
+      "status": "200",
+      "title": "GitHub - langchain-ai/open_deep_research · GitHub",
+      "description": "Contribute to langchain-ai/open_deep_research development by creating an account on GitHub."
+    },
+    {
+      "repo": "browser-use/browser-use",
+      "category": "Agents and coding",
+      "url": "https://github.com/browser-use/browser-use",
+      "status": "200",
+      "title": "GitHub - browser-use/browser-use: Agents that use the browser. · GitHub",
+      "description": "Agents that use the browser. Contribute to browser-use/browser-use development by creating an account on GitHub."
+    },
+    {
+      "repo": "Skyvern-AI/skyvern",
+      "category": "Agents and coding",
+      "url": "https://github.com/Skyvern-AI/skyvern",
+      "status": "200",
+      "title": "GitHub - Skyvern-AI/skyvern: Automate browser based workflows with AI · GitHub",
+      "description": "Automate browser based workflows with AI. Contribute to Skyvern-AI/skyvern development by creating an account on GitHub."
+    },
+    {
+      "repo": "bytedance/UI-TARS-desktop",
+      "category": "Agents and coding",
+      "url": "https://github.com/bytedance/UI-TARS-desktop",
+      "status": "200",
+      "title": "GitHub - bytedance/UI-TARS-desktop: The Open-Source Multimodal AI Agent Stack: Connecting Cutting-Edge AI Models and Agent Infra · GitHub",
+      "description": "The Open-Source Multimodal AI Agent Stack: Connecting Cutting-Edge AI Models and Agent Infra - bytedance/UI-TARS-desktop"
+    },
+    {
+      "repo": "Fosowl/agenticSeek",
+      "category": "Agents and coding",
+      "url": "https://github.com/Fosowl/agenticSeek",
+      "status": "200",
+      "title": "GitHub - Fosowl/agenticSeek: Fully Local Manus AI. No APIs, No $200 monthly bills. Enjoy an autonomous agent that thinks, browses the web, and code for the sole cost of electricity. · GitHub",
+      "description": "Fully Local Manus AI. No APIs, No $200 monthly bills. Enjoy an autonomous agent that thinks, browses the web, and code for the sole cost of electricity. - Fosowl/agenticSeek"
+    },
+    {
+      "repo": "Canner/WrenAI",
+      "category": "Agents and coding",
+      "url": "https://github.com/Canner/WrenAI",
+      "status": "200",
+      "title": "GitHub - Canner/WrenAI: GenBI (Generative BI) for AI agents, an open-source, governed text-to-SQL through an open context layer that turns natural-language questions into trusted dashboards, charts, and SQL across 20+ data sources, such as BigQuery, Snowflake, PostgreSQL, ClickHouse, Amazon Redshift, Databricks and more. · GitHub",
+      "description": "GenBI (Generative BI) for AI agents, an open-source, governed text-to-SQL through an open context layer that turns natural-language questions into trusted dashboards, charts, and SQL across 20+ data sources, such as BigQuery, Snowflake, PostgreSQL, ClickHouse, Amazon Redshift, Databricks and more. - Canner/WrenAI"
+    },
+    {
+      "repo": "stitionai/devika",
+      "category": "Agents and coding",
+      "url": "https://github.com/stitionai/devika",
+      "status": "200",
+      "title": "GitHub - stitionai/devika: Devika is the first open-source implementation of an Agentic Software Engineer. Initially started as an open-source alternative to Devin. · GitHub",
+      "description": "Devika is the first open-source implementation of an Agentic Software Engineer. Initially started as an open-source alternative to Devin. - stitionai/devika"
+    },
+    {
+      "repo": "smol-ai/developer",
+      "category": "Agents and coding",
+      "url": "https://github.com/smol-ai/developer",
+      "status": "200",
+      "title": "GitHub - smol-ai/developer: the first library to let you embed a developer agent in your own app! · GitHub",
+      "description": "the first library to let you embed a developer agent in your own app! - smol-ai/developer"
+    },
+    {
+      "repo": "reworkd/AgentGPT",
+      "category": "Agents and coding",
+      "url": "https://github.com/reworkd/AgentGPT",
+      "status": "200",
+      "title": "GitHub - reworkd/AgentGPT: 🤖 Assemble, configure, and deploy autonomous AI Agents in your browser. · GitHub",
+      "description": "🤖 Assemble, configure, and deploy autonomous AI Agents in your browser. - reworkd/AgentGPT"
+    },
+    {
+      "repo": "Gpt-engineer-org/gpt-engineer",
+      "category": "Agents and coding",
+      "url": "https://github.com/AntonOsika/gpt-engineer",
+      "status": "200",
+      "title": "GitHub - AntonOsika/gpt-engineer: CLI platform to experiment with codegen. Precursor to: https://lovable.dev · GitHub",
+      "description": "CLI platform to experiment with codegen. Precursor to: https://lovable.dev - AntonOsika/gpt-engineer"
+    },
+    {
+      "repo": "sweepai/sweep",
+      "category": "Agents and coding",
+      "url": "https://github.com/sweepai/sweep",
+      "status": "200",
+      "title": "GitHub - sweepai/sweep: Sweep: AI coding assistant for JetBrains · GitHub",
+      "description": "Sweep: AI coding assistant for JetBrains. Contribute to sweepai/sweep development by creating an account on GitHub."
+    },
+    {
+      "repo": "princeton-nlp/SWE-agent",
+      "category": "Agents and coding",
+      "url": "https://github.com/SWE-agent/SWE-agent",
+      "status": "200",
+      "title": "GitHub - SWE-agent/SWE-agent: SWE-agent takes a GitHub issue and tries to automatically fix it, using your LM of choice. It can also be employed for offensive cybersecurity or competitive coding challenges. [NeurIPS 2024] · GitHub",
+      "description": "SWE-agent takes a GitHub issue and tries to automatically fix it, using your LM of choice. It can also be employed for offensive cybersecurity or competitive coding challenges. [NeurIPS 2024]  - GitHub - SWE-agent/SWE-agent: SWE-agent takes a GitHub issue and tries to automatically fix it, using your LM of choice. It can also be employed for offensive cybersecurity or competitive coding challenges. [NeurIPS 2024]"
+    },
+    {
+      "repo": "OpenHands/OpenHands",
+      "category": "Agents and coding",
+      "url": "https://github.com/OpenHands/OpenHands",
+      "status": "200",
+      "title": "GitHub - OpenHands/OpenHands: 🙌 OpenHands: AI-Driven Development · GitHub",
+      "description": "🙌 OpenHands: AI-Driven Development. Contribute to OpenHands/OpenHands development by creating an account on GitHub."
+    },
+    {
+      "repo": "winfunc/opcode",
+      "category": "Agents and coding",
+      "url": "https://github.com/winfunc/opcode",
+      "status": "200",
+      "title": "GitHub - winfunc/opcode: A powerful GUI app and Toolkit for Claude Code - Create custom agents, manage interactive Claude Code sessions, run secure background agents, and more. · GitHub",
+      "description": "A powerful GUI app and Toolkit for Claude Code - Create custom agents, manage interactive Claude Code sessions, run secure background agents, and more. - winfunc/opcode"
+    },
+    {
+      "repo": "iOfficeAI/AionUi",
+      "category": "Agents and coding",
+      "url": "https://github.com/iOfficeAI/AionUi",
+      "status": "200",
+      "title": "GitHub - iOfficeAI/AionUi: Open-source 24/7 Cowork app for OpenClaw, Hermes, Claude Code, Codex, OpenCode and 20+ more CLI Agent | Customize your assistants | Team them up｜Star if you like it! · GitHub",
+      "description": "Open-source 24/7 Cowork app for OpenClaw, Hermes, Claude Code, Codex, OpenCode and 20+ more CLI Agent | Customize your assistants | Team them up｜Star if you like it! - iOfficeAI/AionUi"
+    },
+    {
+      "repo": "dyad-sh/dyad",
+      "category": "Agents and coding",
+      "url": "https://github.com/dyad-sh/dyad",
+      "status": "200",
+      "title": "GitHub - dyad-sh/dyad: Local, open-source AI app builder for power users ✨ v0 / Lovable / Replit / Bolt alternative 🌟 Star if you like it! · GitHub",
+      "description": "Local, open-source AI app builder for power users ✨ v0 / Lovable / Replit / Bolt alternative 🌟 Star if you like it! - dyad-sh/dyad"
+    },
+    {
+      "repo": "stackblitz-labs/bolt.diy",
+      "category": "Agents and coding",
+      "url": "https://github.com/stackblitz-labs/bolt.diy",
+      "status": "200",
+      "title": "GitHub - stackblitz-labs/bolt.diy: Prompt, run, edit, and deploy full-stack web applications using any LLM you want! · GitHub",
+      "description": "Prompt, run, edit, and deploy full-stack web applications using any LLM you want! - stackblitz-labs/bolt.diy"
+    },
+    {
+      "repo": "coleam00/bolt.new-any-llm",
+      "category": "Agents and coding",
+      "url": "https://github.com/stackblitz-labs/bolt.diy",
+      "status": "200",
+      "title": "GitHub - stackblitz-labs/bolt.diy: Prompt, run, edit, and deploy full-stack web applications using any LLM you want! · GitHub",
+      "description": "Prompt, run, edit, and deploy full-stack web applications using any LLM you want! - stackblitz-labs/bolt.diy"
+    },
+    {
+      "repo": "TabbyML/tabby",
+      "category": "Agents and coding",
+      "url": "https://github.com/TabbyML/tabby",
+      "status": "200",
+      "title": "GitHub - TabbyML/tabby: Self-hosted AI coding assistant · GitHub",
+      "description": "Self-hosted AI coding assistant. Contribute to TabbyML/tabby development by creating an account on GitHub."
+    },
+    {
+      "repo": "VoidEditor/void",
+      "category": "Agents and coding",
+      "url": "https://github.com/VoidEditor/void",
+      "status": "200",
+      "title": "GitHub - voideditor/void · GitHub",
+      "description": "Contribute to voideditor/void development by creating an account on GitHub."
+    },
+    {
+      "repo": "zed-industries/zed",
+      "category": "Agents and coding",
+      "url": "https://github.com/zed-industries/zed",
+      "status": "200",
+      "title": "GitHub - zed-industries/zed: Code at the speed of thought – Zed is a high-performance, multiplayer code editor from the creators of Atom and Tree-sitter. · GitHub",
+      "description": "Code at the speed of thought – Zed is a high-performance, multiplayer code editor from the creators of Atom and Tree-sitter. - zed-industries/zed"
+    },
+    {
+      "repo": "getcursor/cursor",
+      "category": "Agents and coding",
+      "url": "https://github.com/cursor/cursor",
+      "status": "200",
+      "title": "GitHub - cursor/cursor · GitHub",
+      "description": "Contribute to cursor/cursor development by creating an account on GitHub."
+    },
+    {
+      "repo": "openclaw/openclaw",
+      "category": "Agents and coding",
+      "url": "https://github.com/openclaw/openclaw",
+      "status": "200",
+      "title": "GitHub - openclaw/openclaw: The AI that really does things. Any OS. Any Platform. The lobster way. 🦞 · GitHub",
+      "description": "The AI that really does things. Any OS. Any Platform. The lobster way. 🦞  - GitHub - openclaw/openclaw: The AI that really does things. Any OS. Any Platform. The lobster way. 🦞"
+    },
+    {
+      "repo": "letta-ai/letta",
+      "category": "Agents and coding",
+      "url": "https://github.com/letta-ai/letta",
+      "status": "200",
+      "title": "GitHub - letta-ai/letta: Platform for stateful agents: AI with advanced memory that can learn and self-improve over time. · GitHub",
+      "description": "Platform for stateful agents: AI with advanced memory that can learn and self-improve over time. - letta-ai/letta"
+    },
+    {
+      "repo": "HKUDS/nanobot",
+      "category": "Agents and coding",
+      "url": "https://github.com/HKUDS/nanobot",
+      "status": "200",
+      "title": "GitHub - HKUDS/nanobot: Ultra-lightweight, open-source, self-hosted personal AI agent framework in Python with WebUI, tools, memory, MCP, multi-agent workflows, automation, and chat apps · GitHub",
+      "description": "Ultra-lightweight, open-source, self-hosted personal AI agent framework in Python with WebUI, tools, memory, MCP, multi-agent workflows, automation, and chat apps - HKUDS/nanobot"
+    },
+    {
+      "repo": "NousResearch/hermes-agent",
+      "category": "Agents and coding",
+      "url": "https://github.com/NousResearch/hermes-agent",
+      "status": "200",
+      "title": "GitHub - NousResearch/hermes-agent: The agent that grows with you · GitHub",
+      "description": "The agent that grows with you. Contribute to NousResearch/hermes-agent development by creating an account on GitHub."
+    },
+    {
+      "repo": "langgenius/dify",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/langgenius/dify",
+      "status": "200",
+      "title": "GitHub - langgenius/dify: Build Agentic workflows, RAG pipelines, with rich AI model and tool support on one collaborative workspace. Deploy on cloud, VPC, or self-hosted, so teams move from prototype to production without rebuilding the stack. · GitHub",
+      "description": "Build Agentic workflows, RAG pipelines, with rich AI model and tool support on one collaborative workspace. Deploy on cloud, VPC, or self-hosted, so teams move from prototype to production without rebuilding the stack. - langgenius/dify"
+    },
+    {
+      "repo": "FlowiseAI/Flowise",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/FlowiseAI/Flowise",
+      "status": "200",
+      "title": "GitHub - FlowiseAI/Flowise: Build AI Agents, Visually · GitHub",
+      "description": "Build AI Agents, Visually. Contribute to FlowiseAI/Flowise development by creating an account on GitHub."
+    },
+    {
+      "repo": "langflow-ai/langflow",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/langflow-ai/langflow",
+      "status": "200",
+      "title": "GitHub - langflow-ai/langflow: Langflow is a powerful tool for building and deploying AI-powered agents and workflows. · GitHub",
+      "description": "Langflow is a powerful tool for building and deploying AI-powered agents and workflows. - langflow-ai/langflow"
+    },
+    {
+      "repo": "n8n-io/n8n",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/n8n-io/n8n",
+      "status": "200",
+      "title": "GitHub - n8n-io/n8n: Fair-code workflow automation platform with native AI capabilities. Combine visual building with custom code, self-host or cloud, 400+ integrations. · GitHub",
+      "description": "Fair-code workflow automation platform with native AI capabilities. Combine visual building with custom code, self-host or cloud, 400+ integrations. - n8n-io/n8n"
+    },
+    {
+      "repo": "infiniflow/ragflow",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/infiniflow/ragflow",
+      "status": "200",
+      "title": "GitHub - infiniflow/ragflow: RAGFlow is a leading open-source Retrieval-Augmented Generation (RAG) engine that fuses cutting-edge RAG with Agent capabilities to create a superior context layer for LLMs · GitHub",
+      "description": "RAGFlow is a leading open-source Retrieval-Augmented Generation (RAG) engine that fuses cutting-edge RAG with Agent capabilities to create a superior context layer for LLMs - infiniflow/ragflow"
+    },
+    {
+      "repo": "onyx-dot-app/onyx",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/onyx-dot-app/onyx",
+      "status": "200",
+      "title": "GitHub - onyx-dot-app/onyx: Open Source AI Platform - AI Chat with advanced features that works with every LLM · GitHub",
+      "description": "Open Source AI Platform - AI Chat with advanced features that works with every LLM - onyx-dot-app/onyx"
+    },
+    {
+      "repo": "QuivrHQ/quivr",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/The-Vibe-Company/quivr",
+      "status": "200",
+      "title": "GitHub - The-Vibe-Company/quivr: Opiniated RAG for integrating GenAI in your apps 🧠   Focus on your product rather than the RAG. Easy integration in existing products with customisation!  Any LLM: GPT4, Groq, Llama. Any Vectorstore: PGVector, Faiss. Any Files. Anyway you want. · GitHub",
+      "description": "Opiniated RAG for integrating GenAI in your apps 🧠   Focus on your product rather than the RAG. Easy integration in existing products with customisation!  Any LLM: GPT4, Groq, Llama. Any Vectorstore: PGVector, Faiss. Any Files. Anyway you want. - The-Vibe-Company/quivr"
+    },
+    {
+      "repo": "langchain-ai/langchain",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/langchain-ai/langchain",
+      "status": "200",
+      "title": "GitHub - langchain-ai/langchain: The agent engineering platform. · GitHub",
+      "description": "The agent engineering platform. Contribute to langchain-ai/langchain development by creating an account on GitHub."
+    },
+    {
+      "repo": "langchain-ai/langgraph",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/langchain-ai/langgraph",
+      "status": "200",
+      "title": "GitHub - langchain-ai/langgraph: Build resilient agents. · GitHub",
+      "description": "Build resilient agents. Contribute to langchain-ai/langgraph development by creating an account on GitHub."
+    },
+    {
+      "repo": "run-llama/llama_index",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/run-llama/llama_index",
+      "status": "200",
+      "title": "GitHub - run-llama/llama_index: LlamaIndex is the document processing platform for AI · GitHub",
+      "description": "LlamaIndex is the document processing platform for AI - run-llama/llama_index"
+    },
+    {
+      "repo": "microsoft/autogen",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/microsoft/autogen",
+      "status": "200",
+      "title": "GitHub - microsoft/autogen: A programming framework for agentic AI · GitHub",
+      "description": "A programming framework for agentic AI. Contribute to microsoft/autogen development by creating an account on GitHub."
+    },
+    {
+      "repo": "crewAIInc/crewAI",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/crewAIInc/crewAI",
+      "status": "200",
+      "title": "GitHub - crewAIInc/crewAI: Framework for orchestrating role-playing, autonomous AI agents. By fostering collaborative intelligence, CrewAI empowers agents to work together seamlessly, tackling complex tasks. · GitHub",
+      "description": "Framework for orchestrating role-playing, autonomous AI agents. By fostering collaborative intelligence, CrewAI empowers agents to work together seamlessly, tackling complex tasks. - crewAIInc/crewAI"
+    },
+    {
+      "repo": "microsoft/semantic-kernel",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/microsoft/semantic-kernel",
+      "status": "200",
+      "title": "GitHub - microsoft/semantic-kernel: Integrate cutting-edge LLM technology quickly and easily into your apps · GitHub",
+      "description": "Integrate cutting-edge LLM technology quickly and easily into your apps - microsoft/semantic-kernel"
+    },
+    {
+      "repo": "huggingface/smolagents",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/huggingface/smolagents",
+      "status": "200",
+      "title": "GitHub - huggingface/smolagents: 🤗 smolagents: a barebones library for agents that think in code. · GitHub",
+      "description": "🤗 smolagents: a barebones library for agents that think in code. - huggingface/smolagents"
+    },
+    {
+      "repo": "pydantic/pydantic-ai",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/pydantic/pydantic-ai",
+      "status": "200",
+      "title": "GitHub - pydantic/pydantic-ai: How Python does AI. Agents, realtime voice, image generation, embeddings. Every model, every interface, typed end to end. · GitHub",
+      "description": "How Python does AI. Agents, realtime voice, image generation, embeddings. Every model, every interface, typed end to end. - pydantic/pydantic-ai"
+    },
+    {
+      "repo": "mastra-ai/mastra",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/mastra-ai/mastra",
+      "status": "200",
+      "title": "GitHub - mastra-ai/mastra: Mastra is the modern TypeScript framework for AI-powered applications and agents. · GitHub",
+      "description": "Mastra is the modern TypeScript framework for AI-powered applications and agents. - mastra-ai/mastra"
+    },
+    {
+      "repo": "openai/openai-agents-python",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/openai/openai-agents-python",
+      "status": "200",
+      "title": "GitHub - openai/openai-agents-python: A lightweight, powerful framework for multi-agent workflows · GitHub",
+      "description": "A lightweight, powerful framework for multi-agent workflows - openai/openai-agents-python"
+    },
+    {
+      "repo": "google/adk-python",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/google/adk-python",
+      "status": "200",
+      "title": "GitHub - google/adk-python: An open-source, code-first Python toolkit for building, evaluating, and deploying sophisticated AI agents with flexibility and control. · GitHub",
+      "description": "An open-source, code-first Python toolkit for building, evaluating, and deploying sophisticated AI agents with flexibility and control. - google/adk-python"
+    },
+    {
+      "repo": "deepset-ai/haystack",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/deepset-ai/haystack",
+      "status": "200",
+      "title": "GitHub - deepset-ai/haystack: Open-source AI orchestration framework for building context-engineered, production-ready LLM applications. Design modular pipelines and agent workflows with explicit control over retrieval, routing, memory, and generation. Built for scalable agents, RAG, multimodal applications, semantic search, and conversational systems. · GitHub",
+      "description": "Open-source AI orchestration framework for building context-engineered, production-ready LLM applications. Design modular pipelines and agent workflows with explicit control over retrieval, routing, memory, and generation. Built for scalable agents, RAG, multimodal applications, semantic search, and conversational systems. - deepset-ai/haystack"
+    },
+    {
+      "repo": "mem0ai/mem0",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/mem0ai/mem0",
+      "status": "200",
+      "title": "GitHub - mem0ai/mem0: The Memory Layer for AI Agents - Drop-in memory infrastructure for AI agents and apps. Context that persists. Built for production. · GitHub",
+      "description": "The Memory Layer for AI Agents - Drop-in memory infrastructure for AI agents and apps. Context that persists. Built for production. - mem0ai/mem0"
+    },
+    {
+      "repo": "coleam00/Archon",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/coleam00/Archon",
+      "status": "200",
+      "title": "GitHub - coleam00/Archon: The first open-source harness builder for AI coding. Make AI coding deterministic and repeatable. · GitHub",
+      "description": "The first open-source harness builder for AI coding. Make AI coding deterministic and repeatable. - coleam00/Archon"
+    },
+    {
+      "repo": "lfnovo/open-notebook",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/lfnovo/open-notebook",
+      "status": "200",
+      "title": "GitHub - lfnovo/open-notebook: An Open Source implementation of Notebook LM with more flexibility and features · GitHub",
+      "description": "An Open Source implementation of Notebook LM with more flexibility and features - lfnovo/open-notebook"
+    },
+    {
+      "repo": "truefoundry/cognita",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/truefoundry/cognita",
+      "status": "200",
+      "title": "GitHub - truefoundry/cognita: RAG (Retrieval Augmented Generation) Framework for building modular, open source applications for production by TrueFoundry · GitHub",
+      "description": "RAG (Retrieval Augmented Generation) Framework for building modular, open source applications for production by TrueFoundry  - GitHub - truefoundry/cognita: RAG (Retrieval Augmented Generation) Framework for building modular, open source applications for production by TrueFoundry"
+    },
+    {
+      "repo": "getzep/graphiti",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/getzep/graphiti",
+      "status": "200",
+      "title": "GitHub - getzep/graphiti: Build Real-Time Knowledge Graphs for AI Agents · GitHub",
+      "description": "Build Real-Time Knowledge Graphs for AI Agents. Contribute to getzep/graphiti development by creating an account on GitHub."
+    },
+    {
+      "repo": "zilliztech/GPTCache",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/zilliztech/GPTCache",
+      "status": "200",
+      "title": "GitHub - zilliztech/GPTCache: Semantic cache for LLMs. Fully integrated with LangChain and llama_index. · GitHub",
+      "description": "Semantic cache for LLMs. Fully integrated with LangChain and llama_index.  - GitHub - zilliztech/GPTCache: Semantic cache for LLMs. Fully integrated with LangChain and llama_index."
+    },
+    {
+      "repo": "NirDiamant/RAG_Techniques",
+      "category": "Knowledge and workflows",
+      "url": "https://github.com/NirDiamant/RAG_Techniques",
+      "status": "200",
+      "title": "GitHub - NirDiamant/RAG_Techniques: This repository showcases various advanced techniques for Retrieval-Augmented Generation (RAG) systems. Each technique has a detailed notebook tutorial. · GitHub",
+      "description": "This repository showcases various advanced techniques for Retrieval-Augmented Generation (RAG) systems. Each technique has a detailed notebook tutorial. - NirDiamant/RAG_Techniques"
+    },
+    {
+      "repo": "BerriAI/litellm",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/BerriAI/litellm",
+      "status": "200",
+      "title": "GitHub - BerriAI/litellm: The fastest, litest AI Gateway. Rust core with Python SDK. Call 100+ LLM APIs in OpenAI (or native) format with cost tracking, guardrails, load balancing, and logging [Bedrock, Azure, OpenAI, Anthropic, OpenAI, VertexAI, vLLM, Nvidia NIM] · GitHub",
+      "description": "The fastest, litest AI Gateway. Rust core with Python SDK. Call 100+ LLM APIs in OpenAI (or native) format with cost tracking, guardrails, load balancing, and logging [Bedrock, Azure, OpenAI, Anthropic, OpenAI, VertexAI, vLLM, Nvidia NIM] - BerriAI/litellm"
+    },
+    {
+      "repo": "Portkey-AI/gateway",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/Portkey-AI/gateway",
+      "status": "200",
+      "title": "GitHub - Portkey-AI/gateway: A blazing fast AI Gateway with integrated guardrails. Route to 1,600+ LLMs, 50+ AI Guardrails with 1 fast & friendly API. · GitHub",
+      "description": "A blazing fast AI Gateway with integrated guardrails. Route to 1,600+ LLMs, 50+ AI Guardrails with 1 fast & friendly API. - Portkey-AI/gateway"
+    },
+    {
+      "repo": "Helicone/helicone",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/Helicone/helicone",
+      "status": "200",
+      "title": "GitHub - Helicone/helicone: 🧊 Open source LLM observability platform. One line of code to monitor, evaluate, and experiment. YC W23 🍓 · GitHub",
+      "description": "🧊 Open source LLM observability platform. One line of code to monitor, evaluate, and experiment. YC W23 🍓 - Helicone/helicone"
+    },
+    {
+      "repo": "langfuse/langfuse",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/langfuse/langfuse",
+      "status": "200",
+      "title": "GitHub - langfuse/langfuse: 🪢 Open source agent evals & observability: Trace, evaluate, and improve LLM applications with one open platform. · GitHub",
+      "description": "🪢 Open source agent evals & observability: Trace, evaluate, and improve LLM applications with one open platform. - langfuse/langfuse"
+    },
+    {
+      "repo": "vercel/ai",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/vercel/ai",
+      "status": "200",
+      "title": "GitHub - vercel/ai: The AI Toolkit for TypeScript. From the creators of Next.js, the AI SDK is a free open-source library for building AI-powered applications and agents · GitHub",
+      "description": "The AI Toolkit for TypeScript. From the creators of Next.js, the AI SDK is a free open-source library for building AI-powered applications and agents  - GitHub - vercel/ai: The AI Toolkit for TypeScript. From the creators of Next.js, the AI SDK is a free open-source library for building AI-powered applications and agents"
+    },
+    {
+      "repo": "assistant-ui/assistant-ui",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/assistant-ui/assistant-ui",
+      "status": "200",
+      "title": "GitHub - assistant-ui/assistant-ui: Typescript/React Library for AI Chat 💬🚀 · GitHub",
+      "description": "Typescript/React Library for AI Chat 💬🚀. Contribute to assistant-ui/assistant-ui development by creating an account on GitHub."
+    },
+    {
+      "repo": "CopilotKit/CopilotKit",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/CopilotKit/CopilotKit",
+      "status": "200",
+      "title": "GitHub - CopilotKit/CopilotKit: The Frontend Stack for Agents & Generative UI. React, Angular, Mobile, Slack, and more.  Makers of the AG-UI Protocol · GitHub",
+      "description": "The Frontend Stack for Agents & Generative UI. React, Angular, Mobile, Slack, and more.  Makers of the AG-UI Protocol - CopilotKit/CopilotKit"
+    },
+    {
+      "repo": "Chainlit/chainlit",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/Chainlit/chainlit",
+      "status": "200",
+      "title": "GitHub - Chainlit/chainlit: Build Conversational AI in minutes ⚡️ · GitHub",
+      "description": "Build Conversational AI in minutes ⚡️. Contribute to Chainlit/chainlit development by creating an account on GitHub."
+    },
+    {
+      "repo": "ag-ui-protocol/ag-ui",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/ag-ui-protocol/ag-ui",
+      "status": "200",
+      "title": "GitHub - ag-ui-protocol/ag-ui: AG-UI: the Agent-User Interaction Protocol. Bring Agents into Frontend Applications. · GitHub",
+      "description": "AG-UI: the Agent-User Interaction Protocol. Bring Agents into Frontend Applications. - ag-ui-protocol/ag-ui"
+    },
+    {
+      "repo": "modelcontextprotocol/typescript-sdk",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/modelcontextprotocol/typescript-sdk",
+      "status": "200",
+      "title": "GitHub - modelcontextprotocol/typescript-sdk: The official TypeScript SDK for Model Context Protocol servers and clients · GitHub",
+      "description": "The official TypeScript SDK for Model Context Protocol servers and clients - modelcontextprotocol/typescript-sdk"
+    },
+    {
+      "repo": "ollama/ollama",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/ollama/ollama",
+      "status": "200",
+      "title": "GitHub - ollama/ollama: Get up and running with Kimi, GLM, MiniMax, DeepSeek, gpt-oss, Qwen, Gemma and other models. · GitHub",
+      "description": "Get up and running with Kimi, GLM, MiniMax, DeepSeek, gpt-oss, Qwen, Gemma and other models. - ollama/ollama"
+    },
+    {
+      "repo": "ggml-org/llama.cpp",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/ggml-org/llama.cpp",
+      "status": "200",
+      "title": "GitHub - ggml-org/llama.cpp: LLM inference in C/C++ · GitHub",
+      "description": "LLM inference in C/C++. Contribute to ggml-org/llama.cpp development by creating an account on GitHub."
+    },
+    {
+      "repo": "mudler/LocalAI",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/mudler/LocalAI",
+      "status": "200",
+      "title": "GitHub - mudler/LocalAI: LocalAI is the open-source AI engine. Run any model - LLMs, vision, voice, image, video - on any hardware. No GPU required. · GitHub",
+      "description": "LocalAI is the open-source AI engine. Run any model - LLMs, vision, voice, image, video - on any hardware. No GPU required. - mudler/LocalAI"
+    },
+    {
+      "repo": "vllm-project/vllm",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/vllm-project/vllm",
+      "status": "200",
+      "title": "GitHub - vllm-project/vllm: A high-throughput and memory-efficient inference and serving engine for LLMs · GitHub",
+      "description": "A high-throughput and memory-efficient inference and serving engine for LLMs - vllm-project/vllm"
+    },
+    {
+      "repo": "sgl-project/sglang",
+      "category": "Providers and UI infrastructure",
+      "url": "https://github.com/sgl-project/sglang",
+      "status": "200",
+      "title": "GitHub - sgl-project/sglang: SGLang is a high-performance serving framework for large language models and multimodal models. · GitHub",
+      "description": "SGLang is a high-performance serving framework for large language models and multimodal models. - sgl-project/sglang"
+    },
+    {
+      "repo": "ChatGPTNextWeb/NextChat",
+      "category": "Chat clients",
+      "url": "https://github.com/ChatGPTNextWeb/NextChat",
+      "status": "200",
+      "title": "GitHub - ChatGPTNextWeb/NextChat: ✨ Zero-config AI chat assistant. No API key needed — sign up and instantly chat with GPT-5, Claude 4, Gemini 2.5, DeepSeek & 100+ top models. Pay-as-you-go saves you more. Available on Web, iOS, macOS, Android, Linux, Windows. · GitHub",
+      "description": "✨ Zero-config AI chat assistant. No API key needed — sign up and instantly chat with GPT-5, Claude 4, Gemini 2.5, DeepSeek & 100+ top models. Pay-as-you-go saves you more. Available on Web, iOS, macOS, Android, Linux, Windows. - ChatGPTNextWeb/NextChat"
+    },
+    {
+      "repo": "MoonshotAI/kimi-code",
+      "category": "Agents and coding",
+      "url": "https://github.com/MoonshotAI/kimi-code",
+      "status": "200",
+      "title": "GitHub - MoonshotAI/kimi-code: Kimi Code CLI  —  The Starting Point for Next-Gen Agents · GitHub",
+      "description": "Kimi Code CLI  —  The Starting Point for Next-Gen Agents - MoonshotAI/kimi-code"
+    }
+  ]
+}

@@ -1,17 +1,19 @@
 [workspace]
 members = [
     "crates/allpaka-core",
+    "crates/allpaka-chat",
     "crates/allpaka-cli",
     "crates/allpaka-gguf",
     "crates/allpaka-backend",
     "crates/allpaka-model",
 ]
 resolver = "2"
+exclude = ["vendor/block"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.85"
 
 # Cross-crate inlining matters here: the hot dot kernels in allpaka-backend
 # call per-block helpers from allpaka-gguf (f16_to_f32, scale_min_k4) once or
@@ -22,6 +24,7 @@ codegen-units = 1
 
 [workspace.dependencies]
 allpaka-core = { path = "crates/allpaka-core" }
+allpaka-chat = { path = "crates/allpaka-chat" }
 allpaka-backend = { path = "crates/allpaka-backend" }
 allpaka-model = { path = "crates/allpaka-model" }
 allpaka-gguf = { path = "crates/allpaka-gguf" }
@@ -34,3 +37,4 @@ toml = "0.8"
 airbug-otel = { git = "https://github.com/themoretheless/airbug", rev = "75b1321b5d7ff2cee983379f539c07726a7d27e5" }
 airbug-bench = { git = "https://github.com/themoretheless/airbug", rev = "75b1321b5d7ff2cee983379f539c07726a7d27e5" }
 airbug = { git = "https://github.com/themoretheless/airbug", rev = "ce464fac", package = "airbug-bench", features = ["macros"] }
+themoretheless-tokenizer = { git = "https://github.com/themoretheless/tokenizer", tag = "v0.3.1" }
