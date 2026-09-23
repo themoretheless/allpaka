@@ -1,0 +1,16 @@
+{
+  "date": "2026-09-21",
+  "host": "Apple M4 Max",
+  "ram_gib": 128,
+  "allpaka_commit": "c1f56452f28ad70c73cbbb08d2cf171da73417da",
+  "allpaka_dirty": true,
+  "working_tree_patch_sha256": "99ab60a667fd64737f75b8079b244f7d62655f4aab202e7570de22b70a048b75",
+  "llama_commit": "b29c606e2",
+  "llama_build": 10964,
+  "repeats": 5,
+  "build_command": "cargo build --release --offline -p allpaka-cli",
+  "script": "scripts/bench-compare.sh",
+  "validation": "All 10 paired runs passed workload, Metal, and complete decode fast-path checks.",
+  "sandbox_attempt": "Excluded: Metal was unavailable; preserved under qwen3-0.6b-sandbox-failed.",
+  "telemetry": "Local benchmark JSON saved. Optional airbug bench export reported No such file or directory."
+}

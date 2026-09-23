@@ -16,10 +16,15 @@ class Mock(BaseHTTPRequestHandler):
         def event(value):self.wfile.write(('data: '+json.dumps(value)+'\n\n').encode());self.wfile.flush()
         try:
             if messages[0].get('role')=='system' and messages[0].get('content','').startswith('Summarize conversation history'):
-                if 'FAIL_COMPACT' in content:
+                if 'RETRY_COMPACT' in content: time.sleep(1.2)
+                if 'FAIL_COMPACT' in content or ('RETRY_COMPACT' in content and body['max_tokens'] < 32768):
                     event({'choices':[{'delta':{'content':'incomplete'},'finish_reason':'length'}]})
                 else:
                     event({'choices':[{'delta':{'content':'COMPACTED: Preserve user goals and completed work.'},'finish_reason':'stop'}]})
+            elif 'STREAM_ANALYSIS' in content:
+                event({'choices':[{'delta':{'reasoning_content':'Visible analysis <script>literal</script>'}}]})
+                time.sleep(1)
+                event({'choices':[{'delta':{'content':'Finished answer'},'finish_reason':'stop'}]})
             elif 'TOKEN_LIMIT_TOOL' in content:
                 event({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'truncated','function':{'name':'write_file','arguments':'{"path":'}}]},'finish_reason':'length'}],'usage':{'completion_tokens':4096}})
             elif 'TOKEN_LIMIT_TEXT' in content:
@@ -35,6 +40,19 @@ class Mock(BaseHTTPRequestHandler):
                 event({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'edit1','type':'function','function':{'name':'edit_file','arguments':json.dumps({'path':path,'old_text':'verified write','new_text':'verified edit'})}}]},'finish_reason':'tool_calls'}]})
             elif 'READ_SECOND' in content:
                 event({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'read1','type':'function','function':{'name':'read_file','arguments':json.dumps({'path':'reference/context.txt'})}}]},'finish_reason':'tool_calls'}]})
+            elif 'Ты — участник swarm' in content and '«slow»' in content:
+                event({'choices':[{'delta':{'content':'REPORT from slow'}}]})
+                for _ in range(20):time.sleep(.1);event({'choices':[{'delta':{'content':'.'}}]})
+            elif 'Ты — участник swarm' in content and 'SWARM-FAIL' in content and '«risks»' in content:
+                event({'error':{'message':'simulated rate limit'}})
+            elif 'Ты — участник swarm' in content:
+                label=content.split('«')[1].split('»')[0] if '«' in content else 'member'
+                event({'choices':[{'delta':{'content':'REPORT from '+label}}]})
+                event({'choices':[{'delta':{'content':''},'finish_reason':'stop'}],'usage':{'prompt_tokens':5,'completion_tokens':6}})
+            elif 'Ты — критик swarm-результата' in content:
+                event({'choices':[{'delta':{'content':'MASTER merged answer (critic passed)'},'finish_reason':'stop'}],'usage':{'prompt_tokens':9,'completion_tokens':10}})
+            elif 'Собери из них один итоговый ответ' in content:
+                event({'choices':[{'delta':{'content':'MASTER merged answer'},'finish_reason':'stop'}],'usage':{'prompt_tokens':7,'completion_tokens':8}})
             else:event({'choices':[{'delta':{'content':'answer: '+content},'finish_reason':'stop'}],'usage':{'prompt_tokens':3,'completion_tokens':4}})
             self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
         except (BrokenPipeError,ConnectionResetError):pass
@@ -45,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
     data=root/'history';data.mkdir()
     sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close();base=f'http://127.0.0.1:{port}'
     env=dict(os.environ,OPENROUTER_API_KEY='',ALLPAKA_LOCAL_BASE_URL=f'http://127.0.0.1:{mock.server_port}/v1')
-    binary=pathlib.Path(__file__).resolve().parents[1]/'target/debug/allpaka'
+    binary=pathlib.Path(os.environ.get('ALLPAKA_TEST_BINARY',str(pathlib.Path(__file__).resolve().parents[1]/'target/debug/allpaka')))
     log=open(root/'server.log','w')
     def start():
         p=subprocess.Popen([str(binary),'studio','--bind',f'127.0.0.1:{port}','--workspace',str(workspace),'--data-dir',str(data)],env=env,stdout=log,stderr=log)
@@ -106,6 +124,11 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         act(id,'send','SLOW');wait(id,lambda s:s['status']=='running');act(id,'send','AFTER-STOP');act(id,'stop');s=wait(id,lambda s:s['status']=='paused');assert s['queue'][0]['text']=='AFTER-STOP'
         act(id,'resume');wait(id,lambda s:s['status']=='idle' and 'AFTER-STOP' in s['messages'][-1]['content'])
         print('PASS stop and resume')
+        read_only_auto=create(mode='auto',allow_writes=True);act(read_only_auto,'send','CHECK-CAPABILITIES')
+        wait(read_only_auto,lambda s:s['status']=='idle' and len(s['messages'])==2)
+        tool_names=[t['function']['name'] for t in requests[-1]['tools']]
+        assert 'read_file' in tool_names and 'write_file' not in tool_names and 'edit_file' not in tool_names
+        assert 'Tools actually available for THIS request:' in requests[-1]['messages'][0]['content']
         project=api('projects',dict(id='default',name='Test project',instructions='',roots=[dict(alias='workspace',path=str(workspace),writable=True),dict(alias='reference',path=str(reference),writable=False)]))
         planned=create(mode='plan',allow_writes=True);act(planned,'send','TRY_WRITE');s=wait(planned,lambda s:s['status']=='idle' and len(s['messages'])>=4);assert not (workspace/'result.txt').exists();assert 'requires Auto' in next(m['content'] for m in s['messages'] if m['role']=='tool')
         auto=create(mode='auto',allow_writes=True);act(auto,'send','TRY_WRITE');wait(auto,lambda s:s['status']=='idle' and len(s['messages'])>=4);assert (workspace/'result.txt').read_text()=='verified write'
@@ -146,6 +169,30 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         s=wait(partial_tool,lambda s:s['status']=='paused');assert s['messages'][-1]['incomplete_tool_calls'] and not s['messages'][-1].get('tool_calls')
         assert not any(m['role']=='tool' for m in s['messages'])
         print('PASS token-limit pause, partial output/usage, safe tools, configurable resume and retained queue')
+        api('providers/deepseek/key',dict(key='dummy-validation-only',persist=False))
+        for model in ['deepseek-flash','deepseek-v4-flash']:
+            flash=create(provider='deepseek',model=model,max_output_tokens=393216,compact_threshold=550000)
+            assert api('sessions/'+flash)['settings']['max_output_tokens']==393216
+        high=create(provider='deepseek',model='deepseek-v4-pro',max_output_tokens=393216,compact_threshold=550000)
+        assert api('sessions/'+high)['settings']['max_output_tokens']==393216
+        assert api('sessions/'+high)['context_stats']['context_window']==1000000
+        try:
+            create(max_output_tokens=393216)
+            raise AssertionError('Unknown model accepted DeepSeek-only limit')
+        except urllib.error.HTTPError as e: assert e.code==400
+        print('PASS DeepSeek Pro output maximum and model-specific validation')
+        verbose=create(verbosity='maximum');act(verbose,'send','DETAIL_TEST',settings=dict(settings,verbosity='maximum'))
+        detailed=wait(verbose,lambda s:s['status']=='idle' and len(s['messages'])==2)
+        assert detailed['settings']['verbosity']=='maximum'
+        assert 'Response detail: maximum.' in requests[-1]['messages'][0]['content']
+        print('PASS verbosity stored and included in provider instructions')
+        thinking=create();act(thinking,'send','STREAM_ANALYSIS')
+        streamed=wait(thinking,lambda s:s['status']=='running' and s['messages'][-1].get('reasoning_content'))
+        assert streamed['messages'][-1]['content']==''
+        finished=wait(thinking,lambda s:s['status']=='idle')
+        assert finished['messages'][-1]['reasoning_content']=='Visible analysis <script>literal</script>'
+        assert finished['messages'][-1]['content']=='Finished answer'
+        print('PASS reasoning streams before answer and remains in history')
         compacted=create(auto_compact=False)
         for i in range(4):
             act(compacted,'send',f'long turn {i} '+('context '*1000))
@@ -154,10 +201,28 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         act(compacted,'compact')
         summary=wait(compacted,lambda s:s['status']=='idle' and s.get('compaction'))
         assert summary['messages']==original and summary['compaction']['through']==4
+        stats=summary['context_stats']
+        assert stats['compacted_messages']==4 and stats['messages']==8
+        assert stats['estimated_history_tokens'] < stats['original_history_tokens']
+        assert stats['remaining_before_compact']==max(0,stats['compact_threshold']-stats['estimated_history_tokens'])
         act(compacted,'send','AFTER-COMPACT')
         wait(compacted,lambda s:s['status']=='idle' and len(s['messages'])==10)
         assert 'COMPACTED:' in requests[-1]['messages'][1]['content']
         assert not any('long turn 0' in m.get('content','') for m in requests[-1]['messages'])
+        retry=create(auto_compact=False)
+        for i in range(3):
+            act(retry,'send','RETRY_COMPACT '+str(i)+(' context'*100))
+            wait(retry,lambda s:s['status']=='idle' and len(s['messages'])==(i+1)*2)
+        original_retry=api('sessions/'+retry)['messages']; first_request=len(requests)
+        act(retry,'compact')
+        progress=wait(retry,lambda s:'Сжатие контекста: часть 1' in (s.get('notice') or ''))
+        assert progress['messages']==original_retry and not progress.get('compaction')
+        retried=wait(retry,lambda s:s['status']=='idle' and s.get('compaction'))
+        attempts=requests[first_request:]
+        assert [r['max_tokens'] for r in attempts]==[16384,32768]
+        assert attempts[0]['messages']==attempts[1]['messages']
+        assert retried['messages']==original_retry
+        print('PASS compaction retries identical input with larger budget and preserves history')
         automatic=create(auto_compact=True,compact_threshold=4096)
         for i in range(4):
             act(automatic,'send',f'auto turn {i} '+('context '*1000))
@@ -195,12 +260,70 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         except urllib.error.HTTPError as e:assert e.code==400
         act(imported,'move','trash')
         print('PASS full-text search, rename, archive/trash/restore, isolated inert import and invalid exchange rejection')
+        # Swarm: a wave of independent members, one merged MASTER, no writes.
+        two_members=[dict(label='scout',role='map the project',provider='local',model='mock'),
+                     dict(label='risks',role='find regressions',provider='local',model='mock')]
+        swarm=create(mode='swarm',swarm=dict(members=two_members,max_steps_per_member=1,report_bytes=4000))
+        started=len(requests)
+        act(swarm,'send','SWARM-BRIEF')
+        state=wait(swarm,lambda s:s['status']=='idle' and s['messages'][-1].get('swarm'))
+        last=state['messages'][-1]
+        assert [r['label'] for r in last['swarm']]==['scout','risks']
+        assert all(r['status']=='done' and r['provider']=='local' and r['model']=='mock' for r in last['swarm'])
+        assert [r['content'] for r in last['swarm']]==['REPORT from scout','REPORT from risks']
+        assert last['content']=='MASTER merged answer'
+        wave=[r for r in requests[started:] if 'Ты — участник swarm' in str(r['messages'][-1]['content'])]
+        merged=[r for r in requests[started:] if 'Собери из них один итоговый ответ' in str(r['messages'][-1]['content'])]
+        assert len(requests)-started==3 and len(wave)==2 and len(merged)==1
+        member_tools=[t['function']['name'] for t in wave[0]['tools']]
+        assert sorted(member_tools)==['list_files','read_file'] and 'write_file' not in member_tools
+        assert all('swarm' not in message for message in merged[0]['messages'])
+        assert state['usage']['completion_tokens']==20 and state['usage']['prompt_tokens']==17
+        print('PASS swarm wave runs in parallel, merges to MASTER, members stay read-only and usage is summed')
+        for broken in [dict(members=[dict(label='solo',role='',provider='local',model='mock')]),
+                       dict(members=[dict(label='a',role='',provider='ghost',model='mock'),dict(label='b',role='',provider='local',model='mock')]),
+                       dict(members=[dict(label='a',role='',provider='local',model='mock'),dict(label='A',role='',provider='local',model='mock')])]:
+            try:
+                create(mode='swarm',swarm=broken)
+                raise AssertionError('invalid swarm accepted')
+            except urllib.error.HTTPError as e:assert e.code==400
+        print('PASS swarm validation rejects one member, unknown provider and duplicate names')
+        partial=create(mode='swarm',swarm=dict(members=two_members,max_steps_per_member=1))
+        act(partial,'send','SWARM-FAIL brief')
+        state=wait(partial,lambda s:s['status']=='idle' and s['messages'][-1].get('swarm'))
+        reports={r['label']:r for r in state['messages'][-1]['swarm']}
+        assert reports['risks']['status']=='error' and reports['risks']['error']
+        assert reports['scout']['status']=='done' and reports['scout']['content']=='REPORT from scout'
+        assert 'не ответил' in state['notice'] and 'MASTER merged answer' in state['messages'][-1]['content']
+        print('PASS swarm names a failed member instead of inventing its report')
+        critic=create(mode='swarm',swarm=dict(members=two_members,max_steps_per_member=1,critic=True))
+        act(critic,'send','SWARM-CRITIC')
+        state=wait(critic,lambda s:s['status']=='idle' and s['messages'][-1].get('swarm'))
+        assert state['messages'][-1]['content']=='MASTER merged answer (critic passed)'
+        assert len([r for r in requests if 'Ты — критик swarm-результата' in str(r['messages'][-1]['content'])])==1
+        assert state['usage']['completion_tokens']==6+6+8+10
+        print('PASS swarm critic pass replaces the draft only after it succeeds')
+        stopping=create(mode='swarm',swarm=dict(members=[dict(label='slow',role='collect',provider='local',model='mock'),dict(label='risks',role='regressions',provider='local',model='mock')],max_steps_per_member=1))
+        act(stopping,'send','SWARM-STOP')
+        wait(stopping,lambda s:s['status']=='running' and 'REPORT from slow' in json.dumps(s['messages'][-1].get('swarm') or []))
+        act(stopping,'stop')
+        stopped=wait(stopping,lambda s:s['status']=='paused')
+        statuses=[r['status'] for r in stopped['messages'][-1]['swarm']]
+        assert not any(status=='running' or status=='queued' for status in statuses), statuses
+        assert 'cancelled' in statuses and stopped['messages'][-1]['content']==''
+        print('PASS stop cancels the whole wave and marks unfinished reports honestly')
+        swarm_export=api('sessions/'+swarm)
+        swarm_import=api('sessions/import',dict(session=swarm_export,project_id='default'))['id']
+        imported_swarm=api('sessions/'+swarm_import)
+        assert imported_swarm['messages']==swarm_export['messages'] and imported_swarm['settings']['mode']=='chat'
+        print('PASS swarm reports survive export/import without re-running the wave')
         # Persisted projects and conversations survive restart.
         process.terminate();process.wait(timeout=5);process=start();assert api('sessions/'+id)['messages'];assert len(api('config')['projects'][0]['roots'])==2
         assert api('sessions/'+vision)['messages'][0]['images'][0]['name']=='tiny.png'
         assert api('sessions/'+branch)['parent']['session_id']==id
         assert api('sessions/'+compacted)['compaction']==summary['compaction']
         assert api('sessions/'+imported)['folder']=='trash'
+        assert api('sessions/'+swarm)['messages'][-1]['swarm'][0]['content']=='REPORT from scout'
         assert api('sessions/'+compacted)['title']=='Renamed conversation'
         print('PASS conversation, image, compaction and project persistence')
         if os.environ.get('ALLPAKA_TEST_NATIVE_VAULT')=='1':

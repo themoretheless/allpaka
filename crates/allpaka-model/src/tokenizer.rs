@@ -36,7 +36,9 @@ impl Tokenizer {
             .vocab_tokens()
             .context("GGUF carries no tokenizer.ggml.tokens; cannot tokenise text")?
             .to_vec();
-        let merges = f.merges().context("GGUF carries no tokenizer.ggml.merges")?;
+        let merges = f
+            .merges()
+            .context("GGUF carries no tokenizer.ggml.merges")?;
 
         let mut ids = HashMap::with_capacity(pieces.len());
         for (i, p) in pieces.iter().enumerate() {
@@ -134,7 +136,9 @@ impl Tokenizer {
     pub fn decode(&self, tokens: &[u32]) -> String {
         let mut bytes = Vec::new();
         for &t in tokens {
-            let Some(piece) = self.pieces.get(t as usize) else { continue };
+            let Some(piece) = self.pieces.get(t as usize) else {
+                continue;
+            };
             for ch in piece.chars() {
                 match self.char_to_byte.get(&ch) {
                     Some(&b) => bytes.push(b),

@@ -2,8 +2,10 @@
 //!
 //! On for every launch. `ALLPAKA_AIRBUG=0` turns it off.
 
+#[cfg(feature = "airbug")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(feature = "airbug")]
 static ON: AtomicBool = AtomicBool::new(false);
 
 pub fn install() {
@@ -45,6 +47,7 @@ fn wanted() -> bool {
     )
 }
 
+#[cfg(feature = "airbug")]
 fn on() -> bool {
     ON.load(Ordering::Relaxed)
 }

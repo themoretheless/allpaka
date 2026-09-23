@@ -152,7 +152,8 @@ impl Config {
         let arch = f.architecture().to_string();
         let key = |suffix: &str| format!("{arch}.{suffix}");
         let need = |suffix: &str| -> Result<u32> {
-            f.meta_u32(&key(suffix)).with_context(|| format!("GGUF has no {}", key(suffix)))
+            f.meta_u32(&key(suffix))
+                .with_context(|| format!("GGUF has no {}", key(suffix)))
         };
 
         let n_expert = f.meta_u32(&key("expert_count")).unwrap_or(0);
@@ -175,9 +176,9 @@ impl Config {
                 expert_ffn: need("expert_feed_forward_length")?,
                 leading_dense: f.meta_u32(&key("leading_dense_block_count")).unwrap_or(0),
                 // qwen35moe omits expert_shared_count but ships the tensors.
-                n_shared: f.meta_u32(&key("expert_shared_count")).unwrap_or_else(|| {
-                    u32::from(f.tensor("blk.0.ffn_up_shexp.weight").is_some())
-                }),
+                n_shared: f
+                    .meta_u32(&key("expert_shared_count"))
+                    .unwrap_or_else(|| u32::from(f.tensor("blk.0.ffn_up_shexp.weight").is_some())),
                 gating,
                 weights_norm: f.meta_bool(&key("expert_weights_norm")).unwrap_or(true),
                 weights_scale: f.meta_f32(&key("expert_weights_scale")).unwrap_or(1.0),
@@ -226,7 +227,8 @@ impl Config {
         let nextn = f.meta_u32(&key("nextn_predict_layers")).unwrap_or(0);
         let mut n_layers = need("block_count")?;
         while n_layers > 0
-            && f.tensor(&format!("blk.{}.attn_q.weight", n_layers - 1)).is_none()
+            && f.tensor(&format!("blk.{}.attn_q.weight", n_layers - 1))
+                .is_none()
         {
             n_layers -= 1;
         }
@@ -236,7 +238,9 @@ impl Config {
         Ok(Config {
             n_layers,
             nextn: nextn > 0,
-            n_kv_heads: f.meta_u32(&key("attention.head_count_kv")).unwrap_or(n_heads),
+            n_kv_heads: f
+                .meta_u32(&key("attention.head_count_kv"))
+                .unwrap_or(n_heads),
             // Absent on linear-attention hybrids (qwen35moe has no dense FFN).
             ffn_hidden: f.meta_u32(&key("feed_forward_length")).unwrap_or(0),
             moe,
@@ -250,9 +254,7 @@ impl Config {
                 .meta_u32_arr(&key("rope.dimension_sections"))
                 .map(|s| [s[0], s[1], s[2], s[3]])
                 .unwrap_or([0, 0, 0, 0]),
-            full_attention_interval: f
-                .meta_u32(&key("full_attention_interval"))
-                .unwrap_or(0),
+            full_attention_interval: f.meta_u32(&key("full_attention_interval")).unwrap_or(0),
             ssm: match f.meta_u32(&key("ssm.inner_size")) {
                 Some(d_inner) => Some(SsmConfig {
                     d_inner,

@@ -54,7 +54,7 @@
 //! pipeline changes the answer, so the planner tries every ordering rather than
 //! trusting the order nodes appear in the config.
 
-use crate::speculation::{SpeculativeCost, Speculation};
+use crate::speculation::{Speculation, SpeculativeCost};
 use crate::{Fabric, Model, Node};
 
 /// One machine's share of the pipeline.
@@ -163,7 +163,10 @@ pub enum Verdict {
     /// Splitting is both possible and faster than any single machine.
     SplitWins { plan: Plan, single_node: Plan },
     /// A single machine holds the whole model and is faster. Use it.
-    UseSingleNode { plan: Plan, best_split: Option<Plan> },
+    UseSingleNode {
+        plan: Plan,
+        best_split: Option<Plan>,
+    },
     /// No single machine can hold the model. Splitting is the only option.
     SplitRequired { plan: Plan },
     /// Nothing fits, split or not.
@@ -180,7 +183,11 @@ pub struct PlanRequest {
 
 impl Default for PlanRequest {
     fn default() -> Self {
-        Self { context_tokens: 8192, prompt_tokens: 2048, speculation: None }
+        Self {
+            context_tokens: 8192,
+            prompt_tokens: 2048,
+            speculation: None,
+        }
     }
 }
 
@@ -196,10 +203,14 @@ const MAX_NODES_FOR_PERMUTATION: usize = 6;
 
 pub fn plan(nodes: &[Node], model: &Model, fabric: &Fabric, req: &PlanRequest) -> Verdict {
     if nodes.is_empty() {
-        return Verdict::Infeasible { reason: "no nodes configured".into() };
+        return Verdict::Infeasible {
+            reason: "no nodes configured".into(),
+        };
     }
     if model.n_layers == 0 {
-        return Verdict::Infeasible { reason: "model has zero layers".into() };
+        return Verdict::Infeasible {
+            reason: "model has zero layers".into(),
+        };
     }
     if nodes.len() > MAX_NODES_FOR_PERMUTATION {
         return Verdict::Infeasible {
@@ -215,10 +226,14 @@ pub fn plan(nodes: &[Node], model: &Model, fabric: &Fabric, req: &PlanRequest) -
     let split = best_split(nodes, model, fabric, req);
 
     match (single, split) {
-        (Some(s), Some(sp)) if sp.secs_per_token() < s.secs_per_token() => {
-            Verdict::SplitWins { plan: sp, single_node: s }
-        }
-        (Some(s), best_split) => Verdict::UseSingleNode { plan: s, best_split },
+        (Some(s), Some(sp)) if sp.secs_per_token() < s.secs_per_token() => Verdict::SplitWins {
+            plan: sp,
+            single_node: s,
+        },
+        (Some(s), best_split) => Verdict::UseSingleNode {
+            plan: s,
+            best_split,
+        },
         (None, Some(sp)) => Verdict::SplitRequired { plan: sp },
         (None, None) => Verdict::Infeasible {
             reason: format!(
@@ -262,7 +277,10 @@ fn best_split(nodes: &[Node], model: &Model, fabric: &Fabric, req: &PlanRequest)
                 return;
             }
             if let Some(p) = build_plan(&dense, nodes, model, fabric, req) {
-                if best.as_ref().is_none_or(|b| p.secs_per_token() < b.secs_per_token()) {
+                if best
+                    .as_ref()
+                    .is_none_or(|b| p.secs_per_token() < b.secs_per_token())
+                {
                     best = Some(p);
                 }
             }
@@ -360,7 +378,9 @@ fn build_plan(
         // The sampled tokens return from the tail of the pipeline to the head.
         let tail = stages.last().unwrap().node_index;
         let head = stages[0].node_index;
-        total += fabric.between(tail, head)?.one_way_p99(RETURN_PAYLOAD_BYTES * batch as u64);
+        total += fabric
+            .between(tail, head)?
+            .one_way_p99(RETURN_PAYLOAD_BYTES * batch as u64);
         Some(total)
     };
 
@@ -456,17 +476,32 @@ mod tests {
     }
 
     fn wifi() -> Link {
-        Link { throughput_bytes_per_sec: 40e6, rtt_p50_secs: 0.004, rtt_p99_secs: 0.030 }
+        Link {
+            throughput_bytes_per_sec: 40e6,
+            rtt_p50_secs: 0.004,
+            rtt_p99_secs: 0.030,
+        }
     }
 
     fn ten_gbe() -> Link {
-        Link { throughput_bytes_per_sec: 1.1e9, rtt_p50_secs: 0.00015, rtt_p99_secs: 0.0004 }
+        Link {
+            throughput_bytes_per_sec: 1.1e9,
+            rtt_p50_secs: 0.00015,
+            rtt_p99_secs: 0.0004,
+        }
     }
 
     #[test]
     fn single_node_has_no_network_cost() {
-        let v = plan(&[mac()], &model_60gib(), &Fabric::uniform(wifi()), &PlanRequest::default());
-        let Verdict::UseSingleNode { plan, .. } = v else { panic!("expected single node") };
+        let v = plan(
+            &[mac()],
+            &model_60gib(),
+            &Fabric::uniform(wifi()),
+            &PlanRequest::default(),
+        );
+        let Verdict::UseSingleNode { plan, .. } = v else {
+            panic!("expected single node")
+        };
         assert_eq!(plan.stages.len(), 1);
         assert_eq!(plan.network_secs_per_token, 0.0);
     }
@@ -474,7 +509,11 @@ mod tests {
     /// A link bad enough that the round trip outweighs the compute the split
     /// saves. Congested Wi-Fi and anything routed over a VPN land here.
     fn congested_wifi() -> Link {
-        Link { throughput_bytes_per_sec: 20e6, rtt_p50_secs: 0.030, rtt_p99_secs: 0.120 }
+        Link {
+            throughput_bytes_per_sec: 20e6,
+            rtt_p50_secs: 0.030,
+            rtt_p99_secs: 0.120,
+        }
     }
 
     /// The decision rule in one test: a split wins exactly when the network
@@ -517,10 +556,15 @@ mod tests {
         let req = PlanRequest::default();
 
         let slow = plan(&nodes, &m, &Fabric::uniform(congested_wifi()), &req);
-        assert!(matches!(slow, Verdict::UseSingleNode { .. }), "got {slow:?}");
+        assert!(
+            matches!(slow, Verdict::UseSingleNode { .. }),
+            "got {slow:?}"
+        );
 
         let fast = plan(&nodes, &m, &Fabric::uniform(ten_gbe()), &req);
-        let Verdict::SplitWins { plan, single_node } = fast else { panic!("got {fast:?}") };
+        let Verdict::SplitWins { plan, single_node } = fast else {
+            panic!("got {fast:?}")
+        };
         assert!(plan.secs_per_token() < single_node.secs_per_token());
         assert!(
             plan.network_overhead_fraction() < 0.05,
@@ -533,8 +577,11 @@ mod tests {
     /// bandwidth. A high-throughput but laggy path stays a bad path.
     #[test]
     fn throughput_without_low_latency_does_not_help_decode() {
-        let laggy =
-            Link { throughput_bytes_per_sec: 1.1e9, rtt_p50_secs: 0.100, rtt_p99_secs: 0.150 };
+        let laggy = Link {
+            throughput_bytes_per_sec: 1.1e9,
+            rtt_p50_secs: 0.100,
+            rtt_p99_secs: 0.150,
+        };
         let v = plan(
             &[mac(), pc()],
             &model_60gib(),
@@ -564,7 +611,10 @@ mod tests {
             panic!("expected a split, got {v:?}")
         };
         let used: Vec<usize> = plan.stages.iter().map(|s| s.node_index).collect();
-        assert!(!used.contains(&2), "the Wi-Fi-attached laptop should be left out: {used:?}");
+        assert!(
+            !used.contains(&2),
+            "the Wi-Fi-attached laptop should be left out: {used:?}"
+        );
     }
 
     #[test]
@@ -581,8 +631,15 @@ mod tests {
     fn split_is_required_when_nothing_holds_the_whole_model() {
         let mut m = model_60gib();
         m.total_weight_bytes = 100 << 30;
-        let v = plan(&[mac(), pc()], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
-        let Verdict::SplitRequired { plan } = v else { panic!("expected a forced split, got {v:?}") };
+        let v = plan(
+            &[mac(), pc()],
+            &m,
+            &Fabric::uniform(ten_gbe()),
+            &PlanRequest::default(),
+        );
+        let Verdict::SplitRequired { plan } = v else {
+            panic!("expected a forced split, got {v:?}")
+        };
         assert_eq!(plan.stages.len(), 2);
     }
 
@@ -590,7 +647,12 @@ mod tests {
     fn oversized_model_is_reported_infeasible() {
         let mut m = model_60gib();
         m.total_weight_bytes = 400 << 30;
-        let v = plan(&[mac(), pc()], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
+        let v = plan(
+            &[mac(), pc()],
+            &m,
+            &Fabric::uniform(ten_gbe()),
+            &PlanRequest::default(),
+        );
         assert!(matches!(v, Verdict::Infeasible { .. }));
     }
 
@@ -598,8 +660,15 @@ mod tests {
     fn layers_are_conserved_and_contiguous_across_stages() {
         let mut m = model_60gib();
         m.total_weight_bytes = 100 << 30;
-        let v = plan(&[mac(), pc()], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
-        let Verdict::SplitRequired { plan } = v else { panic!() };
+        let v = plan(
+            &[mac(), pc()],
+            &m,
+            &Fabric::uniform(ten_gbe()),
+            &PlanRequest::default(),
+        );
+        let Verdict::SplitRequired { plan } = v else {
+            panic!()
+        };
         let mut next = 0;
         for s in &plan.stages {
             assert_eq!(s.first_layer, next);
@@ -613,8 +682,15 @@ mod tests {
         let mut m = model_60gib();
         m.total_weight_bytes = 100 << 30;
         let nodes = [mac(), pc()];
-        let v = plan(&nodes, &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
-        let Verdict::SplitRequired { plan } = v else { panic!() };
+        let v = plan(
+            &nodes,
+            &m,
+            &Fabric::uniform(ten_gbe()),
+            &PlanRequest::default(),
+        );
+        let Verdict::SplitRequired { plan } = v else {
+            panic!()
+        };
         for s in &plan.stages {
             assert!(s.resident_bytes() <= nodes[s.node_index].usable_bytes);
         }
@@ -623,7 +699,11 @@ mod tests {
     fn draft(k: u32, a: f64) -> Speculation {
         // A ~2 GiB draft against a 60 GiB target: roughly a thirtieth the size,
         // so a draft step is roughly a thirtieth of a verify step.
-        Speculation { draft_weight_bytes: 2 << 30, draft_tokens: k, acceptance_rate: a }
+        Speculation {
+            draft_weight_bytes: 2 << 30,
+            draft_tokens: k,
+            acceptance_rate: a,
+        }
     }
 
     /// A fire-and-forget hop costs one-way latency, and a two-stage pipeline
@@ -634,8 +714,15 @@ mod tests {
         let mut m = model_60gib();
         m.total_weight_bytes = 100 << 30;
         let link = ten_gbe();
-        let v = plan(&[mac(), pc()], &m, &Fabric::uniform(link.clone()), &PlanRequest::default());
-        let Verdict::SplitRequired { plan } = v else { panic!() };
+        let v = plan(
+            &[mac(), pc()],
+            &m,
+            &Fabric::uniform(link.clone()),
+            &PlanRequest::default(),
+        );
+        let Verdict::SplitRequired { plan } = v else {
+            panic!()
+        };
         // Two one-way hops, plus serialisation of ~10 KB each way.
         assert!(plan.network_secs_per_token < link.rtt_p99_secs * 1.2);
         assert!(plan.network_secs_per_token > link.rtt_p99_secs * 0.8);
@@ -646,7 +733,10 @@ mod tests {
     fn split_of(v: &Verdict) -> Plan {
         match v {
             Verdict::SplitWins { plan, .. } | Verdict::SplitRequired { plan } => plan.clone(),
-            Verdict::UseSingleNode { best_split: Some(p), .. } => p.clone(),
+            Verdict::UseSingleNode {
+                best_split: Some(p),
+                ..
+            } => p.clone(),
             other => panic!("no split in {other:?}"),
         }
     }
@@ -660,7 +750,10 @@ mod tests {
         let fabric = Fabric::uniform(congested_wifi());
 
         let plain = split_of(&plan(&nodes, &m, &fabric, &PlanRequest::default()));
-        let spec_req = PlanRequest { speculation: Some(draft(4, 0.7)), ..Default::default() };
+        let spec_req = PlanRequest {
+            speculation: Some(draft(4, 0.7)),
+            ..Default::default()
+        };
         let spec = split_of(&plan(&nodes, &m, &fabric, &spec_req));
 
         assert!(
@@ -683,10 +776,15 @@ mod tests {
         let nodes = [mac(), pc()];
         let m = model_60gib();
 
-        for fabric in [Fabric::uniform(ten_gbe()), Fabric::uniform(congested_wifi())] {
+        for fabric in [
+            Fabric::uniform(ten_gbe()),
+            Fabric::uniform(congested_wifi()),
+        ] {
             let plain = plan(&nodes, &m, &fabric, &PlanRequest::default());
-            let spec_req =
-                PlanRequest { speculation: Some(draft(4, 0.7)), ..Default::default() };
+            let spec_req = PlanRequest {
+                speculation: Some(draft(4, 0.7)),
+                ..Default::default()
+            };
             let spec = plan(&nodes, &m, &fabric, &spec_req);
             assert_eq!(
                 std::mem::discriminant(&plain),
@@ -708,7 +806,10 @@ mod tests {
         else {
             panic!()
         };
-        let req = PlanRequest { speculation: Some(draft(4, 0.8)), ..Default::default() };
+        let req = PlanRequest {
+            speculation: Some(draft(4, 0.8)),
+            ..Default::default()
+        };
         let Verdict::SplitWins { plan: spec, .. } = plan(&nodes, &m, &fabric, &req) else {
             panic!()
         };
@@ -729,9 +830,14 @@ mod tests {
         let fabric = Fabric::uniform(ten_gbe());
 
         let plain = plan(&nodes, &m, &fabric, &PlanRequest::default());
-        let Verdict::UseSingleNode { plan: plain, .. } = plain else { panic!() };
+        let Verdict::UseSingleNode { plan: plain, .. } = plain else {
+            panic!()
+        };
 
-        let req = PlanRequest { speculation: Some(draft(8, 0.0)), ..Default::default() };
+        let req = PlanRequest {
+            speculation: Some(draft(8, 0.0)),
+            ..Default::default()
+        };
         let Verdict::UseSingleNode { plan: spec, .. } = plan(&nodes, &m, &fabric, &req) else {
             panic!()
         };
@@ -756,7 +862,11 @@ mod tests {
 
     /// The PCIe bus inside one box. Microseconds, not milliseconds.
     fn pcie() -> Link {
-        Link { throughput_bytes_per_sec: 50e9, rtt_p50_secs: 0.000012, rtt_p99_secs: 0.00003 }
+        Link {
+            throughput_bytes_per_sec: 50e9,
+            rtt_p50_secs: 0.000012,
+            rtt_p99_secs: 0.00003,
+        }
     }
 
     /// A slow tier must never be used while a faster one has room. Capacity is
@@ -791,11 +901,26 @@ mod tests {
         let mut m = model_60gib();
         m.total_weight_bytes = 170 << 30; // over mac + GPU, under mac + GPU + RAM
 
-        let without = plan(&[mac(), pc()], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
-        assert!(matches!(without, Verdict::Infeasible { .. }), "got {without:?}");
+        let without = plan(
+            &[mac(), pc()],
+            &m,
+            &Fabric::uniform(ten_gbe()),
+            &PlanRequest::default(),
+        );
+        assert!(
+            matches!(without, Verdict::Infeasible { .. }),
+            "got {without:?}"
+        );
 
-        let with = plan(&[mac(), pc(), pc_ram()], &m, &fabric, &PlanRequest::default());
-        let Verdict::SplitRequired { plan } = with else { panic!("got {with:?}") };
+        let with = plan(
+            &[mac(), pc(), pc_ram()],
+            &m,
+            &fabric,
+            &PlanRequest::default(),
+        );
+        let Verdict::SplitRequired { plan } = with else {
+            panic!("got {with:?}")
+        };
         assert!(plan.stages.iter().any(|s| s.node_name == "pc-ram"));
     }
 
@@ -810,12 +935,19 @@ mod tests {
         let mut m = model_60gib();
         m.total_weight_bytes = 170 << 30;
 
-        let Verdict::SplitRequired { plan } =
-            plan(&[mac(), pc(), pc_ram()], &m, &fabric, &PlanRequest::default())
-        else {
+        let Verdict::SplitRequired { plan } = plan(
+            &[mac(), pc(), pc_ram()],
+            &m,
+            &fabric,
+            &PlanRequest::default(),
+        ) else {
             panic!()
         };
-        let ram_stage = plan.stages.iter().find(|s| s.node_name == "pc-ram").unwrap();
+        let ram_stage = plan
+            .stages
+            .iter()
+            .find(|s| s.node_name == "pc-ram")
+            .unwrap();
         assert!(
             ram_stage.compute_secs > plan.compute_secs_per_token * 0.5,
             "the RAM stage should dominate: {:.1} of {:.1} ms",
@@ -828,9 +960,7 @@ mod tests {
     /// planner should not hesitate to cut between VRAM and system RAM.
     #[test]
     fn the_pcie_hop_costs_almost_nothing() {
-        let fabric = Fabric::new()
-            .connect(0, 1, pcie())
-            .with_fallback(ten_gbe());
+        let fabric = Fabric::new().connect(0, 1, pcie()).with_fallback(ten_gbe());
         let mut m = model_60gib();
         m.total_weight_bytes = 70 << 30;
         let Verdict::SplitRequired { plan } =
@@ -870,7 +1000,10 @@ mod tests {
         // dense - no router skips it - so the ratio floors above the raw 0.1.
         let expected = sparse.streamed_bytes_per_step(sparse.n_layers, req.context_tokens) as f64
             / dense.streamed_bytes_per_step(dense.n_layers, req.context_tokens) as f64;
-        assert!(expected > 0.1, "the KV term should keep this above the weight fraction");
+        assert!(
+            expected > 0.1,
+            "the KV term should keep this above the weight fraction"
+        );
         let ratio = sp.compute_secs_per_token / d.compute_secs_per_token;
         assert!((ratio - expected).abs() < 1e-9, "{ratio} vs {expected}");
     }
@@ -881,7 +1014,12 @@ mod tests {
         let mut sparse = model_60gib();
         sparse.total_weight_bytes = 400 << 30;
         sparse.active_weight_fraction = 0.05;
-        let v = plan(&[mac(), pc()], &sparse, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
+        let v = plan(
+            &[mac(), pc()],
+            &sparse,
+            &Fabric::uniform(ten_gbe()),
+            &PlanRequest::default(),
+        );
         assert!(
             matches!(v, Verdict::Infeasible { .. }),
             "a 400 GiB MoE still needs 400 GiB of memory, got {v:?}"
@@ -922,14 +1060,28 @@ mod tests {
     #[test]
     fn ttft_is_unknown_until_flops_and_params_are_both_known() {
         let m = model_60gib(); // param_count: 0
-        let v = plan(&[mac()], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
-        let Verdict::UseSingleNode { plan: p, .. } = v else { panic!() };
+        let v = plan(
+            &[mac()],
+            &m,
+            &Fabric::uniform(ten_gbe()),
+            &PlanRequest::default(),
+        );
+        let Verdict::UseSingleNode { plan: p, .. } = v else {
+            panic!()
+        };
         assert!(p.ttft_secs().is_none());
 
         let mut node = mac();
         node.prefill_flops = 16e12; // flops alone is still not enough
-        let v = plan(&[node], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
-        let Verdict::UseSingleNode { plan: p, .. } = v else { panic!() };
+        let v = plan(
+            &[node],
+            &m,
+            &Fabric::uniform(ten_gbe()),
+            &PlanRequest::default(),
+        );
+        let Verdict::UseSingleNode { plan: p, .. } = v else {
+            panic!()
+        };
         assert!(p.ttft_secs().is_none(), "param count is still unknown");
     }
 
@@ -947,8 +1099,15 @@ mod tests {
         m.param_count = 60_000_000_000; // does not fit the GPU alone
         m.active_weight_fraction = 0.11;
 
-        let v = plan(&[gpu, cpu], &m, &Fabric::uniform(pcie()), &PlanRequest::default());
-        let Verdict::SplitRequired { plan: p } = v else { panic!("expected a forced split") };
+        let v = plan(
+            &[gpu, cpu],
+            &m,
+            &Fabric::uniform(pcie()),
+            &PlanRequest::default(),
+        );
+        let Verdict::SplitRequired { plan: p } = v else {
+            panic!("expected a forced split")
+        };
         let ttft = p.ttft_secs().expect("both pools have flops set");
 
         // The CPU stage holds only half the layers, yet its prefill dwarfs
@@ -976,8 +1135,7 @@ mod tests {
         else {
             panic!()
         };
-        let Verdict::UseSingleNode { plan: sp, .. } = plan(&[node], &sparse, &fabric, &req)
-        else {
+        let Verdict::UseSingleNode { plan: sp, .. } = plan(&[node], &sparse, &fabric, &req) else {
             panic!()
         };
         let ratio = sp.ttft_secs().unwrap() / d.ttft_secs().unwrap();
@@ -988,8 +1146,15 @@ mod tests {
     fn each_node_appears_at_most_once_in_a_plan() {
         let mut m = model_60gib();
         m.total_weight_bytes = 100 << 30;
-        let v = plan(&[mac(), pc()], &m, &Fabric::uniform(ten_gbe()), &PlanRequest::default());
-        let Verdict::SplitRequired { plan } = v else { panic!() };
+        let v = plan(
+            &[mac(), pc()],
+            &m,
+            &Fabric::uniform(ten_gbe()),
+            &PlanRequest::default(),
+        );
+        let Verdict::SplitRequired { plan } = v else {
+            panic!()
+        };
         let mut seen: Vec<usize> = plan.stages.iter().map(|s| s.node_index).collect();
         seen.sort_unstable();
         let len = seen.len();

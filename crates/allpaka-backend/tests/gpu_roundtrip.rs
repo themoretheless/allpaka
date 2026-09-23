@@ -118,7 +118,10 @@ kernel void nothing(device float* y [[buffer(0)]], uint i [[thread_position_in_g
     println!("+ empty compute encoder:   {e:>7.1} us median");
     println!("+ one trivial dispatch:    {d:>7.1} us median");
     for (n, us) in &scaling {
-        println!("{n:>4} dispatches in one command buffer: {us:>8.1} us  ({:.2} us each)", us / *n as f64);
+        println!(
+            "{n:>4} dispatches in one command buffer: {us:>8.1} us  ({:.2} us each)",
+            us / *n as f64
+        );
     }
     // The numbers that decide whether merging submissions is worth writing:
     // waits per token as reported by `allpaka bench --engine`.

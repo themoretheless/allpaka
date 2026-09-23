@@ -1,0 +1,36 @@
+{
+  "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
+  "name": "gh",
+  "version": "0.1.0",
+  "description": "GitHub CLI как инструмент агента: PR, issues, Actions, релизы и gh api — с обязательной проверкой авторизации и запретом разрушительных операций без подтверждения.",
+  "keywords": [
+    "gh",
+    "github",
+    "cli",
+    "pull-request",
+    "issues",
+    "actions",
+    "ci",
+    "release",
+    "api"
+  ],
+  "author": "themoretheless",
+  "license": "MIT",
+  "skillInstructions": "GitHub через CLI gh. Использовать, когда нужны PR (создать/посмотреть/дифф/чек-статусы), issues, статус GitHub Actions и логи упавших запусков, релизы, поиск по репозиториям или сырой gh api.\n\nНачинать с gh auth status: без авторизации команды падают, и об этом надо сказать прямо, вместе с подсказкой про gh auth login или токен в GH_TOKEN/GITHUB_TOKEN. В отчётах всегда брать машиночитаемый вид (--json + --jq), а не парсить таблицы.\n\nГраницы: по умолчанию read-only (list/view/diff/checks/run view/api GET). Изменяющие операции (pr create/merge/close/comment, issue create/close/comment, release create/delete, workflow run, repo delete, push) выполняются только по явной просьбе пользователя. Никогда не печатать и не пересылать токены и значения gh auth token; не подставлять --repo наугад — сначала gh repo view или git remote -v. Работает без изоляции: обычный доступ к командной строке, gh в PATH и gh auth status, без MCP-серверов и контейнеров.",
+  "interface": {
+    "displayName": "GitHub CLI",
+    "shortDescription": "PR, issues, Actions и gh api через GitHub CLI",
+    "longDescription": "GitHub CLI как скилл агента: проверка авторизации, PR и их чек-статусы, issues, запуски Actions с логами упавших джобов, релизы, gh api с --json/--jq и правила безопасности для изменяющих команд.",
+    "developerName": "themoretheless",
+    "websiteURL": "",
+    "iconUrl": "",
+    "category": "DEVELOPER",
+    "hostKind": "local",
+    "platforms": [
+      "macos",
+      "linux",
+      "windows"
+    ]
+  },
+  "skills": "./skills/"
+}

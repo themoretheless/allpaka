@@ -49,11 +49,15 @@ impl Region {
 
     fn zeroed(elems: usize) -> Self {
         let bytes = (elems * 2).div_ceil(Self::PAGE) * Self::PAGE;
-        let layout = std::alloc::Layout::from_size_align(bytes, Self::PAGE)
-            .expect("kv cache layout");
+        let layout =
+            std::alloc::Layout::from_size_align(bytes, Self::PAGE).expect("kv cache layout");
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) } as *mut u16;
         assert!(!ptr.is_null(), "out of memory for a {bytes}-byte kv cache");
-        Self { ptr, elems: bytes / 2, layout }
+        Self {
+            ptr,
+            elems: bytes / 2,
+            layout,
+        }
     }
 
     fn as_slice(&self) -> &[u16] {
@@ -107,7 +111,13 @@ pub struct SsmCache {
 }
 
 impl SsmCache {
-    pub fn new(n_layers: usize, d_conv: usize, conv_channels: usize, dt_rank: usize, d_state: usize) -> Self {
+    pub fn new(
+        n_layers: usize,
+        d_conv: usize,
+        conv_channels: usize,
+        dt_rank: usize,
+        d_state: usize,
+    ) -> Self {
         let conv_elems = n_layers * (d_conv - 1) * conv_channels;
         let state_elems = n_layers * dt_rank * d_state * d_state;
         let store = Region::zeroed((conv_elems + state_elems) * 2);
@@ -241,7 +251,16 @@ impl SsmCache {
     pub fn slot_write_ptrs(
         &mut self,
         li: usize,
-    ) -> Option<(*const f32, *const f32, *mut f32, usize, usize, usize, usize, usize)> {
+    ) -> Option<(
+        *const f32,
+        *const f32,
+        *mut f32,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+    )> {
         if !self.slots_armed {
             return None;
         }
@@ -431,7 +450,11 @@ impl KvCache {
     /// Store one position's k and v for one layer. The position is implicit:
     /// always appended at the end, `advance` seals the step.
     pub fn store(&mut self, layer: usize, k: &[f32], v: &[f32]) {
-        assert!(self.len < self.capacity, "kv cache full at {} positions", self.capacity);
+        assert!(
+            self.len < self.capacity,
+            "kv cache full at {} positions",
+            self.capacity
+        );
         self.store_at(layer, self.len, k, v);
     }
 
@@ -443,7 +466,11 @@ impl KvCache {
         assert_eq!(k.len(), self.kv_dim);
         assert_eq!(v.len(), self.kv_dim);
         assert!(pos >= self.len, "position {pos} is already sealed");
-        assert!(pos < self.capacity, "position {pos} past capacity {}", self.capacity);
+        assert!(
+            pos < self.capacity,
+            "position {pos} past capacity {}",
+            self.capacity
+        );
         let at = pos * self.kv_dim;
         let (kr, vr) = (self.k_range(layer), self.v_range(layer));
         let kv_dim = self.kv_dim;
@@ -485,7 +512,11 @@ impl KvCache {
     pub fn store_at_rewrite(&mut self, layer: usize, pos: usize, k: &[f32], v: &[f32]) {
         assert_eq!(k.len(), self.kv_dim);
         assert_eq!(v.len(), self.kv_dim);
-        assert!(pos < self.capacity, "position {pos} past capacity {}", self.capacity);
+        assert!(
+            pos < self.capacity,
+            "position {pos} past capacity {}",
+            self.capacity
+        );
         let at = pos * self.kv_dim;
         let (kr, vr) = (self.k_range(layer), self.v_range(layer));
         let kv_dim = self.kv_dim;
@@ -512,7 +543,11 @@ impl KvCache {
     /// rolling back to the common prefix keeps every token before the fork.
     /// Storage is not cleared - later stores overwrite it.
     pub fn truncate(&mut self, keep: usize) {
-        assert!(keep <= self.len, "cannot truncate {} up to {keep}", self.len);
+        assert!(
+            keep <= self.len,
+            "cannot truncate {} up to {keep}",
+            self.len
+        );
         self.len = keep;
     }
 

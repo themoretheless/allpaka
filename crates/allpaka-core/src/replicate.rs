@@ -86,7 +86,9 @@ impl ReplicaPlan {
     /// Instances fast enough to route traffic to.
     pub fn useful(&self) -> impl Iterator<Item = &Replica> {
         let cutoff = self.fastest_tokens_per_sec() * USEFUL_SHARE_OF_FASTEST;
-        self.replicas.iter().filter(move |r| r.tokens_per_sec() >= cutoff)
+        self.replicas
+            .iter()
+            .filter(move |r| r.tokens_per_sec() >= cutoff)
     }
 
     /// Whether an instance is worth routing to. Reported per replica so a slow
@@ -105,7 +107,10 @@ impl ReplicaPlan {
     }
 
     fn fastest_tokens_per_sec(&self) -> f64 {
-        self.replicas.iter().map(Replica::tokens_per_sec).fold(0.0, f64::max)
+        self.replicas
+            .iter()
+            .map(Replica::tokens_per_sec)
+            .fold(0.0, f64::max)
     }
 
     /// Latency of the fastest instance: what one waiting user sees when routed
@@ -285,7 +290,11 @@ mod tests {
 
         let plan = replicate(&[pc(), slow], &model(20), &PlanRequest::default()).unwrap();
         assert_eq!(plan.concurrency(), 2);
-        assert_eq!(plan.useful_concurrency(), 1, "the DDR4 instance should be excluded");
+        assert_eq!(
+            plan.useful_concurrency(),
+            1,
+            "the DDR4 instance should be excluded"
+        );
         assert!(plan.useful_tokens_per_sec() < plan.aggregate_tokens_per_sec());
         assert_eq!(plan.useful().next().unwrap().node_name, "pc-gpu");
     }
@@ -315,7 +324,10 @@ mod tests {
         let plain = replicate(&[pc()], &m, &PlanRequest::default());
         assert!(plain.is_some(), "26 GiB alone fits the 30 GiB GPU");
 
-        let with_draft = PlanRequest { speculation: Some(spec), ..Default::default() };
+        let with_draft = PlanRequest {
+            speculation: Some(spec),
+            ..Default::default()
+        };
         assert!(
             replicate(&[pc()], &m, &with_draft).is_none(),
             "26 + 6 GiB of draft should not fit"

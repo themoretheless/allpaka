@@ -28,7 +28,9 @@ fn ffn_shaped_matvecs_report_effective_bandwidth() {
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     for b in region.iter_mut() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = (state >> 56) as u8;
     }
     // Scales of random bits include inf/NaN; zero every f16 scale field so
@@ -70,7 +72,16 @@ fn ffn_shaped_matvecs_report_effective_bandwidth() {
     // Warm up once, then measure several rounds.
     let items: Vec<(&QuantMat, &[f32])> = qmats
         .iter()
-        .map(|m| (m, if m.n_in == 4096 { x_gate.as_slice() } else { x_down.as_slice() }))
+        .map(|m| {
+            (
+                m,
+                if m.n_in == 4096 {
+                    x_gate.as_slice()
+                } else {
+                    x_down.as_slice()
+                },
+            )
+        })
         .collect();
     QuantMat::matmul_many(&items).unwrap();
 
@@ -88,7 +99,15 @@ fn ffn_shaped_matvecs_report_effective_bandwidth() {
     let q8_bytes = 1536 * (4096 / 32) * 34;
     let q8_count = (len / q8_bytes).min(64) - 1;
     let q8_mats: Vec<QuantMat> = (0..q8_count)
-        .map(|i| QuantMat::new(&region[i * q8_bytes..(i + 1) * q8_bytes], GgmlType::Q8_0, 1536, 4096).unwrap())
+        .map(|i| {
+            QuantMat::new(
+                &region[i * q8_bytes..(i + 1) * q8_bytes],
+                GgmlType::Q8_0,
+                1536,
+                4096,
+            )
+            .unwrap()
+        })
         .collect();
     let q8_items: Vec<(&QuantMat, &[f32])> =
         q8_mats.iter().map(|m| (m, x_gate.as_slice())).collect();
@@ -141,7 +160,9 @@ fn mm_shaped_matmuls_report_effective_bandwidth() {
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0xB5AD_4ECE_DA1C_E2A9u64;
     for b in region.iter_mut() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = (state >> 56) as u8;
     }
     if !gpu::attach(region) {
@@ -154,8 +175,13 @@ fn mm_shaped_matmuls_report_effective_bandwidth() {
     let count = (len / q2_bytes).min(64) - 1;
     let mats: Vec<QuantMat> = (0..count)
         .map(|i| {
-            QuantMat::new(&region[i * q2_bytes..(i + 1) * q2_bytes], GgmlType::Q2K, 1536, 4096)
-                .unwrap()
+            QuantMat::new(
+                &region[i * q2_bytes..(i + 1) * q2_bytes],
+                GgmlType::Q2K,
+                1536,
+                4096,
+            )
+            .unwrap()
         })
         .collect();
     let m = 32usize;
@@ -177,4 +203,3 @@ fn mm_shaped_matmuls_report_effective_bandwidth() {
         elems * m as f64 / busy / 1e12,
     );
 }
-

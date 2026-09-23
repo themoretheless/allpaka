@@ -71,7 +71,7 @@ tensor parallel вместо pipeline (all-reduce внутри каждого с
 
 ## Чат с облачными API и проектами
 
-`allpaka studio --workspace /path/to/project` запускает веб-чат без загрузки GGUF: OpenAI, Claude, DeepSeek, Kimi, Grok, Gemini, OpenRouter и локальный сервер. Проекты объединяют несколько папок/репозиториев; сообщения поддерживают текстовые и графические вложения. Есть Chat, Plan, Auto, очередь, Steer, Send now и Stop/Resume.
+`allpaka studio --workspace /path/to/project` запускает веб-чат без загрузки GGUF: OpenAI, Claude, DeepSeek, Kimi, Grok, Gemini, OpenRouter и локальный сервер. Проекты объединяют несколько папок/репозиториев; сообщения поддерживают текстовые и графические вложения (локальный `serve` принимает только текст: картинки отклоняются явной ошибкой `images_unsupported`). Есть Chat, Plan, Auto, Goal, Swarm (волна независимых агентов и сводный MASTER), очередь, Steer, Send now и Stop/Resume. Выбранная модель и модель, которой получен каждый ответ, видны там же, где контекст: в блоке «Контекст» под полем ввода, строке `Модель: …` в панели контекста и в шапке каждого ответа.
 
 [Запуск, настройка и границы возможностей](docs/studio.md) · [Обзор 100 проектов](docs/research/chat-2026-09-21/README.md).
 
@@ -85,6 +85,13 @@ cargo build --release
 
 ```bash
 allpaka inspect models/qwen3-32b-q8_0.gguf
+```
+
+Опись vision-проектора (mmproj): метаданные `clip.*` и тензоры по префиксам имён.
+Это только опись файла — движок пока не умеет запускать проектор:
+
+```bash
+allpaka inspect <mmproj>.gguf --mmproj
 ```
 
 Измерить реальную сеть - **каждую пару отдельно**. На одной машине:
@@ -315,6 +322,10 @@ allpaka fleet --model models/reasoner.gguf --model models/tools.gguf --model mod
   - `model.rs` - форма модели: слои, ширина, объём на стык.
   - `link.rs` - одно измерение линка, односторонняя и round-trip цена.
   - `speculation.rs` - спекулятивное декодирование: сколько токенов даёт проход.
+- `crates/allpaka-chat` - `allpaka studio`: многопровайдерный чат с проектами,
+  режимами и RAG-плагином. Границы возможностей - [docs/studio.md](docs/studio.md).
+  - `swarm.rs` - режим Swarm: волна независимых участников, сводный MASTER,
+    необязательный критик-проход; участники только читают контекст.
 - `crates/allpaka-cli` - бинарь `allpaka`.
   - `bench.rs` - измеритель сети и движка.
   - `serve.rs` - OpenAI-совместимый сервер: chat API, сессия с KV-кэшем,
@@ -330,6 +341,12 @@ allpaka fleet --model models/reasoner.gguf --model models/tools.gguf --model mod
   модели или бинарника rag-mcp.
 - `plugins/allpaka`, `plugins/rag-mcp` - Kimi-плагины (личный маркет):
   движок и RAG как MCP/скилл. Установка: вкладка «个人» → ＋.
+- `plugins/git`, `plugins/gh` - Kimi-плагины агента: git (статус, диффы, отчёт по
+  незакоммиченным файлам с +/− строк по файлам) и GitHub CLI (PR, issues, Actions,
+  `gh api`). Источник лежит плоско (`plugins/*.kimi.plugin.json`, `*.SKILL.md`),
+  раскладка по каталогам - `bash plugins/materialize-git-gh-plugins.sh`; детали в
+  [plugins/README.md](plugins/README.md), скрипт отчёта -
+  [scripts/git-uncommitted-report.sh](scripts/git-uncommitted-report.sh).
 
 ## Тесты и CI
 
@@ -361,8 +378,9 @@ llama.cpp, список фальсифицированных идей) задо�
 
 ## Что дальше
 
-Свой движок уже есть и работает (`serve`: Metal-backend, MoE, GPU routing,
-RAG tool-loop). Ближайшие шаги:
+План развития живёт в одном месте — [docs/roadmap.md](docs/roadmap.md):
+трек A (движок и сервинг), трек B (распределённый инференс), трек C (Studio),
+трек D (гигиена). Две ближайшие цели оттуда:
 
 - Распределённый инференс по измеренным линкам: планировщик выдаёт раскладку
   слоёв, движок поднимается на узлах, активации идут по сети. Модель стоимости

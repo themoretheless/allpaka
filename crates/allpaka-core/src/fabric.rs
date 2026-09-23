@@ -27,7 +27,10 @@ impl Fabric {
 
     /// A cluster where every pair shares one measured link.
     pub fn uniform(link: Link) -> Self {
-        Self { edges: Vec::new(), fallback: Some(link) }
+        Self {
+            edges: Vec::new(),
+            fallback: Some(link),
+        }
     }
 
     pub fn with_fallback(mut self, link: Link) -> Self {
@@ -75,7 +78,11 @@ mod tests {
     use super::*;
 
     fn link(mbps: f64) -> Link {
-        Link { throughput_bytes_per_sec: mbps * 1e6, rtt_p50_secs: 0.001, rtt_p99_secs: 0.002 }
+        Link {
+            throughput_bytes_per_sec: mbps * 1e6,
+            rtt_p50_secs: 0.001,
+            rtt_p99_secs: 0.002,
+        }
     }
 
     #[test]
@@ -96,14 +103,18 @@ mod tests {
 
     #[test]
     fn a_fallback_covers_unmeasured_pairs_only() {
-        let f = Fabric::new().connect(0, 1, link(1200.0)).with_fallback(link(40.0));
+        let f = Fabric::new()
+            .connect(0, 1, link(1200.0))
+            .with_fallback(link(40.0));
         assert_eq!(f.between(0, 1).unwrap().throughput_bytes_per_sec, 1200e6);
         assert_eq!(f.between(0, 2).unwrap().throughput_bytes_per_sec, 40e6);
     }
 
     #[test]
     fn reconnecting_a_pair_replaces_the_old_measurement() {
-        let f = Fabric::new().connect(0, 1, link(40.0)).connect(1, 0, link(1200.0));
+        let f = Fabric::new()
+            .connect(0, 1, link(40.0))
+            .connect(1, 0, link(1200.0));
         assert_eq!(f.edges().count(), 1);
         assert_eq!(f.between(0, 1).unwrap().throughput_bytes_per_sec, 1200e6);
     }

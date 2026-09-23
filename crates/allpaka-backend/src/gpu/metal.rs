@@ -7339,16 +7339,6 @@ impl Gpu {
         self.pipeline_full(name, tile, lpr, false, false)
     }
 
-    fn pipeline_ex(
-        &mut self,
-        name: &'static str,
-        tile: usize,
-        lpr: usize,
-        indexed: bool,
-    ) -> Option<&ComputePipelineState> {
-        self.pipeline_full(name, tile, lpr, indexed, false)
-    }
-
     /// The full form: `indexed` compiles the expert-indexed variant,
     /// `swiglu` the down-projection variant that applies silu(gate)*up on
     /// its activation loads.
@@ -8656,7 +8646,6 @@ fn resolve_norm(gpu: &Gpu, raw: &[u8], hidden: usize) -> Option<NormRef> {
 }
 
 #[repr(C)]
-#[repr(C)]
 struct GpuMegaArgs {
     hidden: u32,
     ffn: u32,
@@ -8721,6 +8710,7 @@ fn mega_fmt(ty: GgmlType) -> Option<u32> {
     }
 }
 
+#[repr(C)]
 struct GpuIdxArgs {
     stride: u64,
     slots: u32,
@@ -11122,7 +11112,7 @@ fn encode_verify_tokens(
                         let h0 = std::slice::from_raw_parts(yp.add(h_at), hidden);
                         let hs: f64 = h0.iter().map(|&v| v as f64).sum();
                         eprintln!("  h_ffn_in sum={hs:.6}");
-                        std::fs::write("/tmp/h0.bin", unsafe {
+                        std::fs::write("/tmp/h0.bin", {
                             std::slice::from_raw_parts(h0.as_ptr() as *const u8, hidden * 4)
                         })
                         .ok();
@@ -12377,6 +12367,11 @@ macro_rules! cstamp {
             }
         }
     };
+}
+
+// Metal does not cache prefill graphs; use the regular fused prefill path.
+pub fn prefill_replay(_xs: &[f32]) -> Option<Vec<f32>> {
+    None
 }
 
 pub fn prefill_begin(xs: &[f32]) -> Option<()> {
@@ -15222,6 +15217,32 @@ pub fn ffn_batch(reqs: &[FfnReq]) -> Option<Vec<Vec<f32>>> {
 #[cfg(test)]
 mod tests {
     use super::{tiles_for, TILES};
+
+    #[test]
+    fn objective_c_block_copy_preserves_capture_and_invocation() {
+        let captured = String::from("metal");
+        let stack = block::ConcreteBlock::new(move |n: usize| captured.len() + n);
+        let heap = stack.copy();
+        let retained = heap.clone();
+        drop(heap);
+        // SAFETY: this block was created with the same argument and result types.
+        assert_eq!(unsafe { retained.call((7usize,)) }, 12);
+    }
+
+    #[test]
+    fn indexed_arguments_match_metal_abi() {
+        use super::GpuIdxArgs;
+        use std::mem::{align_of, offset_of, size_of};
+        assert_eq!(size_of::<GpuIdxArgs>(), 32);
+        assert_eq!(align_of::<GpuIdxArgs>(), 8);
+        assert_eq!(offset_of!(GpuIdxArgs, stride), 0);
+        assert_eq!(offset_of!(GpuIdxArgs, slots), 8);
+        assert_eq!(offset_of!(GpuIdxArgs, x_stride), 12);
+        assert_eq!(offset_of!(GpuIdxArgs, ids_stride), 16);
+        assert_eq!(offset_of!(GpuIdxArgs, x_row_stride), 20);
+        assert_eq!(offset_of!(GpuIdxArgs, y_row_stride), 24);
+        assert_eq!(offset_of!(GpuIdxArgs, n_rows), 28);
+    }
 
     #[test]
     fn tiles_cover_every_row_exactly_once() {

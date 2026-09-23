@@ -62,7 +62,9 @@ fn glm_decode_matvecs_report_effective_bandwidth() {
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     for b in region.iter_mut() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = (state >> 56) as u8;
     }
     // Scales of random bits include inf/NaN; the kernels do finite arithmetic

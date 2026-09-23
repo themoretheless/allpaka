@@ -76,8 +76,6 @@ pub(crate) enum Value {
     Uint(u64),
     Int(i64),
     Float(f64),
-    /// Bools land here as 0/1 (GGUF type 7 shares the Int reading path).
-    Consumed,
     Str(String),
     /// A string array the caller asked to keep (vocabulary, merges).
     StrArray(Vec<String>),
@@ -95,6 +93,36 @@ impl Value {
             Value::Uint(v) => u32::try_from(*v).ok(),
             Value::Int(v) => u32::try_from(*v).ok(),
             _ => None,
+        }
+    }
+
+    /// One-line rendering for census output. Arrays are summarised rather than
+    /// dumped: image-mean/std vectors and rope tables are long and unreadable
+    /// in a terminal, and their length is the fact that matters here.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Value::Uint(v) => v.to_string(),
+            Value::Int(v) => v.to_string(),
+            Value::Float(v) => {
+                if v.fract() == 0.0 && v.abs() < 1e15 {
+                    format!("{v:.1}")
+                } else {
+                    v.to_string()
+                }
+            }
+            Value::Str(v) => format!("\"{v}\""),
+            Value::StrArray(items) => format!("[{} strings]", items.len()),
+            Value::U32Array(items) => {
+                let head = items
+                    .iter()
+                    .take(4)
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let more = if items.len() > 4 { ", …" } else { "" };
+                format!("[{head}{more}] ({} values)", items.len())
+            }
+            Value::Skipped => "array (not read)".to_string(),
         }
     }
 }
@@ -153,6 +181,12 @@ impl Header {
             _ => None,
         }
     }
+
+    /// Every header field, in file order, for callers that census a file
+    /// instead of reading a known model shape (mmproj/clip files).
+    pub(crate) fn fields(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.fields.iter().map(|(k, v)| (k.as_str(), v))
+    }
 }
 
 pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
@@ -178,8 +212,8 @@ pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
     for i in 0..kv_count {
         let key = read_string(r).with_context(|| format!("reading key {i}"))?;
         let keep_array = key == "tokenizer.ggml.tokens" || key == "tokenizer.ggml.merges";
-        let value = read_value(r, keep_array)
-            .with_context(|| format!("reading value for {key:?}"))?;
+        let value =
+            read_value(r, keep_array).with_context(|| format!("reading value for {key:?}"))?;
         if let Value::StrArray(items) = value {
             if key == "tokenizer.ggml.tokens" {
                 tokens = Some(items);
@@ -220,14 +254,35 @@ pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
         }
         let type_id = read_u32(r)?;
         let offset = read_u64(r)?;
-        tensors.push(TensorInfo { name, dims, ggml_type: GgmlType::from_id(type_id), offset, part: 0 });
+        tensors.push(TensorInfo {
+            name,
+            dims,
+            ggml_type: GgmlType::from_id(type_id),
+            offset,
+            part: 0,
+        });
     }
 
     // The data section starts at the next aligned position after the header.
     let here = r.stream_position()?;
     let data_offset = here.div_ceil(alignment) * alignment;
 
-    Ok(Header { architecture, tensors, data_offset, tokens, merges, fields })
+    Ok(Header {
+        architecture,
+        tensors,
+        data_offset,
+        tokens,
+        merges,
+        fields,
+    })
+}
+
+/// Open one GGUF file and parse its header. Shared by the planner view and the
+/// mmproj census, so the format is read in exactly one place.
+pub(crate) fn parse_file(path: &Path) -> Result<Header> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut r = BufReader::new(file);
+    parse(&mut r).with_context(|| format!("parsing {}", path.display()))
 }
 
 /// Read the planner's view of a model. Only the header is touched.
@@ -244,10 +299,16 @@ pub fn read(path: &Path) -> Result<GgufInfo> {
         .get_u32("embedding_length")
         .with_context(|| format!("GGUF file has no {}.embedding_length", header.architecture))?;
     let head_count = header.get_u32("attention.head_count").unwrap_or(0);
-    let head_count_kv = header.get_u32("attention.head_count_kv").unwrap_or(head_count);
+    let head_count_kv = header
+        .get_u32("attention.head_count_kv")
+        .unwrap_or(head_count);
 
     // Most models omit key_length/value_length and imply embedding / heads.
-    let implied = if head_count > 0 { embedding_length / head_count } else { 0 };
+    let implied = if head_count > 0 {
+        embedding_length / head_count
+    } else {
+        0
+    };
     let key_length = header.get_u32("attention.key_length").unwrap_or(implied);
     let value_length = header.get_u32("attention.value_length").unwrap_or(implied);
 
@@ -266,7 +327,11 @@ pub fn read(path: &Path) -> Result<GgufInfo> {
             expert += t.elements() as u128;
         }
     }
-    let expert_element_fraction = if total > 0 { expert as f64 / total as f64 } else { 0.0 };
+    let expert_element_fraction = if total > 0 {
+        expert as f64 / total as f64
+    } else {
+        0.0
+    };
 
     Ok(GgufInfo {
         architecture: header.architecture,
@@ -401,7 +466,10 @@ mod tests {
 
     impl Builder {
         fn new() -> Self {
-            Self { kvs: Vec::new(), count: 0 }
+            Self {
+                kvs: Vec::new(),
+                count: 0,
+            }
         }
 
         fn key(&mut self, k: &str) {
@@ -432,7 +500,8 @@ mod tests {
             self.key(k);
             self.kvs.extend_from_slice(&9u32.to_le_bytes());
             self.kvs.extend_from_slice(&8u32.to_le_bytes()); // element type: string
-            self.kvs.extend_from_slice(&(items.len() as u64).to_le_bytes());
+            self.kvs
+                .extend_from_slice(&(items.len() as u64).to_le_bytes());
             for s in items {
                 self.kvs.extend_from_slice(&(s.len() as u64).to_le_bytes());
                 self.kvs.extend_from_slice(s.as_bytes());
@@ -445,7 +514,8 @@ mod tests {
             self.key(k);
             self.kvs.extend_from_slice(&9u32.to_le_bytes());
             self.kvs.extend_from_slice(&4u32.to_le_bytes());
-            self.kvs.extend_from_slice(&(items.len() as u64).to_le_bytes());
+            self.kvs
+                .extend_from_slice(&(items.len() as u64).to_le_bytes());
             for v in items {
                 self.kvs.extend_from_slice(&v.to_le_bytes());
             }
@@ -516,7 +586,10 @@ mod tests {
 
     #[test]
     fn explicit_key_length_wins_over_the_implied_one() {
-        let path = write_temp("explicit", &qwen_like().u32("qwen3.attention.key_length", 256).finish());
+        let path = write_temp(
+            "explicit",
+            &qwen_like().u32("qwen3.attention.key_length", 256).finish(),
+        );
         let info = read(&path).unwrap();
         assert_eq!(info.key_length, 256);
         assert_eq!(info.value_length, 128); // still implied
@@ -568,7 +641,11 @@ mod tests {
         assert_eq!(info.expert_used_count, 2);
         assert!((info.expert_element_fraction - 0.9).abs() < 1e-9);
         // 0.1 dense + 0.9 * (2/8) = 0.325
-        assert!((info.active_weight_fraction() - 0.325).abs() < 1e-9, "{}", info.active_weight_fraction());
+        assert!(
+            (info.active_weight_fraction() - 0.325).abs() < 1e-9,
+            "{}",
+            info.active_weight_fraction()
+        );
         std::fs::remove_file(path).ok();
     }
 
@@ -602,10 +679,8 @@ mod tests {
     /// Parameters come from the tensor shapes, dense models included.
     #[test]
     fn parameter_count_is_the_sum_of_tensor_elements() {
-        let bytes = qwen_like().finish_with_tensors(&[
-            ("blk.0.attn_q.weight", 700),
-            ("blk.0.ffn_up.weight", 300),
-        ]);
+        let bytes = qwen_like()
+            .finish_with_tensors(&[("blk.0.attn_q.weight", 700), ("blk.0.ffn_up.weight", 300)]);
         let path = write_temp("params", &bytes);
         assert_eq!(read(&path).unwrap().param_count, 1000);
         std::fs::remove_file(path).ok();
@@ -620,7 +695,9 @@ mod tests {
 
     #[test]
     fn a_model_without_block_count_is_rejected() {
-        let bytes = Builder::new().string("general.architecture", "qwen3").finish();
+        let bytes = Builder::new()
+            .string("general.architecture", "qwen3")
+            .finish();
         let path = write_temp("noblocks", &bytes);
         let err = read(&path).unwrap_err().to_string();
         assert!(format!("{err:#}").contains("block_count") || err.contains("block_count"));

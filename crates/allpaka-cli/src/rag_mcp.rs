@@ -34,14 +34,20 @@ impl RagMcpConfig {
     /// Defaults point at the sibling rag repo; env wins.
     pub fn from_env(notes_dir: &Path) -> Self {
         RagMcpConfig {
-            bin: std::env::var("RAG_MCP_BIN").map(PathBuf::from).unwrap_or_else(|_| {
-                PathBuf::from("/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp")
-            }),
-            db: std::env::var("RAG_DB_PATH").map(PathBuf::from).unwrap_or_else(|_| {
-                PathBuf::from(
-                    "/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb",
-                )
-            }),
+            bin: std::env::var("RAG_MCP_BIN")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    PathBuf::from(
+                        "/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp",
+                    )
+                }),
+            db: std::env::var("RAG_DB_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    PathBuf::from(
+                        "/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb",
+                    )
+                }),
             notes_dir: notes_dir.to_path_buf(),
             search_mode: std::env::var("RAG_MCP_SEARCH_MODE").unwrap_or_else(|_| "lex".into()),
         }
@@ -90,7 +96,12 @@ impl RagMcp {
             }
         });
 
-        let mut mcp = RagMcp { child, stdin, lines: rx, next_id: 0 };
+        let mut mcp = RagMcp {
+            child,
+            stdin,
+            lines: rx,
+            next_id: 0,
+        };
         let init = mcp.rpc(
             "initialize",
             json!({
@@ -177,8 +188,7 @@ impl RagMcp {
     /// Full text of one document.
     pub fn get_document(&mut self, document_id: &str) -> Result<String> {
         let text = self.call("get_document", json!({"document_id": document_id}))?;
-        let doc: Value =
-            serde_json::from_str(&text).with_context(|| "parsing rag-mcp document")?;
+        let doc: Value = serde_json::from_str(&text).with_context(|| "parsing rag-mcp document")?;
         doc["content"]
             .as_str()
             .map(str::to_string)

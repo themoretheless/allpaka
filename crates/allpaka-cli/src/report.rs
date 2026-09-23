@@ -3,10 +3,13 @@
 //! The reports say what they are confident about and mark what they are not.
 //! An estimate presented without its assumptions is worse than no estimate.
 
-use allpaka_gguf::GgufInfo;
-use allpaka_core::presets::Preset;
 use allpaka_core::fleet::FleetMember;
-use allpaka_core::{gib, Fabric, FleetPlan, Link, Model, Node, Plan, PlanRequest, ReplicaPlan, Verdict};
+use allpaka_core::presets::Preset;
+use allpaka_core::{
+    gib, Fabric, FleetPlan, Link, Model, Node, Plan, PlanRequest, ReplicaPlan, Verdict,
+};
+use allpaka_gguf::vision::VisionCensus;
+use allpaka_gguf::GgufInfo;
 use std::path::Path;
 
 pub fn presets(list: &[Preset]) {
@@ -30,7 +33,10 @@ pub fn gguf(path: &Path, info: &GgufInfo) {
     println!("  layers            {}", info.block_count);
     println!("  hidden size       {}", info.embedding_length);
     println!("  kv heads          {}", info.head_count_kv);
-    println!("  head dims         k={} v={}", info.key_length, info.value_length);
+    println!(
+        "  head dims         k={} v={}",
+        info.key_length, info.value_length
+    );
     println!("  weights on disk   {:.1} GiB", gib(info.file_bytes));
     println!("  parameters        {:.1}B", info.param_count as f64 / 1e9);
     println!(
@@ -61,13 +67,65 @@ pub fn gguf(path: &Path, info: &GgufInfo) {
     );
 }
 
+/// Census of a vision-projector file. It describes the file, and says plainly
+/// that describing a projector is not the same as being able to run it.
+pub fn vision_census(path: &Path, census: &VisionCensus) {
+    println!("{}", path.display());
+    println!("  architecture      {}", census.architecture);
+    println!("  weights on disk   {:.1} GiB", gib(census.file_bytes));
+    println!("  tensors           {}", census.tensor_count);
+    match &census.projector_type {
+        Some(kind) => println!("  projector type    {kind}"),
+        None => println!("  projector type    not stated (`clip.projector_type` absent)"),
+    }
+
+    if census.clip_fields.is_empty() {
+        println!("\n  no clip.* metadata: this file does not look like an mmproj");
+    } else {
+        println!("\n  clip metadata (as found in this file)");
+        for field in &census.clip_fields {
+            println!("    {:<32} {}", field.key, field.value);
+        }
+    }
+
+    println!("\n  tensors by top-level name prefix");
+    for group in &census.tensor_groups {
+        let types = group
+            .types
+            .iter()
+            .map(|(name, count)| format!("{name} x{count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "    {:<8} {:>5} tensors {:>14} elements  {}",
+            group.prefix, group.count, group.elements, types
+        );
+        for example in &group.examples {
+            println!("      {example}");
+        }
+    }
+
+    println!(
+        "\n  Prefixes and fields above are observations from this file, not support.\n  \
+         The engine has no vision path yet: it refuses image parts with HTTP 400\n  \
+         (`images_unsupported`, see docs/serving.md)."
+    );
+}
+
 pub fn link(l: &Link) {
     println!("\nmeasured link");
-    println!("  throughput        {:.1} MB/s", l.throughput_bytes_per_sec / 1e6);
+    println!(
+        "  throughput        {:.1} MB/s",
+        l.throughput_bytes_per_sec / 1e6
+    );
     println!("  round trip p50    {:.2} ms", l.rtt_p50_secs * 1e3);
     println!("  round trip p99    {:.2} ms", l.rtt_p99_secs * 1e3);
 
-    let jitter = if l.rtt_p50_secs > 0.0 { l.rtt_p99_secs / l.rtt_p50_secs } else { f64::NAN };
+    let jitter = if l.rtt_p50_secs > 0.0 {
+        l.rtt_p99_secs / l.rtt_p50_secs
+    } else {
+        f64::NAN
+    };
     println!("  tail / median     {jitter:.1}x");
 
     // A cut costs at least one round trip per token, so the tail latency puts a
@@ -89,7 +147,10 @@ pub fn link(l: &Link) {
     println!("\nadd this to allpaka.toml, with the two node names filled in:\n");
     println!("[[links]]");
     println!("between = [\"nodeA\", \"nodeB\"]");
-    println!("throughput_bytes_per_sec = {:.0}", l.throughput_bytes_per_sec);
+    println!(
+        "throughput_bytes_per_sec = {:.0}",
+        l.throughput_bytes_per_sec
+    );
     println!("rtt_p50_secs = {:.6}", l.rtt_p50_secs);
     println!("rtt_p99_secs = {:.6}", l.rtt_p99_secs);
     println!(
@@ -105,7 +166,11 @@ pub fn missing_link(nodes: &[Node], model: &Model, req: &PlanRequest) {
     println!("capacity check at {} token context:", req.context_tokens);
     for n in nodes {
         let need = model.total_weight_bytes + model.kv_bytes(model.n_layers, req.context_tokens);
-        let fits = if need <= n.usable_bytes { "fits" } else { "DOES NOT FIT" };
+        let fits = if need <= n.usable_bytes {
+            "fits"
+        } else {
+            "DOES NOT FIT"
+        };
         println!(
             "  {:<10} {:>7.1} GiB usable, needs {:>7.1} GiB  {}",
             n.name,
@@ -117,13 +182,7 @@ pub fn missing_link(nodes: &[Node], model: &Model, req: &PlanRequest) {
     println!("\nrun `allpaka bench` on both machines and record the result to plan a split.");
 }
 
-pub fn verdict(
-    nodes: &[Node],
-    model: &Model,
-    req: &PlanRequest,
-    fabric: &Fabric,
-    v: &Verdict,
-) {
+pub fn verdict(nodes: &[Node], model: &Model, req: &PlanRequest, fabric: &Fabric, v: &Verdict) {
     header(model, req);
     fabric_summary(nodes, fabric);
 
@@ -239,7 +298,10 @@ fn header(model: &Model, req: &PlanRequest) {
             model.active_weight_fraction * 100.0
         );
     }
-    println!("  budgeting {} token context, {} token prompt", req.context_tokens, req.prompt_tokens);
+    println!(
+        "  budgeting {} token context, {} token prompt",
+        req.context_tokens, req.prompt_tokens
+    );
 }
 
 fn placement(p: &Plan) {
@@ -289,8 +351,7 @@ fn placement(p: &Plan) {
     if p.is_split() {
         println!(
             "  {:<10} plus {:.2} s to ship the prompt across the cut",
-            "",
-            p.prompt_transfer_secs
+            "", p.prompt_transfer_secs
         );
     }
     match p.ttft_secs() {
@@ -394,12 +455,7 @@ pub fn replication(rp: Option<&ReplicaPlan>, split: &Plan) {
 }
 
 /// Fleet placement: one model per pool, one endpoint per agent.
-pub fn fleet(
-    members: &[FleetMember],
-    nodes: &[Node],
-    plan: &FleetPlan,
-    ports: &[Option<u16>],
-) {
+pub fn fleet(members: &[FleetMember], nodes: &[Node], plan: &FleetPlan, ports: &[Option<u16>]) {
     println!("fleet placement: one agent per memory pool\n");
 
     if plan.placements.is_empty() {
@@ -411,10 +467,7 @@ pub fn fleet(
         let node = &nodes[p.node_index];
         let m = &members[p.model_index];
         let how = if p.pinned { "pinned" } else { "chosen" };
-        println!(
-            "  {:<12} on {:<10} ({})",
-            p.model_name, p.node_name, how
-        );
+        println!("  {:<12} on {:<10} ({})", p.model_name, p.node_name, how);
         println!(
             "  {:<12}    {:>6.1} GiB weights + {:>4.1} GiB kv at ctx {}  of {:.1} GiB usable",
             "",
@@ -424,11 +477,18 @@ pub fn fleet(
             gib(node.usable_bytes),
         );
         let sparse = if m.model.is_sparse() {
-            format!("  ·  MoE, {:.0}% active", m.model.active_weight_fraction * 100.0)
+            format!(
+                "  ·  MoE, {:.0}% active",
+                m.model.active_weight_fraction * 100.0
+            )
         } else {
             String::new()
         };
-        let draft = if m.speculation.is_some() { "  ·  speculating" } else { "" };
+        let draft = if m.speculation.is_some() {
+            "  ·  speculating"
+        } else {
+            ""
+        };
         let shared = if p.co_resident {
             format!("  ·  shares machine \"{}\"", p.host)
         } else {
@@ -492,8 +552,7 @@ pub fn fleet(
         }
     }
 
-    let co: Vec<&str> =
-        plan.co_resident().map(|p| p.model_name.as_str()).collect();
+    let co: Vec<&str> = plan.co_resident().map(|p| p.model_name.as_str()).collect();
     if !co.is_empty() {
         println!();
         println!(
@@ -531,7 +590,9 @@ pub fn launch(cfg: &crate::config::Config, nodes: &[allpaka_core::Node], plan: &
                 "llama-server -m {} -c {} --port {} --host 0.0.0.0 -a {}",
                 agent.model.display(),
                 p.context_tokens,
-                agent.port.map_or_else(|| "<port>".into(), |v| v.to_string()),
+                agent
+                    .port
+                    .map_or_else(|| "<port>".into(), |v| v.to_string()),
                 agent.name,
             );
             match node.backend {
@@ -542,9 +603,18 @@ pub fn launch(cfg: &crate::config::Config, nodes: &[allpaka_core::Node], plan: &
                 Backend::Cpu => cmd.push_str(" -ngl 0"),
             }
             if let Some(d) = &agent.draft {
-                cmd.push_str(&format!(" -md {} --draft-max {}", d.display(), agent.draft_len));
+                cmd.push_str(&format!(
+                    " -md {} --draft-max {}",
+                    d.display(),
+                    agent.draft_len
+                ));
             }
-            println!("  # {} - {:.1} tok/s expected on {}", agent.name, p.tokens_per_sec(), p.node_name);
+            println!(
+                "  # {} - {:.1} tok/s expected on {}",
+                agent.name,
+                p.tokens_per_sec(),
+                p.node_name
+            );
             println!("  {cmd}\n");
         }
     }

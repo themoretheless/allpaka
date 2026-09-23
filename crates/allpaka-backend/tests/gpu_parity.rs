@@ -32,7 +32,9 @@ fn attached_region() -> Option<&'static [u8]> {
             // below per matrix).
             let mut state = 0x243F_6A88_85A3_08D3u64;
             for b in region.iter_mut() {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 *b = (state >> 56) as u8;
             }
             if !gpu::attach(region) {
@@ -51,7 +53,10 @@ fn tame_scales(region: &mut [u8], ty: GgmlType, off: usize, rows: usize, n_in: u
     // F32 has no scales; the random bytes themselves would be inf/NaN soup,
     // so the whole tensor is rewritten with small finite values instead.
     if ty == GgmlType::F32 {
-        for (i, c) in region[off..off + rows * n_in * 4].chunks_exact_mut(4).enumerate() {
+        for (i, c) in region[off..off + rows * n_in * 4]
+            .chunks_exact_mut(4)
+            .enumerate()
+        {
             c.copy_from_slice(&(((i % 61) as f32 - 30.0) * 0.03).to_le_bytes());
         }
         return;
@@ -85,7 +90,9 @@ fn tame_scales(region: &mut [u8], ty: GgmlType, off: usize, rows: usize, n_in: u
 }
 
 fn check_parity(ty: GgmlType, n_out: usize, n_in: usize, m: usize, off: usize) {
-    let Some(region) = attached_region() else { return };
+    let Some(region) = attached_region() else {
+        return;
+    };
     // Redo the taming through a raw pointer: the region is logically ours.
     let region_mut =
         unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
@@ -113,7 +120,9 @@ fn check_parity(ty: GgmlType, n_out: usize, n_in: usize, m: usize, off: usize) {
     let on_gpu = QuantMat::new(inside, ty, n_out, n_in).unwrap();
     let on_cpu = QuantMat::new(&copy, ty, n_out, n_in).unwrap();
 
-    let x: Vec<f32> = (0..m * n_in).map(|i| ((i % 23) as f32 - 11.0) * 0.05).collect();
+    let x: Vec<f32> = (0..m * n_in)
+        .map(|i| ((i % 23) as f32 - 11.0) * 0.05)
+        .collect();
     let got = on_gpu.matmul(&x, m).unwrap();
     // The reference is dequantise-then-dot in f32: QuantMat::matmul on the
     // CPU now quantises activations to Q8 (an approximation of its own), so
@@ -126,7 +135,11 @@ fn check_parity(ty: GgmlType, n_out: usize, n_in: usize, m: usize, off: usize) {
     // half rounding a fraction of a percent.
     let round = |v: f32| -> f32 {
         use allpaka_backend::ops::f16;
-        if m >= 16 { f16::to_f32(f16::scalar_from_f32(v)) } else { v }
+        if m >= 16 {
+            f16::to_f32(f16::scalar_from_f32(v))
+        } else {
+            v
+        }
     };
     let x_ref: Vec<f32> = x.iter().map(|&v| round(v)).collect();
     let mut want = vec![0f32; m * n_out];
@@ -150,7 +163,9 @@ fn check_parity(ty: GgmlType, n_out: usize, n_in: usize, m: usize, off: usize) {
 /// The fused gate/up/swiglu/down path against dequant-and-compute in f32.
 #[test]
 fn fused_ffn_matches_cpu_reference() {
-    let Some(region) = attached_region() else { return };
+    let Some(region) = attached_region() else {
+        return;
+    };
     let region_mut =
         unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
     let (hidden, ffn) = (512usize, 256usize);
@@ -161,15 +176,32 @@ fn fused_ffn_matches_cpu_reference() {
 
     let gate_bytes = ffn * hidden / 256 * 144;
     let down_bytes = hidden * ffn / 256 * 210;
-    let gate = QuantMat::new(&region[gate_off..gate_off + gate_bytes], GgmlType::Q4K, ffn, hidden)
-        .unwrap();
-    let up = QuantMat::new(&region[up_off..up_off + gate_bytes], GgmlType::Q4K, ffn, hidden)
-        .unwrap();
-    let down = QuantMat::new(&region[down_off..down_off + down_bytes], GgmlType::Q6K, hidden, ffn)
-        .unwrap();
+    let gate = QuantMat::new(
+        &region[gate_off..gate_off + gate_bytes],
+        GgmlType::Q4K,
+        ffn,
+        hidden,
+    )
+    .unwrap();
+    let up = QuantMat::new(
+        &region[up_off..up_off + gate_bytes],
+        GgmlType::Q4K,
+        ffn,
+        hidden,
+    )
+    .unwrap();
+    let down = QuantMat::new(
+        &region[down_off..down_off + down_bytes],
+        GgmlType::Q6K,
+        hidden,
+        ffn,
+    )
+    .unwrap();
 
     for m in [1usize, 5] {
-        let x: Vec<f32> = (0..m * hidden).map(|i| ((i % 17) as f32 - 8.0) * 0.06).collect();
+        let x: Vec<f32> = (0..m * hidden)
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.06)
+            .collect();
         let got = QuantMat::ffn_many(&[(&gate, &up, &down, x.as_slice())])
             .expect("GPU must take the fused FFN")
             .pop()

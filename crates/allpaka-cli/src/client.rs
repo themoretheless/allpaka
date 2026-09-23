@@ -31,15 +31,18 @@ fn rag_tools() -> Value {
 
 /// One HTTP request over a fresh connection; no keep-alive.
 fn request(method: &str, addr: &str, path: &str, body: Option<&Value>) -> Result<Value> {
-    let mut stream =
-        TcpStream::connect(addr).with_context(|| format!("connecting to allpaka serve at {addr}"))?;
+    let mut stream = TcpStream::connect(addr)
+        .with_context(|| format!("connecting to allpaka serve at {addr}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(600)))
         .context("setting read timeout")?;
     let payload = body.map(|b| b.to_string()).unwrap_or_default();
     let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
     if body.is_some() {
-        head += &format!("Content-Type: application/json\r\nContent-Length: {}\r\n", payload.len());
+        head += &format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            payload.len()
+        );
     }
     stream.write_all(format!("{head}\r\n{payload}").as_bytes())?;
 
@@ -53,7 +56,10 @@ fn request(method: &str, addr: &str, path: &str, body: Option<&Value>) -> Result
     if !status.contains("200") {
         bail!("{path} returned {status}: {}", &rest[..rest.len().min(300)]);
     }
-    let body_text = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    let body_text = if head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         dechunk(rest)?
     } else {
         rest.to_string()
@@ -93,7 +99,14 @@ pub fn status(addr: &str) -> Result<()> {
 
 /// One chat round trip. With `rag`, hands the server the rag_search/rag_read
 /// schemas so its built-in tool-loop can run.
-pub fn chat(addr: &str, prompt: &str, system: Option<&str>, rag: bool, max_tokens: u32, model: &str) -> Result<()> {
+pub fn chat(
+    addr: &str,
+    prompt: &str,
+    system: Option<&str>,
+    rag: bool,
+    max_tokens: u32,
+    model: &str,
+) -> Result<()> {
     let mut messages = Vec::new();
     if let Some(s) = system {
         messages.push(json!({"role": "system", "content": s}));
@@ -133,10 +146,15 @@ pub fn rag_test(addr: &str, model: &str) -> Result<()> {
         "tools": rag_tools(),
     });
     let out = post(addr, "/v1/chat/completions", &body)?;
-    let answer = out["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    let answer = out["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
     println!("{answer}");
     let prompt_tokens = out["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
-    eprintln!("--- usage: prompt={prompt_tokens} completion={}", out["usage"]["completion_tokens"]);
+    eprintln!(
+        "--- usage: prompt={prompt_tokens} completion={}",
+        out["usage"]["completion_tokens"]
+    );
     if prompt_tokens <= 500 {
         bail!("RAG tool-loop did not run: round-2 prompt is only {prompt_tokens} tokens");
     }

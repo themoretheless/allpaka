@@ -155,6 +155,9 @@ mod tests {
         let streamed = m.streamed_bytes_per_step(m.n_layers, 32768);
         let weights_only = m.active_bytes_for_layers(m.n_layers);
         assert_eq!(streamed - weights_only, m.kv_bytes(m.n_layers, 32768));
-        assert!(streamed > weights_only * 2, "KV should dominate a sparse step here");
+        assert!(
+            streamed > weights_only * 2,
+            "KV should dominate a sparse step here"
+        );
     }
 }

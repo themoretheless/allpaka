@@ -87,7 +87,11 @@ mod tests {
 
     #[test]
     fn a_dead_link_costs_infinity_rather_than_dividing_by_zero() {
-        let l = Link { throughput_bytes_per_sec: 0.0, rtt_p50_secs: 1.0, rtt_p99_secs: 1.0 };
+        let l = Link {
+            throughput_bytes_per_sec: 0.0,
+            rtt_p50_secs: 1.0,
+            rtt_p99_secs: 1.0,
+        };
         assert!(l.one_way_p99(1).is_infinite());
     }
 }

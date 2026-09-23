@@ -36,7 +36,8 @@ allpaka rag-test                                 # end-to-end тест RAG tool-
 
 - Запуск сервера: `allpaka serve --model ...` — долгоживущий процесс; если пользователь просил поднять сервер, оставить его работать (не убивать после ответа).
 - `chat --rag` передаёт схемы инструментов `rag_search`/`rag_read`; serve выполняет tool-loop сам (до 2 итераций, настраивается `ALLPAKA_RAG_MAX_TOOL_ROUNDS`).
-- Переменные окружения serve: `ALLPAKA_RAG_TOOLS=0` выключает RAG; `ALLPAKA_RAG_BACKEND=auto|mcp|grep` — бэкенд поиска (по умолчанию auto: rag-mcp с BM25-индексом, иначе grep); `RAG_MCP_BIN` / `RAG_DB_PATH` — пути к rag-mcp и его DuckDB; `ALLPAKA_RAG_NOTES_DIR` — директория заметок, `ALLPAKA_RAG_AUTO_TOOLS=1` — авто-инжект схем. По умолчанию заметки берутся из `~/.claude/projects/-Users-themoretheless-Documents-Sources-allpaka/memory`.
+- Переменные окружения serve: `ALLPAKA_RAG_TOOLS=0` выключает RAG; `ALLPAKA_RAG_BACKEND=auto|mcp|grep` — бэкенд поиска (по умолчанию auto: rag-mcp с BM25-индексом, иначе grep); `RAG_MCP_BIN` / `RAG_DB_PATH` — пути к rag-mcp и его DuckDB; `ALLPAKA_RAG_NOTES_DIR` — директория заметок, `ALLPAKA_RAG_AUTO_TOOLS=1` — авто-инжект схем; `ALLPAKA_MAX_BODY_MIB` — лимит тела запроса, 1..1024 МиБ (по умолчанию 16). По умолчанию заметки берутся из `~/.claude/projects/-Users-themoretheless-Documents-Sources-allpaka/memory`.
+- Картинки движок пока не поддерживает: запрос с частями `image_url` возвращает HTTP 400 `images_unsupported`. Не выдавать это за успешный разбор изображения и не отправлять повторно то же вложение «на удачу».
 - Автотест движка и RAG: `cargo test -p allpaka-cli --test plugin_smoke -- --test-threads=1` (поднимает serve сам, на отдельном порту).
 
 ## Правила

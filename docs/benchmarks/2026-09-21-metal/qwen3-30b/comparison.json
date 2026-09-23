@@ -1,0 +1,118 @@
+{
+  "model": "models/qwen3-30b-a3b-Q4_K_M.gguf",
+  "model_sha256": "642a1eda167db5f55de673cbd19fd8b4aac69c766d01bdbeaf5820f457c7790d",
+  "pp": 480,
+  "tg": 32,
+  "decode_context_tokens": 1,
+  "comparison_validated": false,
+  "limitations": [
+    "Different token streams; MoE expert routing may differ. This is not a validated equivalent-workload speedup.",
+    "Short-context decode starts at one token and ends at 33; no long-context or serving-concurrency claims.",
+    "Background CPU activity was observed before the run; the host was not isolated.",
+    "The first allpaka prefill on 0.6B was slower; all five samples are retained."
+  ],
+  "allpaka_prefill": {
+    "samples": [
+      1434.9979558753075,
+      1435.2958150954332,
+      1437.1942389841374,
+      1439.3853810029266,
+      1441.3851711494747
+    ],
+    "median": 1437.1942389841374,
+    "min": 1434.9979558753075,
+    "max": 1441.3851711494747
+  },
+  "allpaka_decode": {
+    "samples": [
+      134.93332377330734,
+      136.18378304530881,
+      137.50550355035344,
+      137.90124008767503,
+      138.21001139075085
+    ],
+    "median": 137.50550355035344,
+    "min": 134.93332377330734,
+    "max": 138.21001139075085
+  },
+  "llama_prefill": {
+    "samples": [
+      1531.58,
+      1532.22,
+      1533.74,
+      1534.42,
+      1535.25
+    ],
+    "median": 1533.74,
+    "min": 1531.58,
+    "max": 1535.25
+  },
+  "llama_decode": {
+    "samples": [
+      110.877,
+      111.969,
+      113.152,
+      114.363,
+      115.271
+    ],
+    "median": 113.152,
+    "min": 110.877,
+    "max": 115.271
+  },
+  "verification": [
+    {
+      "pair": 1,
+      "order": [
+        "allpaka",
+        "llama"
+      ],
+      "gpu_decode_coverage": true,
+      "workload_boundaries_match": true,
+      "kv_f16_confirmed": true
+    },
+    {
+      "pair": 2,
+      "order": [
+        "llama",
+        "allpaka"
+      ],
+      "gpu_decode_coverage": true,
+      "workload_boundaries_match": true,
+      "kv_f16_confirmed": true
+    },
+    {
+      "pair": 3,
+      "order": [
+        "allpaka",
+        "llama"
+      ],
+      "gpu_decode_coverage": true,
+      "workload_boundaries_match": true,
+      "kv_f16_confirmed": true
+    },
+    {
+      "pair": 4,
+      "order": [
+        "llama",
+        "allpaka"
+      ],
+      "gpu_decode_coverage": true,
+      "workload_boundaries_match": true,
+      "kv_f16_confirmed": true
+    },
+    {
+      "pair": 5,
+      "order": [
+        "allpaka",
+        "llama"
+      ],
+      "gpu_decode_coverage": true,
+      "workload_boundaries_match": true,
+      "kv_f16_confirmed": true
+    }
+  ],
+  "observed_ratio": {
+    "prefill": 0.9370520681368012,
+    "decode": 1.2152282200080726
+  }
+}

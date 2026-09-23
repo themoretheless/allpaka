@@ -70,6 +70,10 @@ enum Command {
     Inspect {
         /// Path to a .gguf model file.
         model: PathBuf,
+        /// Census a vision projector (`mmproj`) instead of a text model: the
+        /// `clip.*` metadata and the tensors grouped by top-level name prefix.
+        #[arg(long)]
+        mmproj: bool,
     },
 
     /// Measure the network path between two machines.
@@ -291,10 +295,15 @@ fn main() -> Result<()> {
             report::presets(presets::PRESETS);
             Ok(())
         }
-        Command::Inspect { model } => {
-            let info = gguf::read(&model)?;
-            report::gguf(&model, &info);
-            Ok(())
+        Command::Inspect { model, mmproj } => {
+            if mmproj {
+                report::vision_census(&model, &gguf::vision::VisionCensus::read(&model)?);
+                Ok(())
+            } else {
+                let info = gguf::read(&model)?;
+                report::gguf(&model, &info);
+                Ok(())
+            }
         }
         Command::Bench {
             serve,

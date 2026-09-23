@@ -60,10 +60,30 @@ The main introspection endpoints are:
 - `GET /stats`
 - `POST /v1/chat/completions`
 
+## Images
+
+There is no vision projector in the engine yet, so image parts are refused
+rather than ignored. A request whose `content` carries `image_url` (or
+`input_image` / `image`) parts gets HTTP 400 with `"code":
+"images_unsupported"` before any prefill runs, and no session state is touched.
+Text parts of a mixed message are kept: they used to be flattened away together
+with the picture, which made a vision message silently arrive empty. Mixed
+`content` arrays are parsed for every message, so history that still contains an
+image keeps the request rejected until the image is removed.
+
+This is why the body limit above is 16 MiB instead of a fixed 4 MiB - Studio
+allows four attachments, about 6 MB before base64 encoding.
+
+The census the vision increments are planned from is:
+`allpaka inspect <mmproj>.gguf --mmproj`. It prints the `clip.*` metadata fields
+and the tensors grouped by top-level name prefix, and claims nothing beyond what
+the file contains.
+
 ## Request lifetime and sessions
 
 HTTP admission continues while inference runs. Readers are limited to 16, with
-five-second socket timeouts and a 4 MiB body limit. Queue exhaustion returns
+five-second socket timeouts and a 16 MiB body limit (`ALLPAKA_MAX_BODY_MIB`,
+1..1024, default 16). Queue exhaustion returns
 HTTP 429. Inference remains owned by one thread.
 
 Chat requests may specify `request_id` (ASCII letters, digits, `-` or `_`, at

@@ -25,16 +25,18 @@ fn main() {
         let sign = ((b >> 16) & 0x8000) as u16;
         let exp = ((b >> 23) & 0xff) as i32 - 127 + 15;
         let mant = ((b >> 13) & 0x3ff) as u16;
-        if exp <= 0 { return sign; }
-        if exp >= 31 { return sign | 0x7c00; }
+        if exp <= 0 {
+            return sign;
+        }
+        if exp >= 31 {
+            return sign | 0x7c00;
+        }
         sign | ((exp as u16) << 10) | mant
     }
     let a: Vec<u16> = (0..n * n)
         .map(|i| f16(if i % n == i / n { 1.0 } else { 0.0 }))
         .collect();
-    let b: Vec<u16> = (0..n * n)
-        .map(|i| f16((i % 7) as f32))
-        .collect();
+    let b: Vec<u16> = (0..n * n).map(|i| f16((i % 7) as f32)).collect();
     let a_buf = device.new_buffer_with_data(
         a.as_ptr() as *const _,
         (a.len() * 2) as u64,
@@ -59,9 +61,7 @@ fn main() {
     cmd.commit();
     cmd.wait_until_completed();
 
-    let c = unsafe {
-        std::slice::from_raw_parts(c_buf.contents() as *const f32, n * n)
-    };
+    let c = unsafe { std::slice::from_raw_parts(c_buf.contents() as *const f32, n * n) };
     // A = identity, so C should equal B
     let ok = (0..n * n).all(|i| (c[i] - ((i % 7) as f32)).abs() < 1e-3);
     println!("tensor API works: {ok}; C[0..4] = {:?}", &c[0..4]);

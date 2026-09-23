@@ -73,7 +73,9 @@ impl Speculator<'_> {
         let mut batch = Vec::with_capacity(k + 1);
         batch.push(next);
         batch.extend_from_slice(&drafts);
-        let all = self.target.forward_batch_full(&batch, self.target_session)?;
+        let all = self
+            .target
+            .forward_batch_full(&batch, self.target_session)?;
         let vocab = self.target.config.vocab as usize;
 
         let mut emitted = vec![next];
@@ -111,7 +113,12 @@ impl Speculator<'_> {
             self.draft.forward_batch(missing, self.draft_session)?;
         }
 
-        Ok(Round { emitted, next: new_next, drafted: k, accepted })
+        Ok(Round {
+            emitted,
+            next: new_next,
+            drafted: k,
+            accepted,
+        })
     }
 }
 
@@ -311,6 +318,11 @@ impl MtpSpeculator<'_> {
             eprintln!("  round total: {:?}\n", t0.elapsed());
         }
         debug_assert_eq!(s.pos(), start + 1 + accepted);
-        Ok(Round { emitted, next: new_next, drafted: k, accepted })
+        Ok(Round {
+            emitted,
+            next: new_next,
+            drafted: k,
+            accepted,
+        })
     }
 }

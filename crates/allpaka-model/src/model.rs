@@ -109,14 +109,13 @@ struct SharedFfn<'a> {
     /// qwen35moe: a per-token sigmoid gate on the shared expert's output
     /// (`ffn_gate_inp_shexp`, hidden -> 1); None for GLM's unweighted share.
     gate_out: Option<QuantMat<'a>>,
-    ffn: usize,
 }
 
 impl SharedFfn<'_> {
     /// The shared FFN over `m` normed rows; borrow rules keep it out of
     /// [`Ffn`]'s match arms.
     fn forward_batch(&self, hs: &[f32], m: usize) -> Result<Vec<f32>> {
-        let mut out =
+        let out =
             if let Some(mut outs) = QuantMat::ffn_many(&[(&self.gate, &self.up, &self.down, hs)]) {
                 return self.gate_out(outs.pop().expect("one fused item"), hs, m);
             } else {
@@ -1229,7 +1228,7 @@ impl<'a> Model<'a> {
             (&aw.wk, h.as_slice()),
             (&aw.wv, h.as_slice()),
         ])?;
-        let mut v = qkv.pop().expect("v");
+        let v = qkv.pop().expect("v");
         let mut k = qkv.pop().expect("k");
         let mut q = qkv.pop().expect("q");
         let gate: Vec<f32> = if aw.gate_in_q {
@@ -1684,7 +1683,6 @@ impl<'a> Model<'a> {
                     (router_raw, router.n_out)
                 }
                 Ffn::Dense { .. } => (&[][..], 0),
-                _ => return None,
             };
             let (cache, k_off, v_off) = s.kv.gpu_view(li)?;
             let fusion = Some(allpaka_backend::gpu::PrefillFusion {
@@ -1879,7 +1877,6 @@ impl<'a> Model<'a> {
                         Vec::new(),
                     )
                 }
-                _ => return None,
             };
             let mut tok_off = Vec::with_capacity(m + 1);
             let mut hit_row = Vec::with_capacity(total_rows + m);
@@ -2158,7 +2155,7 @@ impl<'a> Model<'a> {
     fn token_layers(
         &self,
         s: &mut Session,
-    ) -> Result<Option<Vec<allpaka_backend::gpu::TokenLayer>>> {
+    ) -> Result<Option<Vec<allpaka_backend::gpu::TokenLayer<'_>>>> {
         use allpaka_backend::gpu::{TokenFfn, TokenGdn, TokenLayer};
         let c = &self.config;
         let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
@@ -3135,7 +3132,6 @@ fn moe_ffn<'a>(
                 Some(t) => Some(QuantMat::new(f.data(t)?, t.ggml_type, 1, hidden)?),
                 None => None,
             },
-            ffn: shared_ffn,
         })
     } else {
         None

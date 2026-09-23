@@ -31,27 +31,39 @@ fn small_model() -> Option<PathBuf> {
 }
 
 fn rag_bin() -> Option<PathBuf> {
-    let p = std::env::var("RAG_MCP_BIN").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from("/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp")
-    });
+    let p = std::env::var("RAG_MCP_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from("/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp")
+        });
     p.is_file().then_some(p)
 }
 
 fn rag_db() -> Option<PathBuf> {
-    let p = std::env::var("RAG_DB_PATH").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from("/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb")
-    });
+    let p = std::env::var("RAG_DB_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from("/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb")
+        });
     p.is_file().then_some(p)
 }
 
 // ---------- minimal HTTP ----------
 
-fn http(method: &str, path: &str, body: Option<&str>, timeout: Duration) -> std::io::Result<String> {
+fn http(
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    timeout: Duration,
+) -> std::io::Result<String> {
     let mut s = TcpStream::connect(HOST)?;
     s.set_read_timeout(Some(timeout))?;
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {HOST}\r\nConnection: close\r\n");
     if let Some(b) = body {
-        req += &format!("Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{b}", b.len());
+        req += &format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{b}",
+            b.len()
+        );
     } else {
         req += "\r\n";
     }
@@ -61,7 +73,12 @@ fn http(method: &str, path: &str, body: Option<&str>, timeout: Duration) -> std:
     Ok(raw)
 }
 
-fn http_json(method: &str, path: &str, body: Option<&str>, timeout: Duration) -> Option<serde_json_free::Value> {
+fn http_json(
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    timeout: Duration,
+) -> Option<serde_json_free::Value> {
     let raw = http(method, path, body, timeout).ok()?;
     let json_start = raw.find("\r\n\r\n")? + 4;
     serde_json_free::parse(&raw[json_start..])
@@ -150,11 +167,18 @@ mod serde_json_free {
         fn num(&mut self) -> Option<Value> {
             let start = self.i;
             while self.i < self.b.len()
-                && matches!(self.b[self.i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                && matches!(
+                    self.b[self.i],
+                    b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'
+                )
             {
                 self.i += 1;
             }
-            std::str::from_utf8(&self.b[start..self.i]).ok()?.parse().ok().map(Value::Num)
+            std::str::from_utf8(&self.b[start..self.i])
+                .ok()?
+                .parse()
+                .ok()
+                .map(Value::Num)
         }
         fn string(&mut self) -> Option<String> {
             if self.peek()? != b'"' {
@@ -174,7 +198,8 @@ mod serde_json_free {
                             b't' => out.push('\t'),
                             b'r' => out.push('\r'),
                             b'u' => {
-                                let hex = std::str::from_utf8(self.b.get(self.i..self.i + 4)?).ok()?;
+                                let hex =
+                                    std::str::from_utf8(self.b.get(self.i..self.i + 4)?).ok()?;
                                 let cp = u32::from_str_radix(hex, 16).ok()?;
                                 self.i += 4;
                                 out.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
@@ -187,7 +212,9 @@ mod serde_json_free {
                         let start = self.i - 1;
                         let len = utf8_len(c);
                         let end = (start + len).min(self.b.len());
-                        out.push_str(std::str::from_utf8(&self.b[start..end]).unwrap_or("\u{fffd}"));
+                        out.push_str(
+                            std::str::from_utf8(&self.b[start..end]).unwrap_or("\u{fffd}"),
+                        );
                         self.i = end;
                     }
                 }
@@ -282,7 +309,10 @@ impl Serve {
             cmd.env(k, v);
         }
         let child = cmd.spawn().ok()?;
-        let s = Serve { child, _permit: permit };
+        let s = Serve {
+            child,
+            _permit: permit,
+        };
         let deadline = Instant::now() + HEALTH_TIMEOUT;
         while Instant::now() < deadline {
             if http("GET", "/health", None, Duration::from_secs(2)).is_ok() {
@@ -326,7 +356,8 @@ fn rag_loop_round2() -> (f64, String) {
         .and_then(|p| p.as_f64())
         .unwrap_or(0.0);
     let answer = rag
-        .get("choices").and_then(|c| c.as_arr())
+        .get("choices")
+        .and_then(|c| c.as_arr())
         .and_then(|a| a.first())
         .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
@@ -344,14 +375,23 @@ fn engine_health_stats_chat_and_rag_loop() {
     };
 
     let stats = http_json("GET", "/stats", None, Duration::from_secs(5)).expect("/stats JSON");
-    assert!(stats.get("model").and_then(|m| m.as_str()).is_some(), "stats has model");
+    assert!(
+        stats.get("model").and_then(|m| m.as_str()).is_some(),
+        "stats has model"
+    );
     println!("stats model = {:?}", stats.get("model"));
 
     let chat_body = r#"{"model":"qwen3","max_tokens":40,"messages":[{"role":"user","content":"Say PONG only."}]}"#;
-    let chat = http_json("POST", "/v1/chat/completions", Some(chat_body), CHAT_TIMEOUT)
-        .expect("chat JSON");
+    let chat = http_json(
+        "POST",
+        "/v1/chat/completions",
+        Some(chat_body),
+        CHAT_TIMEOUT,
+    )
+    .expect("chat JSON");
     let content = chat
-        .get("choices").and_then(|c| c.as_arr())
+        .get("choices")
+        .and_then(|c| c.as_arr())
         .and_then(|a| a.first())
         .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
@@ -360,10 +400,16 @@ fn engine_health_stats_chat_and_rag_loop() {
     assert!(!content.trim().is_empty(), "chat returns content");
 
     let (prompt_tokens, answer) = rag_loop_round2();
-    assert!(prompt_tokens > 500.0, "RAG tool-loop ran (round-2 prompt = {prompt_tokens})");
+    assert!(
+        prompt_tokens > 500.0,
+        "RAG tool-loop ran (round-2 prompt = {prompt_tokens})"
+    );
     // Citing ".md" file names in prose is the model's wording choice; the
     // loop itself is what this test asserts.
-    assert!(!answer.trim().is_empty(), "non-empty answer after the tool-loop");
+    assert!(
+        !answer.trim().is_empty(),
+        "non-empty answer after the tool-loop"
+    );
 }
 
 /// With ALLPAKA_RAG_BACKEND=mcp the tool-loop must be served by rag-mcp's
@@ -380,9 +426,15 @@ fn engine_rag_backend_mcp() {
         return;
     };
     let (prompt_tokens, answer) = rag_loop_round2();
-    assert!(prompt_tokens > 500.0, "tool-loop via rag-mcp (prompt = {prompt_tokens})");
+    assert!(
+        prompt_tokens > 500.0,
+        "tool-loop via rag-mcp (prompt = {prompt_tokens})"
+    );
     assert!(!answer.trim().is_empty(), "non-empty answer via rag-mcp");
-    assert!(!answer.contains("rag-mcp backend is unavailable"), "mcp backend actually served");
+    assert!(
+        !answer.contains("rag-mcp backend is unavailable"),
+        "mcp backend actually served"
+    );
 }
 
 /// Same forced backend, but the binary is gone: the tool must report the
@@ -397,8 +449,16 @@ fn engine_rag_backend_mcp_missing() {
         return;
     };
     let chat_body = r#"{"model":"qwen3","max_tokens":40,"messages":[{"role":"user","content":"Say PONG only."}]}"#;
-    assert!(http_json("POST", "/v1/chat/completions", Some(chat_body), CHAT_TIMEOUT).is_some(),
-        "server answers plain chat without the mcp backend");
+    assert!(
+        http_json(
+            "POST",
+            "/v1/chat/completions",
+            Some(chat_body),
+            CHAT_TIMEOUT
+        )
+        .is_some(),
+        "server answers plain chat without the mcp backend"
+    );
 }
 
 /// Auto backend with a broken rag-mcp must degrade to the grep directory
@@ -413,8 +473,14 @@ fn engine_rag_backend_auto_fallback() {
         return;
     };
     let (prompt_tokens, answer) = rag_loop_round2();
-    assert!(prompt_tokens > 500.0, "grep fallback runs the loop (prompt = {prompt_tokens})");
-    assert!(!answer.trim().is_empty(), "non-empty answer via grep fallback");
+    assert!(
+        prompt_tokens > 500.0,
+        "grep fallback runs the loop (prompt = {prompt_tokens})"
+    );
+    assert!(
+        !answer.trim().is_empty(),
+        "non-empty answer via grep fallback"
+    );
 }
 
 #[test]
@@ -469,37 +535,66 @@ fn rag_mcp_stdio_search() {
         None
     };
 
-    send(&mut stdin, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#);
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+    );
     let init = wait_for(1, Duration::from_secs(30)).expect("initialize reply");
     assert_eq!(
-        init.get("serverInfo").and_then(|s| s.get("name")).and_then(|n| n.as_str()),
+        init.get("serverInfo")
+            .and_then(|s| s.get("name"))
+            .and_then(|n| n.as_str()),
         Some("rag-mcp")
     );
 
-    send(&mut stdin, r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    );
     thread::sleep(Duration::from_millis(500));
 
-    send(&mut stdin, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+    );
     let tools = wait_for(2, Duration::from_secs(30)).expect("tools/list reply");
     let names: Vec<&str> = tools
         .get("tools")
         .and_then(|t| t.as_arr())
-        .map(|a| a.iter().filter_map(|t| t.get("name").and_then(|n| n.as_str())).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+                .collect()
+        })
         .unwrap_or_default();
     println!("rag-mcp tools ({}): {:?}", names.len(), names);
-    for need in ["search", "search_wiki", "query_with_index", "pack_context", "get_document"] {
+    for need in [
+        "search",
+        "search_wiki",
+        "query_with_index",
+        "pack_context",
+        "get_document",
+    ] {
         assert!(names.contains(&need), "missing tool: {need}");
     }
 
-    send(&mut stdin, r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"metal","mode":"lex"}}}"#);
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"metal","mode":"lex"}}}"#,
+    );
     let res = wait_for(3, Duration::from_secs(30)).expect("search reply");
     let text = res
-        .get("content").and_then(|c| c.as_arr())
+        .get("content")
+        .and_then(|c| c.as_arr())
         .and_then(|a| a.first())
         .and_then(|c| c.get("text"))
         .and_then(|t| t.as_str())
         .unwrap_or("");
-    assert!(text.contains("document_title"), "search returns real hits: {}", &text[..text.len().min(150)]);
+    assert!(
+        text.contains("document_title"),
+        "search returns real hits: {}",
+        &text[..text.len().min(150)]
+    );
 
     drop(stdin);
     let _ = child.wait();

@@ -48,8 +48,18 @@ fn fused_decode_matches_the_step_by_step_path() {
     let fused = decode_logits(false);
     let stepped = decode_logits(true);
     for (step, (f, s)) in fused.iter().zip(&stepped).enumerate() {
-        let f_arg = f.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
-        let s_arg = s.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let f_arg = f
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0;
+        let s_arg = s
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0;
         assert_eq!(f_arg, s_arg, "argmax diverged at step {step}");
         let worst = f
             .iter()
