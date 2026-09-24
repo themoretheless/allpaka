@@ -5,7 +5,7 @@
 Локальный движок GGUF: OpenAI-совместимый сервер, веб-студия чата с
 несколькими провайдерами и планировщик размещения модели по машинам.
 Планировщик отвечает на вопрос «стоит ли вообще разделять эту модель между
-этими машинами» - числами, а не надеждой. Это две сабкоманды из шестнадцати
+этими машинами» - числами, а не надеждой. Это две сабкоманды
 (`plan`, `fleet`); основной объём кода - движок, `serve` и `studio`.
 
 ## Что здесь решается
@@ -281,7 +281,8 @@ allpaka fleet --model models/reasoner.gguf --model models/tools.gguf --model mod
 * `ALLPAKA_RAG_MAX_TOOL_ROUNDS` — сколько итераций tool-loop делать (по умолчанию `2`).
 * `ALLPAKA_RAG_READ_MAX_CHARS` — лимит символов ответа `rag_read` (по умолчанию `12000`).
 
-Клиентские сабкоманды бинарника: `allpaka status`, `allpaka chat "<промпт>" [--rag]`,
+Клиентские сабкоманды бинарника: `allpaka status`, `allpaka watch` (`--addr`,
+`--interval-ms`, `--json`), `allpaka chat "<промпт>" [--rag]`,
 `allpaka rag-test` (smoke-тест tool-loop, exit != 0 при регрессе).
 Интеграционные тесты: `cargo test -p allpaka-cli --test plugin_smoke -- --test-threads=1`.
 
