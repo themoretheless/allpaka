@@ -52,10 +52,26 @@ struct Action {
     reply: Option<tokio::sync::oneshot::Sender<std::result::Result<(), String>>>,
     #[serde(default)]
     images: Vec<context::Image>,
-    kind: String,
+    kind: ActionKind,
     #[serde(default)]
     text: String,
     settings: Option<Settings>,
+}
+/// The only kinds `POST /api/sessions/:id/actions` accepts. Serde rejects
+/// anything else, and the actor must name every variant it does not handle,
+/// so a new kind cannot be added to one list and forgotten in another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ActionKind {
+    Send,
+    SendNow,
+    Steer,
+    Stop,
+    Resume,
+    ClearQueue,
+    Compact,
+    Rename,
+    Move,
 }
 pub(crate) type ApiResult<T> = std::result::Result<Json<T>, (StatusCode, Json<Value>)>;
 pub(crate) fn error(status: StatusCode, message: impl ToString) -> (StatusCode, Json<Value>) {
@@ -563,34 +579,19 @@ async fn action(
     Path(id): Path<String>,
     Json(mut action): Json<Action>,
 ) -> ApiResult<Value> {
-    if ![
-        "send",
-        "send_now",
-        "steer",
-        "stop",
-        "resume",
-        "clear_queue",
-        "compact",
-        "rename",
-        "move",
-    ]
-    .contains(&action.kind.as_str())
-    {
-        return Err(error(StatusCode::BAD_REQUEST, "Unknown action"));
-    }
-    if action.kind == "rename" || action.kind == "move" {
+    if matches!(action.kind, ActionKind::Rename | ActionKind::Move) {
         let sessions = app.sessions.lock().unwrap();
         let (shared, _) = sessions
             .get(&id)
             .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
         let mut state = shared.lock().unwrap();
-        if action.kind == "move" && state.status == "running" {
+        if action.kind == ActionKind::Move && state.status == "running" {
             return Err(error(
                 StatusCode::CONFLICT,
                 "Stop generation before moving the conversation",
             ));
         }
-        if action.kind == "rename" {
+        if action.kind == ActionKind::Rename {
             let title = action.text.trim();
             if title.is_empty() || title.chars().count() > 100 {
                 return Err(error(StatusCode::BAD_REQUEST, "Title must be 1–100 characters"));
@@ -607,7 +608,7 @@ async fn action(
         save(&app, &state).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         return Ok(Json(json!({"accepted":true})));
     }
-    if ["send", "send_now", "steer"].contains(&action.kind.as_str())
+    if matches!(action.kind, ActionKind::Send | ActionKind::SendNow | ActionKind::Steer)
         && (action.text.trim().is_empty() || action.text.len() > 131072)
     {
         return Err(error(
@@ -627,8 +628,7 @@ async fn action(
         (state.settings.clone(), state.folder)
     };
     if folder != HistoryFolder::Active
-        && ["send", "send_now", "steer", "resume", "compact"]
-            .contains(&action.kind.as_str())
+        && !matches!(action.kind, ActionKind::Stop | ActionKind::ClearQueue)
     {
         return Err(error(
             StatusCode::CONFLICT,
@@ -644,7 +644,7 @@ async fn action(
     }
     context::validate_images(&action.images, &chosen.provider)
         .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
-    if action.kind == "steer" && !action.images.is_empty() {
+    if action.kind == ActionKind::Steer && !action.images.is_empty() {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "Use Send now or Queue for images",
@@ -770,8 +770,8 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                 let Some(mut a)=command else { cancel(&mut task,&s).await;break; };
                 let reply=a.reply.take();
                 let mut rejection=None;
-                match a.kind.as_str() {
-                    "compact" => {
+                match a.kind {
+                    ActionKind::Compact => {
                         if task.is_some() { rejection=Some("Stop generation before manual compaction".into()); }
                         else {
                             {let mut state=s.lock().unwrap();if let Some(settings)=a.settings {state.settings=settings;}state.status="running".into();state.error=None;state.notice=Some("Сжатие контекста…".into());}
@@ -780,8 +780,8 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                             task=Some(tokio::spawn(async move {compact::run(&app,&s,true).await?;Ok(TurnOutcome::Compacted)}));
                         }
                     },
-                    "stop" => { cancel(&mut task,&s).await;paused=true; },
-                    "resume" => {
+                    ActionKind::Stop => { cancel(&mut task,&s).await;paused=true; },
+                    ActionKind::Resume => {
                         paused=false;
                         let mut s=s.lock().unwrap();
                         if task.is_none() {
@@ -793,19 +793,20 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                             }
                         }
                     },
-                    "clear_queue" => { let mut s=s.lock().unwrap();s.queue.clear();s.steering.clear(); },
-                    "steer" if task.is_some() => { let mut s=s.lock().unwrap();if s.steering.len()<32 {s.steering.push(a.text);}else{rejection=Some("Steering queue is full".to_string());s.error=rejection.clone();} },
-                    "send" | "send_now" | "steer" => {
-                        if a.kind=="send_now" {cancel(&mut task,&s).await;}
+                    ActionKind::ClearQueue => { let mut s=s.lock().unwrap();s.queue.clear();s.steering.clear(); },
+                    ActionKind::Steer if task.is_some() => { let mut s=s.lock().unwrap();if s.steering.len()<32 {s.steering.push(a.text);}else{rejection=Some("Steering queue is full".to_string());s.error=rejection.clone();} },
+                    ActionKind::Send | ActionKind::SendNow | ActionKind::Steer => {
+                        if a.kind==ActionKind::SendNow {cancel(&mut task,&s).await;}
                         let mut s=s.lock().unwrap();
                         let settings=a.settings.unwrap_or_else(||s.settings.clone());
                         let p=Pending{images:a.images,text:a.text,settings};
-                        if s.queue.len()>=32 && a.kind!="send_now" {rejection=Some("Message queue is full".to_string());s.error=rejection.clone();} else {
-                            if a.kind=="send_now" {s.queue.insert(0,p);} else {s.queue.push(p);}
+                        if s.queue.len()>=32 && a.kind!=ActionKind::SendNow {rejection=Some("Message queue is full".to_string());s.error=rejection.clone();} else {
+                            if a.kind==ActionKind::SendNow {s.queue.insert(0,p);} else {s.queue.push(p);}
                             paused=false;
                         }
                     },
-                    _=>{},
+                    // answered by the handler before anything is queued
+                    ActionKind::Rename | ActionKind::Move => {}
                 }
                 persist(&app,&s);
                 if let Some(reply)=reply {let _=reply.send(rejection.map_or(Ok(()),Err));}
