@@ -5,6 +5,7 @@ mod history;
 mod mcp;
 mod plugins;
 mod provider;
+mod rag;
 mod swarm;
 mod state_file;
 mod tools;
@@ -34,16 +35,16 @@ use types::*;
 type SharedSession = Arc<Mutex<Session>>;
 type SessionRegistry = Arc<Mutex<HashMap<String, (SharedSession, mpsc::Sender<Action>)>>>;
 #[derive(Clone)]
-struct App {
-    sessions: SessionRegistry,
-    providers: Arc<Mutex<Vec<provider::Provider>>>,
-    projects: Arc<Mutex<Vec<context::Project>>>,
-    client: reqwest::Client,
-    workspace: Arc<PathBuf>,
-    data: Arc<PathBuf>,
-    origin: String,
-    key_mutations: Arc<tokio::sync::Mutex<()>>,
-    plugins: plugins::Registry,
+pub(crate) struct App {
+    pub(crate) sessions: SessionRegistry,
+    pub(crate) providers: Arc<Mutex<Vec<provider::Provider>>>,
+    pub(crate) projects: Arc<Mutex<Vec<context::Project>>>,
+    pub(crate) client: reqwest::Client,
+    pub(crate) workspace: Arc<PathBuf>,
+    pub(crate) data: Arc<PathBuf>,
+    pub(crate) origin: String,
+    pub(crate) key_mutations: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) plugins: plugins::Registry,
 }
 #[derive(Deserialize)]
 struct Action {
@@ -139,154 +140,6 @@ fn truncate_output(bytes: &[u8]) -> String {
         format!("{}… [truncated {} bytes]", &text[..MAX], text.len() - MAX)
     }
 }
-fn rag_client(app: &App, rag_id: &str) -> Option<Arc<mcp::Client>> {
-    app.plugins.read().unwrap().get(rag_id)?.client.clone()
-}
-async fn retrieve_rag_wakeup(app: &App, rag_id: &str) -> Option<String> {
-    let client = rag_client(app, rag_id)?;
-    let value = client.call("wake_up", &json!({})).await.ok()?;
-    let text = match &value {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
-    Some(text.chars().take(1500).collect())
-}
-async fn retrieve_rag_context(app: &App, rag_id: &str, query: &str) -> Option<String> {
-    let client = rag_client(app, rag_id)?;
-    if let Ok(value) = client
-        .call("search_wiki", &json!({"query": query, "top_k": 6, "mode": "vec"}))
-        .await
-    {
-        if let Some(hits) = value.as_array() {
-            let lines: Vec<String> = hits
-                .iter()
-                .filter_map(|hit| {
-                    let title = hit["document_title"].as_str().unwrap_or("");
-                    let uri = hit["document_uri"].as_str().unwrap_or("");
-                    let content = hit["content"].as_str().unwrap_or("");
-                    if content.is_empty() {
-                        return None;
-                    }
-                    let snippet: String = content.chars().take(600).collect();
-                    Some(format!("- {title} ({uri})\n  {snippet}"))
-                })
-                .collect();
-            if !lines.is_empty() {
-                return Some(lines.join("\n"));
-            }
-        }
-    }
-    if let Ok(value) = client
-        .call("query_with_index", &json!({"query": query, "top_k": 6}))
-        .await
-    {
-        if let Some(matches) = value["matches"].as_array() {
-            let lines: Vec<String> = matches
-                .iter()
-                .filter_map(|m| {
-                    let title = m["entry"]["title"].as_str().unwrap_or("");
-                    let slug = m["entry"]["slug"].as_str().unwrap_or("");
-                    let summary = m["entry"]["summary"].as_str().unwrap_or("");
-                    if summary.is_empty() {
-                        return None;
-                    }
-                    Some(format!("- {title} (wiki://{slug}): {summary}"))
-                })
-                .collect();
-            if !lines.is_empty() {
-                return Some(lines.join("\n"));
-            }
-        }
-    }
-    None
-}
-async fn auto_file_answer(app: &App, rag_id: &str, title: &str, body: &str) {
-    let Some(client) = rag_client(app, rag_id) else { return };
-    let _ = client
-        .call(
-            "file_answer",
-            &json!({"title": title, "body": body, "agent": "allpaka-studio"}),
-        )
-        .await;
-}
-fn connected_rag_id(app: &App) -> Option<String> {
-    let registry = app.plugins.read().unwrap();
-    registry
-        .iter()
-        .find(|(id, state)| {
-            state.client.is_some()
-                && (id.to_lowercase().contains("rag")
-                    || state.config.name.to_lowercase().contains("rag"))
-        })
-        .map(|(id, _)| id.clone())
-}
-fn spawn_rag_maintenance(app: App) {
-    let enabled = std::env::var("ALLPAKA_RAG_AUTO_MAINTENANCE")
-        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
-    if !enabled {
-        return;
-    }
-    let interval_secs = std::env::var("ALLPAKA_RAG_AUTO_MAINTENANCE_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(86400);
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
-            run_rag_maintenance(&app).await;
-        }
-    });
-}
-async fn run_rag_maintenance(app: &App) {
-    let Some(rag_id) = connected_rag_id(app) else { return };
-    let Some(client) = rag_client(app, &rag_id) else { return };
-    eprintln!("rag maintenance: analyze_corpus");
-    let analysis = client.call("analyze_corpus", &json!({})).await.ok();
-    let plan = match client
-        .call(
-            "plan_maintenance",
-            &json!({"force_heuristic": true, "analysis": analysis}),
-        )
-        .await
-    {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("rag maintenance: plan failed: {err:#}");
-            return;
-        }
-    };
-    let actions = plan["actions"].clone();
-    if actions.is_null() {
-        eprintln!("rag maintenance: no actions");
-        return;
-    }
-    let apply = std::env::var("ALLPAKA_RAG_AUTO_MAINTENANCE_APPLY")
-        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
-    if apply {
-        let _ = client
-            .call(
-                "apply_maintenance_plan",
-                &json!({"actions": actions, "dry_run": false}),
-            )
-            .await;
-        let _ = client
-            .call("maintain_refresh", &json!({"dry_run": false}))
-            .await;
-    } else {
-        let _ = client
-            .call(
-                "apply_maintenance_plan",
-                &json!({"actions": actions, "dry_run": true}),
-            )
-            .await;
-        eprintln!(
-            "rag maintenance: dry-run only; set ALLPAKA_RAG_AUTO_MAINTENANCE_APPLY=true to apply"
-        );
-    }
-}
-
 pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> Result<()> {
     if !bind.ip().is_loopback() {
         bail!("Studio is a local single-user service: bind to a loopback address");
@@ -395,7 +248,7 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                     spawn_plugin_connect(app.clone(), config.id.clone());
                 }
             }
-            spawn_rag_maintenance(app.clone());
+            rag::spawn_rag_maintenance(app.clone());
             for entry in std::fs::read_dir(app.data.as_ref())? {
                 let path = entry?.path();
                 if path.extension().is_some_and(|e| e == "json") {
@@ -1411,7 +1264,7 @@ async fn turn(app: App, s: SharedSession) -> Result<TurnOutcome> {
     };
     let system=format!("{system}\nProject: {}\nProject instructions: {}\nAvailable context roots (use alias/path with tools): {}",project.name,project.instructions,serde_json::to_string(&project.roots.iter().map(|r|json!({"alias":r.alias,"writable":r.writable,"repository":r.repository})).collect::<Vec<_>>())?);
     let system = format!("{system}\n{}", settings.verbosity.instruction());
-    let rag_plugin_id = connected_rag_id(&app);
+    let rag_plugin_id = rag::connected_rag_id(&app);
     let system = if let Some(rag_id) = &rag_plugin_id {
         format!("{system}\nA local RAG plugin ({rag_id}) is connected. When the task may benefit from accumulated knowledge, search it first with mcp_{rag_id}_search or mcp_{rag_id}_query_with_index, then answer with citations to retrieved sources. After a valuable answer, you may persist it back with mcp_{rag_id}_file_answer.")
     } else {
@@ -1423,7 +1276,7 @@ async fn turn(app: App, s: SharedSession) -> Result<TurnOutcome> {
             state.messages.len() == 1
         };
         if is_first {
-            retrieve_rag_wakeup(&app, rag_id).await
+            rag::retrieve_rag_wakeup(&app, rag_id).await
         } else {
             None
         }
@@ -1449,7 +1302,7 @@ async fn turn(app: App, s: SharedSession) -> Result<TurnOutcome> {
         if query.is_empty() {
             None
         } else {
-            retrieve_rag_context(&app, rag_id, &query).await
+            rag::retrieve_rag_context(&app, rag_id, &query).await
         }
     } else {
         None
@@ -1550,7 +1403,7 @@ async fn turn(app: App, s: SharedSession) -> Result<TurnOutcome> {
                                 .map(|m| m.content.chars().take(80).collect::<String>())
                                 .unwrap_or_else(|| "allpaka answer".into())
                         };
-                        auto_file_answer(&app, rag_id, &title, &answer).await;
+                        rag::auto_file_answer(&app, rag_id, &title, &answer).await;
                     }
                 }
                 return Ok(TurnOutcome::Complete);
