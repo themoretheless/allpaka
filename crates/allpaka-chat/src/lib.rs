@@ -6,6 +6,7 @@ mod mcp;
 mod plugins;
 mod provider;
 mod swarm;
+mod state_file;
 mod tools;
 mod types;
 
@@ -313,7 +314,7 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
             let data = data.canonicalize()?;
             let projects_file = data.join("projects.state");
             let projects: Vec<context::Project> = if projects_file.exists() {
-                serde_json::from_slice(&std::fs::read(&projects_file)?)?
+                state_file::load_list(&data, "projects", "project", |_| Ok(()))?
             } else {
                 vec![context::Project {
                     id: "default".into(),
@@ -930,27 +931,12 @@ fn validate_custom_provider(p: &CustomProvider) -> Result<()> {
     Ok(())
 }
 fn load_custom_providers(data: &std::path::Path) -> Result<Vec<CustomProvider>> {
-    let path = data.join("custom-providers.state");
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-    let bytes = std::fs::read(&path)?;
-    if bytes.len() > 65536 {
-        bail!("Invalid custom provider file");
-    }
-    let list: Vec<CustomProvider> =
-        serde_json::from_slice(&bytes).context("Invalid custom provider file")?;
-    for p in &list {
-        validate_custom_provider(p)?;
-    }
-    Ok(list)
+    state_file::load_list(data, "custom-providers", "custom provider", |p| {
+        validate_custom_provider(p)
+    })
 }
 fn save_custom_providers(data: &std::path::Path, list: &[CustomProvider]) -> Result<()> {
-    let path = data.join("custom-providers.state");
-    let temp = data.join("custom-providers.tmp");
-    std::fs::write(&temp, serde_json::to_vec(list)?)?;
-    std::fs::rename(temp, path)?;
-    Ok(())
+    state_file::save_list(data, "custom-providers", list)
 }
 fn custom_to_provider(p: &CustomProvider) -> provider::Provider {
     provider::Provider {
@@ -1663,9 +1649,7 @@ async fn save_project(
     } else {
         updated.push(project.clone());
     }
-    let temp = app.data.join("projects.tmp");
-    std::fs::write(&temp, serde_json::to_vec(&updated).unwrap())
-        .and_then(|_| std::fs::rename(temp, app.data.join("projects.state")))
+    state_file::save_list(app.data.as_path(), "projects", &updated)
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     *projects = updated;
     Ok(Json(json!(project)))

@@ -9,7 +9,7 @@
 //! not require a server restart: the next turn rebuilds schemas and prompts.
 
 use crate::mcp;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -95,27 +95,11 @@ pub fn validate(config: &PluginConfig) -> Result<()> {
 }
 
 pub fn load(data: &Path) -> Result<Vec<PluginConfig>> {
-    let path = data.join("plugins.state");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let bytes = std::fs::read(&path)?;
-    if bytes.len() > 65536 {
-        bail!("Invalid plugin file");
-    }
-    let list: Vec<PluginConfig> = serde_json::from_slice(&bytes).context("Invalid plugin file")?;
-    for config in &list {
-        validate(config)?;
-    }
-    Ok(list)
+    crate::state_file::load_list(data, "plugins", "plugin", validate)
 }
 
 pub fn save(data: &Path, list: &[PluginConfig]) -> Result<()> {
-    let path = data.join("plugins.state");
-    let temp = data.join("plugins.tmp");
-    std::fs::write(&temp, serde_json::to_vec(list)?)?;
-    std::fs::rename(temp, path)?;
-    Ok(())
+    crate::state_file::save_list(data, "plugins", list)
 }
 
 /// Collect instructions from all enabled skill plugins.
