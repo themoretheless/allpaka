@@ -1425,17 +1425,7 @@ async fn turn(app: App, s: SharedSession) -> Result<TurnOutcome> {
     };
     let system=format!("{system}\nProject: {}\nProject instructions: {}\nAvailable context roots (use alias/path with tools): {}",project.name,project.instructions,serde_json::to_string(&project.roots.iter().map(|r|json!({"alias":r.alias,"writable":r.writable,"repository":r.repository})).collect::<Vec<_>>())?);
     let system = format!("{system}\n{}", settings.verbosity.instruction());
-    let rag_plugin_id = {
-        let registry = app.plugins.read().unwrap();
-        registry
-            .iter()
-            .find(|(id, state)| {
-                state.client.is_some()
-                    && (id.to_lowercase().contains("rag")
-                        || state.config.name.to_lowercase().contains("rag"))
-            })
-            .map(|(id, _)| id.clone())
-    };
+    let rag_plugin_id = connected_rag_id(&app);
     let system = if let Some(rag_id) = &rag_plugin_id {
         format!("{system}\nA local RAG plugin ({rag_id}) is connected. When the task may benefit from accumulated knowledge, search it first with mcp_{rag_id}_search or mcp_{rag_id}_query_with_index, then answer with citations to retrieved sources. After a valuable answer, you may persist it back with mcp_{rag_id}_file_answer.")
     } else {
