@@ -9,7 +9,7 @@
 //! not require a server restart: the next turn rebuilds schemas and prompts.
 
 use crate::mcp;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -95,27 +95,11 @@ pub fn validate(config: &PluginConfig) -> Result<()> {
 }
 
 pub fn load(data: &Path) -> Result<Vec<PluginConfig>> {
-    let path = data.join("plugins.state");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let bytes = std::fs::read(&path)?;
-    if bytes.len() > 65536 {
-        bail!("Invalid plugin file");
-    }
-    let list: Vec<PluginConfig> = serde_json::from_slice(&bytes).context("Invalid plugin file")?;
-    for config in &list {
-        validate(config)?;
-    }
-    Ok(list)
+    crate::state_file::load_list(data, "plugins", "plugin", validate)
 }
 
 pub fn save(data: &Path, list: &[PluginConfig]) -> Result<()> {
-    let path = data.join("plugins.state");
-    let temp = data.join("plugins.tmp");
-    std::fs::write(&temp, serde_json::to_vec(list)?)?;
-    std::fs::rename(temp, path)?;
-    Ok(())
+    crate::state_file::save_list(data, "plugins", list)
 }
 
 /// Collect instructions from all enabled skill plugins.
@@ -173,4 +157,176 @@ pub fn defaults() -> Vec<PluginConfig> {
             unlocks_tool: None,
         },
     ]
+}
+
+use crate::error;
+use crate::ApiResult;
+use crate::App;
+use axum::extract::{Path as AxumPath, State};
+use axum::http::StatusCode;
+use axum::Json;
+use serde_json::{json, Value};
+use std::time::{SystemTime, UNIX_EPOCH};
+pub(crate) fn spawn_plugin_connect(app: App, id: String) {
+    tokio::spawn(async move {
+        let (url, kind) = {
+            let registry = app.plugins.read().unwrap();
+            let Some(state) = registry.get(&id) else { return };
+            if !state.config.enabled {
+                return;
+            }
+            (state.config.url.clone(), state.config.kind.clone())
+        };
+        if kind == PluginKind::Skill {
+            return;
+        }
+        match mcp::Client::connect(&app.client, &url).await {
+            Ok(client) => {
+                let count = client.tools.len();
+                if let Some(state) = app.plugins.write().unwrap().get_mut(&id) {
+                    state.client = Some(Arc::new(client));
+                    state.error = None;
+                }
+                eprintln!("plugin {id} connected: {count} tools");
+            }
+            Err(err) => {
+                if let Some(state) = app.plugins.write().unwrap().get_mut(&id) {
+                    state.client = None;
+                    state.error = Some(format!("{err:#}"));
+                }
+                eprintln!("plugin {id} unavailable: {err:#}");
+            }
+        }
+    });
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct PluginInput {
+    #[serde(default)]
+    id: String,
+    name: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    url: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    instructions: Option<String>,
+    #[serde(default)]
+    unlocks_tool: Option<String>,
+}
+pub(crate) fn default_true() -> bool {
+    true
+}
+pub(crate) async fn list_plugins(State(app): State<App>) -> Json<Value> {
+    let registry = app.plugins.read().unwrap();
+    let plugins: Vec<Value> = registry
+        .values()
+        .map(|state| {
+            json!({
+                "id": state.config.id,
+                "name": state.config.name,
+                "kind": state.config.kind,
+                "url": state.config.url,
+                "enabled": state.config.enabled,
+                "instructions": state.config.instructions,
+                "unlocks_tool": state.config.unlocks_tool,
+                "connected": state.client.is_some(),
+                "tools": state.client.as_ref().map(|c| c.tools.len()).unwrap_or(0),
+                "error": state.error,
+            })
+        })
+        .collect();
+    Json(json!({"plugins": plugins}))
+}
+pub(crate) async fn save_plugin(
+    State(app): State<App>,
+    Json(mut input): Json<PluginInput>,
+) -> ApiResult<Value> {
+    if input.id.trim().is_empty() {
+        input.id = format!(
+            "plugin-{:x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+    }
+    let kind = match input.kind.as_deref() {
+        Some("skill") => PluginKind::Skill,
+        _ => PluginKind::Mcp,
+    };
+    let config = PluginConfig {
+        id: input.id.trim().to_string(),
+        name: input.name.trim().to_string(),
+        kind: kind.clone(),
+        url: input.url.trim().to_string(),
+        enabled: input.enabled,
+        instructions: input.instructions,
+        unlocks_tool: input.unlocks_tool,
+    };
+    validate(&config).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    {
+        let mut registry = app.plugins.write().unwrap();
+        match registry.get_mut(&config.id) {
+            Some(state) => {
+                let changed = state.config.url != config.url
+                    || state.config.kind != config.kind
+                    || state.config.instructions != config.instructions;
+                state.config = config.clone();
+                if changed {
+                    state.client = None;
+                    state.error = None;
+                }
+            }
+            None => {
+                registry.insert(
+                    config.id.clone(),
+                    PluginState {
+                        config: config.clone(),
+                        client: None,
+                        error: None,
+                    },
+                );
+            }
+        }
+    }
+    let configs: Vec<PluginConfig> = {
+        let registry = app.plugins.read().unwrap();
+        registry.values().map(|state| state.config.clone()).collect()
+    };
+    save(app.data.as_path(), &configs)
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if config.enabled {
+        spawn_plugin_connect(app.clone(), config.id.clone());
+    }
+    Ok(Json(json!({"id": config.id})))
+}
+pub(crate) async fn delete_plugin(State(app): State<App>, AxumPath(id): AxumPath<String>) -> ApiResult<Value> {
+    let existed = app.plugins.write().unwrap().remove(&id).is_some();
+    if !existed {
+        return Err(error(StatusCode::NOT_FOUND, "Plugin not found"));
+    }
+    let configs: Vec<PluginConfig> = {
+        let registry = app.plugins.read().unwrap();
+        registry.values().map(|state| state.config.clone()).collect()
+    };
+    save(app.data.as_path(), &configs)
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(json!({"deleted": id})))
+}
+pub(crate) async fn reload_plugin(State(app): State<App>, AxumPath(id): AxumPath<String>) -> ApiResult<Value> {
+    let enabled = {
+        let mut registry = app.plugins.write().unwrap();
+        let Some(state) = registry.get_mut(&id) else {
+            return Err(error(StatusCode::NOT_FOUND, "Plugin not found"));
+        };
+        state.client = None;
+        state.error = None;
+        state.config.enabled
+    };
+    if enabled {
+        spawn_plugin_connect(app.clone(), id.clone());
+    }
+    Ok(Json(json!({"id": id, "connecting": enabled})))
 }

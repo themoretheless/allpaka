@@ -17,6 +17,7 @@ mod airbug_llama;
 mod report;
 mod serve;
 mod verify;
+mod watch;
 
 use allpaka_core::fleet::FleetMember;
 use allpaka_core::{fleet, plan, presets, replicate, Model, PlanRequest, Speculation, Verdict};
@@ -213,6 +214,23 @@ enum Command {
         /// Address of the running server.
         #[arg(long, default_value = client::DEFAULT_ADDR)]
         addr: String,
+    },
+
+    /// Watch a running `allpaka serve` as a phase plus conditions.
+    ///
+    /// Polls /health, /v1/models, /stats and /resources and prints only the
+    /// transitions between them, so the output is the lifecycle rather than a
+    /// wall of JSON.
+    Watch {
+        /// Address of the running server.
+        #[arg(long, default_value = client::DEFAULT_ADDR)]
+        addr: String,
+        /// Poll interval, milliseconds. Also caps how long a single probe waits.
+        #[arg(long, default_value_t = 500)]
+        interval_ms: u64,
+        /// One JSON object per transition, for scripts.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Send one chat request to a running `allpaka serve`.
@@ -481,6 +499,11 @@ fn main() -> Result<()> {
             )
         }
         Command::Status { addr } => client::status(&addr),
+        Command::Watch { addr, interval_ms, json } => watch::watch(
+            &addr,
+            std::time::Duration::from_millis(interval_ms),
+            json,
+        ),
         Command::Chat {
             prompt,
             system,

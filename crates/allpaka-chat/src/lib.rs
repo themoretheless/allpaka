@@ -5,7 +5,9 @@ mod history;
 mod mcp;
 mod plugins;
 mod provider;
+mod rag;
 mod swarm;
+mod state_file;
 mod tools;
 mod types;
 
@@ -33,16 +35,16 @@ use types::*;
 type SharedSession = Arc<Mutex<Session>>;
 type SessionRegistry = Arc<Mutex<HashMap<String, (SharedSession, mpsc::Sender<Action>)>>>;
 #[derive(Clone)]
-struct App {
-    sessions: SessionRegistry,
-    providers: Arc<Mutex<Vec<provider::Provider>>>,
-    projects: Arc<Mutex<Vec<context::Project>>>,
-    client: reqwest::Client,
-    workspace: Arc<PathBuf>,
-    data: Arc<PathBuf>,
-    origin: String,
-    key_mutations: Arc<tokio::sync::Mutex<()>>,
-    plugins: plugins::Registry,
+pub(crate) struct App {
+    pub(crate) sessions: SessionRegistry,
+    pub(crate) providers: Arc<Mutex<Vec<provider::Provider>>>,
+    pub(crate) projects: Arc<Mutex<Vec<context::Project>>>,
+    pub(crate) client: reqwest::Client,
+    pub(crate) workspace: Arc<PathBuf>,
+    pub(crate) data: Arc<PathBuf>,
+    pub(crate) origin: String,
+    pub(crate) key_mutations: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) plugins: plugins::Registry,
 }
 #[derive(Deserialize)]
 struct Action {
@@ -50,46 +52,30 @@ struct Action {
     reply: Option<tokio::sync::oneshot::Sender<std::result::Result<(), String>>>,
     #[serde(default)]
     images: Vec<context::Image>,
-    kind: String,
+    kind: ActionKind,
     #[serde(default)]
     text: String,
     settings: Option<Settings>,
 }
-type ApiResult<T> = std::result::Result<Json<T>, (StatusCode, Json<Value>)>;
-fn error(status: StatusCode, message: impl ToString) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({"error":message.to_string()})))
+/// The only kinds `POST /api/sessions/:id/actions` accepts. Serde rejects
+/// anything else, and the actor must name every variant it does not handle,
+/// so a new kind cannot be added to one list and forgotten in another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ActionKind {
+    Send,
+    SendNow,
+    Steer,
+    Stop,
+    Resume,
+    ClearQueue,
+    Compact,
+    Rename,
+    Move,
 }
-fn spawn_plugin_connect(app: App, id: String) {
-    tokio::spawn(async move {
-        let (url, kind) = {
-            let registry = app.plugins.read().unwrap();
-            let Some(state) = registry.get(&id) else { return };
-            if !state.config.enabled {
-                return;
-            }
-            (state.config.url.clone(), state.config.kind.clone())
-        };
-        if kind == plugins::PluginKind::Skill {
-            return;
-        }
-        match mcp::Client::connect(&app.client, &url).await {
-            Ok(client) => {
-                let count = client.tools.len();
-                if let Some(state) = app.plugins.write().unwrap().get_mut(&id) {
-                    state.client = Some(Arc::new(client));
-                    state.error = None;
-                }
-                eprintln!("plugin {id} connected: {count} tools");
-            }
-            Err(err) => {
-                if let Some(state) = app.plugins.write().unwrap().get_mut(&id) {
-                    state.client = None;
-                    state.error = Some(format!("{err:#}"));
-                }
-                eprintln!("plugin {id} unavailable: {err:#}");
-            }
-        }
-    });
+pub(crate) type ApiResult<T> = std::result::Result<Json<T>, (StatusCode, Json<Value>)>;
+pub(crate) fn error(status: StatusCode, message: impl ToString) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({"error":message.to_string()})))
 }
 fn mcp_lookup(app: &App, name: &str) -> Option<(Arc<mcp::Client>, String)> {
     let registry = app.plugins.read().unwrap();
@@ -138,154 +124,6 @@ fn truncate_output(bytes: &[u8]) -> String {
         format!("{}… [truncated {} bytes]", &text[..MAX], text.len() - MAX)
     }
 }
-fn rag_client(app: &App, rag_id: &str) -> Option<Arc<mcp::Client>> {
-    app.plugins.read().unwrap().get(rag_id)?.client.clone()
-}
-async fn retrieve_rag_wakeup(app: &App, rag_id: &str) -> Option<String> {
-    let client = rag_client(app, rag_id)?;
-    let value = client.call("wake_up", &json!({})).await.ok()?;
-    let text = match &value {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
-    Some(text.chars().take(1500).collect())
-}
-async fn retrieve_rag_context(app: &App, rag_id: &str, query: &str) -> Option<String> {
-    let client = rag_client(app, rag_id)?;
-    if let Ok(value) = client
-        .call("search_wiki", &json!({"query": query, "top_k": 6, "mode": "vec"}))
-        .await
-    {
-        if let Some(hits) = value.as_array() {
-            let lines: Vec<String> = hits
-                .iter()
-                .filter_map(|hit| {
-                    let title = hit["document_title"].as_str().unwrap_or("");
-                    let uri = hit["document_uri"].as_str().unwrap_or("");
-                    let content = hit["content"].as_str().unwrap_or("");
-                    if content.is_empty() {
-                        return None;
-                    }
-                    let snippet: String = content.chars().take(600).collect();
-                    Some(format!("- {title} ({uri})\n  {snippet}"))
-                })
-                .collect();
-            if !lines.is_empty() {
-                return Some(lines.join("\n"));
-            }
-        }
-    }
-    if let Ok(value) = client
-        .call("query_with_index", &json!({"query": query, "top_k": 6}))
-        .await
-    {
-        if let Some(matches) = value["matches"].as_array() {
-            let lines: Vec<String> = matches
-                .iter()
-                .filter_map(|m| {
-                    let title = m["entry"]["title"].as_str().unwrap_or("");
-                    let slug = m["entry"]["slug"].as_str().unwrap_or("");
-                    let summary = m["entry"]["summary"].as_str().unwrap_or("");
-                    if summary.is_empty() {
-                        return None;
-                    }
-                    Some(format!("- {title} (wiki://{slug}): {summary}"))
-                })
-                .collect();
-            if !lines.is_empty() {
-                return Some(lines.join("\n"));
-            }
-        }
-    }
-    None
-}
-async fn auto_file_answer(app: &App, rag_id: &str, title: &str, body: &str) {
-    let Some(client) = rag_client(app, rag_id) else { return };
-    let _ = client
-        .call(
-            "file_answer",
-            &json!({"title": title, "body": body, "agent": "allpaka-studio"}),
-        )
-        .await;
-}
-fn connected_rag_id(app: &App) -> Option<String> {
-    let registry = app.plugins.read().unwrap();
-    registry
-        .iter()
-        .find(|(id, state)| {
-            state.client.is_some()
-                && (id.to_lowercase().contains("rag")
-                    || state.config.name.to_lowercase().contains("rag"))
-        })
-        .map(|(id, _)| id.clone())
-}
-fn spawn_rag_maintenance(app: App) {
-    let enabled = std::env::var("ALLPAKA_RAG_AUTO_MAINTENANCE")
-        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
-    if !enabled {
-        return;
-    }
-    let interval_secs = std::env::var("ALLPAKA_RAG_AUTO_MAINTENANCE_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(86400);
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
-            run_rag_maintenance(&app).await;
-        }
-    });
-}
-async fn run_rag_maintenance(app: &App) {
-    let Some(rag_id) = connected_rag_id(app) else { return };
-    let Some(client) = rag_client(app, &rag_id) else { return };
-    eprintln!("rag maintenance: analyze_corpus");
-    let analysis = client.call("analyze_corpus", &json!({})).await.ok();
-    let plan = match client
-        .call(
-            "plan_maintenance",
-            &json!({"force_heuristic": true, "analysis": analysis}),
-        )
-        .await
-    {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("rag maintenance: plan failed: {err:#}");
-            return;
-        }
-    };
-    let actions = plan["actions"].clone();
-    if actions.is_null() {
-        eprintln!("rag maintenance: no actions");
-        return;
-    }
-    let apply = std::env::var("ALLPAKA_RAG_AUTO_MAINTENANCE_APPLY")
-        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
-    if apply {
-        let _ = client
-            .call(
-                "apply_maintenance_plan",
-                &json!({"actions": actions, "dry_run": false}),
-            )
-            .await;
-        let _ = client
-            .call("maintain_refresh", &json!({"dry_run": false}))
-            .await;
-    } else {
-        let _ = client
-            .call(
-                "apply_maintenance_plan",
-                &json!({"actions": actions, "dry_run": true}),
-            )
-            .await;
-        eprintln!(
-            "rag maintenance: dry-run only; set ALLPAKA_RAG_AUTO_MAINTENANCE_APPLY=true to apply"
-        );
-    }
-}
-
 pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> Result<()> {
     if !bind.ip().is_loopback() {
         bail!("Studio is a local single-user service: bind to a loopback address");
@@ -313,7 +151,7 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
             let data = data.canonicalize()?;
             let projects_file = data.join("projects.state");
             let projects: Vec<context::Project> = if projects_file.exists() {
-                serde_json::from_slice(&std::fs::read(&projects_file)?)?
+                state_file::load_list(&data, "projects", "project", |_| Ok(()))?
             } else {
                 vec![context::Project {
                     id: "default".into(),
@@ -328,8 +166,8 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                 }]
             };
             let mut providers=provider::defaults();
-            for c in load_custom_providers(&data)? {
-                providers.push(custom_to_provider(&c));
+            for c in provider::load_custom_providers(&data)? {
+                providers.push(provider::custom_to_provider(&c));
             }
             let store=credentials::Store::new(&data);
             for p in &mut providers {
@@ -391,10 +229,10 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
             };
             for config in &plugin_configs {
                 if config.enabled {
-                    spawn_plugin_connect(app.clone(), config.id.clone());
+                    plugins::spawn_plugin_connect(app.clone(), config.id.clone());
                 }
             }
-            spawn_rag_maintenance(app.clone());
+            rag::spawn_rag_maintenance(app.clone());
             for entry in std::fs::read_dir(app.data.as_ref())? {
                 let path = entry?.path();
                 if path.extension().is_some_and(|e| e == "json") {
@@ -466,14 +304,14 @@ fn routes(app: App) -> Router {
             }),
         )
         .route("/api/config", get(config))
-        .route("/api/plugins", get(list_plugins).post(save_plugin))
-        .route("/api/plugins/:id/delete", post(delete_plugin))
-        .route("/api/plugins/:id/reload", post(reload_plugin))
+        .route("/api/plugins", get(plugins::list_plugins).post(plugins::save_plugin))
+        .route("/api/plugins/:id/delete", post(plugins::delete_plugin))
+        .route("/api/plugins/:id/reload", post(plugins::reload_plugin))
         .route("/api/projects", post(save_project))
-        .route("/api/providers", post(save_provider))
-        .route("/api/providers/:id/delete", post(delete_provider))
-        .route("/api/providers/:id/key", post(set_key))
-        .route("/api/providers/:id/models", get(model_list))
+        .route("/api/providers", post(provider::save_provider))
+        .route("/api/providers/:id/delete", post(provider::delete_provider))
+        .route("/api/providers/:id/key", post(provider::set_key))
+        .route("/api/providers/:id/models", get(provider::model_list))
         .route("/api/sessions", get(history::list).post(create_session))
         .route("/api/sessions/import", post(history::import))
         .route("/api/sessions/:id", get(session).delete(delete_session))
@@ -521,297 +359,6 @@ async fn config(State(app): State<App>) -> Json<Value> {
     Json(
         json!({"credential_storage":credentials::AVAILABLE,"providers":app.providers.lock().unwrap().iter().map(|p|p.public()).collect::<Vec<_>>(),"workspace":app.workspace.display().to_string(),"projects":*app.projects.lock().unwrap()}),
     )
-}
-#[derive(Deserialize)]
-struct Key {
-    key: String,
-    #[serde(default)]
-    persist: bool,
-    #[serde(default)]
-    use_current: bool,
-}
-async fn set_key(
-    State(app): State<App>,
-    Path(id): Path<String>,
-    Json(mut key): Json<Key>,
-) -> ApiResult<Value> {
-    if key.key.len() > 4096 || key.key.chars().any(char::is_control) {
-        return Err(error(StatusCode::BAD_REQUEST, "Invalid API key"));
-    }
-    let _serial = app.key_mutations.lock().await;
-    if key.use_current {
-        if !key.persist || !key.key.is_empty() {
-            return Err(error(
-                StatusCode::BAD_REQUEST,
-                "Saving the current key requires persist and no replacement key",
-            ));
-        }
-        key.key = app
-            .providers
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|p| p.id == id)
-            .map(|p| p.key.clone())
-            .unwrap_or_default();
-        if key.key.is_empty() {
-            return Err(error(StatusCode::BAD_REQUEST, "No current key to save"));
-        }
-    }
-    if !app.providers.lock().unwrap().iter().any(|p| p.id == id) {
-        return Err(error(StatusCode::NOT_FOUND, "Unknown provider"));
-    }
-    if key.persist && !credentials::AVAILABLE {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "System credential storage is unavailable on this platform",
-        ));
-    }
-    let data = app.data.clone();
-    let account = id.clone();
-    let secret = key.key.clone();
-    let persist = key.persist;
-    tokio::task::spawn_blocking(move || {
-        credentials::Store::new(&data).update(&credentials::SystemVault, &account, &secret, persist)
-    })
-    .await
-    .map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Credential operation failed",
-        )
-    })?
-    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let mut providers = app.providers.lock().unwrap();
-    let p = providers.iter_mut().find(|p| p.id == id).unwrap();
-    p.saved = key.persist && !key.key.is_empty();
-    p.key_source = if key.key.is_empty() {
-        "none"
-    } else if key.persist {
-        "system"
-    } else {
-        "memory"
-    }
-    .into();
-    p.key = key.key;
-    p.key_error = None;
-    Ok(Json(
-        json!({"configured":p.public().configured,"saved":p.saved,"key_source":p.key_source}),
-    ))
-}
-
-async fn model_list(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
-    let p = app
-        .providers
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|p| p.id == id)
-        .cloned()
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Unknown provider"))?;
-    let models = provider::models(&app.client, &p)
-        .await
-        .map_err(|e| error(StatusCode::BAD_GATEWAY, e))?;
-    Ok(Json(
-        json!({"models":models.iter().map(|m|&m["id"]).collect::<Vec<_>>(),"catalog":models}),
-    ))
-}
-async fn save_provider(
-    State(app): State<App>,
-    Json(mut input): Json<CustomProviderInput>,
-) -> ApiResult<Value> {
-    if input.id.trim().is_empty() {
-        input.id = format!(
-            "custom-{:x}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-    }
-    let candidate = CustomProvider {
-        id: input.id.trim().to_string(),
-        name: input.name.trim().to_string(),
-        base: input.base.trim().to_string(),
-    };
-    validate_custom_provider(&candidate).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
-    if BUILTIN_PROVIDERS.contains(&candidate.id.as_str()) {
-        return Err(error(StatusCode::BAD_REQUEST, "This provider ID is reserved"));
-    }
-    let mut list =
-        load_custom_providers(app.data.as_path()).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    match list.iter().position(|p| p.id == candidate.id) {
-        Some(i) => list[i] = candidate.clone(),
-        None => list.push(candidate.clone()),
-    }
-    save_custom_providers(app.data.as_path(), &list)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let mut providers = app.providers.lock().unwrap();
-    let old = providers
-        .iter()
-        .find(|p| p.id == candidate.id)
-        .map(|p| (p.key.clone(), p.key_source.clone(), p.saved));
-    let mut next = custom_to_provider(&candidate);
-    if let Some((key, key_source, saved)) = old {
-        next.key = key;
-        next.key_source = key_source;
-        next.saved = saved;
-        *providers.iter_mut().find(|p| p.id == candidate.id).unwrap() = next;
-    } else {
-        providers.push(next);
-    }
-    Ok(Json(json!({"id": candidate.id})))
-}
-async fn delete_provider(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
-    if BUILTIN_PROVIDERS.contains(&id.as_str()) {
-        return Err(error(StatusCode::BAD_REQUEST, "Built-in providers cannot be removed"));
-    }
-    let mut list =
-        load_custom_providers(app.data.as_path()).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if !list.iter().any(|p| p.id == id) {
-        return Err(error(StatusCode::NOT_FOUND, "Custom provider not found"));
-    }
-    list.retain(|p| p.id != id);
-    save_custom_providers(app.data.as_path(), &list)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if credentials::AVAILABLE {
-        // Remove any persisted system-credential secret for this provider id.
-        let _ = credentials::Store::new(app.data.as_path())
-            .update(&credentials::SystemVault, &id, "", false);
-    }
-    app.providers.lock().unwrap().retain(|p| p.id != id || !p.custom);
-    Ok(Json(json!({"deleted": id})))
-}
-#[derive(Deserialize)]
-struct PluginInput {
-    #[serde(default)]
-    id: String,
-    name: String,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    url: String,
-    #[serde(default = "default_true")]
-    enabled: bool,
-    #[serde(default)]
-    instructions: Option<String>,
-    #[serde(default)]
-    unlocks_tool: Option<String>,
-}
-fn default_true() -> bool {
-    true
-}
-async fn list_plugins(State(app): State<App>) -> Json<Value> {
-    let registry = app.plugins.read().unwrap();
-    let plugins: Vec<Value> = registry
-        .values()
-        .map(|state| {
-            json!({
-                "id": state.config.id,
-                "name": state.config.name,
-                "kind": state.config.kind,
-                "url": state.config.url,
-                "enabled": state.config.enabled,
-                "instructions": state.config.instructions,
-                "unlocks_tool": state.config.unlocks_tool,
-                "connected": state.client.is_some(),
-                "tools": state.client.as_ref().map(|c| c.tools.len()).unwrap_or(0),
-                "error": state.error,
-            })
-        })
-        .collect();
-    Json(json!({"plugins": plugins}))
-}
-async fn save_plugin(
-    State(app): State<App>,
-    Json(mut input): Json<PluginInput>,
-) -> ApiResult<Value> {
-    if input.id.trim().is_empty() {
-        input.id = format!(
-            "plugin-{:x}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-    }
-    let kind = match input.kind.as_deref() {
-        Some("skill") => plugins::PluginKind::Skill,
-        _ => plugins::PluginKind::Mcp,
-    };
-    let config = plugins::PluginConfig {
-        id: input.id.trim().to_string(),
-        name: input.name.trim().to_string(),
-        kind: kind.clone(),
-        url: input.url.trim().to_string(),
-        enabled: input.enabled,
-        instructions: input.instructions,
-        unlocks_tool: input.unlocks_tool,
-    };
-    plugins::validate(&config).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
-    {
-        let mut registry = app.plugins.write().unwrap();
-        match registry.get_mut(&config.id) {
-            Some(state) => {
-                let changed = state.config.url != config.url
-                    || state.config.kind != config.kind
-                    || state.config.instructions != config.instructions;
-                state.config = config.clone();
-                if changed {
-                    state.client = None;
-                    state.error = None;
-                }
-            }
-            None => {
-                registry.insert(
-                    config.id.clone(),
-                    plugins::PluginState {
-                        config: config.clone(),
-                        client: None,
-                        error: None,
-                    },
-                );
-            }
-        }
-    }
-    let configs: Vec<plugins::PluginConfig> = {
-        let registry = app.plugins.read().unwrap();
-        registry.values().map(|state| state.config.clone()).collect()
-    };
-    plugins::save(app.data.as_path(), &configs)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if config.enabled {
-        spawn_plugin_connect(app.clone(), config.id.clone());
-    }
-    Ok(Json(json!({"id": config.id})))
-}
-async fn delete_plugin(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
-    let existed = app.plugins.write().unwrap().remove(&id).is_some();
-    if !existed {
-        return Err(error(StatusCode::NOT_FOUND, "Plugin not found"));
-    }
-    let configs: Vec<plugins::PluginConfig> = {
-        let registry = app.plugins.read().unwrap();
-        registry.values().map(|state| state.config.clone()).collect()
-    };
-    plugins::save(app.data.as_path(), &configs)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(json!({"deleted": id})))
-}
-async fn reload_plugin(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
-    let enabled = {
-        let mut registry = app.plugins.write().unwrap();
-        let Some(state) = registry.get_mut(&id) else {
-            return Err(error(StatusCode::NOT_FOUND, "Plugin not found"));
-        };
-        state.client = None;
-        state.error = None;
-        state.config.enabled
-    };
-    if enabled {
-        spawn_plugin_connect(app.clone(), id.clone());
-    }
-    Ok(Json(json!({"id": id, "connecting": enabled})))
 }
 fn validate_settings(s: &Settings, app: &App) -> Result<()> {
     if !(4096..=1000000).contains(&s.compact_threshold) {
@@ -880,91 +427,6 @@ fn validate_settings(s: &Settings, app: &App) -> Result<()> {
 }
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() < 80 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-}
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct CustomProvider {
-    id: String,
-    name: String,
-    base: String,
-}
-#[derive(Deserialize)]
-struct CustomProviderInput {
-    #[serde(default)]
-    id: String,
-    name: String,
-    base: String,
-}
-const BUILTIN_PROVIDERS: &[&str] = &[
-    "openai",
-    "anthropic",
-    "deepseek",
-    "kimi",
-    "xai",
-    "gemini",
-    "openrouter",
-    "local",
-];
-fn valid_custom_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() < 80
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-fn validate_custom_provider(p: &CustomProvider) -> Result<()> {
-    if !valid_custom_id(&p.id) {
-        bail!("Custom provider ID must be 1–79 ASCII letters, digits, '-' or '_'");
-    }
-    if p.name.trim().is_empty()
-        || p.name.chars().count() > 100
-        || p.name.chars().any(char::is_control)
-    {
-        bail!("Provider name must be 1–100 characters");
-    }
-    if !(p.base.starts_with("http://") || p.base.starts_with("https://"))
-        || p.base.len() > 500
-        || p.base.chars().any(char::is_control)
-    {
-        bail!("Base URL must start with http:// or https:// and be at most 500 characters");
-    }
-    Ok(())
-}
-fn load_custom_providers(data: &std::path::Path) -> Result<Vec<CustomProvider>> {
-    let path = data.join("custom-providers.state");
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-    let bytes = std::fs::read(&path)?;
-    if bytes.len() > 65536 {
-        bail!("Invalid custom provider file");
-    }
-    let list: Vec<CustomProvider> =
-        serde_json::from_slice(&bytes).context("Invalid custom provider file")?;
-    for p in &list {
-        validate_custom_provider(p)?;
-    }
-    Ok(list)
-}
-fn save_custom_providers(data: &std::path::Path, list: &[CustomProvider]) -> Result<()> {
-    let path = data.join("custom-providers.state");
-    let temp = data.join("custom-providers.tmp");
-    std::fs::write(&temp, serde_json::to_vec(list)?)?;
-    std::fs::rename(temp, path)?;
-    Ok(())
-}
-fn custom_to_provider(p: &CustomProvider) -> provider::Provider {
-    provider::Provider {
-        id: p.id.clone(),
-        name: p.name.clone(),
-        base: p.base.clone(),
-        key: String::new(),
-        env: String::new(),
-        anthropic: false,
-        custom: true,
-        key_source: "none".into(),
-        key_error: None,
-        saved: false,
-    }
 }
 async fn create_session(
     State(app): State<App>,
@@ -1117,34 +579,19 @@ async fn action(
     Path(id): Path<String>,
     Json(mut action): Json<Action>,
 ) -> ApiResult<Value> {
-    if ![
-        "send",
-        "send_now",
-        "steer",
-        "stop",
-        "resume",
-        "clear_queue",
-        "compact",
-        "rename",
-        "move",
-    ]
-    .contains(&action.kind.as_str())
-    {
-        return Err(error(StatusCode::BAD_REQUEST, "Unknown action"));
-    }
-    if action.kind == "rename" || action.kind == "move" {
+    if matches!(action.kind, ActionKind::Rename | ActionKind::Move) {
         let sessions = app.sessions.lock().unwrap();
         let (shared, _) = sessions
             .get(&id)
             .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
         let mut state = shared.lock().unwrap();
-        if action.kind == "move" && state.status == "running" {
+        if action.kind == ActionKind::Move && state.status == "running" {
             return Err(error(
                 StatusCode::CONFLICT,
                 "Stop generation before moving the conversation",
             ));
         }
-        if action.kind == "rename" {
+        if action.kind == ActionKind::Rename {
             let title = action.text.trim();
             if title.is_empty() || title.chars().count() > 100 {
                 return Err(error(StatusCode::BAD_REQUEST, "Title must be 1–100 characters"));
@@ -1161,7 +608,7 @@ async fn action(
         save(&app, &state).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         return Ok(Json(json!({"accepted":true})));
     }
-    if ["send", "send_now", "steer"].contains(&action.kind.as_str())
+    if matches!(action.kind, ActionKind::Send | ActionKind::SendNow | ActionKind::Steer)
         && (action.text.trim().is_empty() || action.text.len() > 131072)
     {
         return Err(error(
@@ -1181,8 +628,7 @@ async fn action(
         (state.settings.clone(), state.folder)
     };
     if folder != HistoryFolder::Active
-        && ["send", "send_now", "steer", "resume", "compact"]
-            .contains(&action.kind.as_str())
+        && !matches!(action.kind, ActionKind::Stop | ActionKind::ClearQueue)
     {
         return Err(error(
             StatusCode::CONFLICT,
@@ -1198,7 +644,7 @@ async fn action(
     }
     context::validate_images(&action.images, &chosen.provider)
         .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
-    if action.kind == "steer" && !action.images.is_empty() {
+    if action.kind == ActionKind::Steer && !action.images.is_empty() {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "Use Send now or Queue for images",
@@ -1324,8 +770,8 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                 let Some(mut a)=command else { cancel(&mut task,&s).await;break; };
                 let reply=a.reply.take();
                 let mut rejection=None;
-                match a.kind.as_str() {
-                    "compact" => {
+                match a.kind {
+                    ActionKind::Compact => {
                         if task.is_some() { rejection=Some("Stop generation before manual compaction".into()); }
                         else {
                             {let mut state=s.lock().unwrap();if let Some(settings)=a.settings {state.settings=settings;}state.status="running".into();state.error=None;state.notice=Some("Сжатие контекста…".into());}
@@ -1334,8 +780,8 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                             task=Some(tokio::spawn(async move {compact::run(&app,&s,true).await?;Ok(TurnOutcome::Compacted)}));
                         }
                     },
-                    "stop" => { cancel(&mut task,&s).await;paused=true; },
-                    "resume" => {
+                    ActionKind::Stop => { cancel(&mut task,&s).await;paused=true; },
+                    ActionKind::Resume => {
                         paused=false;
                         let mut s=s.lock().unwrap();
                         if task.is_none() {
@@ -1347,19 +793,20 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                             }
                         }
                     },
-                    "clear_queue" => { let mut s=s.lock().unwrap();s.queue.clear();s.steering.clear(); },
-                    "steer" if task.is_some() => { let mut s=s.lock().unwrap();if s.steering.len()<32 {s.steering.push(a.text);}else{rejection=Some("Steering queue is full".to_string());s.error=rejection.clone();} },
-                    "send" | "send_now" | "steer" => {
-                        if a.kind=="send_now" {cancel(&mut task,&s).await;}
+                    ActionKind::ClearQueue => { let mut s=s.lock().unwrap();s.queue.clear();s.steering.clear(); },
+                    ActionKind::Steer if task.is_some() => { let mut s=s.lock().unwrap();if s.steering.len()<32 {s.steering.push(a.text);}else{rejection=Some("Steering queue is full".to_string());s.error=rejection.clone();} },
+                    ActionKind::Send | ActionKind::SendNow | ActionKind::Steer => {
+                        if a.kind==ActionKind::SendNow {cancel(&mut task,&s).await;}
                         let mut s=s.lock().unwrap();
                         let settings=a.settings.unwrap_or_else(||s.settings.clone());
                         let p=Pending{images:a.images,text:a.text,settings};
-                        if s.queue.len()>=32 && a.kind!="send_now" {rejection=Some("Message queue is full".to_string());s.error=rejection.clone();} else {
-                            if a.kind=="send_now" {s.queue.insert(0,p);} else {s.queue.push(p);}
+                        if s.queue.len()>=32 && a.kind!=ActionKind::SendNow {rejection=Some("Message queue is full".to_string());s.error=rejection.clone();} else {
+                            if a.kind==ActionKind::SendNow {s.queue.insert(0,p);} else {s.queue.push(p);}
                             paused=false;
                         }
                     },
-                    _=>{},
+                    // answered by the handler before anything is queued
+                    ActionKind::Rename | ActionKind::Move => {}
                 }
                 persist(&app,&s);
                 if let Some(reply)=reply {let _=reply.send(rejection.map_or(Ok(()),Err));}
@@ -1425,17 +872,7 @@ async fn turn(app: App, s: SharedSession) -> Result<TurnOutcome> {
     };
     let system=format!("{system}\nProject: {}\nProject instructions: {}\nAvailable context roots (use alias/path with tools): {}",project.name,project.instructions,serde_json::to_string(&project.roots.iter().map(|r|json!({"alias":r.alias,"writable":r.writable,"repository":r.repository})).collect::<Vec<_>>())?);
     let system = format!("{system}\n{}", settings.verbosity.instruction());
-    let rag_plugin_id = {
-        let registry = app.plugins.read().unwrap();
-        registry
-            .iter()
-            .find(|(id, state)| {
-                state.client.is_some()
-                    && (id.to_lowercase().contains("rag")
-                        || state.config.name.to_lowercase().contains("rag"))
-            })
-            .map(|(id, _)| id.clone())
-    };
+    let rag_plugin_id = rag::connected_rag_id(&app);
     let system = if let Some(rag_id) = &rag_plugin_id {
         format!("{system}\nA local RAG plugin ({rag_id}) is connected. When the task may benefit from accumulated knowledge, search it first with mcp_{rag_id}_search or mcp_{rag_id}_query_with_index, then answer with citations to retrieved sources. After a valuable answer, you may persist it back with mcp_{rag_id}_file_answer.")
     } else {
@@ -1447,7 +884,7 @@ async fn turn(app: App, s: SharedSession) -> Result<TurnOutcome> {
             state.messages.len() == 1
         };
         if is_first {
-            retrieve_rag_wakeup(&app, rag_id).await
+            rag::retrieve_rag_wakeup(&app, rag_id).await
         } else {
             None
         }
@@ -1473,7 +910,7 @@ async fn turn(app: App, s: SharedSession) -> Result<TurnOutcome> {
         if query.is_empty() {
             None
         } else {
-            retrieve_rag_context(&app, rag_id, &query).await
+            rag::retrieve_rag_context(&app, rag_id, &query).await
         }
     } else {
         None
@@ -1574,7 +1011,7 @@ async fn turn(app: App, s: SharedSession) -> Result<TurnOutcome> {
                                 .map(|m| m.content.chars().take(80).collect::<String>())
                                 .unwrap_or_else(|| "allpaka answer".into())
                         };
-                        auto_file_answer(&app, rag_id, &title, &answer).await;
+                        rag::auto_file_answer(&app, rag_id, &title, &answer).await;
                     }
                 }
                 return Ok(TurnOutcome::Complete);
@@ -1673,9 +1110,7 @@ async fn save_project(
     } else {
         updated.push(project.clone());
     }
-    let temp = app.data.join("projects.tmp");
-    std::fs::write(&temp, serde_json::to_vec(&updated).unwrap())
-        .and_then(|_| std::fs::rename(temp, app.data.join("projects.state")))
+    state_file::save_list(app.data.as_path(), "projects", &updated)
         .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     *projects = updated;
     Ok(Json(json!(project)))

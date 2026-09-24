@@ -2,9 +2,11 @@
 
 [![ci](https://github.com/themoretheless/allpaka/actions/workflows/ci.yml/badge.svg)](https://github.com/themoretheless/allpaka/actions/workflows/ci.yml)
 
-Планировщик размещения языковой модели по нескольким машинам. Отвечает на
-вопрос «стоит ли вообще разделять эту модель между этими машинами» - числами,
-а не надеждой.
+Локальный движок GGUF: OpenAI-совместимый сервер, веб-студия чата с
+несколькими провайдерами и планировщик размещения модели по машинам.
+Планировщик отвечает на вопрос «стоит ли вообще разделять эту модель между
+этими машинами» - числами, а не надеждой. Это две сабкоманды из шестнадцати
+(`plan`, `fleet`); основной объём кода - движок, `serve` и `studio`.
 
 ## Что здесь решается
 
@@ -121,13 +123,18 @@ allpaka serve --model models/qwen3-0.6b-Q8_0.gguf --bind 127.0.0.1:8099
 
 ```bash
 allpaka status                     # /health + /stats: какая модель, сколько контекста занято
+allpaka watch                      # фазы и условия живого сервера, только переходы
 allpaka chat "привет"              # один запрос к /v1/chat/completions
 allpaka chat "что в заметках про Metal?" --rag   # с инструментами rag_search/rag_read
 allpaka rag-test                   # smoke-тест RAG tool-loop; exit != 0 при регрессе
 ```
 
-Роуты сервера: `POST /v1/chat/completions`, `GET /health`, `GET /stats`,
-`GET /` (веб-чат). RAG-бэкенды и переменные — в разделе ниже.
+Роуты сервера: `POST /v1/chat/completions`, `POST /v1/launch`,
+`POST /v1/requests/{id}/cancel`, `GET /v1/models`, `GET /v1/catalog`,
+`GET /stats`, `GET /resources`, `GET /health`, `GET /` и `GET /index`
+(веб-чат), `OPTIONS` для CORS. `GET /stats` отвечает живыми числами и
+ожидает модель, `GET /resources` отвечает до очереди и показывает контекст
+последней завершённой генерации. RAG-бэкенды и переменные — в разделе ниже.
 
 ### Проверка на двух машинах: пошагово
 
@@ -322,16 +329,52 @@ allpaka fleet --model models/reasoner.gguf --model models/tools.gguf --model mod
   - `model.rs` - форма модели: слои, ширина, объём на стык.
   - `link.rs` - одно измерение линка, односторонняя и round-trip цена.
   - `speculation.rs` - спекулятивное декодирование: сколько токенов даёт проход.
+  - `presets.rs` - готовые пресеты машин и моделей (`allpaka presets`).
 - `crates/allpaka-chat` - `allpaka studio`: многопровайдерный чат с проектами,
   режимами и RAG-плагином. Границы возможностей - [docs/studio.md](docs/studio.md).
   - `swarm.rs` - режим Swarm: волна независимых участников, сводный MASTER,
     необязательный критик-проход; участники только читают контекст.
+  - `plugins.rs`, `mcp.rs` - реестр плагинов (mcp и скилл) и MCP-клиент.
+  - `compact.rs`, `context.rs`, `history.rs` - сжатие контекста, проекты с
+    корнями и история чатов.
+  - `provider.rs` - провайдеры и стриминг ответов, включая свои эндпоинты.
+  - `rag.rs`, `state_file.rs` - RAG-плагин (поиск, авто-ответ, обслуживание) и
+    атомарная читка/запись `*.state`.
+- `crates/allpaka-gguf` - чтение GGUF: `metadata.rs`, `tensors.rs`,
+  `dequant.rs` (кванты) и `vision.rs`.
+- `crates/allpaka-backend` - слой исполнения: какой бэкенд считает данный тензор.
+  - `gpu/metal.rs`, `gpu/cuda/`, `gpu/stub.rs` - ядра под Apple Silicon, под
+    NVIDIA через `ggml` и заглушка для машины без GPU.
+  - `accel.rs`, `capability.rs`, `memory.rs` - выбор ускорителя, его возможности
+    и бюджет памяти.
+  - `ops.rs`, `quantmat.rs`, `execution.rs`, `command.rs` - операции, квантованные
+    матрицы и постановка работы на очередь.
+  - `runtime.rs`, `profile.rs` - политики запуска (`ALLPAKA_*`) и именованные
+    профили.
+  - `telemetry.rs` - пофазный учёт времени (Embed/Norm/QKV/Attention/...).
+- `crates/allpaka-model` - модель целиком: `model.rs` (слои), `kv.rs` (KV-кэш),
+  `prefix_cache.rs`, `speculate.rs`, `tokenizer.rs`, `requirements.rs`,
+  `config.rs` и `profile.rs` - куда уходит время CPU на один токен декода.
+  Одно имя с `backend/src/profile.rs`, смысл разный: там именованные политики
+  запуска, здесь замер.
 - `crates/allpaka-cli` - бинарь `allpaka`.
+  - `config.rs` - чтение `allpaka.toml` (`init` пишет его же).
+  - `scheduler.rs`, `serving_runtime.rs`, `model_registry.rs` - очередь запросов,
+    непрерывный батчинг и реестр загруженных моделей.
+  - `serve/` - части сервера: вход (`ingress.rs`), запуск моделей (`launch.rs`),
+    бюджет памяти (`memory.rs`), RAG-инструменты, отмена запросов и снимок
+    ресурсов.
+  - `autotune.rs`, `benchmark_report.rs`, `airbug.rs`, `airbug_llama.rs` -
+    подбор профилей, сериализуемый отчёт бенча и замеры вместе с llama.cpp.
+  - `explain.rs`, `report.rs` - объяснение вердикта и человекочитаемые отчёты.
   - `bench.rs` - измеритель сети и движка.
   - `serve.rs` - OpenAI-совместимый сервер: chat API, сессия с KV-кэшем,
     RAG tool-loop (см. раздел про RAG).
   - `client.rs` - клиентские сабкоманды `status` / `chat` / `rag-test`
     (HTTP по голому TcpStream + serde_json, без зависимостей).
+  - `watch.rs` - опрос тех же четырёх ручек и сведение их в `phase` +
+    `conditions`; классификация чистая функция над `Facts`, тесты поднимают
+    сервер.
   - `rag_mcp.rs` - stdio JSON-RPC клиент к внешнему `rag-mcp` (BM25/DuckDB):
     spawn, MCP-handshake, таймауты, откат на grep.
   - `verify.rs` - сверка логитов с llama-server.

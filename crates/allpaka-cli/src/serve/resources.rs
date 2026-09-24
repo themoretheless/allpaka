@@ -81,6 +81,9 @@ pub fn note_generation(
     state.context_capacity = context_capacity;
 }
 
+/// Metrics for the resources page, served before the request queue so a
+/// busy model cannot starve it. `context_used` / `context_capacity` are the
+/// values captured at the end of the last generation, not live ones.
 pub fn snapshot() -> Value {
     let Some(state) = STATE.get() else {
         return json!({});

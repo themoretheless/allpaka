@@ -14,7 +14,7 @@ cuda = ["allpaka-backend/cuda", "allpaka-model/cuda"]
 airbug = ["dep:airbug-otel", "dep:airbug-bench"]
 
 [dependencies]
-allpaka-chat = { workspace = true }
+allpaka-chat.workspace = true
 allpaka-core.workspace = true
 allpaka-gguf.workspace = true
 allpaka-backend = { workspace = true }

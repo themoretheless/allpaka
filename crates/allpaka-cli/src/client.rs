@@ -31,10 +31,20 @@ fn rag_tools() -> Value {
 
 /// One HTTP request over a fresh connection; no keep-alive.
 fn request(method: &str, addr: &str, path: &str, body: Option<&Value>) -> Result<Value> {
+    request_within(method, addr, path, body, Duration::from_secs(600))
+}
+
+fn request_within(
+    method: &str,
+    addr: &str,
+    path: &str,
+    body: Option<&Value>,
+    read_timeout: Duration,
+) -> Result<Value> {
     let mut stream = TcpStream::connect(addr)
         .with_context(|| format!("connecting to allpaka serve at {addr}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(600)))
+        .set_read_timeout(Some(read_timeout))
         .context("setting read timeout")?;
     let payload = body.map(|b| b.to_string()).unwrap_or_default();
     let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
@@ -83,6 +93,13 @@ fn dechunk(raw: &str) -> Result<String> {
 
 fn get(addr: &str, path: &str) -> Result<Value> {
     request("GET", addr, path, None)
+}
+
+/// A GET that gives up after `timeout` rather than waiting out a generation.
+/// `watch` needs a bounded probe: `/stats` is answered after the model lock, so
+/// an unbounded read would stall the poll for the length of the run.
+pub(crate) fn get_within(addr: &str, path: &str, timeout: Duration) -> Result<Value> {
+    request_within("GET", addr, path, None, timeout)
 }
 
 fn post(addr: &str, path: &str, body: &Value) -> Result<Value> {

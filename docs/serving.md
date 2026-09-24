@@ -60,6 +60,43 @@ The main introspection endpoints are:
 - `GET /stats`
 - `POST /v1/chat/completions`
 
+## Watching a live server
+
+`allpaka watch` polls `/health`, `/v1/models`, `/stats` and `/resources` and
+prints the transitions between them: a one-word `phase` plus the conditions that
+moved. It reads only those endpoints, changes nothing, and stops with the
+process.
+
+```
+15:09:27  phase=Ready       health=0ms models=0ms stats=0ms resources=0ms context=0/1 mem=1.2 GiB/uncapped
+15:09:28  phase=Generating  Ready -> Generating  +Generating (model lock held 300ms without answering)  health=0ms ...
+15:09:29  phase=Ready       Generating -> Ready  -Generating  health=0ms ...
+```
+
+The conditions are `Reachable`, `ModelsAdmitted`, `EngineResponsive`,
+`ResourcesSampled`, `Generating`, `MemoryHeadroom`, `PrefixCacheResident`. Two
+rules decide what they can claim:
+
+* **Which probes can see an outage.** `/health` and `/resources` are answered
+  before the model lock, so only they can tell a dead server from a busy one.
+  `/v1/models` and `/stats` are dispatched after it: an unanswered probe there
+  while the lock is held is the generation, so the condition stays held and
+  says "held by the model lock". `--interval-ms` bounds each probe, which is
+  what makes a held probe observable at all.
+* **Residency is not reuse.** `PrefixCacheResident` reports entries and bytes
+  from `/stats`, which is what A4 of the roadmap calls residency - not hit
+  rate. `MemoryHeadroom` compares `reserved_bytes` to `limit_bytes`, and
+  reports `no cap set` when the limit is the `u64::MAX` sentinel `serve` uses
+  for an unbudgeted process.
+
+`Generating` comes from two measurements rather than a threshold on absolute
+latency: `/stats` waiting several times longer than `/resources` in the same
+round (same connection style, same machine, so the ratio is contention), or the
+context captured at the end of the last generation advancing between polls. The
+measured numbers ride on every printed line so a reader can disagree with the
+ratio without reading the source. `--json` emits one object per transition with
+the drift lines kept, which the human line omits.
+
 ## Images
 
 There is no vision projector in the engine yet, so image parts are refused
