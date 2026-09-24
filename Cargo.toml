@@ -28,7 +28,6 @@ allpaka-chat = { path = "crates/allpaka-chat" }
 allpaka-backend = { path = "crates/allpaka-backend" }
 allpaka-model = { path = "crates/allpaka-model" }
 allpaka-gguf = { path = "crates/allpaka-gguf" }
-allpaka-chat = { path = "crates/allpaka-chat" }
 anyhow = "1"
 memmap2 = "0.9"
 clap = { version = "4", features = ["derive"] }
