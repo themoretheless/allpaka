@@ -54,6 +54,41 @@ pub struct SwarmMember {
     pub model: String,
 }
 
+/// Where the session's turn loop stands. The wire names are the lowercase
+/// words `web/app.js` compares against, so they are part of the API: renaming a
+/// variant renames the JSON.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionStatus {
+    #[default]
+    Idle,
+    Running,
+    Paused,
+    Error,
+}
+
+/// Where one swarm member's report stands, inside one wave.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberStatus {
+    #[default]
+    Queued,
+    Running,
+    Done,
+    Cancelled,
+    Error,
+}
+
+impl MemberStatus {
+    /// Reports a stopped wave has to account for. Both sides used to spell this
+    /// `status == "queued" || status.starts_with("running")`, where the prefix
+    /// test guarded against a suffixed status no writer ever produced - the
+    /// enum makes the set of shapes the writers can build explicit instead.
+    pub fn unfinished(self) -> bool {
+        matches!(self, Self::Queued | Self::Running)
+    }
+}
+
 /// One agent's report inside a swarm turn. Stored with the assistant message
 /// so the transcript stays a single message with expandable per-agent sections.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -63,9 +98,13 @@ pub struct SwarmReport {
     pub model: String,
     #[serde(default = "default_swarm_rounds")]
     pub round: u8,
-    /// queued | running | done | error | cancelled
     #[serde(default)]
-    pub status: String,
+    pub status: MemberStatus,
+    /// Tool-loop step being streamed right now. This used to ride inside
+    /// `status` as `running · шаг N`, which is why both sides compared the
+    /// status by prefix; the word now says only the phase.
+    #[serde(default)]
+    pub step: usize,
     #[serde(default)]
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,7 +266,7 @@ pub struct Session {
     pub title: String,
     pub messages: Vec<Message>,
     pub settings: Settings,
-    pub status: String,
+    pub status: SessionStatus,
     pub queue: Vec<Pending>,
     pub steering: Vec<String>,
     pub plan: Vec<PlanItem>,
@@ -259,7 +298,7 @@ impl Session {
             title: "Новый чат".into(),
             messages: vec![],
             settings,
-            status: "idle".into(),
+            status: SessionStatus::Idle,
             queue: vec![],
             steering: vec![],
             plan: vec![],
@@ -291,5 +330,67 @@ impl Session {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod status_wire_tests {
+    use super::{MemberStatus, SessionStatus};
+    use serde_json::json;
+
+    /// `web/app.js` compares these words as strings, and `/history/export`
+    /// round-trips them through `/history/import`, so the JSON spelling is the
+    /// contract - not the Rust names.
+    #[test]
+    fn status_words_match_what_the_ui_compares() {
+        for (value, word) in [
+            (SessionStatus::Idle, "idle"),
+            (SessionStatus::Running, "running"),
+            (SessionStatus::Paused, "paused"),
+            (SessionStatus::Error, "error"),
+        ] {
+            assert_eq!(json!(value), json!(word));
+            assert_eq!(serde_json::from_value::<SessionStatus>(json!(word)).unwrap(), value);
+        }
+        for (value, word) in [
+            (MemberStatus::Queued, "queued"),
+            (MemberStatus::Running, "running"),
+            (MemberStatus::Done, "done"),
+            (MemberStatus::Cancelled, "cancelled"),
+            (MemberStatus::Error, "error"),
+        ] {
+            assert_eq!(json!(value), json!(word));
+            assert_eq!(serde_json::from_value::<MemberStatus>(json!(word)).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn a_report_with_only_the_words_the_ui_needs_still_deserializes() {
+        let report: super::SwarmReport = serde_json::from_value(json!({
+            "label": "safety", "provider": "local", "model": "m", "status": "running",
+            "content": "…",
+        }))
+        .unwrap();
+        assert_eq!(report.status, MemberStatus::Running);
+        // The step the status used to embed is a separate field, and absent
+        // means "not streaming a step", not a parse failure.
+        assert_eq!(report.step, 0);
+    }
+
+    #[test]
+    fn only_unfinished_reports_await_an_accounting_pass() {
+        assert!(MemberStatus::Queued.unfinished());
+        assert!(MemberStatus::Running.unfinished());
+        assert!(!MemberStatus::Done.unfinished());
+        assert!(!MemberStatus::Cancelled.unfinished());
+        assert!(!MemberStatus::Error.unfinished());
+    }
+
+    #[test]
+    fn the_absent_default_is_the_not_started_word() {
+        // `SwarmReport.status` is `#[serde(default)]`, so this is what a report
+        // with no status word reads as - it must be "not started", not "done".
+        assert_eq!(MemberStatus::default(), MemberStatus::Queued);
+        assert_eq!(SessionStatus::default(), SessionStatus::Idle);
     }
 }

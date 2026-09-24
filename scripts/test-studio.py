@@ -45,6 +45,10 @@ class Mock(BaseHTTPRequestHandler):
                 for _ in range(20):time.sleep(.1);event({'choices':[{'delta':{'content':'.'}}]})
             elif 'Ты — участник swarm' in content and 'SWARM-FAIL' in content and '«risks»' in content:
                 event({'error':{'message':'simulated rate limit'}})
+            elif 'Ты — участник swarm' in content and 'SWARM-STEP' in content and '«scout»' in content and not any(m.get('role')=='tool' for m in messages):
+                # First pass of a two-step member: one read-only tool call, so the
+                # run reaches step 2 and the step has somewhere to live.
+                event({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'swread','type':'function','function':{'name':'read_file','arguments':json.dumps({'path':'reference/context.txt'})}}]},'finish_reason':'tool_calls'}]})
             elif 'Ты — участник swarm' in content:
                 label=content.split('«')[1].split('»')[0] if '«' in content else 'member'
                 event({'choices':[{'delta':{'content':'REPORT from '+label}}]})
@@ -280,6 +284,16 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         assert all('swarm' not in message for message in merged[0]['messages'])
         assert state['usage']['completion_tokens']==20 and state['usage']['prompt_tokens']==17
         print('PASS swarm wave runs in parallel, merges to MASTER, members stay read-only and usage is summed')
+        stepping=create(mode='swarm',swarm=dict(members=two_members,max_steps_per_member=2,report_bytes=4000))
+        act(stepping,'send','SWARM-STEP brief')
+        state=wait(stepping,lambda s:s['status']=='idle' and s['messages'][-1].get('swarm'))
+        stepped={r['label']:r for r in state['messages'][-1]['swarm']}
+        assert stepped['scout']['status']=='done' and stepped['scout']['step']==2, stepped['scout']
+        assert stepped['risks']['step']==1, stepped['risks']
+        # The word stays the phase; the step it used to carry is a field, so a
+        # client never has to prefix-match a status again.
+        assert all(r['status'] in ('queued','running','done','cancelled','error') for r in stepped.values())
+        print('PASS swarm member reports its tool-loop step as a field beside the status word')
         for broken in [dict(members=[dict(label='solo',role='',provider='local',model='mock')]),
                        dict(members=[dict(label='a',role='',provider='ghost',model='mock'),dict(label='b',role='',provider='local',model='mock')]),
                        dict(members=[dict(label='a',role='',provider='local',model='mock'),dict(label='A',role='',provider='local',model='mock')])]:

@@ -483,7 +483,8 @@ fn prepare(shared: &SharedSession, members: &[(SwarmMember, Provider)]) -> (usiz
             provider: member.provider.clone(),
             model: member.model.clone(),
             round: 1,
-            status: "queued".into(),
+            status: MemberStatus::Queued,
+            step: 0,
             content: String::new(),
             error: None,
         })
@@ -512,11 +513,9 @@ async fn run_member(
     let mut usage = Value::Null;
     let steps = member_settings.max_steps.max(1);
     for step in 1..=steps {
+        note(shared, index, slot, round, MemberStatus::Running, Some(step));
         if step > 1 {
-            note(shared, index, slot, round, &format!("running · шаг {step}"));
             append(shared, index, slot, "\n\n");
-        } else {
-            note(shared, index, slot, round, "running");
         }
         let copy = shared.clone();
         let save_app = app.clone();
@@ -552,7 +551,7 @@ async fn run_member(
         .with_context(|| format!("участник {label}"))?;
         usage = merge_usage(usage, step_usage);
         if message.truncated {
-            note(shared, index, slot, round, "error");
+            note(shared, index, slot, round, MemberStatus::Error, None);
             fail(shared, index, slot, "Достигнут лимит токенов: отчёт неполный");
             persist(app, shared);
             return Ok(MemberOutcome { usage });
@@ -571,7 +570,7 @@ async fn run_member(
             });
         }
     }
-    note(shared, index, slot, round, "done");
+    note(shared, index, slot, round, MemberStatus::Done, None);
     persist(app, shared);
     Ok(MemberOutcome { usage })
 }
@@ -706,7 +705,14 @@ fn set_content(shared: &SharedSession, index: usize, text: &str) {
     }
 }
 
-fn note(shared: &SharedSession, index: usize, slot: usize, round: u8, status: &str) {
+fn note(
+    shared: &SharedSession,
+    index: usize,
+    slot: usize,
+    round: u8,
+    status: MemberStatus,
+    step: Option<usize>,
+) {
     let mut state = shared.lock().unwrap();
     if let Some(report) = state
         .messages
@@ -714,7 +720,10 @@ fn note(shared: &SharedSession, index: usize, slot: usize, round: u8, status: &s
         .and_then(|m| m.swarm.get_mut(slot))
     {
         report.round = round;
-        report.status = status.to_owned();
+        report.status = status;
+        if let Some(step) = step {
+            report.step = step;
+        }
     }
 }
 
@@ -736,7 +745,7 @@ fn fail(shared: &SharedSession, index: usize, slot: usize, message: &str) {
         .get_mut(index)
         .and_then(|m| m.swarm.get_mut(slot))
     {
-        report.status = "error".into();
+        report.status = MemberStatus::Error;
         if report.error.is_none() {
             report.error = Some(message.to_owned());
         }
@@ -755,8 +764,8 @@ fn finish(
         state.usage = usage;
         if let Some(message) = state.messages.get_mut(index) {
             for report in &mut message.swarm {
-                if report.status == "queued" || report.status.starts_with("running") {
-                    report.status = "error".into();
+                if report.status.unfinished() {
+                    report.status = MemberStatus::Error;
                     if report.error.is_none() {
                         report.error = Some("Отчёт прерван".into());
                     }
@@ -962,8 +971,8 @@ mod tests {
             let mut state = shared.lock().unwrap();
             let mut message = Message::text("assistant", "");
             message.swarm = vec![
-                SwarmReport { label: "m0".into(), provider: "local".into(), model: "m".into(), round: 1, status: "done".into(), content: "своё".into(), error: None },
-                SwarmReport { label: "m1".into(), provider: "local".into(), model: "m".into(), round: 1, status: "done".into(), content: "чужое".into(), error: None },
+                SwarmReport { label: "m0".into(), provider: "local".into(), model: "m".into(), round: 1, status: MemberStatus::Done, step: 0, content: "своё".into(), error: None },
+                SwarmReport { label: "m1".into(), provider: "local".into(), model: "m".into(), round: 1, status: MemberStatus::Done, step: 0, content: "чужое".into(), error: None },
             ];
             state.messages.push(message);
             state.messages.len() - 1
@@ -973,6 +982,37 @@ mod tests {
         assert!(prompts[0].contains("своё"));
         assert!(prompts[0].contains("чужое"));
     }
+    #[test]
+    fn a_later_step_is_a_field_not_part_of_the_status_word() {
+        // Step two and beyond used to be spelled `running · шаг N` inside
+        // `status`, which forced every reader to compare by prefix. The word now
+        // says only the phase and the number rides beside it.
+        let shared: SharedSession = std::sync::Arc::new(std::sync::Mutex::new(Session::new(
+            "test".into(),
+            serde_json::from_value(json!({"provider": "local", "model": "m"})).unwrap(),
+        )));
+        let index = {
+            let mut state = shared.lock().unwrap();
+            let mut message = Message::text("assistant", "");
+            message.swarm = vec![SwarmReport {
+                label: "m0".into(),
+                provider: "local".into(),
+                model: "m".into(),
+                round: 1,
+                ..Default::default()
+            }];
+            state.messages.push(message);
+            state.messages.len() - 1
+        };
+        note(&shared, index, 0, 1, MemberStatus::Running, Some(3));
+        let state = shared.lock().unwrap();
+        let report = &state.messages[index].swarm[0];
+        assert_eq!(report.status, MemberStatus::Running);
+        assert_eq!(report.step, 3);
+        assert_eq!(serde_json::to_value(report).unwrap()["status"], json!("running"));
+        assert_eq!(serde_json::to_value(report).unwrap()["step"], json!(3));
+    }
+
     fn two_rounds_for_tests() -> SwarmConfig {
         let mut c = config(2);
         c.rounds = 2;

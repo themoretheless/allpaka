@@ -244,15 +244,15 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                     if !valid_id(&session.id) {
                         bail!("Invalid saved session ID");
                     }
-                    if session.status == "running" {
-                        session.status = "paused".into();
+                    if session.status == SessionStatus::Running {
+                        session.status = SessionStatus::Paused;
                         session.error = Some(
                             "Server restarted. Partial output retained; resume explicitly.".into(),
                         );
                         session.close_pending_tools();
                     }
                     if session.error.as_deref().is_some_and(|e|e == "Provider stopped: length" || e == "Provider stopped: max_tokens") {
-                    session.error=None;session.status="paused".into();
+                    session.error=None;session.status=SessionStatus::Paused;
                     session.notice=Some("Предыдущий ответ достиг лимита токенов. Увеличьте лимит ответа и нажмите «Продолжить».".into());
                     if let Some(m)=session.messages.last_mut().filter(|m|m.role=="assistant") {m.truncated=true;}
                 }
@@ -473,7 +473,7 @@ async fn branch_session(
         let snapshot = source.lock().unwrap().clone();
         snapshot
     };
-    if source.status == "running" {
+    if source.status == SessionStatus::Running {
         return Err(error(
             StatusCode::CONFLICT,
             "Stop generation before branching",
@@ -585,7 +585,7 @@ async fn action(
             .get(&id)
             .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
         let mut state = shared.lock().unwrap();
-        if action.kind == ActionKind::Move && state.status == "running" {
+        if action.kind == ActionKind::Move && state.status == SessionStatus::Running {
             return Err(error(
                 StatusCode::CONFLICT,
                 "Stop generation before moving the conversation",
@@ -716,8 +716,8 @@ async fn cancel(task: &mut Option<JoinHandle<Result<TurnOutcome>>>, s: &SharedSe
             continue;
         }
         for report in &mut message.swarm {
-            if report.status == "queued" || report.status.starts_with("running") {
-                report.status = "cancelled".into();
+            if report.status.unfinished() {
+                report.status = MemberStatus::Cancelled;
                 if report.error.is_none() {
                     report.error = Some("Отменено пользователем".into());
                 }
@@ -725,7 +725,7 @@ async fn cancel(task: &mut Option<JoinHandle<Result<TurnOutcome>>>, s: &SharedSe
         }
         break;
     }
-    s.status = "paused".into();
+    s.status = SessionStatus::Paused;
     if s.notice.as_deref() == Some("Сжатие контекста…") {
         s.notice = None;
     }
@@ -750,7 +750,7 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                 {
                     let mut s = s.lock().unwrap();
                     s.settings = p.settings.clone();
-                    s.status = "running".into();
+                    s.status = SessionStatus::Running;
                     s.error = None;
                     s.notice = None;
                     s.step = 0;
@@ -774,7 +774,7 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                     ActionKind::Compact => {
                         if task.is_some() { rejection=Some("Stop generation before manual compaction".into()); }
                         else {
-                            {let mut state=s.lock().unwrap();if let Some(settings)=a.settings {state.settings=settings;}state.status="running".into();state.error=None;state.notice=Some("Сжатие контекста…".into());}
+                            {let mut state=s.lock().unwrap();if let Some(settings)=a.settings {state.settings=settings;}state.status=SessionStatus::Running;state.error=None;state.notice=Some("Сжатие контекста…".into());}
                             paused=true;
                             let app=app.clone();let s=s.clone();
                             task=Some(tokio::spawn(async move {compact::run(&app,&s,true).await?;Ok(TurnOutcome::Compacted)}));
@@ -814,17 +814,17 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
             result=async { task.as_mut().unwrap().await },if task.is_some()=>{
                 task=None;
                 { let mut s=s.lock().unwrap(); match result {
-                    Ok(Ok(TurnOutcome::Compacted))=>{s.status=if s.queue.is_empty(){"idle"}else{"paused"}.into();paused=true;},
+                    Ok(Ok(TurnOutcome::Compacted))=>{s.status=if s.queue.is_empty(){SessionStatus::Idle}else{SessionStatus::Paused};paused=true;},
                     Ok(Ok(TurnOutcome::TokenLimit))=>{
-                        s.status="paused".into();paused=true;
+                        s.status=SessionStatus::Paused;paused=true;
                         s.notice=Some(format!("Достигнут лимит {} токенов. Частичный ответ сохранён; незавершённые инструменты не выполнялись. Можно увеличить лимит ответа и нажать «Продолжить».",s.settings.max_output_tokens));
                     },
                     Ok(Ok(TurnOutcome::Complete))=>{
-                        s.status="idle".into();
+                        s.status=SessionStatus::Idle;
                         if !s.steering.is_empty(){let settings=s.settings.clone();s.queue.insert(0,Pending{images:vec![],text:"Apply the pending user steering to the current task.".into(),settings});}
                     },
-                    Ok(Err(e))=>{s.notice=None;s.status="error".into();s.error=Some(format!("{e:#}"));s.close_pending_tools();paused=true;},
-                    Err(e)=>{s.notice=None;s.status="error".into();s.error=Some(format!("Task failed: {e}"));s.close_pending_tools();paused=true;},
+                    Ok(Err(e))=>{s.notice=None;s.status=SessionStatus::Error;s.error=Some(format!("{e:#}"));s.close_pending_tools();paused=true;},
+                    Err(e)=>{s.notice=None;s.status=SessionStatus::Error;s.error=Some(format!("Task failed: {e}"));s.close_pending_tools();paused=true;},
                 } }
                 persist(&app,&s);
             }

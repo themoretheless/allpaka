@@ -246,11 +246,14 @@ function updateSwarmCost(){
   $('swarm-cost').textContent=`Запросов к провайдерам за один ход: ${requests} (${split}). Участники только читают контекст; запись файлов в Swarm недоступна.`+(problems.length?` Не готово: ${problems.join('; ')}.`:'');
   refreshContextModel();
 }
-function swarmState(status){
+function swarmState(report){
+  const status=report.status;
   if(status==='done')return {label:'готов',className:'swarm-ok'};
   if(status==='error')return {label:'ошибка',className:'swarm-err'};
   if(status==='cancelled')return {label:'отменён',className:'swarm-err'};
-  if(status&&status.startsWith('running'))return {label:status.replace('running','работает'),className:'swarm-run'};
+  // The status word is only the phase now; the step it used to carry became a
+  // field, so the suffix is assembled here.
+  if(status==='running')return {label:report.step>1?`работает · шаг ${report.step}`:'работает',className:'swarm-run'};
   return {label:'в очереди',className:'muted'};
 }
 function settings() {return {verbosity:$('verbosity').value,project_id:$('project').value,provider:$('provider').value,model:$('model').value.trim(),mode:$('mode').value,max_steps:Number($('steps').value),max_output_tokens:Number($('output-tokens').value),auto_compact:$('auto-compact').checked,compact_threshold:$('compact-threshold').value?Number($('compact-threshold').value):24000,allow_writes:$('writes').checked,json_mode:$('json-mode').checked,swarm:collectSwarm()};}
@@ -466,7 +469,7 @@ function renderSingleMessage(s,m,index,openKey,detailState){
     const finished=(m.swarm||[]).filter(r=>r.status==='done').length;
     reports.append(node('summary',`Участники Swarm: ${finished}/${m.swarm.length} отчётов`));
     for(const report of m.swarm){
-      const state=swarmState(report.status);
+      const state=swarmState(report);
       const card=node('div',undefined,'swarm-report');
       const head=node('div',undefined,'swarm-report-head');
       head.append(node('b',report.label),node('small',`${report.provider} · ${report.model}${report.round>1?` · волна ${report.round}`:''}`),node('span',state.label,state.className));
