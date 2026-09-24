@@ -57,8 +57,8 @@ struct Action {
     text: String,
     settings: Option<Settings>,
 }
-type ApiResult<T> = std::result::Result<Json<T>, (StatusCode, Json<Value>)>;
-fn error(status: StatusCode, message: impl ToString) -> (StatusCode, Json<Value>) {
+pub(crate) type ApiResult<T> = std::result::Result<Json<T>, (StatusCode, Json<Value>)>;
+pub(crate) fn error(status: StatusCode, message: impl ToString) -> (StatusCode, Json<Value>) {
     (status, Json(json!({"error":message.to_string()})))
 }
 fn spawn_plugin_connect(app: App, id: String) {
@@ -182,8 +182,8 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                 }]
             };
             let mut providers=provider::defaults();
-            for c in load_custom_providers(&data)? {
-                providers.push(custom_to_provider(&c));
+            for c in provider::load_custom_providers(&data)? {
+                providers.push(provider::custom_to_provider(&c));
             }
             let store=credentials::Store::new(&data);
             for p in &mut providers {
@@ -324,10 +324,10 @@ fn routes(app: App) -> Router {
         .route("/api/plugins/:id/delete", post(delete_plugin))
         .route("/api/plugins/:id/reload", post(reload_plugin))
         .route("/api/projects", post(save_project))
-        .route("/api/providers", post(save_provider))
-        .route("/api/providers/:id/delete", post(delete_provider))
-        .route("/api/providers/:id/key", post(set_key))
-        .route("/api/providers/:id/models", get(model_list))
+        .route("/api/providers", post(provider::save_provider))
+        .route("/api/providers/:id/delete", post(provider::delete_provider))
+        .route("/api/providers/:id/key", post(provider::set_key))
+        .route("/api/providers/:id/models", get(provider::model_list))
         .route("/api/sessions", get(history::list).post(create_session))
         .route("/api/sessions/import", post(history::import))
         .route("/api/sessions/:id", get(session).delete(delete_session))
@@ -375,166 +375,6 @@ async fn config(State(app): State<App>) -> Json<Value> {
     Json(
         json!({"credential_storage":credentials::AVAILABLE,"providers":app.providers.lock().unwrap().iter().map(|p|p.public()).collect::<Vec<_>>(),"workspace":app.workspace.display().to_string(),"projects":*app.projects.lock().unwrap()}),
     )
-}
-#[derive(Deserialize)]
-struct Key {
-    key: String,
-    #[serde(default)]
-    persist: bool,
-    #[serde(default)]
-    use_current: bool,
-}
-async fn set_key(
-    State(app): State<App>,
-    Path(id): Path<String>,
-    Json(mut key): Json<Key>,
-) -> ApiResult<Value> {
-    if key.key.len() > 4096 || key.key.chars().any(char::is_control) {
-        return Err(error(StatusCode::BAD_REQUEST, "Invalid API key"));
-    }
-    let _serial = app.key_mutations.lock().await;
-    if key.use_current {
-        if !key.persist || !key.key.is_empty() {
-            return Err(error(
-                StatusCode::BAD_REQUEST,
-                "Saving the current key requires persist and no replacement key",
-            ));
-        }
-        key.key = app
-            .providers
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|p| p.id == id)
-            .map(|p| p.key.clone())
-            .unwrap_or_default();
-        if key.key.is_empty() {
-            return Err(error(StatusCode::BAD_REQUEST, "No current key to save"));
-        }
-    }
-    if !app.providers.lock().unwrap().iter().any(|p| p.id == id) {
-        return Err(error(StatusCode::NOT_FOUND, "Unknown provider"));
-    }
-    if key.persist && !credentials::AVAILABLE {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "System credential storage is unavailable on this platform",
-        ));
-    }
-    let data = app.data.clone();
-    let account = id.clone();
-    let secret = key.key.clone();
-    let persist = key.persist;
-    tokio::task::spawn_blocking(move || {
-        credentials::Store::new(&data).update(&credentials::SystemVault, &account, &secret, persist)
-    })
-    .await
-    .map_err(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Credential operation failed",
-        )
-    })?
-    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let mut providers = app.providers.lock().unwrap();
-    let p = providers.iter_mut().find(|p| p.id == id).unwrap();
-    p.saved = key.persist && !key.key.is_empty();
-    p.key_source = if key.key.is_empty() {
-        "none"
-    } else if key.persist {
-        "system"
-    } else {
-        "memory"
-    }
-    .into();
-    p.key = key.key;
-    p.key_error = None;
-    Ok(Json(
-        json!({"configured":p.public().configured,"saved":p.saved,"key_source":p.key_source}),
-    ))
-}
-
-async fn model_list(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
-    let p = app
-        .providers
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|p| p.id == id)
-        .cloned()
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Unknown provider"))?;
-    let models = provider::models(&app.client, &p)
-        .await
-        .map_err(|e| error(StatusCode::BAD_GATEWAY, e))?;
-    Ok(Json(
-        json!({"models":models.iter().map(|m|&m["id"]).collect::<Vec<_>>(),"catalog":models}),
-    ))
-}
-async fn save_provider(
-    State(app): State<App>,
-    Json(mut input): Json<CustomProviderInput>,
-) -> ApiResult<Value> {
-    if input.id.trim().is_empty() {
-        input.id = format!(
-            "custom-{:x}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-    }
-    let candidate = CustomProvider {
-        id: input.id.trim().to_string(),
-        name: input.name.trim().to_string(),
-        base: input.base.trim().to_string(),
-    };
-    validate_custom_provider(&candidate).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
-    if BUILTIN_PROVIDERS.contains(&candidate.id.as_str()) {
-        return Err(error(StatusCode::BAD_REQUEST, "This provider ID is reserved"));
-    }
-    let mut list =
-        load_custom_providers(app.data.as_path()).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    match list.iter().position(|p| p.id == candidate.id) {
-        Some(i) => list[i] = candidate.clone(),
-        None => list.push(candidate.clone()),
-    }
-    save_custom_providers(app.data.as_path(), &list)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let mut providers = app.providers.lock().unwrap();
-    let old = providers
-        .iter()
-        .find(|p| p.id == candidate.id)
-        .map(|p| (p.key.clone(), p.key_source.clone(), p.saved));
-    let mut next = custom_to_provider(&candidate);
-    if let Some((key, key_source, saved)) = old {
-        next.key = key;
-        next.key_source = key_source;
-        next.saved = saved;
-        *providers.iter_mut().find(|p| p.id == candidate.id).unwrap() = next;
-    } else {
-        providers.push(next);
-    }
-    Ok(Json(json!({"id": candidate.id})))
-}
-async fn delete_provider(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
-    if BUILTIN_PROVIDERS.contains(&id.as_str()) {
-        return Err(error(StatusCode::BAD_REQUEST, "Built-in providers cannot be removed"));
-    }
-    let mut list =
-        load_custom_providers(app.data.as_path()).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if !list.iter().any(|p| p.id == id) {
-        return Err(error(StatusCode::NOT_FOUND, "Custom provider not found"));
-    }
-    list.retain(|p| p.id != id);
-    save_custom_providers(app.data.as_path(), &list)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if credentials::AVAILABLE {
-        // Remove any persisted system-credential secret for this provider id.
-        let _ = credentials::Store::new(app.data.as_path())
-            .update(&credentials::SystemVault, &id, "", false);
-    }
-    app.providers.lock().unwrap().retain(|p| p.id != id || !p.custom);
-    Ok(Json(json!({"deleted": id})))
 }
 #[derive(Deserialize)]
 struct PluginInput {
@@ -734,76 +574,6 @@ fn validate_settings(s: &Settings, app: &App) -> Result<()> {
 }
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() < 80 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-}
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct CustomProvider {
-    id: String,
-    name: String,
-    base: String,
-}
-#[derive(Deserialize)]
-struct CustomProviderInput {
-    #[serde(default)]
-    id: String,
-    name: String,
-    base: String,
-}
-const BUILTIN_PROVIDERS: &[&str] = &[
-    "openai",
-    "anthropic",
-    "deepseek",
-    "kimi",
-    "xai",
-    "gemini",
-    "openrouter",
-    "local",
-];
-fn valid_custom_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() < 80
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-fn validate_custom_provider(p: &CustomProvider) -> Result<()> {
-    if !valid_custom_id(&p.id) {
-        bail!("Custom provider ID must be 1–79 ASCII letters, digits, '-' or '_'");
-    }
-    if p.name.trim().is_empty()
-        || p.name.chars().count() > 100
-        || p.name.chars().any(char::is_control)
-    {
-        bail!("Provider name must be 1–100 characters");
-    }
-    if !(p.base.starts_with("http://") || p.base.starts_with("https://"))
-        || p.base.len() > 500
-        || p.base.chars().any(char::is_control)
-    {
-        bail!("Base URL must start with http:// or https:// and be at most 500 characters");
-    }
-    Ok(())
-}
-fn load_custom_providers(data: &std::path::Path) -> Result<Vec<CustomProvider>> {
-    state_file::load_list(data, "custom-providers", "custom provider", |p| {
-        validate_custom_provider(p)
-    })
-}
-fn save_custom_providers(data: &std::path::Path, list: &[CustomProvider]) -> Result<()> {
-    state_file::save_list(data, "custom-providers", list)
-}
-fn custom_to_provider(p: &CustomProvider) -> provider::Provider {
-    provider::Provider {
-        id: p.id.clone(),
-        name: p.name.clone(),
-        base: p.base.clone(),
-        key: String::new(),
-        env: String::new(),
-        anthropic: false,
-        custom: true,
-        key_source: "none".into(),
-        key_error: None,
-        saved: false,
-    }
 }
 async fn create_session(
     State(app): State<App>,
