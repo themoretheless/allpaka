@@ -123,6 +123,7 @@ allpaka serve --model models/qwen3-0.6b-Q8_0.gguf --bind 127.0.0.1:8099
 
 ```bash
 allpaka status                     # /health + /stats: какая модель, сколько контекста занято
+allpaka watch                      # фазы и условия живого сервера, только переходы
 allpaka chat "привет"              # один запрос к /v1/chat/completions
 allpaka chat "что в заметках про Metal?" --rag   # с инструментами rag_search/rag_read
 allpaka rag-test                   # smoke-тест RAG tool-loop; exit != 0 при регрессе
@@ -371,6 +372,9 @@ allpaka fleet --model models/reasoner.gguf --model models/tools.gguf --model mod
     RAG tool-loop (см. раздел про RAG).
   - `client.rs` - клиентские сабкоманды `status` / `chat` / `rag-test`
     (HTTP по голому TcpStream + serde_json, без зависимостей).
+  - `watch.rs` - опрос тех же четырёх ручек и сведение их в `phase` +
+    `conditions`; классификация чистая функция над `Facts`, тесты поднимают
+    сервер.
   - `rag_mcp.rs` - stdio JSON-RPC клиент к внешнему `rag-mcp` (BM25/DuckDB):
     spawn, MCP-handshake, таймауты, откат на grep.
   - `verify.rs` - сверка логитов с llama-server.
