@@ -352,9 +352,10 @@ allpaka fleet --model models/reasoner.gguf --model models/tools.gguf --model mod
     профили.
   - `telemetry.rs` - пофазный учёт времени (Embed/Norm/QKV/Attention/...).
 - `crates/allpaka-model` - модель целиком: `model.rs` (слои), `kv.rs` (KV-кэш),
-  `prefix_cache.rs`, `speculate.rs`, `tokenizer.rs`, `requirements.rs` и
-  `config.rs`. Не путать с `backend/src/profile.rs`: здесь это профилировщик
-  времени CPU, а не политика запуска.
+  `prefix_cache.rs`, `speculate.rs`, `tokenizer.rs`, `requirements.rs`,
+  `config.rs` и `profile.rs` - куда уходит время CPU на один токен декода.
+  Одно имя с `backend/src/profile.rs`, смысл разный: там именованные политики
+  запуска, здесь замер.
 - `crates/allpaka-cli` - бинарь `allpaka`.
   - `config.rs` - чтение `allpaka.toml` (`init` пишет его же).
   - `scheduler.rs`, `serving_runtime.rs`, `model_registry.rs` - очередь запросов,
