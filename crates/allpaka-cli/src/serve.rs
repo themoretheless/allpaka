@@ -1137,6 +1137,12 @@ fn load_model_service(model_path: &Path, memory: &memory::Budget) -> Result<(Str
     ))
 }
 
+/// Answers every request that does not need a loaded model. Which routes are in
+/// this set is a contract, not a cache: `/health` and `/resources` are the only
+/// probes that answer while the model lock is held, and `watch::classify` uses
+/// exactly that asymmetry to tell an outage from a busy engine. Moving a
+/// post-lock route up here would make every probe answer pre-lock and turn
+/// "held by the generation" into a silent "Ready".
 fn prepare_connection(
     mut stream: TcpStream,
     default_model: &str,
