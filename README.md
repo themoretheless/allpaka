@@ -409,9 +409,11 @@ cargo test --workspace    # юниты + GPU-тесты + smoke (локальн�
 ```
 
 GPU-тесты и smoke-тесты скипаются там, где нет Metal-устройства или моделей
-(GitHub-раннеры), поэтому CI зелёный и на них. Workflow:
-`.github/workflows/ci.yml` (macos-14, `cargo test --workspace` на push).
-Полное покрытие (реальные кернелы + end-to-end RAG) даёт локальный прогон.
+(GitHub-раннеры), так что на раннере остаются юниты. Workflow:
+`.github/workflows/ci.yml` (macos-14, `cargo test --workspace` на push). Он красен
+не из-за тестов allpaka, а из-за const-eval в сборке зависимости `ring` - причина и
+обход описаны в комментарии к `RUSTFLAGS` в самом workflow. Полное покрытие
+(реальные кернелы + end-to-end RAG) даёт только локальный прогон.
 
 Оптимизации MoE-prefill под Metal (GPU-роутинг, fused SwiGLU, замеры против
 llama.cpp, список фальсифицированных идей) задокументированы в
