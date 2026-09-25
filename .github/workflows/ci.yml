@@ -8,6 +8,14 @@ on:
 jobs:
   test:
     runs-on: macos-14
+    env:
+      # The `[target.aarch64-apple-darwin]` rustflags in `.cargo/config.toml`
+      # reach ordinary host builds too, and `-C target-cpu=native` is what makes
+      # ring 0.17.14 panic in its static CPU-capability asserts on the runner.
+      # Test builds gain nothing from native tuning; clearing the flag restores
+      # the target default, which still carries `neon` for the intrinsics in
+      # `backend/src/ops.rs`.
+      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v4
 
