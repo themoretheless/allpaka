@@ -9,17 +9,23 @@ jobs:
   test:
     runs-on: macos-14
     env:
-      # The `[target.aarch64-apple-darwin]` rustflags in `.cargo/config.toml`
-      # reach ordinary host builds too, and `-C target-cpu=native` is what makes
-      # ring 0.17.14 panic in its static CPU-capability asserts on the runner.
-      # Test builds gain nothing from native tuning; clearing the flag restores
-      # the target default, which still carries `neon` for the intrinsics in
-      # `backend/src/ops.rs`.
+      # `.cargo/config.toml` sets `-C target-cpu=native` for
+      # aarch64-apple-darwin, and those rustflags reach ordinary host builds. On
+      # the runner that leaves the compile-time feature set below ring 0.17.14's
+      # static minimum, so the build aborts in ring's
+      # `assert!((CAPS_STATIC & MIN_STATIC_FEATURES) == MIN_STATIC_FEATURES)`
+      # (`src/cpu/arm/darwin.rs:44`). Locally the same assert reproduces with
+      # `-C target-cpu=generic` (leaves only `neon`), while the target default -
+      # what an empty `RUSTFLAGS` falls back to - builds ring and still carries
+      # the `neon` that `backend/src/ops.rs` intrinsics need. Test builds gain
+      # nothing from native tuning.
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v4
 
       - name: Rust toolchain
+        # `rust-toolchain.toml` wins over this for every later step, so the
+        # workspace is built by nightly; stable only sets the rustup default.
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cargo cache
