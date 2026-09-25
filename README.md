@@ -341,6 +341,16 @@ allpaka fleet --model models/reasoner.gguf --model models/tools.gguf --model mod
   - `provider.rs` - провайдеры и стриминг ответов, включая свои эндпоинты.
   - `rag.rs`, `state_file.rs` - RAG-плагин (поиск, авто-ответ, обслуживание) и
     атомарная читка/запись `*.state`.
+  - `types.rs` - проволочные типы студии: сессия, сообщение, режим, настройки,
+    план (compaction, ветка) и отчёты swarm; здесь же `SessionStatus` и
+    `MemberStatus`.
+  - `tools.rs` - схемы инструментов под режим сессии, их исполнение и разбор
+    плана из ответа модели.
+  - `credentials.rs` - ключи провайдеров: `Store` поверх трейта `Vault`,
+    `SystemVault` есть только на macOS и Windows; скоуп - директория истории,
+    сами секреты хранятся вне неё.
+  - `lib.rs` - корень сборки: запуск сервера, таблица маршрутов, гвард
+    источников, реестр сессий и `ActionKind` - тип действия, которым ход управляет.
 - `crates/allpaka-gguf` - чтение GGUF: `metadata.rs`, `tensors.rs`,
   `dequant.rs` (кванты) и `vision.rs`.
 - `crates/allpaka-backend` - слой исполнения: какой бэкенд считает данный тензор.
