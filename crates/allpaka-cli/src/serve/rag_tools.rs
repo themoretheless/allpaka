@@ -3,10 +3,8 @@ use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use crate::rag_mcp::{RagMcp, RagMcpConfig};
+use crate::rag_mcp::{DEFAULT_RAG_NOTES_DIR, RagMcp, RagMcpConfig};
 
-const DEFAULT_RAG_NOTES_DIR: &str =
-    "/Users/themoretheless/.claude/projects/-Users-themoretheless-Documents-Sources-allpaka/memory";
 const RAG_SEARCH_MAX_RESULTS: usize = 5;
 const RAG_SEARCH_MAX_LINES: usize = 6;
 const RAG_TOOL_MAX_ROUNDS: usize = 2;

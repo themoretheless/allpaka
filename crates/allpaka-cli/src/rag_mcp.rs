@@ -21,6 +21,17 @@ use std::time::Duration;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Where the sibling rag repo keeps its built server, its DuckDB index, and
+/// the notes corpus. `tests/plugin_smoke.rs` includes this module instead of
+/// restating them, so the smoke tests skip on exactly what the server falls
+/// back to.
+pub const DEFAULT_RAG_MCP_BIN: &str =
+    "/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp";
+pub const DEFAULT_RAG_DB: &str =
+    "/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb";
+pub const DEFAULT_RAG_NOTES_DIR: &str =
+    "/Users/themoretheless/.claude/projects/-Users-themoretheless-Documents-Sources-allpaka/memory";
+
 /// Where the pieces live; every field has an env override so the same binary
 /// serves the dev repo and the installed plugin.
 pub struct RagMcpConfig {
@@ -36,18 +47,10 @@ impl RagMcpConfig {
         RagMcpConfig {
             bin: std::env::var("RAG_MCP_BIN")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    PathBuf::from(
-                        "/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp",
-                    )
-                }),
+                .unwrap_or_else(|_| PathBuf::from(DEFAULT_RAG_MCP_BIN)),
             db: std::env::var("RAG_DB_PATH")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    PathBuf::from(
-                        "/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb",
-                    )
-                }),
+                .unwrap_or_else(|_| PathBuf::from(DEFAULT_RAG_DB)),
             notes_dir: notes_dir.to_path_buf(),
             search_mode: std::env::var("RAG_MCP_SEARCH_MODE").unwrap_or_else(|_| "lex".into()),
         }

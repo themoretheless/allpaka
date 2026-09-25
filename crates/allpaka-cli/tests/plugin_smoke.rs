@@ -8,11 +8,18 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+// allpaka-cli is a binary-only crate, so an integration test cannot import from
+// it; the rag-mcp client is a leaf module, so including it by path works and
+// keeps one copy of the fallback paths and env names.
+#[allow(dead_code)] // only the config defaults are read here
+#[path = "../src/rag_mcp.rs"]
+mod rag_mcp;
 
 const HOST: &str = "127.0.0.1:18099";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -30,22 +37,20 @@ fn small_model() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// The same defaults `serve` uses; notes_dir only feeds the child env, so it
+/// does not matter to the two paths below.
+fn rag_paths() -> rag_mcp::RagMcpConfig {
+    rag_mcp::RagMcpConfig::from_env(Path::new("."))
+}
+
 fn rag_bin() -> Option<PathBuf> {
-    let p = std::env::var("RAG_MCP_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from("/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp")
-        });
-    p.is_file().then_some(p)
+    let cfg = rag_paths();
+    cfg.bin.is_file().then_some(cfg.bin)
 }
 
 fn rag_db() -> Option<PathBuf> {
-    let p = std::env::var("RAG_DB_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from("/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb")
-        });
-    p.is_file().then_some(p)
+    let cfg = rag_paths();
+    cfg.db.is_file().then_some(cfg.db)
 }
 
 // ---------- minimal HTTP ----------
@@ -490,9 +495,8 @@ fn rag_mcp_stdio_search() {
         eprintln!("SKIP: rag-mcp binary or DuckDB not found");
         return;
     };
-    let notes = std::env::var("RAG_INGEST_ROOTS").unwrap_or_else(|_| {
-        "/Users/themoretheless/.claude/projects/-Users-themoretheless-Documents-Sources-allpaka/memory".into()
-    });
+    let notes =
+        std::env::var("RAG_INGEST_ROOTS").unwrap_or_else(|_| rag_mcp::DEFAULT_RAG_NOTES_DIR.into());
 
     let mut child = Command::new(bin)
         .env("RAG_DB_PATH", db)
