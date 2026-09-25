@@ -365,7 +365,7 @@ async function refreshFolderCounts(){
   for(const [f,n] of results)folderCounts[f]=n;
   updateFolderOptions();
 }
-function resetChat() {$('context-statistics-title').textContent=contextHeadline(null);$('context-statistics-body').replaceChildren();$('usage').textContent='';$('compact-summary').textContent='Контекст ещё не сжат.';$('branch-origin').hidden=true;active=null;current=null;lastMessages='';lastPlan='';$('plan-add').hidden=true;$('messages').innerHTML=welcome;$('title').textContent='Новый разговор';$('error').hidden=true;$('notice').hidden=true;$('queue').replaceChildren();$('plan').replaceChildren(node('li','План появится во время работы','muted'));$('history-folder').value='active';renderStatus('idle');listChats().catch(fail);refreshFolderCounts().catch(()=>{});bindSuggestions();}
+function resetChat() {$('context-statistics-title').textContent=contextHeadline(null);$('context-statistics-body').replaceChildren();$('usage').textContent='';$('compact-summary').textContent='Контекст ещё не сжат.';$('branch-origin').hidden=true;active=null;current=null;lastMessages='';messageCache=[];lastPlan='';$('plan-add').hidden=true;$('messages').innerHTML=welcome;$('title').textContent='Новый разговор';$('error').hidden=true;$('notice').hidden=true;$('queue').replaceChildren();$('plan').replaceChildren(node('li','План появится во время работы','muted'));$('history-folder').value='active';renderStatus('idle');listChats().catch(fail);refreshFolderCounts().catch(()=>{});bindSuggestions();}
 function bindSuggestions() {document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>{$('prompt').value=b.dataset.prompt;$('mode').value=b.dataset.mode;modeHelp();$('prompt').focus();});}
 function renderStatus(status) {
   $('manage-chat').disabled=!active;const archived=!!(current&&current.folder&&current.folder!=='active');$('send').disabled=archived;$('resume').disabled=archived;
@@ -373,7 +373,7 @@ function renderStatus(status) {
   $('send').textContent=running?'В очередь ↑':'Отправить ↑';$('send').title=archived?'Восстановите разговор из архива или корзины':'Отправить сообщение';$('steer').hidden=!running;$('send-now').hidden=!running;$('stop').hidden=!running;$('resume').hidden=!['paused','error'].includes(status);
 }
 async function openChat(id) {
-  active=id;lastMessages='';const s=await api('sessions/'+id);if(active!==id)return;
+  active=id;lastMessages='';messageCache=[];const s=await api('sessions/'+id);if(active!==id)return;
   $('verbosity').value=s.settings.verbosity||'normal';$('auto-compact').checked=s.settings.auto_compact??true;$('compact-threshold').value=s.settings.compact_threshold??24000;current=s;$('history-folder').value=s.folder||'active';$('project').value=s.settings.project_id;$('provider').value=s.settings.provider;$('model').value=s.settings.model;$('mode').value=s.settings.mode;$('steps').value=s.settings.max_steps;$('output-tokens').value=s.settings.max_output_tokens??8192;$('writes').checked=s.settings.allow_writes;$('json-mode').checked=!!s.settings.json_mode;applySwarm(s.settings.swarm);
   savePrefs();
   renderModelInfo();renderContext();modeHelp();render(s);await listChats();
@@ -497,8 +497,26 @@ function renderSingleMessage(s,m,index,openKey,detailState){
   }
   return div;
 }
+// The transcript is append-only apart from compaction and branching, so the
+// nodes of every message before the first changed one are kept: a poll during
+// generation rebuilds the streaming message instead of re-parsing the whole
+// conversation. Entries are indexed by message index; a group stores the same
+// unit at each of its members.
+let messageCache = [],cacheStatus = '';
+function sameMessage(a,b){return a===b||JSON.stringify(a)===JSON.stringify(b);}
 function buildMessageNodes(s,detailState){
-  const nodes=[];
+  const nodes=[],previous=messageCache;
+  messageCache=[];
+  // Only the messages before the first changed one are reusable, and only while
+  // the turn status is what it was: a node reads its predecessors for the tool
+  // name and the action buttons, and `running` is baked into the answer
+  // placeholder, so a status change invalidates every node.
+  let diverged=0;
+  while(diverged<s.messages.length&&diverged<previous.length&&sameMessage(s.messages[diverged],previous[diverged].message))diverged++;
+  const reusable=s.status===cacheStatus?diverged:0;
+  cacheStatus=s.status;
+  const held=(start,end)=>end<=reusable&&previous[start]&&previous[start].end===end?previous[start].node:null;
+  const keep=(start,end,built)=>{for(let k=start;k<end;k++)messageCache[k]={end,node:built,message:s.messages[k]};};
   let i=0;
   while(i<s.messages.length){
     const m=s.messages[i];
@@ -513,6 +531,8 @@ function buildMessageNodes(s,detailState){
         j++;
       }
       if(group.length>=2){
+        const kept=held(i,j);
+        if(kept){nodes.push(kept);keep(i,j,kept);i=j;continue;}
         const aggKey=`${i}:agg`;
         const aggDetails=node('details',undefined,'file-aggregate');
         aggDetails.dataset.openKey=aggKey;
@@ -569,14 +589,17 @@ function buildMessageNodes(s,detailState){
           div.classList.add('agg-member');
           wrap.append(div);
         }
-        nodes.push(wrap);
+        nodes.push(wrap);keep(i,j,wrap);
         i=j;
         continue;
       }
     }
+    const kept=held(i,i+1);
+    if(kept){nodes.push(kept);keep(i,i+1,kept);i++;continue;}
     let detailIndex=0;
     const openKey=()=>`${i}:${detailIndex++}`;
-    nodes.push(renderSingleMessage(s,m,i,openKey,detailState));
+    const built=renderSingleMessage(s,m,i,openKey,detailState);
+    nodes.push(built);keep(i,i+1,built);
     i++;
   }
   return nodes;
@@ -595,7 +618,12 @@ function render(s) {
   if(serialized!==lastMessages){
     const pane=$('messages'),atBottom=pane.scrollHeight-pane.scrollTop-pane.clientHeight<120;
     const detailState=new Map([...pane.querySelectorAll('details[data-open-key]')].map(d=>[d.dataset.openKey,d.open]));
-    pane.replaceChildren(...buildMessageNodes(s,detailState));lastMessages=serialized;if(atBottom)pane.scrollTop=pane.scrollHeight;
+    const built=buildMessageNodes(s,detailState);
+    // Swapping only the units that were rebuilt keeps the scroll position and
+    // every open `<details>` of the untouched messages.
+    if(pane.children.length!==built.length)pane.replaceChildren(...built);
+    else built.forEach((n,k)=>{if(pane.children[k]!==n)pane.children[k].replaceWith(n);});
+    lastMessages=serialized;if(atBottom)pane.scrollTop=pane.scrollHeight;
   }
   $('queue').replaceChildren(...s.queue.map((p,i)=>node('div',`${i+1}. ${p.text.slice(0,100)}`,'chip')),...s.steering.map(t=>node('div','Steer: '+t.slice(0,100),'chip')));
   if(s.queue.length||s.steering.length){const b=node('button','Очистить очередь');b.onclick=()=>control('clear_queue').catch(fail);$('queue').append(b);}
@@ -998,7 +1026,7 @@ try { const saved=JSON.parse(localStorage.getItem(presentationKey)||'{}');
 } catch {}
 function savePresentation(){try{localStorage.setItem(presentationKey,JSON.stringify({verbosity:$('verbosity').value,analysis:$('analysis-display').value}));}catch{}}
 $('verbosity').onchange=savePresentation;
-$('analysis-display').onchange=()=>{savePresentation();document.querySelectorAll('details.reasoning').forEach(d=>{d.open=$('analysis-display').value==='expanded';});lastMessages='';if(current)render(current);};
+$('analysis-display').onchange=()=>{savePresentation();document.querySelectorAll('details.reasoning').forEach(d=>{d.open=$('analysis-display').value==='expanded';});lastMessages='';messageCache=[];if(current)render(current);};
 
 let pluginStatusPolling=false;
 setInterval(async()=>{
