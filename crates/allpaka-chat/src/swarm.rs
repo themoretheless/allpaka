@@ -176,40 +176,164 @@ pub async fn run(
         bail!("Ни один участник Swarm не вернул отчёт");
     }
 
-    let merge_cfg = merge_settings(settings, &config);
-    let (merged, merge_usage_value) = merge_pass(
+    let (synth_usage, notice, truncated) =
+        synthesize(app, shared, index, settings, &config, &synth, &brief, &reports).await?;
+    total_usage = merge_usage(total_usage, synth_usage);
+
+    finish(app, shared, index, total_usage, notice);
+    if truncated {
+        return Ok(TurnOutcome::TokenLimit);
+    }
+    Ok(TurnOutcome::Complete)
+}
+
+/// Re-run one member of the last Swarm turn and rebuild the answer from all the
+/// reports that stand afterwards. The member is taken from the stored report, not
+/// from the current roster, so editing the roster between turns does not hide the
+/// retry; only its persona is re-read from the roster, and a member that is no
+/// longer there gets the generic role.
+pub async fn retry(
+    app: &App,
+    shared: &SharedSession,
+    settings: &Settings,
+    project: &context::Project,
+    system: &str,
+    label: &str,
+) -> Result<TurnOutcome> {
+    let config = settings.swarm.clone();
+    let target = take_report(shared, label, &config)?;
+    let provider = {
+        let providers = app.providers.lock().unwrap().clone();
+        providers
+            .iter()
+            .find(|p| p.id == target.member.provider)
+            .cloned()
+    }
+    .with_context(|| {
+        format!(
+            "Участник {}: неизвестный провайдер {}",
+            target.member.label, target.member.provider
+        )
+    })?;
+    let read_only = {
+        let mut member_view = settings.clone();
+        member_view.mode = Mode::Chat;
+        member_view.allow_writes = false;
+        tools::schemas(&member_view, false)
+    };
+    let prompt = if target.round > 1 {
+        wave_two_prompt(&target.member, &target.own, &peer_digests(shared, target.index, target.slot), &config)
+    } else {
+        wave_one_prompt(&target.member, &config, &target.brief)
+    };
+    let outcome = run_member(
+        app,
+        shared,
+        project,
+        &target.member.label,
+        &provider,
+        member_settings(settings, &target.member, &config),
+        member_system(system, &target.member, &config, target.round),
+        &read_only,
+        target.round,
+        format!("{prompt}{RETRY_NOTE}"),
+        target.slot,
+        target.index,
+    )
+    .await?;
+    let mut total_usage = outcome.usage;
+
+    let reports = collect_reports(shared, target.index);
+    if reports.iter().all(|r| r.content.trim().is_empty()) {
+        finish(
+            app,
+            shared,
+            target.index,
+            total_usage,
+            Some("Повтор не дал отчёта, и остальные участники пусты — результат не выдуман.".into()),
+        );
+        bail!("Повтор участника не вернул отчёт");
+    }
+    // The synthesis streams into the message, so the previous MASTER has to go
+    // first; otherwise the rebuild would read as an appended second answer.
+    set_content(shared, target.index, "");
+    let (synth_usage, notice, truncated) = synthesize(
+        app,
+        shared,
+        target.index,
+        settings,
+        &config,
+        &synth_provider(app, settings, &config)?,
+        &target.brief,
+        &reports,
+    )
+    .await?;
+    total_usage = merge_usage(total_usage, synth_usage);
+    finish(app, shared, target.index, total_usage, notice);
+    if truncated {
+        return Ok(TurnOutcome::TokenLimit);
+    }
+    Ok(TurnOutcome::Complete)
+}
+
+/// The synthesizer connection, resolved the same way `run` resolves it.
+fn synth_provider(app: &App, settings: &Settings, config: &SwarmConfig) -> Result<Provider> {
+    let name = if config.synthesis_provider.trim().is_empty() {
+        settings.provider.clone()
+    } else {
+        config.synthesis_provider.clone()
+    };
+    let providers = app.providers.lock().unwrap().clone();
+    providers
+        .iter()
+        .find(|p| p.id == name)
+        .cloned()
+        .with_context(|| format!("Синтез: неизвестный провайдер {name}"))
+}
+
+/// Merge the reports that exist right now into the Swarm message, then run the
+/// critic pass over that draft when it is enabled. Returns the usage of these
+/// requests, the notice for the caller and whether the merge hit a token limit.
+async fn synthesize(
+    app: &App,
+    shared: &SharedSession,
+    index: usize,
+    settings: &Settings,
+    config: &SwarmConfig,
+    synth: &Provider,
+    brief: &str,
+    reports: &[ReportView],
+) -> Result<(Value, Option<String>, bool)> {
+    let merge_cfg = merge_settings(settings, config);
+    let (merged, mut usage) = merge_pass(
         app,
         shared,
         index,
-        &synth,
+        synth,
         &merge_cfg,
         "You are the synthesizer of a swarm. Merge peer reports into one answer. Never invent findings nobody reported.",
-        merge_prompt(&brief, &reports, &config),
+        merge_prompt(brief, reports, config),
         MergeOutput::Stream,
     )
     .await?;
-    total_usage = merge_usage(total_usage, merge_usage_value);
-
-    let mut notice = failure_notice(&reports, members.len());
+    let mut notice = failure_notice(reports, reports.len());
     if merged.truncated {
-        finish(app, shared, index, total_usage, notice);
-        return Ok(TurnOutcome::TokenLimit);
+        return Ok((usage, notice, true));
     }
-
     if config.critic {
         let draft = message_content(shared, index);
         let (critic, critic_usage) = merge_pass(
             app,
             shared,
             index,
-            &synth,
+            synth,
             &merge_cfg,
             "You are an adversarial reviewer of a merged swarm result. Return only the corrected final text.",
-            critic_prompt(&brief, &reports, &draft, &config),
+            critic_prompt(brief, reports, &draft, config),
             MergeOutput::Buffered,
         )
         .await?;
-        total_usage = merge_usage(total_usage, critic_usage);
+        usage = merge_usage(usage, critic_usage);
         if critic.truncated {
             notice = Some(match notice {
                 Some(text) => format!("{text} Критик-проход прерван лимитом токенов: показан черновик синтеза."),
@@ -224,10 +348,95 @@ pub async fn run(
             set_content(shared, index, &critic.content);
         }
     }
-
-    finish(app, shared, index, total_usage, notice);
-    Ok(TurnOutcome::Complete)
+    Ok((usage, notice, false))
 }
+
+/// One member of the last Swarm turn, taken out of the message and reset for a
+/// re-run: whatever the previous attempt produced is gone before the new one
+/// streams, so a retried report never shows text from two attempts.
+fn take_report(
+    shared: &SharedSession,
+    label: &str,
+    config: &SwarmConfig,
+) -> Result<RetryTarget> {
+    let mut state = shared.lock().unwrap();
+    let index = state
+        .messages
+        .iter()
+        .rposition(|m| !m.swarm.is_empty())
+        .context("В этом разговоре ещё не было Swarm-хода")?;
+    let brief = state
+        .messages[..index]
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let slot = state.messages[index]
+        .swarm
+        .iter()
+        .position(|r| r.label.trim().eq_ignore_ascii_case(label.trim()))
+        .with_context(|| format!("Участника «{label}» нет в последнем Swarm-ходе"))?;
+    let previous = state.messages[index].swarm[slot].clone();
+    let own = clip(&previous.content, config.report_bytes);
+    let member = SwarmMember {
+        label: previous.label.clone(),
+        role: config
+            .members
+            .iter()
+            .find(|m| m.label.trim().eq_ignore_ascii_case(previous.label.trim()))
+            .map(|m| m.role.clone())
+            .unwrap_or_default(),
+        provider: previous.provider.clone(),
+        model: previous.model.clone(),
+    };
+    let report = &mut state.messages[index].swarm[slot];
+    report.content.clear();
+    report.error = None;
+    report.status = MemberStatus::Queued;
+    report.step = 0;
+    Ok(RetryTarget {
+        index,
+        slot,
+        round: previous.round.max(1),
+        brief,
+        own,
+        member,
+    })
+}
+
+struct RetryTarget {
+    index: usize,
+    slot: usize,
+    round: u8,
+    brief: String,
+    /// The member's own previous report, already clipped to the report budget.
+    own: String,
+    member: SwarmMember,
+}
+
+/// What the rest of the wave looks like for one member: the same digests the
+/// next-wave prompt gets, minus the member's own.
+fn peer_digests(shared: &SharedSession, index: usize, slot: usize) -> String {
+    collect_reports(shared, index)
+        .iter()
+        .enumerate()
+        .filter(|(other, _)| *other != slot)
+        .map(|(_, r)| {
+            format!(
+                "### {label} ({provider}/{model})\n{content}",
+                label = r.label,
+                provider = r.provider,
+                model = r.model,
+                content = clip(&r.content, PEER_DIGEST_BYTES),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+const RETRY_NOTE: &str = "\n\nЭто повтор: прошлый заход этого участника не дошёл до синтезатора. \
+     Выдай отчёт заново и целиком, не ссылаясь на прежнюю попытку.";
 
 struct MemberOutcome {
     usage: Value,

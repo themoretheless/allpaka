@@ -43,7 +43,7 @@ class Mock(BaseHTTPRequestHandler):
             elif 'Ты — участник swarm' in content and '«slow»' in content:
                 event({'choices':[{'delta':{'content':'REPORT from slow'}}]})
                 for _ in range(20):time.sleep(.1);event({'choices':[{'delta':{'content':'.'}}]})
-            elif 'Ты — участник swarm' in content and 'SWARM-FAIL' in content and '«risks»' in content:
+            elif 'Ты — участник swarm' in content and 'SWARM-FAIL' in content and '«risks»' in content and 'Это повтор' not in content:
                 event({'error':{'message':'simulated rate limit'}})
             elif 'Ты — участник swarm' in content and 'SWARM-STEP' in content and '«scout»' in content and not any(m.get('role')=='tool' for m in messages):
                 # First pass of a two-step member: one read-only tool call, so the
@@ -310,6 +310,31 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         assert reports['scout']['status']=='done' and reports['scout']['content']=='REPORT from scout'
         assert 'не ответил' in state['notice'] and 'MASTER merged answer' in state['messages'][-1]['content']
         print('PASS swarm names a failed member instead of inventing its report')
+        def merges():return len([r for r in requests if 'Собери из них один итоговый ответ' in str(r['messages'][-1]['content'])])
+        retried=create(mode='swarm',swarm=dict(members=two_members,max_steps_per_member=1))
+        act(retried,'send','SWARM-FAIL retry brief')
+        state=wait(retried,lambda s:s['status']=='idle' and s['messages'][-1].get('swarm') and all(r['status']!='queued' for r in s['messages'][-1]['swarm']))
+        assert {r['label']:r['status'] for r in state['messages'][-1]['swarm']}=={'scout':'done','risks':'error'}
+        before=merges()
+        act(retried,'retry_member','risks')
+        state=wait(retried,lambda s:s['status']=='idle' and all(r['status']=='done' for r in s['messages'][-1]['swarm']))
+        reports={r['label']:r for r in state['messages'][-1]['swarm']}
+        assert reports['risks']['content']=='REPORT from risks' and not reports['risks'].get('error')
+        assert reports['scout']['content']=='REPORT from scout'
+        assert len([r for r in requests if 'Это повтор' in str(r['messages'][-1]['content'])])==1
+        assert merges()==before+1 and not state['notice']
+        assert state['usage']['prompt_tokens']==12 and state['usage']['completion_tokens']==14
+        for bad in '','  ':
+            try:act(retried,'retry_member',bad);raise AssertionError('nameless retry accepted')
+            except urllib.error.HTTPError as e:assert e.code==400
+        act(retried,'retry_member','nobody')
+        state=wait(retried,lambda s:s['status']=='error')
+        assert 'nobody' in state['error'] and state['messages'][-1]['content']=='MASTER merged answer'
+        assert all(r['status']=='done' for r in state['messages'][-1]['swarm'])
+        plain=create()
+        try:act(plain,'retry_member','risks');raise AssertionError('retry accepted outside swarm')
+        except urllib.error.HTTPError as e:assert e.code==429
+        print('PASS swarm retry re-runs one member, rebuilds the MASTER and bills only the retry')
         critic=create(mode='swarm',swarm=dict(members=two_members,max_steps_per_member=1,critic=True))
         act(critic,'send','SWARM-CRITIC')
         state=wait(critic,lambda s:s['status']=='idle' and s['messages'][-1].get('swarm'))

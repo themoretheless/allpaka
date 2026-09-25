@@ -468,11 +468,16 @@ function renderSingleMessage(s,m,index,openKey,detailState){
     reports.open=detailState.get(reportsKey)??!['running'].includes(s.status);
     const finished=(m.swarm||[]).filter(r=>r.status==='done').length;
     reports.append(node('summary',`Участники Swarm: ${finished}/${m.swarm.length} отчётов`));
+    // Only the last Swarm turn can be re-run: a retry rebuilds that message's
+    // synthesis, and rewriting an older one would falsify its history.
+    const lastSwarm=s.messages.reduce((acc,row,k)=>(row.swarm||[]).length?k:acc,-1);
+    const canRetry=index===lastSwarm&&s.status!=='running';
     for(const report of m.swarm){
       const state=swarmState(report);
       const card=node('div',undefined,'swarm-report');
       const head=node('div',undefined,'swarm-report-head');
       head.append(node('b',report.label),node('small',`${report.provider} · ${report.model}${report.round>1?` · волна ${report.round}`:''}`),node('span',state.label,state.className));
+      if(canRetry){const again=node('button','Повторить участника');again.title='Перезапустить этого участника и пересобрать итог по всем отчётам';again.onclick=()=>control('retry_member',report.label).catch(fail);head.append(again);}
       card.append(head);
       if(report.error)card.append(node('div',report.error,'muted'));
       if(report.content)card.append(StudioContent.render(report.content));
@@ -693,9 +698,9 @@ function applyCommand(text){
   }
   return false;
 }
-async function control(kind) {
+async function control(kind, actionText) {
   $('error').hidden=true;
-  if(current&&current.folder&&current.folder!=='active'&&['send','send_now','steer','resume','compact'].includes(kind))throw new Error('Разговор в архиве или корзине. Восстановите его, чтобы продолжить.');
+  if(current&&current.folder&&current.folder!=='active'&&['send','send_now','steer','resume','compact','retry_member'].includes(kind))throw new Error('Разговор в архиве или корзине. Восстановите его, чтобы продолжить.');
   const sends=['send','send_now','steer'].includes(kind);
   let text=$('prompt').value.trim();
   if(sends&&text.startsWith('/')){
@@ -712,7 +717,7 @@ async function control(kind) {
     if(kind==='steer'&&draftImages.length)throw new Error('Для изображений используйте Send now или очередь.');
   }
   if(!active){if(!sends)return;active=(await api('sessions',snapshot)).id;savePrefs();}
-  await api(`sessions/${active}/actions`,{kind,text:sends?text:'',settings:(sends&&kind!=='steer')||['resume','compact'].includes(kind)?snapshot:undefined,images:sends?draftImages:[]});
+  await api(`sessions/${active}/actions`,{kind,text:sends?text:(actionText||''),settings:(sends&&kind!=='steer')||['resume','compact'].includes(kind)?snapshot:undefined,images:sends?draftImages:[]});
   if(sends){$('prompt').value='';draftImages=[];draftTexts=[];renderAttachments();}
   await poll();await listChats();
 }

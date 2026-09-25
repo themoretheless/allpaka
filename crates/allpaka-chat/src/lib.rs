@@ -70,6 +70,9 @@ enum ActionKind {
     Resume,
     ClearQueue,
     Compact,
+    /// Re-run one member of the last Swarm turn and rebuild the synthesis. The
+    /// member is named by `text`; nothing about the roster is required to match.
+    RetryMember,
     Rename,
     Move,
 }
@@ -616,6 +619,14 @@ async fn action(
             "Message must contain 1–131072 bytes",
         ));
     }
+    if action.kind == ActionKind::RetryMember
+        && (action.text.trim().is_empty() || action.text.chars().count() > 60)
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "Name the swarm member to retry (1–60 characters)",
+        ));
+    }
     if let Some(settings) = &action.settings {
         validate_settings(settings, &app).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
     }
@@ -762,7 +773,7 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                     s.messages.push(message);
                 }
                 persist(&app, &s);
-                task = Some(tokio::spawn(turn(app.clone(), s.clone())));
+                task = Some(tokio::spawn(turn(app.clone(), s.clone(), None)));
             }
         }
         tokio::select! {
@@ -770,6 +781,7 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                 let Some(mut a)=command else { cancel(&mut task,&s).await;break; };
                 let reply=a.reply.take();
                 let mut rejection=None;
+                let mut retry_member=None;
                 match a.kind {
                     ActionKind::Compact => {
                         if task.is_some() { rejection=Some("Stop generation before manual compaction".into()); }
@@ -778,6 +790,14 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                             paused=true;
                             let app=app.clone();let s=s.clone();
                             task=Some(tokio::spawn(async move {compact::run(&app,&s,true).await?;Ok(TurnOutcome::Compacted)}));
+                        }
+                    },
+                    ActionKind::RetryMember => {
+                        if task.is_some() { rejection=Some("Дождитесь окончания хода или нажмите «Стоп»".into()); }
+                        else {
+                            let mut state=s.lock().unwrap();
+                            if state.settings.mode!=Mode::Swarm { rejection=Some("Повтор участника доступен, пока режим разговора — Swarm".into()); }
+                            else { state.status=SessionStatus::Running;state.error=None;retry_member=Some(a.text.trim().to_string()); }
                         }
                     },
                     ActionKind::Stop => { cancel(&mut task,&s).await;paused=true; },
@@ -810,6 +830,7 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                 }
                 persist(&app,&s);
                 if let Some(reply)=reply {let _=reply.send(rejection.map_or(Ok(()),Err));}
+                if let Some(label)=retry_member { task=Some(tokio::spawn(turn(app.clone(), s.clone(), Some(label)))); }
             },
             result=async { task.as_mut().unwrap().await },if task.is_some()=>{
                 task=None;
@@ -831,7 +852,10 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
         }
     }
 }
-async fn turn(app: App, s: SharedSession) -> Result<TurnOutcome> {
+/// Run one turn. `retry_member` names a swarm member to re-run instead of a full
+/// wave; only the Swarm executor understands it, and the actor refuses it for
+/// every other mode.
+async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Result<TurnOutcome> {
     let settings = s.lock().unwrap().settings.clone();
     validate_settings(&settings, &app)?;
     let p = app
@@ -935,7 +959,10 @@ async fn turn(app: App, s: SharedSession) -> Result<TurnOutcome> {
     // Swarm is a different executor: it runs its own wave, merge and optional
     // critic pass, and never touches the single-model step loop below.
     if settings.mode == Mode::Swarm {
-        return swarm::run(&app, &s, &settings, &project, &system).await;
+        return match retry_member {
+            Some(label) => swarm::retry(&app, &s, &settings, &project, &system, &label).await,
+            None => swarm::run(&app, &s, &settings, &project, &system).await,
+        };
     }
     for step in 1..=settings.max_steps {
         compact::run(&app, &s, false).await?;
