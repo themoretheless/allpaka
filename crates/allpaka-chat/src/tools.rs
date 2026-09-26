@@ -280,7 +280,7 @@ mod tests {
             compact_threshold: 24000,
             json_mode: false,
         };
-        assert_eq!(schemas(&s).len(), 3);
+        assert_eq!(schemas(&s, false).len(), 3);
         assert!(execute(
             Path::new("/tmp"),
             &s,
@@ -381,7 +381,7 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(s.mode, Mode::Swarm));
-        assert_eq!(schemas(&s).len(), 3);
+        assert_eq!(schemas(&s, false).len(), 3);
         assert!(execute(
             Path::new("/tmp"),
             &s,
@@ -390,6 +390,6 @@ mod tests {
         )
         .is_err());
         s.mode = Mode::Chat;
-        assert_eq!(schemas(&s).len(), 2);
+        assert_eq!(schemas(&s, false).len(), 2);
     }
 }
