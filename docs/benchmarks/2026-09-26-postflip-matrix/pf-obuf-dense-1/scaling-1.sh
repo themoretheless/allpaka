@@ -11,6 +11,7 @@
 #
 # Run from the repo root. Campaign-local, not a repo script.
 set -uo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
 model=${1:?model}
 reps=${2:-5}
 wt=${3:?allpaka binary with the dense-obuf fix}
@@ -45,3 +46,4 @@ for ((i = 1; i <= reps; i++)); do
     done
 done
 echo "=== done; artifacts in $out ==="
+"$HERE/fit-scaling.py" "$out/ladder-1.txt" 2>&1 | tee "$out/fit-1.txt"
