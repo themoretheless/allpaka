@@ -107,10 +107,15 @@ the ~8-12% gap is closed. Decode 36.5-37.5 tok/s (the llama decode gap,
     qualified for the PF_DEFER chain. qwen3-0.6b pp512 went from 29 separate
     command-buffer commits per chunk to 2: encode 25 -> 0 ms, GPU scheduling
     58 -> 0 ms, **executing unchanged at 51 ms**, wall 59 -> 53 ms (paired
-    median **+12.3%**, 10/10 signs at pp512 and pp1024). Still **0.95x llama**
-    - with the scheduling side now empty, the residual is 3.5-5% of kernel
-    time, i.e. the item in "Remaining ideas" below, not a commit-shape
-    problem. Numbers taken at load 13.8-26, so not yet certified;
+    median **+12.3%**, 10/10 signs at pp512 and pp1024). Paired against llama in
+    the same repeat, the PP response changes sign: **pp64 is now 1.04-1.07x
+    llama** (0.64x before this), pp256 0.96-0.97x (was 0.75x), pp512
+    0.94-0.96x, pp1024 0.94-0.95x, pp4096 0.80-0.98x and unstable. Fitting
+    wall = F + k*tokens over pp64-512 gives F 5.0 ms against llama's 6.0, but k
+    0.0902 ms/token against llama's 0.0848: the per-chunk setup is now *cheaper*
+    than llama's and what remains is a **~6% per-token marginal cost** - kernel
+    time, i.e. the item in "Remaining ideas" below, not a commit-shape problem.
+    Taken at load 8.6-26, so not certified as throughputs;
     `docs/benchmarks/2026-09-26-postflip-matrix/pf-obuf-dense-1/results.txt`.
     `ALLPAKA_PF_OBUF_DENSE=0` reverts. A CPU-routed MoE keeps the old path
     deliberately: `req.route.is_none()` is in the predicate, because that case

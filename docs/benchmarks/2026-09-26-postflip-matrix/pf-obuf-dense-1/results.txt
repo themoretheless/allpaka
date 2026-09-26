@@ -103,3 +103,38 @@ Load never dropped below 13.8 during this file's runs, so:
 Related: ../pp-sweep-1/diagnostic-1-prefill-shape.txt established the same
 fixed-cost reading from the other direction (prefill ratio 0.64x at PP=64
 rising to 0.97x at PP=1024, before this change).
+
+## Addendum, same evening - the PP curve after the fix (supersedes "does NOT reach parity")
+
+The section above was written from pp512 and pp1024 only. A paired pp-curve
+(fix ON vs llama-bench inside the same repeat, 3 reps each) changes the
+picture: allpaka is now AHEAD of llama at the short end.
+
+    pp    allpaka med   llama med   ratio      commits   exec
+    64         5927        5600     1.036-1.069     2     10 ms
+    256        9207        9510     0.958-0.973     2     27 ms
+    512        9876       10375     0.944-0.962     2     50 ms
+    1024       9165        9648     0.942-0.950     4    109 ms
+    4096       5384        6351     0.800-0.979    16    636-795 ms
+
+  raw     docs/benchmarks/2026-09-26-postflip-matrix/pf-obuf-dense-1/curve-1.txt
+  load    8.6-9.6 across the curve
+
+pp64 went 3969 -> 5927 (the 0.64x row in ../pp-sweep-1 was pre-fix) and the
+ratio is above 1.0 in 3/3 repeats, so the claim "this does not reach parity"
+holds only for pp>=256.
+
+Fitting wall = F + k*tokens over pp64-512 separates the two engines cleanly:
+
+    allpaka  F 5.0 ms   k 0.0902 ms/token
+    llama    F 6.0 ms   k 0.0848 ms/token
+
+The per-chunk setup is now CHEAPER than llama's (that is the crossover at the
+short end), and the whole remaining deficit at pp256-1024 is a ~6% per-token
+marginal cost - kernel time, not commit shape. Nothing in this change's scope
+addresses it.
+
+pp4096 stays unresolved and is not a commit-shape case either: with 16 commits
+and exec varying 636-795 ms between repeats at the same shape and load, the
+spread is inside the GPU work itself. Needs a quiet-window run before it is
+called a regression or noise.
