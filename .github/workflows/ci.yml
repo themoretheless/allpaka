@@ -46,42 +46,28 @@ jobs:
         # tests too, run this workflow on a self-hosted runner that has
         # models/qwen3-0.6b-Q8_0.gguf and RAG_MCP_BIN/RAG_DB_PATH set.
 
-  # Optional: Self-heal analysis job (runs only on failure, requires manual trigger or external call)
-  # Uncomment below to enable automatic analysis when tests fail
+  # Опциональный разбор отказа. Показывает, почему упало, и предлагает команды;
+  # сам ничего не чинит. Раскомментируйте, чтобы получать отчёт артефактом.
+  #
   # self-heal-analysis:
-  #   runs-on: ubuntu-latest
+  #   needs: test
   #   if: failure()
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     actions: read
   #   steps:
   #     - uses: actions/checkout@v4
-      
-  #     - name: Analyze CI failure
+  #
+  #     - name: Разбор упавшего запуска
+  #       env:
+  #         GH_TOKEN: ${{ github.token }}
+  #       # --save пишет markdown в .qoder/reports; || true — потому что код 1
+  #       # означает «паттерны не распознаны», а не ошибку разбора.
   #       run: |
-  #         echo "CI failed. Run the following command locally for fix suggestions:"
-  #         echo ""
-  #         echo "  bash scripts/ci-self-heal-analyzer.sh --output=table $GITHUB_RUN_ID"
-  #         echo ""
-  #         echo "Or integrate with GitHub Actions using:"
-  #         echo "  gh run download ${{ github.run_id }} --name test-log"
-  #         echo "  bash scripts/ci-self-heal-analyzer.sh --output=issue ${{ github.run_id }}"
-      
-  #     - name: Generate diagnostic report
-  #       run: |
-  #         mkdir -p .qoder/reports
-  #         cat > .qoder/reports/self-heal-diagnostic.md <<'EOF'
-  #         ## CI Failure Diagnostic
-  #         
-  #         **Run ID:** ${{ github.run_id }}
-  #         **Repository:** ${{ github.repository }}
-  #         **Branch:** ${{ github.ref_name }}
-  #         
-  #         ### Next Steps
-  #         
-  #         1. Review test output in Actions logs
-  #         2. Apply suggested fixes manually: `cargo fmt`, `cargo clippy --fix`
-  #         3. Push changes to trigger re-run
-  #         
-  #         For automated suggestions, use:
-  #         ```bash
-  #         bash scripts/ci-self-heal-analyzer.sh --output=table ${{ github.run_id }}
-  #         ```
-  #         EOF
+  #         bash scripts/ci-self-heal-analyzer.sh \
+  #           --repo "$GITHUB_REPOSITORY" --output=md --save "$GITHUB_RUN_ID" || true
+  #
+  #     - uses: actions/upload-artifact@v4
+  #       with:
+  #         name: ci-analysis
+  #         path: .qoder/reports/*.md
