@@ -14621,6 +14621,19 @@ fn pf_onebuf() -> bool {
     crate::runtime::get().prefill_one_buffer
 }
 
+/// Join the shared prefill buffer without GPU-side MoE routing, for a grouped
+/// FFN that has no route table and whose combine already lands in `pf_x`
+/// (`req.fused.is_some()`: the download is skipped, so nothing is read back).
+/// Dense models reach this. The `route_mode` gate guards the router-logits
+/// rescue, which a dense layer has no logits for, so it excluded dense from the
+/// segment over a hazard that cannot occur there. A CPU-routed MoE keeps the
+/// old path: it is not what this was measured on.
+/// `ALLPAKA_PF_OBUF_DENSE=0` reverts.
+fn dense_obuf() -> bool {
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| std::env::var("ALLPAKA_PF_OBUF_DENSE").map_or(true, |v| v != "0"))
+}
+
 /// ALLPAKA_GPU_COUNTERS=1: per-dispatch GPUTimestamp sampling in the fused
 /// prefill. This device exposes only the "timestamp" counter set, and only
 /// atCommandBoundary sampling - per-dispatch compute-encoder samples assert
@@ -15324,7 +15337,10 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         // that stays off the shared buffer (CPU routing, FFN_SPLIT) seals
         // the open segment first, so its own buffer stays ordered after
         // the work already encoded there.
-        let onebuf = route_mode && pf_onebuf() && !split;
+        let onebuf = (route_mode
+            || (dense_obuf() && req.route.is_none() && req.fused.is_some()))
+            && pf_onebuf()
+            && !split;
         if !onebuf {
             gpu.pf_obuf_seal();
         } else {
