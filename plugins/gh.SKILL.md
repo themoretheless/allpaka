@@ -32,6 +32,8 @@ gh repo clone owner/name
 
 ## Pull requests
 
+### Basic Operations
+
 ```sh
 gh pr list --state open --limit 20 --json number,title,author,isDraft
 gh pr view <n> --json number,title,state,mergeable,reviewDecision,statusCheckRollup
@@ -51,6 +53,60 @@ gh pr close <n>
 
 Перед `pr create` показать пользователю заголовок и тело — они уйдут публично.
 Перед `pr merge` проверить `gh pr checks <n>` и `mergeable`.
+
+### Auto-Merge with Preconditions
+
+**Script:** `scripts/gh-auto-merge.sh` (implements smart merge logic)
+
+**Preconditions checked before merge:**
+1. PR has no conflicts (`mergeable=true`)
+2. All required status checks pass (`statusCheckRollup.conclusion == success`)
+3. Required reviews present (check via `reviewDecision` field)
+4. Branch protection rules respected
+
+**Commands:**
+```sh
+# Dry-run: check conditions without merging
+scripts/gh-auto-merge.sh --dry-run <PR_NUMBER>
+
+# Merge with squash strategy (default)
+scripts/gh-auto-merge.sh --strategy=squash <PR_NUMBER>
+
+# Merge with timeout (wait up to 30 min for checks)
+scripts/gh-auto-merge.sh --timeout=30m --strategy merge <PR_NUMBER>
+```
+
+**Safety:**
+- Never bypass branch protection rules
+- Fail fast if preconditions not met
+- Show preview of what will be merged
+- Exit codes: 0=merged, 1=failed precondition, 2=timeout, 3=not authorized
+
+### PR Status Monitoring & Watch Mode
+
+**Script:** `scripts/gh-pr-status-watch.sh`
+
+**Continuous check monitoring:**
+```sh
+# Watch single PR until all checks pass
+scripts/gh-pr-status-watch.sh <PR_NUMBER>
+
+# Batch mode for multiple PRs
+scripts/gh-pr-status-watch.sh --batch pr-list.txt
+
+# JSON output for CI integration
+scripts/gh-pr-status-watch.sh --json <PR_NUMBER> | jq '.checks[]'
+```
+
+**Output formats:**
+- Markdown table (default): human-readable status per check
+- JSON: machine-parseable for automation tools
+- Updates every N seconds (configurable interval)
+
+**Use cases:**
+- Monitor long-running CI builds
+- Alert when PR becomes blocked by failing tests
+- Track slow checks that exceed expected duration
 
 ## Issues
 
@@ -72,6 +128,49 @@ gh workflow list
 gh workflow run <name>               # только по просьбе: это меняет состояние CI
 ```
 
+### Self-Heal Analysis on CI Failure
+
+**Script:** `scripts/ci-self-heal-analyzer.sh` (conservative suggestion mode)
+
+**Analyzes common failure patterns:**
+- Formatting issues (`cargo fmt --check`)
+- Clippy warnings (`cargo clippy`)
+- Test expectation mismatches
+- Linting errors
+
+**Commands:**
+```sh
+# Generate fix suggestions as markdown table
+scripts/ci-self-heal-analyzer.sh --output=table <RUN_ID>
+
+# Output diff snippets for manual application
+scripts/ci-self-heal-analyzer.sh --output=diff <RUN_ID>
+
+# Optional: create draft issue with analysis
+scripts/ci-self-heal-analyzer.sh --output=issue <RUN_ID>
+```
+
+**Safety boundaries:**
+- ❌ NO automatic commits
+- ❌ NO pushing changes anywhere
+- ✅ Only generates suggestions in stdout/file
+- ✅ Includes clear "how to apply" instructions
+
+**Example output:**
+```markdown
+## CI Failure Analysis
+
+| Issue Type | Files Affected | Fix Command | Confidence |
+|------------|----------------|-------------|------------|
+| formatting | backend/src/lib.rs | `cargo fmt --package allpaka-backend` | 100% |
+| clippy | src/cli.rs | `cargo clippy --fix --package allpaka-cli` | 95% |
+
+To apply fixes manually:
+  $ cargo fmt
+  $ cargo clippy --fix
+  $ git commit -m "chore: self-heal CI fixes"
+```
+
 ## Релизы и прочее
 
 ```sh
@@ -81,6 +180,33 @@ gh label list
 gh search prs --repo owner/name "query" --limit 10
 gh search repos "query" --limit 10
 ```
+
+### PR Lifecycle Hooks
+
+**Script:** `scripts/gh-pr-lifecycle-hooks.sh`
+
+**Automated maintenance operations:**
+- Close stale PRs (inactive >30 days, configurable)
+- Label management based on code owners
+- Weekly status reports via GitHub Issues
+
+**Commands:**
+```sh
+# Find and close stale PRs (>30 days inactive)
+scripts/gh-pr-lifecycle-hooks.sh stale-pr-cleanup --age-threshold=30d --action=close|comment
+
+# Get weekly PR dashboard
+scripts/gh-pr-lifecycle-hooks.sh weekly-dashboard --output=.qoder/reports/pr-weekly.md
+
+# Manage labels based on ownership patterns
+scripts/gh-pr-lifecycle-hooks.sh sync-labels --codeowners=CODEOWNERS
+```
+
+**Safety:**
+- Only acts on PRs explicitly marked as stale by timeout
+- Always previews what would be changed before acting
+- Requires explicit confirmation for destructive actions
+- Logs all changes to audit trail
 
 ## gh api (сырые запросы)
 
@@ -109,6 +235,8 @@ GET: если команда без `-f/-F/--method`, это чтение. Не 
   (`gh api rate_limit --jq '.rate'`).
 - Ошибки `gh` показывать как есть: «not logged in», «HTTP 404», «no such remote» —
   это ответ, а не повод додумывать состояние репозитория.
+- Скрипты автоматизации (`gh-auto-merge.sh`, `gh-pr-lifecycle-hooks.sh`) имеют флаги `--dry-run`:
+  использовать для проверки перед фактическим действием
 
 ## Никакой изоляции: обычный shell
 
