@@ -48,10 +48,32 @@ def fit(xs, ys):
     return my - b * mx, b
 
 
-def main(path, min_reps=3):
+def censor(rows, calib_pp, tol):
+    """Drop repeats whose in-run calibration shape is worse than `tol` over the
+    best repeat of the same run. A pre/post bracket does not save a ladder: the
+    GPU window can move mid-run, so the only contamination evidence that is worth
+    anything is a sample taken inside each repeat. The calib shape is already a
+    ladder point, so this censors on data the run collected anyway."""
+    # cost, not throughput: the stored column is tok/s, where larger is worse.
+    per = {r: 1e6 / rows[(r, calib_pp)]["ap"] for r in sorted({k[0] for k in rows})
+           if (r, calib_pp) in rows}
+    if not per:
+        return rows, []
+    best = min(per.values())
+    keep = [r for r, v in sorted(per.items()) if v <= best * (1 + tol)]
+    dropped = [r for r in per if r not in keep]
+    return {k: v for k, v in rows.items() if k[0] in keep}, dropped
+
+
+def main(path, min_reps=3, calib_pp=None, tol=0.10):
     rows = load(path)
     if not rows:
         sys.exit(f"no rows parsed from {path}")
+    if calib_pp:
+        rows, dropped = censor(rows, calib_pp, tol)
+        kept = sorted({r for (r, _) in rows})
+        print(f"calib censoring on pp{calib_pp} (within {tol * 100:.0f}% of best repeat): "
+              f"kept {kept}, dropped {dropped}")
     pps = sorted({pp for (_, pp) in rows})
     reps = sorted({rep for (rep, _) in rows})
     full = [pp for pp in pps if sum(1 for r in reps if (r, pp) in rows) >= min_reps]
@@ -148,4 +170,10 @@ def main(path, min_reps=3):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else 3)
+    args = [a for a in sys.argv[1:]]
+    cp = None
+    for i, a in enumerate(args):
+        if a == "--calib-pp":
+            cp = int(args[i + 1])
+    pos = [a for i, a in enumerate(args) if not a.startswith("--") and args[i - 1] != "--calib-pp"]
+    main(pos[0], int(pos[1]) if len(pos) > 1 else 3, cp)

@@ -155,3 +155,41 @@ What still stands, independent of the fit:
   for both (both arms' natural batch: `ALLPAKA_PREFILL_CHUNK`=512, llama
   `n_ubatch`=512), so pp256 must stay out of any slope fit.
 - Nothing about the size of the allpaka/llama gap is measured tonight.
+
+## Postscript - 00:05 local, the calibrated run, and what survived censoring
+
+`calib-1` gated on the GPU instead of load, accepted on three consecutive
+101-107 ms calib samples, and still failed: the ladder takes ~5 minutes and the
+window moved inside it (pre-run calib 101 ms, post-run 164 ms). So a bracket is
+not enough either.
+
+The fix is inside the data: pp1024 is a ladder point, so every repeat already
+contains a calibration sample. `fit-scaling.py --calib-pp` drops repeats whose
+own calib cost exceeds the run's best repeat by >10%. Applied here it kept
+reps 1-3 (calib exec 110/114/107 ms) and dropped 4-5 (124/129 ms), i.e. 3 of
+the registered 5 repeats - below the pre-registered DoD, so the formal answer
+is UNDETERMINED and is recorded as such.
+
+Descriptively, the 3 surviving repeats settle the evening rather than deepen it:
+
+| pp | allpaka us/tok | llama us/tok | ratio |
+|----|----------------|--------------|-------|
+| 1536 | 136.6 | 115.0 | 0.842 |
+| 2048 | 142.4 | 126.6 | 0.889 |
+| 2560 | 153.7 | 135.0 | 0.878 |
+| 3072 | 167.8 | 143.5 | 0.855 |
+| 4096 | 187.4 | 162.7 | 0.868 |
+| 8192 | 262.2 | 237.8 | 0.907 |
+
+- Ratio is flat at 0.84-0.91 across 1536-8192. The trough is gone, as expected
+  once repeats are matched on contamination rather than on order.
+- Fit: A ratio 1.175 (bootstrap-separated), B ratio 1.081 (not separated).
+  Held-out prediction errors 2.6-8.5%, so the two-term model is weakly
+  supported at 3 points-per-end rather than rejected as it was at 5.
+- Third independent run in the same direction: the deficit behaves like a
+  roughly context-independent per-unit-of-work cost, worst in the per-token
+  (linear) term, not like a long-context mechanism.
+
+Nothing here is certified; CV is still 10.7%. What changed is that the
+instrument now knows why: the GPU has a co-tenant, and until it does not, no
+number of gate rules on load average will produce a usable slope.
