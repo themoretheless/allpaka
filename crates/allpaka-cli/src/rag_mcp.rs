@@ -9,6 +9,10 @@
 //! thread owns the child's stdout and forwards lines; rpc() matches replies
 //! by id with a timeout. Any failure poisons the client and the caller falls
 //! back to the grep backend.
+//!
+//! Two things constrain this file from outside: `tests/plugin_smoke.rs` includes
+//! it by `#[path]`, so it must not reach for `crate::`, and the defaults below
+//! are what those smoke tests skip on.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
