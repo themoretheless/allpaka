@@ -1110,7 +1110,8 @@ mod tests {
         assert_eq!(clip(text, 100), text);
         // 7 lands in the middle of a two-byte character; the cut moves to 6.
         assert_eq!(clip(text, 7), "при\n[сокращено]");
-        assert_eq!(clip(text, 12), text);
+        // 12 lands exactly on the boundary after "т"; the cut stays put.
+        assert_eq!(clip(text, 12), "привет\n[сокращено]");
     }
 
     #[test]
