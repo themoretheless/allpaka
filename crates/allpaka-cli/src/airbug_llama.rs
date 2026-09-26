@@ -42,6 +42,9 @@ struct AllpakaMeasurement {
     summary: AllpakaSummary,
     #[serde(default)]
     fast_path: AllpakaFastPath,
+    /// Tokens in KV before the measured phase, as the bench reports it.
+    #[serde(default)]
+    context_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,7 +103,7 @@ fn cases(pp: u32, tg: u32, model: &Path) -> Vec<Case> {
         Case {
             id: "decode".into(),
             contract: BTreeMap::from([
-                ("workload".into(), format!("tg{tg}@pp{pp}")),
+                ("workload".into(), format!("tg{tg}@context1")),
                 ("model".into(), model_s),
                 (
                     "limitations".into(),
@@ -180,6 +183,13 @@ fn run_allpaka(opts: &Options, pair: u32, work: &Path) -> Result<(f64, f64)> {
         .find(|m| m.name == "decode")
         .context("allpaka report missing decode")?;
     anyhow::ensure!(
+        decode.context_tokens == Some(DECODE_DEPTH as usize),
+        "allpaka decode is not a depth-{} workload (report says {:?}); the llama arm \
+         would be paired against a context allpaka is not measured in",
+        DECODE_DEPTH,
+        decode.context_tokens
+    );
+    anyhow::ensure!(
         decode.fast_path.attempts == opts.tg as u64
             && decode.fast_path.successes == opts.tg as u64
             && decode.fast_path.declines == 0,
@@ -196,6 +206,12 @@ fn cooldown(opts: &Options) {
         std::thread::sleep(std::time::Duration::from_millis(opts.cooldown_ms));
     }
 }
+
+/// llama `-d` / `--n-depth`: KV tokens already present before the measured
+/// decode. allpaka's bench truncates the session and feeds one seed token, so
+/// its decode arm is a depth-1 workload; asking llama for `-d pp` instead
+/// charges it a prefix that the allpaka arm does not carry.
+const DECODE_DEPTH: u32 = 1;
 
 fn llama_rate(rows: &[LlamaRow], prompt: u32, gen: u32, depth: u32) -> Result<f64> {
     let row = rows
@@ -252,7 +268,7 @@ fn run_llama(opts: &Options, pair: u32, work: &Path) -> Result<(f64, f64)> {
             "-n",
             &opts.tg.to_string(),
             "-d",
-            &opts.pp.to_string(),
+            &DECODE_DEPTH.to_string(),
             "-r",
             "1",
             "-ngl",
@@ -273,7 +289,7 @@ fn run_llama(opts: &Options, pair: u32, work: &Path) -> Result<(f64, f64)> {
     let tg_rows: Vec<LlamaRow> = parse_llama_json(&std::fs::read(&tg_json)?)?;
     Ok((
         llama_rate(&pp_rows, opts.pp, 0, 0)?,
-        llama_rate(&tg_rows, 0, opts.tg, opts.pp)?,
+        llama_rate(&tg_rows, 0, opts.tg, DECODE_DEPTH)?,
     ))
 }
 
