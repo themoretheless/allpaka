@@ -1,0 +1,38 @@
+# fa-probe-1: what does llama-bench's `flash_attn:-1` (auto) actually resolve to?
+
+Every campaign row so far has been compared against a llama arm invoked without
+`-fa`, which reports `flash_attn: -1` in its own JSON. Auto is not documented
+for the Metal backend, and the answer decides whether the llama numbers this
+goal chases are llama's best attention path or a handicapped one. Probed by
+running both settings, not by reading docs.
+
+    llama-bench -m models/qwen3-0.6b-Q8_0.gguf -p PP -n 0 -d 0 -r 1 \
+        -ngl 99 -ctk f16 -ctv f16 -fa {on,off} -o json
+
+| PP   | -fa on | -fa off | on/off |
+|------|--------|---------|--------|
+| 8192 | 4966.5 | 2002.3  | 2.48x  |
+| 256  | 6677.6 | 7095.3  | 0.94x  |
+
+**Answer: auto = ON.** The campaign's llama arm at pp8192 reported 4928.7
+(`scaling-1.sh` smoke, load 7.0); `-fa on` here gives 4966.5 and `-fa off`
+gives 2002.3. The arm sits on the on-number, 2.5x above the off-number, so the
+registered baseline has been flash attention all along.
+
+Consequences:
+- The llama prefill rows in `pp-sweep-1`, `pf-obuf-dense-1` and `series-1` are
+  fair comparisons against llama's best attention path. No re-benchmarking is
+  owed, and "closing the gap" is not closing an artifact of a disabled kernel.
+- allpaka's fused prefill also runs a flash-style kernel (`attend_mm`,
+  `ALLPAKA_ATTN_MM` default ON), so the long-context comparison is kernel vs
+  kernel, not kernel vs materialised scores.
+- At pp256 the two settings are indistinguishable (0.94x) and both rows are
+  contention-damaged - load 21 during these runs, against 7.0 for the 10161
+  smoke row. Only the pp8192 contrast is used above, because a 2.48x effect is
+  far outside that noise. The pp256 pair is reported for completeness, not as
+  a short-context result.
+
+Caveat on method: one repeat per cell, taken during a contended window, chosen
+because the expected effect (2x) is two orders above the window's noise. It is
+not a certified measurement of llama's FA cost, and none is needed - the
+question was which arm auto selects, and 4928 vs 2002 answers it unambiguously.

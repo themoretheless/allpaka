@@ -46,4 +46,24 @@ for ((i = 1; i <= reps; i++)); do
     done
 done
 echo "=== done; artifacts in $out ==="
+
+# Is the baseline arm llama's best? Every campaign row has been compared against
+# a llama-bench that reports flash_attn:-1 (auto), and auto is not documented as
+# on-or-off for the Metal backend. If auto means OFF, the llama numbers this goal
+# is chasing are a handicapped attention path, and closing "the gap" would be
+# closing less than it looks. Probed at both ends, one invocation each, after the
+# ladder so it cannot bias the paired rows.
+echo "--- llama -fa probe (what did flash_attn:-1 resolve to?) ---"
+for pp in 256 8192; do
+    for fa in default on off; do
+        flag=()
+        [[ $fa != default ]] && flag=(-fa "$fa")
+        llama-bench -m "$model" -p "$pp" -n 0 -d 0 -r 1 -ngl 99 -ctk f16 -ctv f16 \
+            ${flag[@]+"${flag[@]}"} -o json >"$out/fa-$fa-$pp.json" 2>/dev/null
+        printf 'pp %5s -fa %-7s %10.1f t/s  (reported flash_attn %s)\n' \
+            "$pp" "$fa" "$(jq -r '.[0].samples_ts[0]' "$out/fa-$fa-$pp.json")" \
+            "$(jq -r '.[0].flash_attn' "$out/fa-$fa-$pp.json")"
+    done
+done
+
 "$HERE/fit-scaling.py" "$out/ladder-1.txt" 2>&1 | tee "$out/fit-1.txt"
