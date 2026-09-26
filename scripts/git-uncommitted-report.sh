@@ -71,12 +71,12 @@ while IFS= read -r line; do
       un_add=0   # бинарный новый файл: построчно не считаем
     fi
   else
-    while IFS=$'\t' read -r a d; do
+    while IFS=$'\t' read -r a d _; do
       [ -n "${a:-}" ] || continue
       if [ "$a" = "-" ]; then continue; fi
       st_add=$((st_add + a)); st_del=$((st_del + d))
     done < <(git diff --cached --no-renames --numstat -- "$path")
-    while IFS=$'\t' read -r a d; do
+    while IFS=$'\t' read -r a d _; do
       [ -n "${a:-}" ] || continue
       if [ "$a" = "-" ]; then continue; fi
       un_add=$((un_add + a)); un_del=$((un_del + d))
