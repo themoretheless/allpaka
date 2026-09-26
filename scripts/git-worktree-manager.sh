@@ -1,359 +1,289 @@
 #!/usr/bin/env bash
-# scripts/git-worktree-manager.sh — автоматизация управления worktrees
+# scripts/git-worktree-manager.sh — жизнь worktree: создать, посмотреть, удалить, прибрать.
 #
 # Использование:
-#   scripts/git-worktree-manager.sh [command] [options] [arguments]
+#   scripts/git-worktree-manager.sh <КОМАНДА> [АРГУМЕНТЫ]
 #
-# Команды:
-#   add <branch> <path>         Создать новый worktree для ветки
-#   remove <path>|<branch>      Удалить worktree и опционально ветку
-#   list [--verbose|--json]     Показать список всех worktrees
-#   prune                       Удалить орфанованные записи
-#   sync <source> <target>      Синхронизировать изменения между worktrees (показать preview)
+#   add <ветка> <путь> [--detach]     создать worktree (ветку заведёт, если её нет)
+#   list [--json|--verbose]           показать все worktree этого репозитория
+#   remove <путь|ветка> [--force]     удалить worktree; ветку НЕ трогает
+#   prune [--dry-run]                 убрать записи о несуществующих путях
+#   report [--path ГЛОБ]              сводка по незакоммиченному в каждом worktree
 #
 # Примеры:
-#   # Создать изолированное рабочее дерево для feature-ветки
-#   scripts/git-worktree-manager.sh add feature-x ./worktrees/feature-x
-#
-#   # Перечислить все worktrees
+#   scripts/git-worktree-manager.sh add feature-x .qoder-worktrees/feature-x
 #   scripts/git-worktree-manager.sh list
+#   scripts/git-worktree-manager.sh remove .qoder-worktrees/feature-x
 #
-#   # Удалить worktree с веткой
-#   scripts/git-worktree-manager.sh remove feature-x
+# Выходные коды: 0 — ok, 1 — отказ по причине безопасности, 2 — неверные аргументы.
 #
-#   # Очистить старые записи
-#   scripts/git-worktree-manager.sh prune
+# Только remove/prune меняют состояние, и оба показывают что делают. Ни reset --hard,
+# ни clean, ни удаления веток здесь нет по построению.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../.qoder/scripts-common.sh"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+COMMON=""
+for _cand in "$SCRIPT_DIR/scripts-common.sh" "$SCRIPT_DIR/../scripts/scripts-common.sh"; do
+  [ -f "$_cand" ] && { COMMON="$_cand"; break; }
+done
+[ -n "$COMMON" ] || { printf 'не найден scripts-common.sh рядом с %s\n' "$0" >&2; exit 2; }
+# shellcheck source=/dev/null
+source "$COMMON"
 
-WORKTREE_BASE="${WORKTREE_BASE:-./worktrees}"
+usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
 
-# --- Commands ---
+git_in_repo() { git "$@"; }
 
+# Канонический путь без симлинков: git worktree list отдаёт /private/tmp/..., а
+# pwd — /tmp/..., и без этого сверка путей всегда расходится.
+phys_path() {
+  local t=$1
+  if [ -d "$t" ]; then (cd -- "$t" && pwd -P); return 0; fi
+  local d=${t%/*} b=${t##*/}
+  [ "$d" = "$t" ] && d=.
+  if [ -d "$d" ]; then printf '%s/%s\n' "$(cd -- "$d" && pwd -P)" "$b"; return 0; fi
+  printf '%s\n' "$t"
+}
+
+top_level() {
+  local t
+  t=$(git_in_repo rev-parse --show-toplevel 2>/dev/null) || return 1
+  phys_path "$t"
+}
+
+# Вет already checked out в другом worktree? Печатает путь занявшего.
+branch_in_use_by() { # <ветка> -> путь|пусто
+  local want=$1 p s b
+  while IFS=$'\t' read -r p s b; do
+    [ "$b" = "$want" ] && { printf '%s\n' "$p"; return 0; }
+  done < <(worktree_tsv)
+  return 0
+}
+
+require_repo() {
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+    printf 'это не git-репозиторий: %s\n' "$(pwd)" >&2; exit 2; }
+}
+
+# ---------- add ----------
 cmd_add() {
-  local branch="$1"
-  local path="$2"
-  
-  log_action "WORKTREE-ADD" "Creating worktree for branch '$branch' at '$path'"
-  
-  # Check if path already exists
-  if [[ -e "$path" ]]; then
-    log_error "Path already exists: $path"
-    exit 1
-  fi
-  
-  # Ensure base directory exists
-  mkdir -p "$(dirname "$path")"
-  
-  # Check disk space (at least 100MB free required)
-  local available
-  available=$(df -m "$(dirname "$path")" | awk 'NR==2 {print $4}')
-  if [[ $available -lt 100 ]]; then
-    log_error "Insufficient disk space (need at least 100MB, have ${available}MB)"
-    exit 1
-  fi
-  
-  # Show preview
-  echo ""
-  echo "=== Creating Worktree ==="
-  printf "Branch: %s\n" "$branch"
-  printf "Path:   %s\n" "$path"
-  printf "Command: git worktree add -b %s %s\n" "$branch" "$path"
-  
-  if [[ "${DRY_RUN:-false}" == true ]]; then
-    log_info "Dry run mode: no changes made"
-    return 0
-  fi
-  
-  # Create worktree
-  if git worktree add -b "$branch" "$path"; then
-    log_info "Successfully created worktree at $path"
-    echo ""
-    printf "Switch to new worktree: cd %s\n" "$path"
-  else
-    log_error "Failed to create worktree"
-    exit 1
-  fi
-}
-
-cmd_remove() {
-  local target="$1"
-  local branch="${2:-}"
-  
-  log_action "WORKTREE-REMOVE" "Removing worktree targeting '$target'"
-  
-  # Determine if target is path or branch name
-  local worktree_path=""
-  local actual_branch=""
-  
-  if [[ -d "$target" ]] && git -C "$target" rev-parse --is-inside-work-tree &>/dev/null; then
-    worktree_path="$target"
-    actual_branch=$(git -C "$target" rev-parse --abbrev-ref HEAD)
-  elif [[ -n "$branch" ]]; then
-    # User provided explicit branch name
-    # Find the worktree for this branch
-    while IFS= read -r line; do
-      local wb wt
-      wb=$(echo "$line" | cut -d' ' -f1)
-      wt=$(echo "$line" | cut -d' ' -f3-)
-      if [[ "$wt" == "$branch" ]] || [[ "$wb" == *"branch/$branch"* ]]; then
-        worktree_path="$wb"
-        actual_branch="$branch"
-        break
-      fi
-    done < <(git worktree list)
-    
-    if [[ -z "$worktree_path" ]]; then
-      log_error "Worktree for branch '$branch' not found"
-      exit 1
-    fi
-  else
-    # Try to infer from target
-    if git -C "$target" rev-parse --is-inside-work-tree &>/dev/null; then
-      worktree_path="$target"
-      actual_branch=$(git -C "$target" rev-parse --abbrev-ref HEAD)
-    else
-      log_error "Unknown target: $target (path or branch name expected)"
-      exit 1
-    fi
-  fi
-  
-  if [[ -z "$worktree_path" ]]; then
-    log_error "Could not determine worktree path"
-    exit 1
-  fi
-  
-  # Check for uncommitted changes
-  local has_changes
-  has_changes=$(git -C "$worktree_path" status --porcelain 2>/dev/null | wc -l)
-  
-  if [[ $has_changes -gt 0 ]]; then
-    log_warn "Worktree has uncommitted changes:"
-    git -C "$worktree_path" status --short
-    echo ""
-    if [[ "${FORCE:-false}" != true ]]; then
-      read -rp "Remove anyway? (add --force to skip check) [y/N]: " confirm
-      if [[ "${confirm,,}" != "y" ]]; then
-        log_info "Aborted"
-        exit 0
-      fi
-    fi
-  fi
-  
-  # Show preview
-  echo ""
-  echo "=== Removing Worktree ==="
-  printf "Path:   %s\n" "$worktree_path"
-  printf "Branch: %s\n" "$actual_branch"
-  printf "Commands:\n"
-  printf "  git worktree remove %s\n" "$worktree_path"
-  printf "  git branch -D %s\n" "$actual_branch"
-  
-  if [[ "${DRY_RUN:-false}" == true ]]; then
-    log_info "Dry run mode: no changes made"
-    return 0
-  fi
-  
-  # Remove worktree
-  if git worktree remove "$worktree_path"; then
-    log_info "Successfully removed worktree at $worktree_path"
-    
-    # Optionally delete branch (local only)
-    if git branch -D "$actual_branch" 2>/dev/null; then
-      log_info "Deleted local branch: $actual_branch"
-    else
-      log_info "Branch not deleted or doesn't exist locally: $actual_branch"
-    fi
-  else
-    log_error "Failed to remove worktree"
-    exit 1
-  fi
-}
-
-cmd_list() {
-  local verbose=false
-  local json_output=false
-  
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --verbose) verbose=true; shift ;;
-      --json) json_output=true; shift ;;
-      *) break ;;
+  local branch='' path='' detach=false a
+  local -a rest=()
+  for a in "$@"; do
+    case "$a" in
+      --detach) detach=true ;;
+      -*) printf 'неизвестная опция add: %s\n' "$a" >&2; return 2 ;;
+      *) rest+=("$a") ;;
     esac
   done
-  
-  log_action "WORKTREE-LIST" "Listing all worktrees"
-  
-  if [[ "$json_output" == true ]]; then
-    # JSON output for machine consumption
-    if [[ "$verbose" == true ]]; then
-      git worktree list --json
-    else
-      git worktree list --json | jq '[.[] | {path, branch: .[\"head\"].branch // \"HEAD\"}]'
-    fi
-  else
-    # Human-readable table
-    echo ""
-    echo "=== Git Worktrees ==="
-    echo ""
-    
-    if [[ "$verbose" == true ]]; then
-      printf '| Path              | Branch         | Commit SHA          |\n'
-      printf '|-------------------|----------------|---------------------|\n'
-      
-      while IFS= read -r line; do
-        local path branch sha
-        path=$(echo "$line" | cut -d' ' -f1)
-        branch=$(echo "$line" | sed 's/^.*branch: \(.*\) (.*/\1/')
-        sha=$(echo "$line" | grep -oE '[a-f0-9]{7,40}' | head -1)
-        
-        printf '| %-17s | %-14s | %-19s |\n' "$path" "$branch" "$sha"
-      done < <(git worktree list)
-    else
-      git worktree list
-    fi
-    
-    # Summary count
-    local count
-    count=$(git worktree list | wc -l)
-    echo ""
-    printf "Total worktrees: %s\n" "$count"
+  [ ${#rest[@]} -ge 2 ] || { printf 'нужны <ветка> и <путь>\n' >&2; return 2; }
+  branch=${rest[0]}; path=${rest[1]}
+  [ ${#rest[@]} -eq 2 ] || { printf 'лишний аргумент: %s\n' "${rest[2]}" >&2; return 2; }
+
+  require_repo
+  if [ -e "$path" ]; then
+    log_error "путь уже существует: $path"
+    log_info  "выберите другой путь или удалите worktree командой remove"
+    return 1
   fi
+
+  local exists=false
+  git show-ref --verify --quiet "refs/heads/$branch" && exists=true
+
+  if [ "$exists" = true ] && [ "$detach" != true ]; then
+    local holder
+    holder=$(branch_in_use_by "$branch")
+    if [ -n "$holder" ]; then
+      log_error "ветка $branch уже занята worktree: $holder"
+      log_info  "git не позволяет checkout одной ветки в двух местах; возьмите другую ветку или --detach"
+      return 1
+    fi
+  fi
+
+  printf '=== Создание worktree ===\n'
+  printf '  ветка   : %s%s\n' "$branch" "$([ "$exists" = true ] && printf ' (существует)' || printf ' (будет создана)')"
+  printf '  путь    : %s\n' "$path"
+  if [ "$detach" = true ]; then
+    printf '  команда : git worktree add --detach %q %q\n' "$path" "$branch"
+  elif [ "$exists" = true ]; then
+    printf '  команда : git worktree add %q %q\n' "$path" "$branch"
+  else
+    printf '  команда : git worktree add -b %q %q [текущий HEAD]\n' "$branch" "$path"
+  fi
+
+  mkdir -p "$(dirname "$path")"
+  local rc=0
+  if [ "$detach" = true ]; then
+    git_in_repo worktree add --detach "$path" "$branch" || rc=$?
+  elif [ "$exists" = true ]; then
+    git_in_repo worktree add "$path" "$branch" || rc=$?
+  else
+    git_in_repo worktree add -b "$branch" "$path" || rc=$?
+  fi
+  if [ "$rc" != 0 ]; then
+    log_error "git worktree add завершился с кодом $rc — worktree не создан"
+    rmdir "$(dirname "$path")" 2>/dev/null || true
+    return 1
+  fi
+  log_action WORKTREE-ADD "создан $path (ветка $branch)"
 }
 
+# Разбирает `git worktree list --porcelain` в TSV: путь <TAB> sha <TAB> ветка.
+# Пустая ветка означает detached; для bare-записи — "(bare)".
+worktree_tsv() {
+  git_in_repo worktree list --porcelain | awk '
+    BEGIN { p = ""; s = ""; b = "" }
+    function flush() { if (p != "") printf "%s\t%s\t%s\n", p, s, b }
+    /^worktree[ ]/ { flush(); p = substr($0, 10); s = ""; b = "" }
+    /^HEAD[ ]/     { s = substr($0, 6, 40) }
+    /^branch[ ]/   { b = substr($0, 8); sub(/^refs\/heads\//, "", b) }
+    /^detached/    { b = "" }
+    /^bare/        { b = "(bare)" }
+    END { flush() }'
+}
+
+# ---------- list ----------
+cmd_list() {
+  require_repo
+  local mode=${1:-}
+  local tsv
+  tsv=$(worktree_tsv)
+
+  case "$mode" in
+    --json)
+      if [ -z "$tsv" ]; then printf '[]\n'; return 0; fi
+      local p s b
+      while IFS=$'\t' read -r p s b; do
+        [ -n "$p" ] || continue
+        jq -cn --arg path "$p" --arg sha "$s" --arg branch "$b" \
+          '{path: $path, sha: $sha} + (if $branch == "" then {detached: true} else {branch: $branch} end)'
+      done <<<"$tsv" | jq -s '.'
+      ;;
+    --verbose|"")
+      printf '=== Worktree (%s) ===\n' "$(basename "$(git_in_repo rev-parse --show-toplevel)")"
+      printf '  %-44s  %-18s  %s\n' 'ПУТЬ' 'ВЕТКА' 'SHA'
+      local p s b shown=0
+      while IFS=$'\t' read -r p s b; do
+        [ -n "$p" ] || continue
+        shown=$((shown + 1))
+        printf '  %-44s  %-18s  %s\n' "$p" "${b:-(detached)}" "${s:0:10}"
+      done <<<"$tsv"
+      printf '\n  итого: %s\n' "$shown"
+      ;;
+    *) printf 'неизвестная опция list: %s\n' "$mode" >&2; return 2 ;;
+  esac
+}
+
+# ---------- remove ----------
+cmd_remove() {
+  require_repo
+  local target='' force=false a
+  local -a rest=()
+  for a in "$@"; do
+    case "$a" in
+      --force) force=true ;;
+      -*) printf 'неизвестная опция remove: %s\n' "$a" >&2; return 2 ;;
+      *) rest+=("$a") ;;
+    esac
+  done
+  [ ${#rest[@]} -eq 1 ] || { printf 'нужен ровно один <путь>\n' >&2; return 2; }
+  target=${rest[0]}
+
+  # Путь должен быть именно worktree из списка этого репозитория.
+  local list abs
+  list=$(worktree_tsv | cut -f1)
+  abs=$(phys_path "$target")
+  if ! printf '%s\n' "$list" | grep -qxF "$abs"; then
+    log_error "'$target' нет в списке worktree — удалять нечего"
+    printf 'известные пути:\n' >&2
+    printf '  %s\n' $list >&2
+    return 1
+  fi
+
+  # Основной worktree не удаляем.
+  if [ "$abs" = "$(top_level)" ]; then
+    log_error 'нельзя удалить основной worktree репозитория'
+    return 1
+  fi
+
+  local dirty
+  dirty=$(git_in_repo -C "$abs" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$dirty" != 0 ] && [ "$force" != true ]; then
+    log_error "в $abs есть незакоммиченные изменения ($dirty записей) — удаление отменено"
+    git_in_repo -C "$abs" status --short | sed 's/^/    /' >&2
+    log_info 'сохраните изменения (commit) или передайте --force, если они не нужны'
+    return 1
+  fi
+
+  printf '=== Удаление worktree ===\n'
+  printf '  путь    : %s\n' "$abs"
+  printf '  ветка   : %s (остаётся в репозитории)\n' "$(git_in_repo -C "$abs" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+  printf '  команда : git worktree remove%s %q\n' "$([ "$force" = true ] && printf ' --force' || true)" "$abs"
+
+  if [ "$force" = true ]; then
+    git_in_repo worktree remove --force "$abs"
+  else
+    git_in_repo worktree remove "$abs"
+  fi
+  log_action WORKTREE-REMOVE "удалён $abs"
+  log_info 'локальная ветка сохранена; удалите сами, если она больше не нужна'
+}
+
+# ---------- prune ----------
 cmd_prune() {
-  log_action "WORKTREE-PRUNE" "Pruning stale worktree entries"
-  
-  # Check dry-run flag
-  if [[ "${DRY_RUN:-false}" == true ]]; then
-    echo "=== Prune Dry Run ==="
-    local stale_entries
-    stale_entries=$(git worktree prune --dry-run 2>&1 || true)
-    
-    if [[ -n "$stale_entries" ]]; then
-      echo "Would remove the following stale entries:"
-      echo "$stale_entries"
-    else
-      echo "No stale entries found"
-    fi
+  require_repo
+  local dry=false
+  case "${1:-}" in --dry-run) dry=true ;; '') ;; *) printf 'неизвестная опция prune: %s\n' "$1" >&2; return 2 ;; esac
+
+  if [ "$dry" = true ]; then
+    printf '=== prune (только показать) ===\n'
+    local out
+    out=$(git_in_repo worktree prune -v --dry-run 2>&1 || true)
+    if [ -z "$out" ]; then printf '  устаревших записей нет\n'; else printf '%s\n' "$out" | sed 's/^/  /'; fi
     return 0
   fi
-  
-  # Execute prune
-  local output
-  output=$(git worktree prune 2>&1) || {
-    log_error "Prune failed: $output"
-    exit 1
-  }
-  
-  if [[ -n "$output" ]]; then
-    log_info "Removed stale entries:"
-    echo "$output"
-  else
-    log_info "No stale entries found"
-  fi
+
+  printf '=== prune ===\n'
+  git_in_repo worktree prune -v | sed 's/^/  /' || true
+  log_action WORKTREE-PRUNE "устаревшие записи убраны"
 }
 
-cmd_sync() {
-  local source_path="$1"
-  local target_branch="$2"
-  
-  log_action "WORKTREE-SYNC" "Syncing between worktrees"
-  
-  # Validate paths
-  if ! git -C "$source_path" rev-parse --is-inside-work-tree &>/dev/null; then
-    log_error "Invalid source worktree: $source_path"
-    exit 1
-  fi
-  
-  # Show what would be synced
-  echo ""
-  echo "=== Sync Preview ==="
-  printf "Source: %s\n" "$source_path"
-  printf "Target branch: %s\n" "$target_branch"
-  
-  # Get diff between current branch in source and target branch
-  local source_branch
-  source_branch=$(git -C "$source_path" rev-parse --abbrev-ref HEAD)
-  
-  echo ""
-  echo "Changes in $source_branch that would be applied to $target_branch:"
-  echo ""
-  
-  # Fetch latest from remote
-  git -C "$source_path" fetch origin 2>/dev/null || true
-  
-  # Show commits
-  git -C "$source_path" log "origin/$target_branch".."$source_branch" --oneline
-  
-  if [[ "${DRY_RUN:-false}" == true ]]; then
-    echo ""
-    log_info "Dry run mode: no changes made"
-  else
-    read -rp "Apply these changes to $target_branch? [y/N]: " confirm
-    if [[ "${confirm,,}" == "y" ]]; then
-      git checkout "$target_branch"
-      git merge "$source_branch" --no-edit
-      log_info "Successfully synced changes"
-    else
-      log_info "Cancelled"
-    fi
-  fi
+# ---------- report ----------
+cmd_report() {
+  require_repo
+  local globs=() a
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --path) shift; globs+=("${1:-}"); shift ;;
+      *) printf 'неизвестная опция report: %s\n' "$1" >&2; return 2 ;;
+    esac
+  done
+
+  local script=''
+  for cand in "$SCRIPT_DIR/git-uncommitted-report.sh" "$SCRIPT_DIR/../scripts/git-uncommitted-report.sh"; do
+    [ -f "$cand" ] && { script=$cand; break; }
+  done
+  [ -n "$script" ] || { log_error 'git-uncommitted-report.sh не найден — report недоступен'; return 1; }
+
+  local p
+  for p in $(worktree_tsv | cut -f1); do
+    printf '\n########## %s\n' "$p"
+    bash "$script" -C "$p" || printf '  (не удалось получить отчёт)\n'
+  done
 }
 
-# --- Main argument parsing ---
-
-CMD="${1:-help}"
-shift || true
+# ---------- main ----------
+CMD=${1:-help}
+[ $# -gt 0 ] && shift
 
 case "$CMD" in
-  add)
-    [[ $# -ge 2 ]] || { echo "Ошибка: команда add требует <branch> <path>" >&2; exit 1; }
-    cmd_add "$1" "$2"
-    ;;
-  remove)
-    [[ $# -ge 1 ]] || { echo "Ошибка: команда remove требует <path|branch>" >&2; exit 1; }
-    cmd_remove "$@"
-    ;;
-  list)
-    cmd_list "$@"
-    ;;
-  prune)
-    cmd_prune "$@"
-    ;;
-  sync)
-    [[ $# -ge 2 ]] || { echo "Ошибка: команда sync требует <source-path> <target-branch>" >&2; exit 1; }
-    cmd_sync "$1" "$2"
-    ;;
-  help|--help|-h)
-    cat <<EOF
-Использование: $0 [command] [options]
-
-Команды:
-  add <branch> <path>                 Создать новый worktree для ветки
-  remove <path|branch>                Удалить worktree и опционально ветку
-  list [--verbose|--json]             Показать список всех worktrees
-  prune                               Удалить орфанованные записи
-  sync <source> <target-branch>       Синхронизировать изменения между worktrees
-
-Опции:
-  --dry-run                           Показать что будет сделано без изменений
-  --force                             Пропустить проверку изменений при удалении
-  -h, --help                          Эта справка
-
-Примеры:
-  $0 add feature-x ./worktrees/feature-x
-  $0 list --verbose
-  $0 remove feature-x
-  $0 prune
-EOF
-    ;;
-  *)
-    echo "Ошибка: неизвестная команда '$CMD'" >&2
-    echo "Доступные команды: add, remove, list, prune, sync" >&2
-    exit 1
-    ;;
+  add)    cmd_add "$@" ;;
+  list)   cmd_list "$@" ;;
+  remove) cmd_remove "$@" ;;
+  prune)  cmd_prune "$@" ;;
+  report) cmd_report "$@" ;;
+  help|--help|-h) usage ;;
+  *) printf 'неизвестная команда: %s\n' "$CMD" >&2
+     printf 'доступны: add, list, remove, prune, report\n' >&2; exit 2 ;;
 esac
