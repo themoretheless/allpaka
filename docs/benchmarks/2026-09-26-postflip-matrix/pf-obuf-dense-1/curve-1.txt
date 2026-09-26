@@ -1,0 +1,15 @@
+pp    64 rep 1  allpaka   5927.2  llama   5721.5  ratio 1.036  commits 2  exec 10ms  load 8.64
+pp    64 rep 2  allpaka   5921.6  llama   5598.7  ratio 1.058  commits 2  exec 10ms  load 8.64
+pp    64 rep 3  allpaka   5934.9  llama   5550.9  ratio 1.069  commits 2  exec 10ms  load 8.64
+pp   256 rep 1  allpaka   9110.3  llama   9509.7  ratio 0.958  commits 2  exec 27ms  load 8.64
+pp   256 rep 2  allpaka   9207.1  llama   9465.5  ratio 0.973  commits 2  exec 27ms  load 8.64
+pp   256 rep 3  allpaka   9248.3  llama   9515.5  ratio 0.972  commits 2  exec 27ms  load 9.31
+pp   512 rep 1  allpaka   9964.9  llama  10364.4  ratio 0.962  commits 2  exec 50ms  load 9.31
+pp   512 rep 2  allpaka   9876.0  llama  10429.0  ratio 0.947  commits 2  exec 50ms  load 9.31
+pp   512 rep 3  allpaka   9798.4  llama  10375.1  ratio 0.944  commits 2  exec 50ms  load 9.31
+pp  1024 rep 1  allpaka   9089.7  llama   9648.4  ratio 0.942  commits 4  exec 109ms  load 9.61
+pp  1024 rep 2  allpaka   9164.0  llama   9644.4  ratio 0.950  commits 4  exec 109ms  load 9.61
+pp  1024 rep 3  allpaka   9205.0  llama   9699.7  ratio 0.949  commits 4  exec 108ms  load 9.61
+pp  4096 rep 1  allpaka   6327.1  llama   6463.4  ratio 0.979  commits 16  exec 636ms  load 9.40
+pp  4096 rep 2  allpaka   5081.6  llama   6351.1  ratio 0.800  commits 16  exec 795ms  load 9.13
+pp  4096 rep 3  allpaka   5384.0  llama   5818.9  ratio 0.925  commits 16  exec 749ms  load 8.79

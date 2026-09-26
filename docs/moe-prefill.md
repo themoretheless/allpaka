@@ -98,6 +98,29 @@ the ~8-12% gap is closed. Decode 36.5-37.5 tok/s (the llama decode gap,
    1335-1339 tok/s (paired, MM_PIPE on/off). Same-session reference:
    llama-bench 1354 - **allpaka +6.8%**. Greedy byte-parity verified.
 
+10. **Dense FFN joins the one-buffer chunk** (`ffn_batch_grouped`'s `onebuf`
+    predicate). Items 7-8 gated the shared buffer on `route_mode`
+    (= `req.route.is_some()`, GPU-side MoE routing), so a DENSE layer never
+    joined it - even though that gate only guards the router-logits rescue,
+    which a dense layer has no logits for, and dense already passes
+    `Some(GroupedCombine)`, already skips the output download, and already
+    qualified for the PF_DEFER chain. qwen3-0.6b pp512 went from 29 separate
+    command-buffer commits per chunk to 2: encode 25 -> 0 ms, GPU scheduling
+    58 -> 0 ms, **executing unchanged at 51 ms**, wall 59 -> 53 ms (paired
+    median **+12.3%**, 10/10 signs at pp512 and pp1024). Paired against llama in
+    the same repeat, the PP response changes sign: **pp64 is now 1.04-1.07x
+    llama** (0.64x before this), pp256 0.96-0.97x (was 0.75x), pp512
+    0.94-0.96x, pp1024 0.94-0.95x, pp4096 0.80-0.98x and unstable. Fitting
+    wall = F + k*tokens over pp64-512 gives F 5.0 ms against llama's 6.0, but k
+    0.0902 ms/token against llama's 0.0848: the per-chunk setup is now *cheaper*
+    than llama's and what remains is a **~6% per-token marginal cost** - kernel
+    time, i.e. the item in "Remaining ideas" below, not a commit-shape problem.
+    Taken at load 8.6-26, so not certified as throughputs;
+    `docs/benchmarks/2026-09-26-postflip-matrix/pf-obuf-dense-1/results.txt`.
+    `ALLPAKA_PF_OBUF_DENSE=0` reverts. A CPU-routed MoE keeps the old path
+    deliberately: `req.route.is_none()` is in the predicate, because that case
+    is plausibly safe but was not measured.
+
 ## What was tried and falsified (do not retry without new evidence)
 
 - **(qwen3-30b)** llama `kernel_mul_mm_id_q4_K` port: CLOSED BY INSPECTION +
@@ -176,6 +199,7 @@ the ~8-12% gap is closed. Decode 36.5-37.5 tok/s (the llama decode gap,
 | `ALLPAKA_GPU_ROUTE=0` | CPU routing fallback |
 | `ALLPAKA_PF_DEFER=0` | per-layer CPU waits instead of the event chain |
 | `ALLPAKA_PF_ONEBUF=0` | event chain instead of one command buffer per chunk |
+| `ALLPAKA_PF_OBUF_DENSE=0` | keep a dense (non-routed) FFN off the shared chunk buffer |
 | `ALLPAKA_MM_PIPE=0` | two-barrier llama K-loop instead of the pipelined one |
 | `ALLPAKA_PF_SPLIT` | per-stage timing of the attention buffer (serialises) |
 | `ALLPAKA_DUAL=1` | one-dispatch gate+up (slower, reference) |

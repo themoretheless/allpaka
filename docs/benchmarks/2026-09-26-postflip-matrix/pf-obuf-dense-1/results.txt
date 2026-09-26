@@ -1,0 +1,140 @@
+Post-flip matrix - pf-obuf-dense-1: dense prefill joins the one-buffer chunk.
+
+    question  Why is allpaka prefill below llama on a DENSE model when
+              docs/moe-prefill.md records MoE prefill at or above parity?
+    model     models/qwen3-0.6b-Q8_0.gguf (arch qwen3, 28 layers, dense)
+    base      1cc7a27, measured in a detached worktree at /tmp/pf-obuf-wt with
+              its own target dir, so the release binary the gated `series-1`
+              campaign is using stayed untouched throughout.
+    arms      ONE binary, env-gated: ALLPAKA_PF_OBUF_DENSE=0 vs =1. Both arms
+              and llama-bench run inside the same repeat, so the machine state
+              is shared by all three numbers.
+    state     1-minute load 13.8-26.0 across every repeat. Contended. These are
+              paired deltas, not certified throughputs; see Certify below.
+
+## Cause
+
+`gpu::ffn_batch_grouped` decides to encode into the chunk's shared command
+buffer with `onebuf = route_mode && pf_onebuf() && !split` (metal.rs:15327),
+where `route_mode = req.route.is_some()` - GPU-side MoE routing. A dense layer
+has no route table, so it was off the segment, and `CALLS` (which
+bench.rs:934 prints as "waits") only increments when `!onebuf`.
+
+That gate exists to guard the router-logits rescue (15235-15281), and the whole
+rescue block sits inside `if let Some(rl) = &rl`, with `rl` derived from
+`req.route`. On a dense layer `rl` is None, so the hazard it guards cannot
+occur. Dense prefill was paying per-buffer overhead for a MoE problem.
+
+Dense was not otherwise unfused: `model.rs:1913` already passes
+`Some(GroupedCombine{..})` with a dense identity hit table, so the combine
+lands in `pf_x`, the output download is already skipped, and the layer already
+qualified for the deferred (`PF_DEFER`) chain. Only the shared buffer eluded it.
+
+## Result: +12% dense prefill, GPU executing unchanged
+
+on/off per repeat (paired, same binary, same window):
+
+    PP=512   1.380*  1.120  1.133  1.151  1.123   median 1.123   5/5 positive
+    PP=1024  1.133   1.137  1.123  1.114  1.091   median 1.123   5/5 positive
+    PP=512   1.325*  1.112  1.099                  (tightened predicate)
+
+  *rep 1 of each PP is the first pair after the processes start and the machine
+  was at load 13.8-26; the off arm (29 separate commits, 25 ms CPU encode) is
+  the one a co-tenant punishes, so contention inflates these two. They are
+  reported, not used for the median.
+
+Instrument counters, deterministic across every repeat:
+
+    waits  29 -> 2     (PP=512,  28 layers + 1)
+    waits  58 -> 4     (PP=1024, two chunks)
+    dispatches         281 -> 281   (unchanged: same GPU work)
+    encode 25 ms -> 0 ms
+    scheduling 58 ms -> 0 ms
+    executing 51 ms -> 51 ms        (UNCHANGED)
+    wall  59 ms -> 53 ms            (512 tok: 8667 -> 9732 tok/s)
+
+Executing did not move, which is the signature of buffer-start overhead
+removal and the same mechanism moe-prefill.md item 8 records for MoE. The
+decode arm is untouched by construction and measurably so (64 waits, 148-149
+ms wait, identical in both arms).
+
+## This does NOT reach parity, and the remaining term is kernels
+
+    on/llama   PP=512   0.924 0.952 0.954 0.958 0.938   median 0.952
+    on/llama   PP=1024  0.963 0.946 0.947 0.933 0.925   median 0.946
+    on/llama   PP=512   0.943 0.938 0.959               (tightened)
+
+After the fix the wall is 53 ms of which 51 ms is GPU executing; llama's whole
+PP=512 prefill is 49.3 ms in the same repeat. So the CPU/scheduling side of
+dense prefill is now empty, and what separates the engines is ~3.5% of kernel
+time at PP=512 and ~5% at PP=1024 (executing 114 ms vs llama's 108.4 ms).
+That is the in-model-vs-microbench TFLOPS question moe-prefill.md still lists
+as "the in-model mechanism is unidentified"; it is not a commit-shape problem
+and this change does not address it.
+
+## Correctness
+
+80 tests green with `ALLPAKA_PF_OBUF_DENSE=1` (`cargo test --release -p
+allpaka-model -p allpaka-backend`), including `forward_batch_matches_sequential_forward`,
+`fused_ffn_matches_cpu_reference`, `gpu_attention_matches_the_cpu_path`,
+`truncate_then_replay_matches_the_original_computation` and
+`verify_rows_match_greedy_decode`. Each arm is checked against the CPU
+reference independently, so the arms agree with each other by transitivity.
+
+## Scope of the predicate
+
+`(route_mode || (dense_obuf() && req.route.is_none() && req.fused.is_some()))`
+
+The `req.route.is_none()` term is deliberate. `req.fused.is_some()` alone would
+also pull a CPU-routed MoE (`ALLPAKA_GPU_ROUTE=0`) onto the shared buffer. That
+case is plausibly safe but was never measured here, so it keeps the old path.
+
+## Certify before quoting
+
+Load never dropped below 13.8 during this file's runs, so:
+- re-run the interleaved three-arm series at load < 5 (`wait-then-run.sh`
+  criteria) before any of these numbers goes into docs/decode-opts.md or
+  moe-prefill.md as a throughput;
+- re-run on qwen3-30b-a3b to confirm MoE is byte- and throughput-neutral (the
+  `route_mode` disjunct short-circuits first, so no change is expected);
+- a dense layer inside an MoE block (GLM's leading Dense layer) does take this
+  path now, so GLM prefill should be re-measured rather than assumed.
+
+Related: ../pp-sweep-1/diagnostic-1-prefill-shape.txt established the same
+fixed-cost reading from the other direction (prefill ratio 0.64x at PP=64
+rising to 0.97x at PP=1024, before this change).
+
+## Addendum, same evening - the PP curve after the fix (supersedes "does NOT reach parity")
+
+The section above was written from pp512 and pp1024 only. A paired pp-curve
+(fix ON vs llama-bench inside the same repeat, 3 reps each) changes the
+picture: allpaka is now AHEAD of llama at the short end.
+
+    pp    allpaka med   llama med   ratio      commits   exec
+    64         5927        5600     1.036-1.069     2     10 ms
+    256        9207        9510     0.958-0.973     2     27 ms
+    512        9876       10375     0.944-0.962     2     50 ms
+    1024       9165        9648     0.942-0.950     4    109 ms
+    4096       5384        6351     0.800-0.979    16    636-795 ms
+
+  raw     docs/benchmarks/2026-09-26-postflip-matrix/pf-obuf-dense-1/curve-1.txt
+  load    8.6-9.6 across the curve
+
+pp64 went 3969 -> 5927 (the 0.64x row in ../pp-sweep-1 was pre-fix) and the
+ratio is above 1.0 in 3/3 repeats, so the claim "this does not reach parity"
+holds only for pp>=256.
+
+Fitting wall = F + k*tokens over pp64-512 separates the two engines cleanly:
+
+    allpaka  F 5.0 ms   k 0.0902 ms/token
+    llama    F 6.0 ms   k 0.0848 ms/token
+
+The per-chunk setup is now CHEAPER than llama's (that is the crossover at the
+short end), and the whole remaining deficit at pp256-1024 is a ~6% per-token
+marginal cost - kernel time, not commit shape. Nothing in this change's scope
+addresses it.
+
+pp4096 stays unresolved and is not a commit-shape case either: with 16 commits
+and exec varying 636-795 ms between repeats at the same shape and load, the
+spread is inside the GPU work itself. Needs a quiet-window run before it is
+called a regression or noise.
