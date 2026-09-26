@@ -168,8 +168,16 @@ add_finding() {
 
 if [ "$FETCH_LOG" = true ] && [ -s "$FAILED_STEPS" ]; then
   log_info "Читаю логи упавших шагов..."
-  gh run view "$RUN_ID" --repo "$REPO" --log-failed 2>/dev/null \
-    | head -c "$MAX_LOG_BYTES" >"$LOG_TXT" || : >"$LOG_TXT"
+  # Качаем целиком и обрезаем после. `gh … | head -c` теряет весь уже принятый
+  # кусок: head закрывает поток раньше, gh уходит по SIGPIPE, pipefail делает
+  # конвейер неуспешным, и ветка `||` стирает файл, который head уже заполнил.
+  LOG_RAW="$TMP_DIR/log.raw"
+  if gh run view "$RUN_ID" --repo "$REPO" --log-failed >"$LOG_RAW" 2>/dev/null; then
+    head -c "$MAX_LOG_BYTES" "$LOG_RAW" >"$LOG_TXT" || cp "$LOG_RAW" "$LOG_TXT"
+  else
+    : >"$LOG_TXT"
+  fi
+  rm -f "$LOG_RAW"
   if [ ! -s "$LOG_TXT" ]; then
     log_warn "Логи недоступны (возможно, артефакты удалены) — классификация по именам шагов"
   fi
@@ -199,11 +207,13 @@ edition_of() {
 classify_log() {
   local log="$1"
 
+  # Во всех $(grep … | …) стоит || true: grep без совпадения возвращает 1, а под
+  # set -o pipefail это уронило бы скрипт до отчёта — пустой stdout и rc 1.
   # rustfmt в CI печатает "Diff in <path> at line N:". Перечисляем ровно эти файлы:
   # cargo fmt по workspace заодно переформатирует файлы вне задачи.
   if grep -qE '^Diff in .* at line ' "$log"; then
     local files e cmd
-    files=$(grep -oE '^Diff in [^ ]+ at line ' "$log" | awk '{print $3}' | sort -u | tr '\n' ' ')
+    files=$(grep -oE '^Diff in [^ ]+ at line ' "$log" | awk '{print $3}' | sort -u | tr '\n' ' ' || true)
     e=$(edition_of)
     cmd="rustfmt --edition $e ${files}"
     add_finding "formatting" "rustfmt хочет переформатировать: $(printf '%s' "$files" | tr -d '\n')" "$cmd" "высокая" "локальные правки"
@@ -220,8 +230,8 @@ classify_log() {
   # Тесты: имена из блоков "---- <name> stdout ----".
   if grep -qE 'test result: FAILED|error: test failed' "$log"; then
     local names
-    names=$(grep -oE '^---- [^ ]+ (stdout|stderr) ----' "$log" | awk '{print $2}' | sort -u | head -20 | tr '\n' ' ')
-    [ -n "$names" ] || names=$(grep -oE 'test [A-Za-z0-9_:]+ \.\.\. FAILED' "$log" | awk '{print $2}' | sort -u | head -20 | tr '\n' ' ')
+    names=$(grep -oE '^---- [^ ]+ (stdout|stderr) ----' "$log" | awk '{print $2}' | sort -u | head -20 | tr '\n' ' ' || true)
+    [ -n "$names" ] || names=$(grep -oE 'test [A-Za-z0-9_:]+ \.\.\. FAILED' "$log" | awk '{print $2}' | sort -u | head -20 | tr '\n' ' ' || true)
     if [ -n "$names" ]; then
       add_finding "test-failure" "упавшие тесты: $names" "cargo test --workspace -- --nocapture" "средняя" "локальный прогон"
     else
@@ -232,8 +242,8 @@ classify_log() {
   # Компиляция.
   if grep -qE '^error\[E[0-9A-Z]+\]|^error: could not compile' "$log"; then
     local crates codes
-    crates=$(grep -oE '^\s*(Compiling|Checking) [A-Za-z0-9_.-]+' "$log" | awk '{print $2}' | sort -u | tail -5 | tr '\n' ' ')
-    codes=$(grep -oE '^error\[[A-Z][0-9]+\]' "$log" | sort -u | tr '\n' ' ')
+    crates=$(grep -oE '^\s*(Compiling|Checking) [A-Za-z0-9_.-]+' "$log" | awk '{print $2}' | sort -u | tail -5 | tr '\n' ' ' || true)
+    codes=$(grep -oE '^error\[[A-Z][0-9]+\]' "$log" | sort -u | tr '\n' ' ' || true)
     add_finding "compile-error" "коды ошибок: ${codes:-нет}; последние компилируемые crates: ${crates:-неясно}" \
       "cargo check --workspace --all-targets" "средняя" "локальная проверка"
   fi

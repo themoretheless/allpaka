@@ -72,7 +72,7 @@
 | библиотека | `parse_duration`, `json_get`, `pr_checks_rollup`, `pr_is_mergeable`, `is_owner_name`, `detect_repo` (https, `.git`, scp-ssh, ssh-url, trailing slash, не-GitHub) | 33 / 0 |
 | auto-merge + watch | dry-run, `--squash/--rebase --delete-branch/--auto` в argv, failure/draft/closed/mergeable=false, таймаут, `gh auth` отказ, коды 1/2/3/4, NDJSON | 38 / 0 |
 | worktree | реальный git-репозиторий: add (новая/существующая/занятая ветка, `--detach`, занятый путь), list/`--json`/`--verbose`, remove (грязное, `--force`, чистое, неизвестный путь, основной worktree), prune (`--dry-run` и реальный прогон), report, коды аргументов | 38 / 0 |
-| CI-разбор | сценарии rustfmt/ring/test/compile/network/missing/oom/green, `--no-log`, `--output=json|md|issue`, `--save`, тело issue через `--body-file`, отказ gh → rc 3, аргументы → rc 2, отсутствие мутирующих вызовов | 55 / 0 |
+| CI-разбор | сценарии rustfmt/ring/test/compile/network/missing/oom/green, `--no-log`, `--output=json|md|issue`, `--save`, тело issue через `--body-file`, отказ gh → rc 3, аргументы → rc 2, отсутствие мутирующих вызовов. Две регрессии найдены прогоном на реальном красном запуске: лог с упавшими тестами без имён (grep без совпадения под `pipefail` ронял скрипт молча, rc 1 и пустой stdout) и лог длиннее `--max-log` (конвейер `gh … | head -c` терял весь уже принятый кусок) | 61 / 0 |
 
 Все скрипты проходят `bash -n` и печатают `--help` с кодом 0; четыре пакета раскладываются
 `bash plugins/materialize-git-gh-plugins.sh --dest …`, манифесты валидируются как JSON, и
