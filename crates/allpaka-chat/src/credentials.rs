@@ -121,13 +121,19 @@ mod tests {
         }
     }
     fn temporary() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        // `cargo test` runs these on threads of one process, and SystemTime can
+        // hand two of them the same nanosecond count, so pid + nanos is not a
+        // unique name. The counter is what makes create_dir exclusive.
+        static SEQ: AtomicU32 = AtomicU32::new(0);
         let p = std::env::temp_dir().join(format!(
-            "studio-credentials-test-{}-{}",
+            "studio-credentials-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&p).unwrap();
         p.canonicalize().unwrap()
