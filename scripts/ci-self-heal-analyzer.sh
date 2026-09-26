@@ -1,72 +1,89 @@
 #!/usr/bin/env bash
-# scripts/ci-self-heal-analyzer.sh — анализ неудач CI и предложение исправлений
+# scripts/ci-self-heal-analyzer.sh — разбор упавшего запуска CI и подсказки, что чинить.
 #
 # Использование:
-#   scripts/ci-self-heal-analyzer.sh [OPTIONS] <RUN_ID>
+#   scripts/ci-self-heal-analyzer.sh [ОПЦИИ] <RUN_ID>
 #
-# Примеры:
-#   # Анализ с выводом таблицы исправлений
-#   scripts/ci-self-heal-analyzer.sh --output=table 123456
+#   # Таблица находок по команде-ремоуту из origin
+#   scripts/ci-self-heal-analyzer.sh 1234567890
 #
-#   # Вывод diff сниппетов для ручного применения
-#   scripts/ci-self-heal-analyzer.sh --output=diff 123456
+#   # Markdown-отчёт в файл, без локальных проверок
+#   scripts/ci-self-heal-analyzer.sh --output=md --save 1234567890
 #
-#   # Создание черновика issue с анализом
-#   scripts/ci-self-heal-analyzer.sh --output=issue 123456
+#   # Черновик issue (тело пишется в файл; gh issue create запускает человек)
+#   scripts/ci-self-heal-analyzer.sh --output=issue 1234567890
 #
-# ВНИМАНИЕ: этот скрипт только анализирует и предлагает исправления, 
-# но не применяет их автоматически!
+# Выходные коды:
+#   0 — анализ завершён, находки есть
+#   1 — анализ завершён, паттерны не распознаны (нужна ручная проверка)
+#   2 — неверные аргументы
+#   3 — нет авторизации gh или запуск недоступен
+#
+# Границы: скрипт ничего не чинит сам. Он читает JSON запуска, шаги и логи gh,
+# классифицирует отказ и печатает команды. Изменяющие команды помечены как
+# mutating и выполняются только человеком.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../.qoder/scripts-common.sh"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+COMMON=""
+for _cand in "$SCRIPT_DIR/scripts-common.sh" "$SCRIPT_DIR/../scripts/scripts-common.sh"; do
+  [ -f "$_cand" ] && { COMMON="$_cand"; break; }
+done
+[ -n "$COMMON" ] || { printf 'не найден scripts-common.sh рядом с %s\n' "$0" >&2; exit 2; }
+# shellcheck source=/dev/null
+source "$COMMON"
 
-# --- Configuration ---
-OUTPUT_FORMAT="table"  # table, diff, or issue
-COMMIT_FIXES=false
+MAX_LOG_BYTES=400000
+OUTPUT=table
+REPO_OVERRIDE=""
+FETCH_LOG=true
+RUN_LOCAL=false
+SAVE=false
+RUN_ID=""
 
-# --- Parse arguments ---
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --output=*) OUTPUT_FORMAT="${1#*=}"; shift ;;
-    --commit) COMMIT_FIXES=true; shift ;;
-    -h|--help)
-      cat <<EOF
-Использование: $0 [OPTIONS] <RUN_ID>
+usage() {
+  cat <<EOF
+Использование: $0 [ОПЦИИ] <RUN_ID>
 
-Анализ неудач CI и предложение консервативных исправлений.
+Классифицирует отказ запуска GitHub Actions и предлагает команды. сам ничего не применяет.
 
-Опции:
-  --output=table|diff|issue   Формат вывода (default: table)
-                              table - Markdown таблица с командой исправления
-                              diff  - Diff сниппеты для применения
-                              issue - Черновик issue/PR с описанием
-  
-  --commit                    Применить исправления автоматически
-                              (ВНИМАНИЕ: все равно требует подтверждения!)
+Вывод:
+  --output=table|md|json|issue   формат отчёта (default: table)
+  --save                         дополнительно сохранить отчёт в $REPORTS_DIR
+  --repo=owner/name              репозиторий вместо определённого из origin
 
-Примеры:
-  $0 --output=table 123456        # Генерировать таблицу исправлений
-  $0 --output=diff 123456         # Показать diff сниппеты
-  $0 --output=issue 123456        # Создать черновик issue
-  $0 --commit 123456              # Применить исправления (требует подтверждения)
+Источники данных:
+  --no-log             не тянуть логи упавших шагов (только имена шагов из JSON)
+  --max-log=BYTES      ограничить объём логов (default: $MAX_LOG_BYTES)
+  --local              дополнить разбор локальными read-only проверками (rustfmt --check,
+                       cargo test того же набора); по умолчанию выключено
 
-ВЫХОДНЫЕ КОДЫ:
-  0 = успешно проанализировал
-  1 = ошибка анализа или нет данных для анализа
-  2 = ошибка авторизации / доступа
+Прочее:
+  -h, --help           эта справка
 
-ВАЖНО: Этот скрипт НЕ ПРИМЕНЯЕТ исправления автоматически!
-Он только анализирует и показывает что можно исправить.
+Выходные коды: 0 — находки есть, 1 — паттерны не распознаны, 2 — аргументы, 3 — нет доступа к gh
+
+Границы: только чтение. Подсказки по форматированию дают rustfmt по конкретным файлам, а не
+cargo fmt по всему workspace: в этом репозитории cargo fmt переформатирует чужие файлы.
 EOF
-      exit 0
-      ;;
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --output=*)   OUTPUT="${1#*=}"; shift ;;
+    --repo=*)     REPO_OVERRIDE="${1#*=}"; shift ;;
+    --max-log=*)  MAX_LOG_BYTES="${1#*=}"; shift ;;
+    --no-log)     FETCH_LOG=false; shift ;;
+    --local)      RUN_LOCAL=true; shift ;;
+    --save)       SAVE=true; shift ;;
+    -h|--help)    usage; exit 0 ;;
+    --*)          printf 'неизвестная опция: %s\n' "$1" >&2; usage >&2; exit 2 ;;
     *)
-      if [[ "$1" =~ ^[0-9]+$ ]]; then
+      if [ -z "$RUN_ID" ] && [[ "$1" =~ ^[0-9]+$ ]]; then
         RUN_ID="$1"
       else
-        echo "Ошибка: неизвестный аргумент '$1'" >&2
+        printf 'Ошибка: лишний аргумент: %s (нужен числовой ID запуска)\n' "$1" >&2
         exit 2
       fi
       shift
@@ -74,328 +91,313 @@ EOF
   esac
 done
 
-if [[ -z "${RUN_ID:-}" ]]; then
-  echo "Ошибка: нужен ID запуска CI" >&2
+[ -n "$RUN_ID" ] || { printf 'Ошибка: нужен ID запуска CI (gh run list --limit 5)\n' >&2; exit 2; }
+[[ "$MAX_LOG_BYTES" =~ ^[0-9]+$ ]] || { printf 'Ошибка: --max-log должен быть числом\n' >&2; exit 2; }
+case "$OUTPUT" in table|md|json|issue) ;; *) printf 'Ошибка: --output=table|md|json|issue\n' >&2; exit 2 ;; esac
+
+REPO=$REPO_OVERRIDE
+[ -n "$REPO" ] || REPO=$(detect_repo)
+if [ -z "$REPO" ]; then
+  printf 'Не удалось определить owner/name из origin. Укажите --repo=owner/name\n' >&2
   exit 2
 fi
+case "$REPO" in
+  */*) ;;
+  *) printf 'Репозиторий должен быть вида owner/name, получено: %s\n' "$REPO" >&2; exit 2 ;;
+esac
 
-if [[ -z "${GITHUB_REPO:-}" ]]; then
-  GITHUB_REPO=$(git remote get-url origin 2>/dev/null | sed 's/.git$//' | sed 's|.*github.com/||' || echo "")
+gh auth status >/dev/null 2>&1 || { log_error 'gh не авторизован — выполните gh auth login'; exit 3; }
+
+log_action "CI-HEAL" "RUN=$RUN_ID REPO=$REPO OUTPUT=$OUTPUT" >&2
+
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ci-heal.XXXXXX")
+trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
+
+RUN_JSON="$TMP_DIR/run.json"
+FAILED_STEPS="$TMP_DIR/steps.tsv"
+LOG_TXT="$TMP_DIR/log.txt"
+FINDINGS="$TMP_DIR/findings.tsv"
+
+: >"$LOG_TXT"
+: >"$FINDINGS"
+
+# --- Данные о запуске ---------------------------------------------------------
+
+if ! gh run view "$RUN_ID" --repo "$REPO" \
+      --json databaseId,displayTitle,workflowName,headBranch,headSha,event,conclusion,status,url \
+      >"$RUN_JSON" 2>"$TMP_DIR/run.err"; then
+  log_error "Не удалось получить запуск $RUN_ID: $(tr '\n' ' ' <"$TMP_DIR/run.err")"
+  log_info "Проверьте доступ к репозиторию и что ID существует: gh run list --repo $REPO --limit 10"
+  exit 3
 fi
 
-if [[ -z "$GITHUB_REPO" ]]; then
-  read -rp "Введите репозиторий в формате owner/name: " GITHUB_REPO
+run_field() { json_get "$(cat "$RUN_JSON")" "$1" "$2"; }
+
+WF_NAME=$(run_field '.workflowName' 'неизвестный workflow')
+RUN_TITLE=$(run_field '.displayTitle' '(без заголовка)')
+RUN_BRANCH=$(run_field '.headBranch' '?')
+RUN_SHA=$(run_field '.headSha' '?')
+RUN_STATE=$(run_field '.conclusion' "$(run_field '.status' 'unknown')")
+RUN_URL=$(run_field '.url' '')
+
+if [ "$RUN_STATE" != "failure" ]; then
+  log_warn "Запуск $RUN_ID завершён как '$RUN_STATE', а не failure — разбор всё равно сделан по упавшим шагам"
 fi
 
-log_action "CI-ANALYZER" "Analyzing CI run #$RUN_ID on repo $GITHUB_REPO"
+# name<TAB>step<TAB>stepConclusion — декартовы строки для каждого упавшего шага.
+# Строка на каждый упавший шаг: job<TAB>step<TAB>conclusion.
+gh run view "$RUN_ID" --repo "$REPO" --json jobs --jq '
+  (.jobs // [])[]
+  | select(((.conclusion // "") | ascii_downcase) == "failure")
+  | . as $j
+  | ($j.steps // [])[]
+  | select(((.conclusion // "") | ascii_downcase) | test("failure|timed_out|cancelled"))
+  | [$j.name, .name, .conclusion] | @tsv' >"$FAILED_STEPS" 2>/dev/null || : >"$FAILED_STEPS"
 
-# --- Analysis functions ---
+if [ ! -s "$FAILED_STEPS" ]; then
+  # У завершённого успехом запуска упавших шагов нет — это валидный пустой результат.
+  log_info "Упавших шагов не найдено (состояние: $RUN_STATE)"
+fi
 
-# Get run details
-get_run_info() {
-  local run_id="$1"
-  gh run view "$run_id" --repo "$GITHUB_REPO" --json status,conclusion,workflowName,headBranch --jq '.' 2>/dev/null
+add_finding() {
+  # category<TAB>что найдено<TAB>команда<TAB>уверенность<TAB>побочный эффект
+  printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >>"$FINDINGS"
 }
 
-# Get failed jobs for a run
-get_failed_jobs() {
-  local run_id="$1"
-  gh run view "$run_id" --repo "$GITHUB_REPO" --job --json name,status,conclusion,outcome --jq '.jobs[] | select(.status != "completed")' 2>/dev/null || true
+# --- Логи ---------------------------------------------------------------------
+
+if [ "$FETCH_LOG" = true ] && [ -s "$FAILED_STEPS" ]; then
+  log_info "Читаю логи упавших шагов..."
+  gh run view "$RUN_ID" --repo "$REPO" --log-failed 2>/dev/null \
+    | head -c "$MAX_LOG_BYTES" >"$LOG_TXT" || : >"$LOG_TXT"
+  if [ ! -s "$LOG_TXT" ]; then
+    log_warn "Логи недоступны (возможно, артефакты удалены) — классификация по именам шагов"
+  fi
+fi
+
+# Действия в Actions печатают строки с префиксом "<job>\t<step>\t| ". Снимаем префикс,
+# чтобы регулярки работали по содержимому, а не по его хвосту. awk, а не sed: BSD sed
+# не понимает \t, и префикс оставался бы в строке — якоря ^error тогда не срабатывали.
+LOG_BODY="$TMP_DIR/log.body"
+awk -F'\t' -v OFS='\t' '
+  { line = $0
+    if (NF > 1) {
+      for (i = NF; i >= 1; i--) {
+        if (substr($i, 1, 1) == "|") { line = substr($i, 2); sub(/^ /, "", line); break }
+      }
+    }
+    print line }' "$LOG_TXT" >"$LOG_BODY" 2>/dev/null || cp "$LOG_TXT" "$LOG_BODY"
+
+# --- Классификация ------------------------------------------------------------
+
+edition_of() {
+  local e
+  e=$(grep -m1 -oE 'edition *= *"[0-9]+"' Cargo.toml 2>/dev/null | grep -oE '[0-9]+' || true)
+  printf '%s\n' "${e:-2021}"
 }
 
-# Analyze common failure patterns
-analyze_cargo_format() {
-  log_info "Checking for formatting issues..."
-  
-  # Run cargo fmt check in dry-run mode
-  local format_output
-  if format_output=$(cargo fmt --check --all 2>&1); then
-    return 0
-  fi
-  
-  # Extract formatted files
-  local affected_files
-  affected_files=$(echo "$format_output" | grep "^diff" | awk '{print $NF}' | sort -u)
-  
-  if [[ -n "$affected_files" ]]; then
-    echo "formatting"
-    echo "$affected_files"
-    return 0
-  fi
-  
-  return 1
-}
+classify_log() {
+  local log="$1"
 
-analyze_cargo_clippy() {
-  log_info "Checking for clippy warnings..."
-  
-  # Run clippy check
-  local clippy_output
-  if clippy_output=$(cargo clippy --all-targets 2>&1); then
-    return 0
+  # rustfmt в CI печатает "Diff in <path> at line N:". Перечисляем ровно эти файлы:
+  # cargo fmt по workspace заодно переформатирует файлы вне задачи.
+  if grep -qE '^Diff in .* at line ' "$log"; then
+    local files e cmd
+    files=$(grep -oE '^Diff in [^ ]+ at line ' "$log" | awk '{print $3}' | sort -u | tr '\n' ' ')
+    e=$(edition_of)
+    cmd="rustfmt --edition $e ${files}"
+    add_finding "formatting" "rustfmt хочет переформатировать: $(printf '%s' "$files" | tr -d '\n')" "$cmd" "высокая" "локальные правки"
   fi
-  
-  # Extract warning-prone areas (not failures)
-  local issues
-  issues=$(echo "$clippy_output" | grep -E "(warning:|help:)" | head -20)
-  
-  if [[ -n "$issues" ]]; then
-    echo "clippy"
-    echo "$issues"
-    return 0
-  fi
-  
-  return 1
-}
 
-analyze_test_failures() {
-  log_info "Analyzing test failures..."
-  
-  # Check test output from logs
-  local test_log
-  test_log=$(gh run download "$RUN_ID" --name test-log --repo "$GITHUB_REPO" 2>/dev/null || true)
-  
-  if [[ -n "$test_log" ]]; then
-    local failing_tests
-    failing_tests=$(echo "$test_log" | grep -A5 "thread.*panicked\|test result: FAILED" | head -30)
-    
-    if [[ -n "$failing_tests" ]]; then
-      echo "test_expectation"
-      echo "$failing_tests"
-      return 0
+  # Известная отказоустойчивость этого репозитория: target-cpu=native из
+  # .cargo/config.toml и статический минимум ring.
+  if grep -qE 'CAPS_STATIC|MIN_STATIC_FEATURES' "$log"; then
+    add_finding "toolchain-cpu-flags" \
+      "ring проверяет фичи CPU: build идёт с -C target-cpu=native из .cargo/config.toml" \
+      'RUSTFLAGS="" cargo build --workspace' "высокая" "локальная сборка"
+  fi
+
+  # Тесты: имена из блоков "---- <name> stdout ----".
+  if grep -qE 'test result: FAILED|error: test failed' "$log"; then
+    local names
+    names=$(grep -oE '^---- [^ ]+ (stdout|stderr) ----' "$log" | awk '{print $2}' | sort -u | head -20 | tr '\n' ' ')
+    [ -n "$names" ] || names=$(grep -oE 'test [A-Za-z0-9_:]+ \.\.\. FAILED' "$log" | awk '{print $2}' | sort -u | head -20 | tr '\n' ' ')
+    if [ -n "$names" ]; then
+      add_finding "test-failure" "упавшие тесты: $names" "cargo test --workspace -- --nocapture" "средняя" "локальный прогон"
+    else
+      add_finding "test-failure" "тесты упали, имена в логе не найдены" "cargo test --workspace" "низкая" "локальный прогон"
     fi
   fi
-  
-  return 1
-}
 
-# Generate markdown table output
-generate_table_report() {
-  echo ""
-  echo "## CI Failure Analysis Report"
-  echo ""
-  printf '| Issue Type | Files Affected | Fix Command | Confidence |\n'
-  printf '|------------|----------------|-------------|------------|\n'
-  
-  local found_issues=false
-  
-  # Check formatting
-  if analyze_cargo_format > /tmp/format_check.txt 2>&1; then
-    local issue_type
-    issue_type=$(sed -n '1p' /tmp/format_check.txt)
-    local files
-    files=$(tail -n +2 /tmp/format_check.txt | tr '\n' ', ' | sed 's/,$//')
-    
-    if [[ "$issue_type" == "formatting" ]] && [[ -n "$files" ]]; then
-      printf '| %s | %s | \`cargo fmt\` | 100%% |\n' "$issue_type" "$files"
-      found_issues=true
-    fi
-    rm -f /tmp/format_check.txt
+  # Компиляция.
+  if grep -qE '^error\[E[0-9A-Z]+\]|^error: could not compile' "$log"; then
+    local crates codes
+    crates=$(grep -oE '^\s*(Compiling|Checking) [A-Za-z0-9_.-]+' "$log" | awk '{print $2}' | sort -u | tail -5 | tr '\n' ' ')
+    codes=$(grep -oE '^error\[[A-Z][0-9]+\]' "$log" | sort -u | tr '\n' ' ')
+    add_finding "compile-error" "коды ошибок: ${codes:-нет}; последние компилируемые crates: ${crates:-неясно}" \
+      "cargo check --workspace --all-targets" "средняя" "локальная проверка"
   fi
-  
-  # Check clippy
-  if analyze_cargo_clippy > /tmp/clippy_check.txt 2>&1; then
-    local issue_type
-    issue_type=$(sed -n '1p' /tmp/clippy_check.txt)
-    
-    if [[ "$issue_type" == "clippy" ]]; then
-      printf '| %s | multiple files | \`cargo clippy --fix --allow-dirty\` | 95%% |\n' "$issue_type"
-      found_issues=true
-    fi
-    rm -f /tmp/clippy_check.txt
-  fi
-  
-  # Check tests
-  if analyze_test_failures > /tmp/test_check.txt 2>&1; then
-    local issue_type
-    issue_type=$(sed -n '1p' /tmp/test_check.txt)
-    
-    if [[ "$issue_type" == "test_expectation" ]]; then
-      printf '| %s | see below | Review test expectations | 80%% |\n' "$issue_type"
-      found_issues=true
-    fi
-    rm -f /tmp/test_check.txt
-  fi
-  
-  if [[ "$found_issues" == false ]]; then
-    echo "| No automatic fixes detected | - | Manual inspection required | - |"
-  fi
-  
-  echo ""
-  echo "### Recommended Actions"
-  echo ""
-  
-  # Always suggest these basic fixes
-  echo "```bash"
-  echo "# 1. Apply formatting fixes"
-  echo "cargo fmt"
-  echo ""
-  echo "# 2. Apply clippy fixes (review carefully!)"
-  echo "cargo clippy --fix --allow-dirty --allow-staged"
-  echo ""
-  echo "# 3. Re-run tests"
-  echo "cargo test --workspace"
-  echo "```"
-  echo ""
-  echo "After applying fixes:"
-  echo "  \$ git commit -m \"chore: self-heal CI fixes\""
-  echo "  \$ git push"
-  echo ""
-}
 
-# Generate diff snippets
-generate_diff_report() {
-  echo ""
-  echo "## Potential Auto-Fixes (Diff Output)"
-  echo ""
-  
-  # Formatting diff
-  if analyze_cargo_format > /tmp/format_check.txt 2>&1; then
-    echo "### Formatting corrections"
-    echo "```diff"
-    cargo fmt --check --all 2>/dev/null || true
-    echo "```"
-    echo ""
-    rm -f /tmp/format_check.txt
+  if grep -qE "error: .*clippy|warning: .*declared as .#\[deny|clippy::" "$log"; then
+    add_finding "clippy" "clippy нашёл нарушения" "cargo clippy --workspace --all-targets" "средняя" "локальная проверка"
   fi
-  
-  # Clippy suggestions
-  if analyze_cargo_clippy > /tmp/clippy_check.txt 2>&1; then
-    echo "### Clippy suggestions"
-    echo "Check for 'help:' lines in clippy output showing suggested fixes."
-    echo ""
-    rm -f /tmp/clippy_check.txt
+
+  # Внешние причины: сеть, реестр, лимиты.
+  if grep -qiE 'failed to (fetch|load source|download)|network failure|timed out (during|while)|error sending request|Could not resolve host|403 Forbidden|429 ' "$log"; then
+    add_finding "transient-network" "похоже на сетевую/реестровую проблему, а не на изменение в коде" \
+      "gh run rerun $RUN_ID --failed" "средняя" "МУТАЦИЯ: перезапуск CI"
+  fi
+
+  if grep -qE 'out of memory|Cannot allocate|signal: 9 \(SIGKILL\)|Killed|exited with signal: 9' "$log"; then
+    add_finding "resource" "процесс убит по памяти или ресурсам" \
+      "cargo test --workspace --jobs 1" "низкая" "локальный прогон"
+  fi
+
+  # Отсутствующий локальный ресурс (модели, бинарь RAG) — то, что graceful-skip в тестах.
+  if grep -qiE 'No such file or directory.*(\.gguf|models/|rag-mcp|duckdb)|missing (model|binary)' "$log"; then
+    add_finding "missing-local-resource" "нужен файл или бинарь, которого нет в раннере" \
+      "проверить условный skip теста; для покрытия нужен self-hosted раннер" "средняя" "только чтение"
   fi
 }
 
-# Generate issue template
-generate_issue_report() {
-  local run_info
-  run_info=$(get_run_info "$RUN_ID")
-  
-  local workflow_name
-  workflow_name=$(json_get "$run_info" '.workflowName // "Unknown"')
-  local conclusion
-  conclusion=$(json_get "$run_info" '.conclusion // "unknown"')
-  local branch
-  branch=$(json_get "$run_info" '.headBranch // "unknown"')
-  
-  echo "```markdown"
-  echo "# Automated CI Self-Heal Suggestion"
-  echo ""
-  echo "## CI Run Details"
-  echo "- **Workflow**: $workflow_name"
-  echo "- **Status**: $conclusion"
-  echo "- **Branch**: $branch"
-  echo "- **Run ID**: $RUN_ID"
-  echo ""
-  echo "## Analysis Results"
-  echo ""
-  
-  generate_table_report
-  
-  echo ""
-  echo "---"
-  echo ""
-  echo "**Generated automatically by `ci-self-heal-analyzer.sh`**"
-  echo "Please review suggestions before committing."
-  echo "```"
+classify_steps() {
+  while IFS=$'\t' read -r job step _; do
+    [ -n "$step" ] || continue
+    case "$step" in
+      *fmt*|*format*)
+        grep -q 'formatting' "$FINDINGS" || add_finding "formatting" "упал шаг '$step'" 'rustfmt --check на файлах из лога' "средняя" "локальные правки" ;;
+      *clippy*)
+        grep -q 'clippy' "$FINDINGS" || add_finding "clippy" "упал шаг '$step'" "cargo clippy --workspace --all-targets" "средняя" "локальная проверка" ;;
+      *test*)
+        grep -q 'test-failure' "$FINDINGS" || add_finding "test-failure" "упал шаг '$step'" "cargo test --workspace" "низкая" "локальный прогон" ;;
+      *"Set up"*|*toolchain*|*cache*)
+        add_finding "infra" "упал служебный шаг '$step' (job: $job)" "gh run view $RUN_ID --repo $REPO --log-failed" "низкая" "только чтение" ;;
+    esac
+  done <"$FAILED_STEPS"
 }
 
-# Apply fixes (requires explicit confirmation)
-apply_fixes() {
-  echo ""
-  echo "=== Applying Fixes ==="
-  show_preview "Auto-fix application" \
-    "This will apply all detected fixes and commit them."
-  
-  if [[ "${DRY_RUN:-false}" != true ]]; then
-    read -rp "Confirm application of all fixes? [y/N]: " confirm
-    if [[ "${confirm,,}" != "y" ]]; then
-      log_info "Aborted by user"
-      return 1
+classify_log "$LOG_BODY"
+classify_steps
+
+if [ ! -s "$FINDINGS" ]; then
+  if [ -s "$FAILED_STEPS" ]; then
+    log_warn "Паттерны не распознаны — читать лог руками"
+  else
+    log_info "Упавших шагов нет — классифицировать нечего"
+  fi
+fi
+
+# --- Локальные read-only дополнения ------------------------------------------
+
+local_checks() {
+  command -v cargo >/dev/null 2>&1 || { log_warn "cargo не найден — локальные проверки пропущены"; return; }
+  local e out
+  e=$(edition_of)
+  if command -v rustfmt >/dev/null 2>&1; then
+    out=$(git diff --name-only HEAD 2>/dev/null | grep -E '\.rs$' || true)
+    if [ -n "$out" ]; then
+      if printf '%s\n' "$out" | xargs rustfmt --edition "$e" --check >/dev/null 2>&1; then
+        log_info "Локально: изменённые .rs файлы уже отформатированы"
+      else
+        log_warn "Локально: rustfmt хочет переформатировать изменённые файлы — см. rustfmt --edition $e <файлы>"
+      fi
     fi
   fi
-  
-  log_info "Applying fixes..."
-  
-  # Apply formatting
-  log_info "Applying formatting fixes..."
-  cargo fmt || {
-    log_error "Formatting fix failed"
-    return 1
+}
+
+if [ "$RUN_LOCAL" = true ]; then local_checks; fi
+
+# --- Отчёты -------------------------------------------------------------------
+
+COUNT=$(wc -l <"$FINDINGS" | tr -d ' ')
+
+emit_json() {
+  local findings steps
+  findings=$(jq -Rn '[inputs | select(length > 0) | split("\t")
+    | {category: .[0], detail: .[1], command: .[2], confidence: .[3], side_effects: .[4]}]' "$FINDINGS")
+  steps=$(jq -Rn '[inputs | select(length > 0) | split("\t")
+    | {job: .[0], step: .[1]}]' "$FAILED_STEPS")
+  jq -n --argjson count "$COUNT" --argjson findings "$findings" --argjson steps "$steps" \
+    --slurpfile run "$RUN_JSON" \
+    '{run: $run[0], failed_steps: $steps, findings: $findings, finding_count: $count}'
+}
+
+emit_table() {
+  printf '\n## Разбор CI: %s (#%s)\n\n' "$WF_NAME" "$RUN_ID"
+  printf -- '- **Запуск**: %s\n' "$RUN_TITLE"
+  printf -- '- **Ветка / SHA**: %s / %s\n' "$RUN_BRANCH" "$(printf '%.10s' "$RUN_SHA")"
+  printf -- '- **Итог**: %s\n' "$RUN_STATE"
+  printf -- '- **Репозиторий**: %s\n' "$REPO"
+  if [ -n "$RUN_URL" ]; then printf -- '- **Ссылка**: %s\n' "$RUN_URL"; fi
+  printf -- '- **Упавших шагов**: %s\n' "$(wc -l <"$FAILED_STEPS" | tr -d ' ')"
+
+  if [ ! -s "$FINDINGS" ]; then
+    printf '\nРаспознанных паттернов нет. Читать лог: `gh run view %s --repo %s --log-failed`\n' "$RUN_ID" "$REPO"
+    return
+  fi
+
+  printf '\n| Категория | Что найдено | Команда | Уверенность | Побочный эффект |\n'
+  printf '|---|---|---|---|---|\n'
+  while IFS=$'\t' read -r category detail cmd conf side; do
+    [ -n "$category" ] || continue
+    printf '| %s | %s | `%s` | %s | %s |\n' "$category" "$detail" "$cmd" "$conf" "$side"
+  done <"$FINDINGS"
+
+  printf '\nСкрипт ничего не применяет. Мутирующие команды (перезапуск CI, push, правки файлов) выполняйте осознанно.\n'
+}
+
+emit_md() {
+  {
+    emit_table
+    printf '\n### Упавшие шаги\n\n'
+    if [ -s "$FAILED_STEPS" ]; then
+      while IFS=$'\t' read -r job step _; do printf -- '- %s → %s\n' "$job" "$step"; done <"$FAILED_STEPS"
+    else
+      printf -- '- нет данных\n'
+    fi
+    if [ -s "$LOG_TXT" ]; then
+      printf '\n### Фрагменты лога\n\n```text\n'
+      grep -nE '^(error|Diff in|failures:|---- |test result:|warning: )' "$LOG_BODY" 2>/dev/null | head -40 || true
+      printf '```\n'
+    fi
   }
-  
-  # Apply clippy fixes
-  log_info "Applying clippy fixes..."
-  cargo clippy --fix --allow-dirty --allow-staged || {
-    log_warn "Clippy fix had some errors, but continuing..."
-  }
-  
-  # Stage changes
-  git add -A
-  
-  # Commit
-  git commit -m "chore: self-heal CI fixes" || {
-    log_warn "No changes to commit (or commit failed)"
-    return 1
-  }
-  
-  log_action "SUCCESS" "Applied fixes and committed"
-  echo ""
-  echo "✓ Fixes applied successfully!"
-  echo ""
-  echo "Next steps:"
-  echo "  - Review changes: git diff HEAD~1"
-  echo "  - Push to trigger re-run: git push"
-  
-  return 0
 }
 
-# --- Main execution ---
+emit_issue() {
+  {
+    printf '## Отказ CI: %s\n\n' "$WF_NAME"
+    printf 'Запуск: <%s> (ID %s, `%s`)\n\n' "${RUN_URL:-https://github.com/$REPO/actions/runs/$RUN_ID}" "$RUN_ID" "$RUN_BRANCH"
+    printf 'Итог: `%s`\n\n' "$RUN_STATE"
+    emit_table
+    printf '\n---\n\nСгенерировано `scripts/ci-self-heal-analyzer.sh`. Исправления не применялись.\n'
+  }
+}
 
-# Verify CI status first
-log_info "Fetching CI run info..."
-if ! run_info=$(get_run_info "$RUN_ID"); then
-  log_error "Failed to fetch CI run #$RUN_ID"
-  log_info "Make sure you have access to this repository"
-  exit 1
-fi
-
-local conclusion
-conclusion=$(json_get "$run_info" '.conclusion')
-
-if [[ "$conclusion" != "failure" ]]; then
-  log_warn "CI run #$RUN_ID did not fail (conclusion: $conclusion)"
-  log_info "Analysis is most useful for failed runs"
-fi
-
-log_info "Analyzing failure patterns..."
-
-# Generate report based on format
-case "$OUTPUT_FORMAT" in
-  table)
-    generate_table_report
-    ;;
-  diff)
-    generate_diff_report
-    ;;
+REPORT=""
+case "$OUTPUT" in
+  table) emit_table ;;
+  md)    emit_md ;;
+  json)  emit_json ;;
   issue)
-    generate_issue_report
-    ;;
-  *)
-    log_error "Invalid output format: $OUTPUT_FORMAT"
-    exit 1
+    emit_issue
+    REPORT="$REPORTS_DIR/ci-issue-body-$RUN_ID.md"
+    mkdir -p "$REPORTS_DIR"
+    emit_issue >"$REPORT"
+    printf '\nТело issue сохранено: %s\n' "$REPORT"
+    printf 'Создать issue (публичное действие, решает человек):\n'
+    printf '  gh issue create --repo %s --title "CI: %s (#%s)" --body-file "%s"\n' \
+      "$REPO" "$WF_NAME" "$RUN_ID" "$REPORT"
     ;;
 esac
 
-# If --commit was requested, apply fixes
-if [[ "$COMMIT_FIXES" == true ]]; then
-  if apply_fixes; then
-    exit 0
-  else
-    exit 1
-  fi
+if [ "$SAVE" = true ] && [ "$OUTPUT" != issue ]; then
+  mkdir -p "$REPORTS_DIR"
+  REPORT="$REPORTS_DIR/ci-analysis-$RUN_ID-$(date +%Y%m%d-%H%M%S).md"
+  emit_md >"$REPORT"
+  printf '\nОтчёт сохранён: %s\n' "$REPORT"
 fi
 
-exit 0
+log_action "CI-HEAL" "RUN=$RUN_ID findings=$COUNT" >&2
+
+[ "$COUNT" -gt 0 ] && exit 0
+exit 1
