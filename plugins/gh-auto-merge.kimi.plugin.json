@@ -1,0 +1,34 @@
+{
+  "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
+  "name": "gh-auto-merge",
+  "version": "0.1.0",
+  "description": "Слияние PR через gh только когда выполнены все условия: открыт, не черновик, mergeable, check-и зелёные. Умеет ждать прохождения check-ов и показывать команду gh без слияния.",
+  "keywords": [
+    "github",
+    "gh",
+    "pull-request",
+    "merge",
+    "auto-merge",
+    "checks",
+    "ci",
+    "squash"
+  ],
+  "author": "themoretheless",
+  "license": "MIT",
+  "skillInstructions": "Слияние pull request через GitHub CLI после проверки условий. Использовать, когда нужно слить PR без ручной сверки mergeable, check-ов и ревью, или прогнать несколько PR подряд.\n\nКоманда: bin/gh-auto-merge.sh [ОПЦИИ] <НОМЕР_PR>; общие функции — bin/scripts-common.sh (обязателен рядом со скриптом).\n\nУсловия слияния: PR открыт, не draft, mergeable=true, свёртка statusCheckRollup равна success. Пока check-и в процессе, скрипт опрашивает статус до --timeout (default 30m); при failure или action_required сливает отказывается.\n\nГраницы: только чтение до самого слияния. Флаг --admin не используется, защита веток не обходится, принудительное слияние невозможное. --dry-run печатает планируемую команду gh и ничего не меняет. Сначала --dry-run, потом реальное слияние только по явной просьбе пользователя; gh pr merge — действие, видимое другим людям.\n\nОпции: --squash (default) | --merge | --rebase, --delete-branch, --auto (авто-сливание GitHub вместо немедленного), --timeout=DURATION, --interval=SECONDS, --repo=owner/name, --dry-run, -h. Коды выхода: 0 — слит, 1 — условие не выполнено, 2 — таймаут или аргументы, 3 — нет gh auth.\n\nТребования: gh в PATH и gh auth status успешен (либо GH_TOKEN/GITHUB_TOKEN), git-репозиторий с GitHub remote для вывода owner/name. Токен не печатать. Работает без изоляции: обычный shell, без MCP-серверов.",
+  "interface": {
+    "displayName": "GH Auto Merge",
+    "shortDescription": "Слить PR, только когда условия выполнены",
+    "longDescription": "Проверяет открытое состояние, draft, mergeable и statusCheckRollup, ждёт прохождения check-ов с таймаутом и сливает выбранным способом. Показывает команду gh до выполнения, не обходит защиту веток и не использует --admin.",
+    "developerName": "themoretheless",
+    "websiteURL": "",
+    "iconUrl": "",
+    "category": "DEVELOPER",
+    "hostKind": "local",
+    "platforms": [
+      "macos",
+      "linux"
+    ]
+  },
+  "skills": "./skills/"
+}

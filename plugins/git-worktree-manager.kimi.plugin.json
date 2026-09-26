@@ -1,0 +1,33 @@
+{
+  "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
+  "name": "git-worktree-manager",
+  "version": "0.1.0",
+  "description": "Worktree без ручной сверки: список со связкой путь-ветка-коммит, создание с проверкой что ветка не занята, удаление с отказом на грязном дереве, prune и отчёт.",
+  "keywords": [
+    "git",
+    "worktree",
+    "branches",
+    "parallel",
+    "vcs",
+    "prune",
+    "lifecycle"
+  ],
+  "author": "themoretheless",
+  "license": "MIT",
+  "skillInstructions": "Управление git worktree из рабочего дерева пользователя. Использовать, когда нужно поднять отдельное дерево под ветку, понять какие ветки уже заняты worktree, или прибрать записи про удалённые каталоги.\n\nКоманда: bin/git-worktree-manager.sh <КОМАНДА> [АРГУМЕНТЫ]; общие функции — bin/scripts-common.sh (обязателен рядом со скриптом).\n\nКоманды: add <ветка> <путь> [--detach] (создаёт дерево; свою worktree-ветку разрешает, занятому другим деревом — отказывает с rc 1 и подсказкой --detach), list [--verbose|--json] (путь, HEAD, ветка, занятость, dirty), remove <путь> [--force] (только git worktree remove: ветку не трогает, на незакоммиченных изменениях отказывает без --force, основной worktree не удаляет), prune [--dry-run], report.\n\nГраницы: скрипт не удаляет ветки, не делает reset/checkout в основном дереве, не трогает чужие worktree. --force у remove — только по явной просьбе: он выбрасывает незакоммиченную работу. Перед remove показать git -C <путь> status --short и объяснить, что потеряется.\n\nКоды выхода: 0 — успешно, 1 — отказ по безопасности или занятая ветка, 2 — аргументы.\n\nТребования: git в PATH, запуск внутри git-репозитория. Пути сверяются физически (pwd -P), потому что на macOS /tmp — симлинк на /private/tmp, и logical-путь не совпадает с тем, что отдаёт git worktree list. Работает без изоляции: обычный shell, без MCP-серверов.",
+  "interface": {
+    "displayName": "Git Worktree Manager",
+    "shortDescription": "Создание, список, удаление и prune worktree",
+    "longDescription": "Обёртка над git worktree с проверками: add не берёт ветку, уже занятую другим деревом, list связывает путь с веткой и коммитом и помечает грязные деревья, remove удаляет только worktree и отказывается на незакоммиченных изменениях без --force.",
+    "developerName": "themoretheless",
+    "websiteURL": "",
+    "iconUrl": "",
+    "category": "DEVELOPER",
+    "hostKind": "local",
+    "platforms": [
+      "macos",
+      "linux"
+    ]
+  },
+  "skills": "./skills/"
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
+  "name": "gh-pr-status-watch",
+  "version": "0.1.0",
+  "description": "Мониторинг check-ов pull request через gh: один опрос или слежение до завершения, таблица по каждому check-у или NDJSON, сразу несколько PR.",
+  "keywords": [
+    "github",
+    "gh",
+    "pull-request",
+    "checks",
+    "ci",
+    "status",
+    "watch",
+    "polling"
+  ],
+  "author": "themoretheless",
+  "license": "MIT",
+  "skillInstructions": "Опрос статус-чек-ов pull request через GitHub CLI. Использовать, когда нужно дождаться прохождения CI, посмотреть, какой именно check висит, или следить за несколькими PR одновременно.\n\nКоманда: bin/gh-pr-status-watch.sh [ОПЦИИ] <НОМЕР_PR>...; общие функции — bin/scripts-common.sh (обязателен рядом со скриптом).\n\nТолько чтение: скрипт вызывает gh pr view и ничего не меняет в PR и в репозитории. Он не сливает, не комментирует и не закрывает — для слияния есть gh-auto-merge.\n\nОпции: --once (один опрос), --json (по объекту на PR, NDJSON; для массива — | jq -s .), --interval=DURATION (default 10s), --timeout=DURATION (0 — без лимита), --repo=owner/name, -h. Слежение в реальном времени включено только для одного PR; для нескольких делает один опрос. Коды выхода: 0 — зелёный или check-ов нет, 1 — есть упавший check, 2 — таймаут слежения, 3 — нет gh auth, 4 — аргументы.\n\nСводка по check-ам строится по statusCheckRollup: свёртка массива (any failure -> failure, any pending -> pending, все success -> success), потому что поля .statusCheckRollup.conclusion у массива нет.\n\nТребования: gh в PATH и успешный gh auth status (или GH_TOKEN/GITHUB_TOKEN), git-репозиторий с GitHub remote для owner/name. Уважать rate limit: при 403/429 не долбить повторами. Работает без изоляции: обычный shell, без MCP-серверов.",
+  "interface": {
+    "displayName": "GH PR Status Watch",
+    "shortDescription": "Таблица и слежение check-ов PR",
+    "longDescription": "Опрашивает statusCheckRollup указанных PR и выводит ровную таблицу по каждому check-у или NDJSON. Режим слежения с интервалом и таймаутом для одного PR. Только чтение: ничего не меняет в PR и репозитории.",
+    "developerName": "themoretheless",
+    "websiteURL": "",
+    "iconUrl": "",
+    "category": "DEVELOPER",
+    "hostKind": "local",
+    "platforms": [
+      "macos",
+      "linux"
+    ]
+  },
+  "skills": "./skills/"
+}

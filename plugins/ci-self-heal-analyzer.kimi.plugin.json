@@ -1,0 +1,33 @@
+{
+  "$schema": "https://catalog.msh.team/misc/kimi.plugin.schema.json",
+  "name": "ci-self-heal-analyzer",
+  "version": "0.1.0",
+  "description": "Разбор упавшего запуска GitHub Actions: читает JSON запуска и логи gh, классифицирует причину и предлагает консервативные команды. Сам ничего не меняет.",
+  "keywords": [
+    "ci",
+    "github-actions",
+    "gh",
+    "failure-analysis",
+    "rust",
+    "cargo",
+    "troubleshooting"
+  ],
+  "author": "themoretheless",
+  "license": "MIT",
+  "skillInstructions": "Классификация отказа запуска GitHub Actions и подсказки, что чинить. Использовать, когда CI покраснел и нужно понять причину по логам, не листая раннер руками.\n\nКоманда: bin/ci-self-heal-analyzer.sh [ОПЦИИ] <RUN_ID>; общие функции — bin/scripts-common.sh (обязателен рядом со скриптом). ID запуска брать из gh run list --limit 5.\n\nТолько чтение. Скрипт читает gh run view (json) и gh run view --log-failed, распознаёт паттерны и печатает команды; он не правит файлы, не коммитит, не пушит и не перезапускает CI. Команда gh run rerun появляется как подсказка с пометкой МУТАЦИЯ и выполняется человеком.\n\nРаспознаёт: rustfmt (Diff in <file> at line N), ошибки компиляции error[EXXXX], упавшие тесты с именами из блоков ---- <test> stdout ----, clippy, сетевые сбои загрузки crates, нехватку памяти, отсутствие локальных ресурсов (модели .gguf, бинарь rag-mcp) и assert фич CPU у ring (CAPS_STATIC и MIN_STATIC_FEATURES), который чинится RUSTFLAGS=\"\" из-за target-cpu=native в .cargo/config.toml.\n\nОпции: --output=table|md|json|issue, --save (отчёт в $REPORTS_DIR), --repo=owner/name, --no-log (классификация только по именам шагов), --max-log=BYTES (default 400000), --local (дополнить read-only проверками rustfmt --check по изменённым .rs), -h. Формат issue пишет тело в файл и печатает готовую команду gh issue create --body-file; сам issue создаёт человек.\n\nКоды выхода: 0 — находки есть, 1 — паттерны не распознаны (читать лог руками), 2 — аргументы, 3 — нет gh auth или запуск недоступен.\n\nПодсказки по форматированию дают rustfmt по конкретным файлам из лога, а не cargo fmt по всему workspace: cargo fmt переформатирует файлы вне задачи и загрязняет диф. Не запускать cargo fmt -p в репозитории, который не считается fmt-чистым. Требования: gh с gh auth status, jq, git-репозиторий с GitHub remote. Токен не печатать. Работает без изоляции: обычный shell, без MCP-серверов.",
+  "interface": {
+    "displayName": "CI Self-Heal Analyzer",
+    "shortDescription": "Разбор отказа CI и подсказки команд",
+    "longDescription": "Читает JSON запуска GitHub Actions и логи упавших шагов, сводит их к категориям (форматирование, компиляция, тесты, clippy, сеть, память, отсутствующие локальные ресурсы, assert фич CPU у ring) и печатает консервативные команды. Изменяющие действия помечены и не выполняются.",
+    "developerName": "themoretheless",
+    "websiteURL": "",
+    "iconUrl": "",
+    "category": "DEVELOPER",
+    "hostKind": "local",
+    "platforms": [
+      "macos",
+      "linux"
+    ]
+  },
+  "skills": "./skills/"
+}

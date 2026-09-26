@@ -1,303 +1,79 @@
 ---
 name: gh-pr-status-watch
-description: Непрерывный мониторинг статусов проверок PR с real-time updates. Использовать когда нужно отслеживать прогресс CI checks, ждать passing builds, или мониторить multiple PRs одновременно.
+description: Опрос check-ов pull request через gh — один проход таблицей или NDJSON, либо слежение за одним PR до завершения CI. Использовать, когда нужно дождаться зелёного статуса или понять, какой check висит.
 ---
 
-# PR Status Watch via GitHub CLI
+# Статус check-ов PR
 
-Непрерывное слежение за статусами проверок pull requests с автоматическим обновлением статуса.
+Скрипт `scripts/gh-pr-status-watch.sh` (в составе плагина — `bin/gh-pr-status-watch.sh`,
+рядом обязательная `bin/scripts-common.sh`). Только чтение: вызывает `gh pr view`
+и ничего не меняет в PR и в репозитории.
 
-## Когда использовать
-
-- Ожидание прохождения long-running CI builds (test suites >10 мин)
-- Мониторинг multiple PRs параллельно перед merge decisions
-- Alerting при failing checks для быстрого triage
-- Интеграция в CI dashboards для machine-parseable status
-- Terminal watch mode с实时更新
-
-## Установка требований
+## Использование
 
 ```sh
-# Проверить авторизацию
-gh auth status
-
-# Если не авторизован
-gh auth login
+scripts/gh-pr-status-watch.sh --once 123            # один опрос, ровная таблица
+scripts/gh-pr-status-watch.sh --once --json 123     # машиночитаемо
+scripts/gh-pr-status-watch.sh 123                   # следить до завершения check-ов
+scripts/gh-pr-status-watch.sh --interval=30s --timeout=20m 123
+scripts/gh-pr-status-watch.sh --once 12 34 56       # несколько PR за один проход
 ```
 
-## Основные команды
+Флаги: `--once`, `--json`, `--interval=DURATION` (default `10s`), `--timeout=DURATION`
+(0 — без лимита), `--repo=owner/name`, `-h`.
 
-### Watch Mode (Continuous Monitoring)
+Слежение в реальном времени имеет смысл только для одного PR; при нескольких аргументах
+скрипт делает один проход и выходит.
+
+## Вывод
+
+Таблица — по строке на check: имя, `status` (в нижнем регистре), `conclusion`.
+Пустой conclusion у незавершённого check-а показывается как `…`, отмеченные ✗ —
+упавшие (`failure|timed_out|cancelled`), ✓ — `success|skipped|neutral`. Над строкой
+итог: `success`, `pending`, `failure` или `none`.
+
+`--json` печатает по одному объекту `gh pr view` на PR (NDJSON). Для массива:
 
 ```sh
-scripts/gh-pr-status-watch.sh [--interval=DURATION] <PR_NUMBER>
+scripts/gh-pr-status-watch.sh --once --json 12 34 | jq -s 'map({n: .number, s: .statusCheckRollup})'
 ```
 
-**Примеры:**
-```bash
-# Monitor single PR until all checks complete
-scripts/gh-pr-status-watch.sh 123
+## Коды выхода
 
-# Custom poll interval (5 seconds)
-scripts/gh-pr-status-watch.sh --interval=5s 123
+- `0` — check-и зелёные или их нет;
+- `1` — есть неуспешный check (или PR недоступен);
+- `2` — таймаут слежения;
+- `3` — нет `gh auth`;
+- `4` — неверные аргументы.
 
-# Exit after one poll (no continuous watching)
-scripts/gh-pr-status-watch.sh --interval=0s 123
-```
-
-### Batch Mode (Multiple PRs)
+Удобно как gate перед слиянием:
 
 ```sh
-cat pr-list.txt | xargs -I{} scripts/gh-pr-status-watch.sh {}
+scripts/gh-pr-status-watch.sh --once "$PR" || exit 1
 ```
 
-Или напрямую:
-```bash
-scripts/gh-pr-status-watch.sh 123 456 789
-```
+## Как сводится статус
 
-### JSON Output (Machine Parseable)
+Скрипт сворачивает массив `statusCheckRollup`, а не читает `.statusCheckRollup.conclusion`
+(у массива такого поля нет, и такой путь даёт пустоту). Приоритет: любой
+`failure|timed_out|cancelled|action_required` → `failure`; иначе любой незавершённый
+(`queued|in_progress|pending|waiting`) → `pending`; иначе все
+`success|skipped|neutral` → `success`; пустой массив → `none`.
 
-```sh
-scripts/gh-pr-status-watch.sh --json <PR_NUMBER> | jq '.checks[]'
-```
+У `gh pr checks --json` другие имена полей: доступны `bucket`, `completedAt`,
+`description`, `event`, `link`, `name`, `startedAt`, `state`, `workflow` — ни `status`,
+ни `conclusion`, ни `url` там нет, gh отсекает запрос ещё до обращения к API. Поэтому
+скрипт читает `statusCheckRollup` один раз из `gh pr view`.
 
-**Output format:**
-```json
-{
-  "pr": 123,
-  "checks": [
-    {
-      "name": "Build & Test",
-      "workflowName": "CI",
-      "status": "completed",
-      "conclusion": "success",
-      "detail": "",
-      "url": "https://github.com/..."
-    },
-    {
-      "name": "Security Scan",
-      "workflowName": "Security",
-      "status": "pending",
-      "conclusion": null,
-      "detail": "Waiting for queue position #3",
-      "url": "https://github.com/..."
-    }
-  ]
-}
-```
+## Границы
 
-## Markdown Output Format
+- Никаких `gh pr merge`, `gh pr edit`, комментариев: для слияния есть gh-auto-merge.
+- Не долбить API: интервал не ниже секунды, при 403/429 сообщить о лимите
+  (`gh api rate_limit --jq '.rate'`), а не уменьшать интервал.
+- Ошибки gh показывать как есть: 404, `not logged in`, `no such remote`.
+- Токен не печатать; `gh auth status` достаточно.
 
-Human-readable table with automatic refresh:
+## Окружение
 
-```
-==================================================
-2026-09-26 14:32:15 | Monitoring PRs on owner/repo
-PRs: 123
-Interval: 10s
-==================================================
-
-── PR #123 ──
-┌─────────────┬──────────────────┬─────────────┬─────────────┬──────────────────────────┐
-│ PR №       │ Check Name        │ Status      │ Result      │ Detail                   │
-├─────────────┼──────────────────┼─────────────┼─────────────┼──────────────────────────┤
-│ #123        │ Build & Test      │ completed   │ success     │                          │
-│ #123        │ Security Scan     │ completed   │ failure     │ 2 high-severity issues   │
-│ #123        │ Documentation     │ pending     │ n/a         │ Waiting for queue        │
-│ #123        │ Lint              │ completed   │ success     │                          │
-└─────────────┴──────────────────┴─────────────┴─────────────┴──────────────────────────┘
-
-📊 Summary: 2 passing, 1 failing, 1 pending
-⚠️  WARNING: Some checks are failing!
-```
-
-## Integration in Scripts
-
-### Wait for All Checks to Pass
-
-```bash
-#!/bin/bash
-# wait-for-green.sh
-
-PR_NUM=$1
-timeout=3600  # 1 hour max
-
-echo "Waiting for PR #$PR_NUM to become green..."
-
-while true; do
-  STATUS=$(scripts/gh-pr-status-watch.sh --json "$PR_NUM" | \
-    jq '[.checks[] | select(.status == "completed")] | length')
-  
-  FAILED=$(scripts/gh-pr-status-watch.sh --json "$PR_NUM" | \
-    jq '[.checks[] | select(.status == "completed" and .conclusion == "failure")] | length')
-  
-  if [[ $FAILED -eq 0 ]] && [[ $STATUS -gt 0 ]]; then
-    echo "✓ All checks passed!"
-    break
-  fi
-  
-  sleep 30
-done
-```
-
-### CI Dashboard Integration
-
-```python
-# ci_dashboard.py
-import subprocess
-import json
-
-def get_pr_status(pr_num):
-    result = subprocess.run(
-        ['bash', 'scripts/gh-pr-status-watch.sh', '--json', str(pr_num)],
-        capture_output=True, text=True
-    )
-    return json.loads(result.stdout)
-
-def render_status(pr_num):
-    data = get_pr_status(pr_num)
-    print(f"\nPR #{pr_num}")
-    print("-" * 50)
-    
-    for check in data['checks']:
-        emoji = "✅" if check['conclusion'] == 'success' else \
-                "❌" if check['conclusion'] == 'failure' else \
-                "⏳"
-        print(f"{emoji} {check['name']}: {check['conclusion'] or 'pending'}")
-    
-    summary(data['checks'])
-
-def summary(checks):
-    passing = sum(1 for c in checks if c['conclusion'] == 'success')
-    failing = sum(1 for c in checks if c['conclusion'] == 'failure')
-    pending = sum(1 for c in checks if c['status'] != 'completed')
-    
-    print(f"\nSummary: {passing} passing, {failing} failing, {pending} pending")
-```
-
-### Slack/Discord Notifications
-
-```bash
-#!/bin/bash
-# notify-failing-checks.sh
-
-PR_NUM=$1
-SLACK_WEBHOOK=$2
-
-for check in $(scripts/gh-pr-status-watch.sh --json "$PR_NUM" | \
-               jq -r '.checks[] | select(.status == "completed" and .conclusion == "failure") | .name'); do
-  curl -X POST "$SLACK_WEBHOOK" -H 'Content-type: application/json' \
-    --data "{
-      \"attachments\":[{
-        \"color\":\"danger\",
-        \"text\":\"⚠️ Failing check in PR #$PR_NUM: \`$check\`\"
-      }]}"
-done
-```
-
-## Configuration
-
-### Environment Variables
-
-```bash
-# Set default polling interval
-export DEFAULT_INTERVAL="10s"  # options: s, m, h suffixes
-
-# Set repository if not in git workspace
-export GITHUB_REPO="owner/name"
-```
-
-### Interval Units
-
-| Suffix | Meaning | Example | Seconds |
-|--------|---------|---------|---------|
-| s | seconds | `5s` | 5 |
-| m | minutes | `2m` | 120 |
-| h | hours | `1h` | 3600 |
-
-## Use Cases
-
-### Developer Waiting for Tests
-
-```bash
-# Start watching while doing other work
-scripts/gh-pr-status-watch.sh 123 &
-WATCH_PID=$!
-
-# Do other development work...
-git checkout feature-x
-
-# Stop watching when convenient
-kill $WATCH_PID
-```
-
-### CI Integration Check
-
-```yaml
-# .github/workflows/pr-dashboard.yml
-name: PR Status Dashboard
-on:
-  schedule:
-    - cron: '*/15 * * * *'  # Every 15 minutes
-
-jobs:
-  dashboard:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Get PR statuses
-        run: |
-          for PR in 123 456 789; do
-            bash scripts/gh-pr-status-watch.sh --json "$PR" >> pr-status.json
-          done
-      
-      - name: Generate report
-        run: |
-          python generate-dashboard-report.py pr-status.json
-```
-
-### Blocked PR Detection
-
-```bash
-#!/bin/bash
-# find-blocked-prs.sh
-
-echo "=== Finding Blocked PRs ==="
-
-for PR in $(gh pr list --state open --json number --jq '.[].number'); do
-  CHECKS=$(scripts/gh-pr-status-watch.sh --json "$PR" | jq '.checks[]')
-  
-  FAILING=$(echo "$CHECKS" | jq '[.[] | select(.conclusion == "failure")] | length')
-  
-  if [[ $FAILING -gt 0 ]]; then
-    echo "🚫 PR #$PR has $FAILING failing checks"
-  fi
-done
-```
-
-## Safety Notes
-
-- **Read-only operations**: Скрипт только читает статус, не меняет ничего
-- **Rate limit aware**: Wait_for_rate_limit встроен автоматически
-- **Graceful exit**: Ctrl+C stops clean watch loop
-- **No side effects**: Даже в watch mode нет изменений в репозитории
-
-## Comparison with `gh pr checks --watch`
-
-GitHub CLI自带命令:
-```sh
-gh pr checks 123 --watch  # Fixed timing, only one PR, no customization
-```
-
-Наши улучшения:
-```sh
-scripts/gh-pr-status-watch.sh --interval=5s 123  # Customizable interval
-scripts/gh-pr-status-watch.sh --json 123         # Machine-parseable output
-scripts/gh-pr-status-watch.sh 123 456 789        # Multiple PRs simultaneously
-```
-
-Преимущества:
-- ✅ Настраиваемый интервал опроса
-- ✅ JSON вывод для automation
-- ✅ Поддержка batch режимов
-- ✅ Кастомная форм
+Обычный shell: `gh` в PATH и авторизован (`gh auth login` или `GH_TOKEN`/`GITHUB_TOKEN`),
+`jq`, git-репозиторий с GitHub remote для вывода `owner/name`. Ни MCP-сервера, ни контейнера.
