@@ -9,7 +9,7 @@ tok/s) and keep Qwen MoE wins from regressing.
 | --- | --- | --- | --- |
 | `matvec_q5_k_mv` | ON | `ALLPAKA_Q5_MV=0` | llama-structure Q5_K matvec + `SWIGLU_X`; GLM shared gate/up, qwen35 expert down |
 | `matvec_q8_0_mv` | ON | `ALLPAKA_Q8_MV=0` | llama-structure Q8_0 matvec + `SWIGLU_X`; GLM down, qwen35 projections |
-| decode SwiGLU fuse | ON | `ALLPAKA_SWFUSE=0` | drops standalone swiglu + one barrier per MoE layer (now covers Q5_K down) |
+| decode SwiGLU fuse | **OFF** | `ALLPAKA_SWFUSE=1` | folds swiglu into the down loads, drops a dispatch + barrier; flipped off-by-default 2026-09-26 - costs the 235B q3_k down 7.7 ms/token (10/10 signs), nothing on q8_0 |
 | decode `attend_mv` | ON | `ALLPAKA_ATTN_MV=0` | four-position-in-flight flash-attn vec path |
 | plain `mmll_q5_0` | ON (via `MM_LL`) | — | GLM / dense Q5_0 prefill mm (indexed `mmll_id_q5_0` already existed) |
 | `moe_ffn_mega` | **OFF (code)** | — | disabled; prior multi-TG atomic spin froze Macs — no env re-enable |
@@ -18,7 +18,7 @@ tok/s) and keep Qwen MoE wins from regressing.
 | `ALLPAKA_SHARED_STAGGER` | OFF | `=1` | GLM: expert Q4 gate/up → barrier → expert Q8 down ∥ shared Q5 gate/up → barrier → shared Q8 down. **Unmeasured in-agent** (Metal=nil); enable for Terminal A/B via `scripts/glm-ab-stagger.sh`. Off under `SHARED_TAIL` |
 | `ALLPAKA_MV_TG` | 128 | `{64,128,256}` | matvec threadgroup size (geometry only; NR0 stays 2) |
 | `ALLPAKA_MV_ID` | **ON** | `=0` | llama `mul_mv_id` grid for INDEXED Q4/Q8 `_mv` (`grid.z = slots`). Flat 1D opt-out for A/B |
-| dense SwiGLU fuse | ON | `ALLPAKA_SWFUSE=0` | same `SWIGLU_X` as MoE on the one dense FFN layer |
+| dense SwiGLU fuse | **OFF** | `ALLPAKA_SWFUSE=1` | same `SWIGLU_X` as MoE on the one dense FFN layer; q8_0 measures 0.99x, so nothing is lost by leaving it off |
 
 Microbench harnesses (Mac only):
 

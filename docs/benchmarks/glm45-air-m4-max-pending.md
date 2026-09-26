@@ -38,5 +38,7 @@ scripts/airbug-vs-llama.sh models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf
 ## Notes
 
 - Do **not** enable MEGA (can freeze the Mac); see `docs/decode-opts.md`.
-- Env defaults: Q5/Q8 `_mv` ON, SWFUSE ON, ATTN_MV ON; no overrides in reports.
+- Env defaults: Q5/Q8 `_mv` ON, SWFUSE ON as measured (opt-IN since 2026-09-26,
+  `2026-09-24-235b-swfuse/results.txt` — GLM itself measured flat), ATTN_MV ON;
+  no overrides in reports.
 - Re-measure when cool before claiming a close of the historical decode gap.

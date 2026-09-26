@@ -8,8 +8,8 @@
 //! in seconds without loading a 46 GiB model.
 //!
 //! Run: `cargo test -p allpaka-backend --test gpu_glm_mvbench -- --ignored --nocapture`
-//! A/B new kernels: `ALLPAKA_Q5_MV=0 ALLPAKA_Q8_MV=0` (and optionally
-//! `ALLPAKA_SWFUSE=0`) against the defaults.
+//! A/B new kernels: `ALLPAKA_Q5_MV=0 ALLPAKA_Q8_MV=0` against the defaults.
+//! The decode SwiGLU fold is opt-IN since 2026-09-26, so `=1` is the fold arm.
 //! Indexed geometry A/B: default `MV_ID` on vs `ALLPAKA_MV_ID=0` (flat).
 
 #![cfg(target_os = "macos")]

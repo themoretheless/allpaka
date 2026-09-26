@@ -3,7 +3,9 @@
 Measured 2026-09-12 on
 `models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` (`qwen35moe`). MEGA disabled.
 `ALLPAKA_BENCH_SKIP_MTP=1`. No env overrides → Q5/Q8 `_mv`, SWFUSE, ATTN_MV
-at defaults (ON).
+at defaults (ON). SWFUSE became opt-IN on 2026-09-26
+(`2026-09-24-235b-swfuse/results.txt`), so these rows measured the fused regime
+and a post-flip number needs a re-run.
 
 ## Sustained warm
 

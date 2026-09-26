@@ -1,0 +1,481 @@
+# SwiGLU fusion results: the q3_k down's 2.09x was the instrument timing a different kernel
+
+Against `preregistration.txt` (criteria G, H, I for Phase S; J, K for the bench
+arm). Machine Apple M4 Max, model `qwen3-235b-a22b-instruct-2507-Q2_K_XL.gguf`,
+PP 480 / TG 64, `ALLPAKA_PROFILE=max-performance ALLPAKA_BENCH_SKIP_MTP=1`,
+one env flip `ALLPAKA_SWFUSE=0` against the shipped default (ON).
+Split instrument on (`ALLPAKA_DECODE_SPLIT=1`). Raw runs `s1-base.txt`,
+`s1-swf0.txt` ... `s3-swf0.txt` (+ `.json`).
+
+## 1. Phase S - all three reps, nothing dropped
+
+| rep | order | base wall | swf0 wall | Δwall | base `down` | swf0 `down` | base `swiglu` | swf0 `swiglu` | `down`+`swiglu` |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | AB | 47.66 | 40.62 | -7.03 | 16.010 | 8.500 | 0.040 | 0.243 | 16.050 -> 8.743 |
+| 2 | BA | 48.59 | 41.88 | -6.72 | 16.048 | 8.467 | 0.039 | 0.234 | 16.087 -> 8.701 |
+| 3 | AB | 87.34 | 63.59 | -23.75 | 28.497 | 11.841 | 0.057 | 0.289 | 28.554 -> 12.130 |
+
+Rep 3 is REJECTED as a pair: its base wall (87.34) is 1.83x the cluster the same
+instrument gives on this machine (`47.66-48.59`, and RUN 2's `47.66-48.12`), and
+every one of its labels moved with the wall (`qkv` 7.345 against 5.23-5.26,
+`gate_up` 19.867 against 11.86-11.88). That is the machine, not the treatment -
+the run was contended. It is reported because the pre-registration says report
+every run; its ratios happen to agree with reps 1-2, but they are not evidence.
+
+Reps 1-2, drift controls (labels the treatment cannot touch), mean base -> mean arm:
+`resnorm` 2.449 -> 2.472 (x1.009), `qkv` 5.245 -> 5.214 (0.994), `attend` 0.693
+-> 0.711 (1.026), `wo` 4.441 -> 4.412 (0.993), `router` 1.747 -> 1.715 (0.982),
+`gate_up` 11.872 -> 11.892 (1.002), `combine` 0.340 -> 0.339 (0.997), `head`
+1.013 -> 1.011 (0.998). Every control is within +-2.6%, so the pair is admissible
+and the treatment's own movement is 47-74% of `down`, not drift.
+
+## 2. What moved
+
+  - `down` 16.010/16.048 -> 8.500/8.467 ms/token, x0.529 (a 1.89x cut).
+  - `swiglu` 0.040/0.039 -> 0.243/0.234 ms/token, +0.203 - the standalone
+    dispatch fusion was supposed to be eliminating.
+  - `down`+`swiglu` 16.05/16.09 -> 8.74/8.70 ms/token: **7.31-7.39 ms/token
+    saved, 15.3% of the token.**
+  - Wall (split mode, which itself costs 13-16% of the token): 47.66 -> 40.62 and
+    48.59 -> 41.88, -7.03/-6.72 ms/token, agreeing with the label pair to 0.3 ms.
+  - Dispatches/token 1318 -> 1397 (+79, one standalone swiglu per MoE down that
+    was fused; 84 352 -> 89 408 over 64 tokens).
+  - Nothing else moved: `gate_up` is never fused and is flat at 11.87 -> 11.89.
+
+## 3. Criterion verdicts
+
+  G FIRES, on both of its conditions: the `down` label drops 1.89x (>= 1.5x) and
+  `down`+`swiglu` (8.74) is far below the baseline pair's `down`+`swiglu` (16.05).
+  So the 2.09x that `2026-09-24-235b-decode-split` section 5 measured was the
+  instrument timing a kernel the model does not run. Unfused, the same stage
+  prices 1.71 GB in 8.48 ms = 202 GB/s against the indexed micro-bench's 221.3
+  GB/s: 1.10x, inside the +-15% band that section 5 declared unresolved, and the
+  same shape's `gate_up` sits at 0.99x. There is no q3_k in-situ deficit to
+  explain.
+  H does not fire (the sum fell, it did not rise).
+  I does not fire.
+
+## 4. Mechanism, and why it is not a curiosity
+
+The `SWIGLU_X` variant applies silu(gate)*up at the point where the down kernel
+loads its activation (`if (SWIGLU_X) { v = sw4(v, u1v[g]); }`, in the q3_k
+indexed loop at metal.rs:1439-1441). A down projection reads its activation once
+per OUTPUT ROW: the [4096,1536] x8 dispatch re-loads and re-computes the same
+12 288 activation elements 4096 times, so per token the fused path spends 79
+dispatches x 32 768 rows x 1536 elements = 4.0 G element-swiglus and 4.0 G x 4 B
+= 15.9 GB of activation reads through the cache hierarchy where the unfused
+dispatch reads 8.0 GB, to save 79 dispatches and 79 encoder fences. RUN 2
+measured encoder fences at 0.0 ms/token over the whole 1318-dispatch token, so
+the thing fusion was buying was already free, and the standalone swiglu it
+removes costs 0.20 ms/token - it computes each of the 12 288 elements once.
+
+Both halves of the fused path's price scale with `n_out * n_in * slots` rather
+than with weight bytes, which is the prediction to keep: 4.0 G element-swiglus
+and 8 GB of extra cache traffic for 7.31 ms is ~1.1 TB/s of extra activation
+reads plus ~550 G silu/s, both plausible for the machine, and neither is a DRAM
+figure. It is why `gate_up` (n_out 1536, and never fused) shows nothing of the
+kind: the redundancy is proportional to the number of rows that re-read one
+activation vector, and the down projection is the wide-in-that-sense matrix.
+
+## 5. Status of the decision
+
+Phase S attributes the time. It does not ship anything: split mode costs
+13-16% of the token, so the default flip needs the wall-only paired A/B (Phase W,
+10 pairs, AB/BA alternating, `w*.txt`) and the e2E gate the q5_0 flip used. The
+bench-side fused arm (criteria J, K) is the cross-check that the micro-bench can
+reproduce the 1.89x on the identical weight bytes. Phase W below settles the
+first of these; the bench arm and the cross-model arm are still open.
+
+## 6. Consequences for the roadmap, independent of Phase W
+
+  - The q3_k unpack chain is no longer the explanation of the 235B's decode gap.
+    Its in-situ stage price is now 202 GB/s against its own bench rate of 221.3
+    GB/s, i.e. the kernel is close to its measured limit; what was slow was the
+    fusion policy wrapped around it.
+  - `ALLPAKA_SWFUSE` is ON by default for every kernel in `sw_capable`
+    (q2_k, q3_k, q4_k, q5_k, q8_0, q5_0 downs) and for the dense FFN as well, so
+    this is not a 235B-only knob: every MoE and dense model with a fused down is
+    paying a per-row silu recompute. The same stage-level A/B has to be run on
+    the 30B and GLM before a global default flip is justified.
+
+## 7. Phase W - the decision, wall only, 10 pairs AB/BA
+
+Raw runs `w1a-base.txt` ... `w10b-base.txt` (+ `.json`). No split counters, so
+these are the shipped-mode numbers; order alternates per pair (pair 1 base first,
+pair 2 arm first, ...). ms/token = the `decode 64 tok in X s` line x 1000/64.
+
+| pair | order | base ms/tok | swf0 ms/tok | Δ ms/tok | Δ tok/s |
+|---|---|---|---|---|---|
+| 1 | AB | 55.625 | 39.062 | -16.562 | +29.8% |
+| 2 | BA | 44.688 | 35.156 | -9.531 | +21.3% |
+| 3 | AB | 42.500 | 34.844 | -7.656 | +18.0% |
+| 4 | BA | 43.125 | 35.156 | -7.969 | +18.5% |
+| 5 | AB | 42.344 | 35.000 | -7.344 | +17.3% |
+| 6 | BA | 42.344 | 35.000 | -7.344 | +17.3% |
+| 7 | AB | 42.344 | 35.000 | -7.344 | +17.3% |
+| 8 | BA | 42.344 | 35.000 | -7.344 | +17.3% |
+| 9 | AB | 42.344 | 35.000 | -7.344 | +17.3% |
+| 10 | BA | 42.500 | 35.000 | -7.500 | +17.6% |
+
+  - **10/10 pairs agree in sign.** mean Δ = -8.594 ms/token, SEM 0.911 over all
+    ten; excluding pair 1 (see below) mean Δ = -7.708, SEM 0.239.
+  - Gain: **+18.0% tok/s** (pairs 2-10), +19.5% including pair 1. The DoD for this
+    flip was >= 5% on the wall with agreeing signs; it clears it by 3.6x.
+  - Pair 1 is inflated in BOTH arms (55.6 / 39.1 against cluster 42.3-43.1 /
+    34.8-35.2), which is what the first process after 16 model loads looks like -
+    the whole pair is warm-up, not treatment. It is kept in the all-10 statistic
+    rather than deleted, and its exclusion moves the answer by 1.5 points, not
+    its sign.
+  - The two arms are tight to the clock's resolution: the bench prints seconds to
+    2 decimals, so ms/token steps at 0.156, and pairs 5-9 sit on exactly 2.71 s
+    and 2.24 s. The reported SEM is therefore partly a print artefact; the honest
+    spread of the stable cluster is +-0.16 ms base, +-0.0 arm.
+  - Dispatch count moves as Phase S predicted and is identical in every run:
+    84 352 (fused) against 89 408 (unfused) over 64 tokens = 1318 -> 1397 per
+    token, the +79 standalone swiglu dispatches.
+  - Unfused wall 35.0 ms/token = 28.57 tok/s against this machine's published
+    llama.cpp figure of 29.59 tok/s for the same model and the same 480/64 shape
+    (`2026-09-24-235b-e2e/pair-analysis.txt`, where allpaka's own median was
+    23.43 = 0.79x). The gap goes to **0.966x**. Quoted as a cross-session
+    comparison, not a paired one: the residual 3.4% is inside the between-session
+    band this repo has repeatedly measured, so the correct claim is "the 235B
+    decode gap is closed to measurement noise", not "allpaka is 3.4% behind".
+  - Agreement with Phase S: the label pair predicted -7.31/-7.39 ms/token and the
+    wall gives -7.34 to -7.71 in the stable pairs. The split instrument did not
+    distort the treatment's size, which retroactively validates the 13-16% split
+    overhead as additive cost rather than as interaction.
+
+Decision: the flip ships, per-format policy decided by the bench fused arm
+(criteria J/K) and the cross-model stage A/B (`x30-*`, `xglm-*`, same directory).
+
+## 8. Axis 2 - the same flip inside the micro-bench (criteria J, K)
+
+Raw run `rates-fused.txt`: `indexed_matvecs_report_effective_bandwidth` with
+`ALLPAKA_BENCH_SWFUSES=0,1`, one feed (1), contiguous experts, shared
+activations, so the ONLY difference between a row pair is whether the down
+pipeline is compiled with `SWIGLU_X` (and raw up bound at buffer 8). Same
+process, same weight bytes, numerator unchanged. Ratio = fused / plain GB/s.
+
+| row (label, shape) | plain GB/s | fused GB/s | fused/plain | does the model build this? |
+|---|---|---|---|---|
+| q3_k down [4096,1536] | 222.0 | 108.9 | **0.491** | yes - the 235B's down |
+| q4_k [4096,1536] | 468.8 | 239.8 | 0.512 | yes |
+| q4_k control [1536,4096] | 464.7 | 263.9 | 0.568 | hypothetical (gate/up geometry) |
+| q4_k 30b gate/up [768,2048] | 381.9 | 218.2 | 0.571 | hypothetical |
+| q4_k glm gate/up [1408,4096] | 462.6 | 266.3 | 0.576 | hypothetical |
+| q2_k gate/up [1536,4096] | 257.9 | 166.6 | 0.646 | hypothetical |
+| q5_k [4096,1536] | 344.9 | 252.8 | 0.733 | yes |
+| q6_k down [4096,1536] | 471.5 | 360.6 | 0.765 | NO - q6_k is not in `sw_capable` |
+| q6_k gate/up [1536,4096] | 459.8 | 360.7 | 0.784 | no |
+| q2_k control [4096,1536] | 138.9 | 119.2 | 0.858 | yes |
+| q5_0 glm down [4096,1408] | 381.2 | 329.9 | 0.865 | yes - GLM-4.5-Air's down |
+| q6_k 30b down [2048,768] | 364.3 | 318.4 | 0.874 | no |
+| q5_0 down [4096,1536] | 394.3 | 347.4 | 0.881 | yes |
+| q8_0 [4096,1536] | 495.3 | 489.3 | 0.988 | yes |
+| q8_0 glm down [4096,1408] | 493.8 | 488.7 | 0.990 | yes |
+
+  J FIRES, and by a wide margin: the fused q3_k down is 0.491x its plain arm
+  (<= 0.75x was the trigger), i.e. the SWIGLU_X variant costs 2.04x on the
+  format that pays the most for it. The number that matters is the closure of
+  the original discrepancy: in-situ the fused 235B `down` stage reads 1.71 GB in
+  16.01 ms = 106.8 GB/s, and the bench's fused arm for the identical shape gives
+  108.9 GB/s - **in-situ / bench = 0.98x**. The 2.09x of
+  `2026-09-24-235b-decode-split` section 5 was never a kernel anomaly: it was a
+  plain-vs-fused comparison.
+  K does not fire (the movement is 2x, not +-10%).
+  The control criterion J named is INVALID as written, and the reason is a code
+  fact worth keeping: `matvec_q6_k_mv` DOES carry the `SWIGLU_X` branch in the
+  MSL, but `sw_capable` (both FFN builders) lists only q2_k, q3_k_mv, q4_k_mv,
+  q5_k_mv, q8_0, q8_0_mv, q5_0_mv. So the harness can compile a fused q6_k
+  pipeline the model never builds, and its 0.765/0.874 rows measure a
+  hypothetical, not a no-op control. The x30 arm in section 9 is the real
+  control, and it is one: its `swiglu` label is present in BOTH arms (0.116
+  against 0.129), which is the runtime proof that q6_k was never fused.
+
+  What the table does NOT dissolve: q3_k against q4_k at the same shape and both
+  compiled plain is 222.0 against 468.8 = 0.474, i.e. the format's own unpack
+  chain still costs 2.11x per byte. That residue is a property of the kernel;
+  only its in-situ confirmation was an artefact.
+
+## 9. Cross-model stage A/B - the flip where fusion is not the bottleneck
+
+Raw runs `x30-r*.txt`, `xglm-r*.txt` (split instrument on, 2 reps AB/BA each,
+same flags as Phase S). These models print the fine per-stage table, so `down`
+and `swiglu` are readable directly.
+
+qwen3-30b-a3b (expert down = q6_k, NOT fused in either arm - the no-op control):
+
+| | base | swf0 |
+|---|---|---|
+| dispatches/token | 674 | 674 |
+| `down` | 1.221 / 1.219 | 1.218 / 1.203 |
+| `swiglu` | 0.116 / 0.125 | 0.129 / 0.117 |
+| wall ms/token | 10.625 / 10.312 | 10.000 / 10.000 |
+
+  Identical dispatch counts and identical pipelines: this pair CANNOT differ in
+  code, yet the wall moved +6.2% and +2.2%, and the labels moved with it
+  (`head` 0.000 -> 0.510 in rep 1, `unaccounted` 3.55 -> 3.00). That is the
+  paired-drift floor for a 10 ms/token model on this machine, and it is the
+  number any future claim under ~5% on this class of model has to clear. The
+  235B's +18% with 10/10 signs and a 0.24 ms SEM is 3.4x this floor on the
+  largest pair and does not overlap it.
+
+GLM-4.5-Air (expert down = q5_0, fused in base):
+
+| | base | swf0 |
+|---|---|---|
+| dispatches/token | 778 | 824 (+46 = one swiglu per layer; GLM-4.5-Air has 46 layers) |
+| `down` | 5.262 / 5.256 | 5.013 / 4.902 |
+| `swiglu` | absent | 0.118 / 0.117 |
+| `gate_up` (untouched by the flip) | 6.582 / 6.564 | 6.794 / 6.586 |
+| wall ms/token | 24.219 / 24.062 | 24.062 / 24.375 |
+
+  `down` drops 0.943x (mean 5.259 -> 4.957), the standalone swiglu adds 0.118,
+  so the treatment's net is -0.18 ms/token = +0.8% of the wall - and the wall
+  reads +0.7% / -1.4%. The direction agrees with the 235B and with the bench's
+  q5_0 row (0.865x), the size does not: the drift band here is set by
+  `gate_up` +3.2% in rep 1, a label the flip cannot touch, so this model says
+  "the fused q5_0 down costs roughly nothing", not a number.
+
+  Consistent across the three instruments: the price of the variant scales with
+  how ALU-dense the format's own unpack already is - q3_k 0.49, q4_k 0.51,
+  q5_k 0.73, q5_0 0.87-0.88, q8_0 0.99 in the bench; in the models that becomes
+  7.3 ms/token on the 235B, 0.18 on GLM, 0 on the 30B.
+
+## 10. Decision
+
+Ship the global flip: `ALLPAKA_SWFUSE` becomes opt-IN, `sw_capable` unchanged.
+Justification: it is +18.0% on the 235B's wall (10/10 signs), +0.8% predicted on
+GLM (measured flat inside its own drift band), exactly nothing on the 30B, and
+the only format where fusion is free (q8_0, 0.99x) saves 79 dispatches/token
+that Phase S measured at 0.04 ms - the thing fusion bought was already free.
+A per-format policy would add a table of exceptions to protect a 1% model, so
+the default flips for every kernel that can fuse.
+
+## 11. What the knob does not reach
+
+The fold is wired in exactly two places, both in the decode pipeline builders:
+`metal.rs:10706` (dense `TokenFfn::Dense`) and `metal.rs:10816` (the MoE expert
+group, where `shared_down_sw` additionally refuses fusion unless the shared
+expert's down carries the variant too). The batched FFN path - `gpu::ffn_batch`
+(`metal.rs:17115`) and `ffn_batch_grouped` (`metal.rs:16258`), reached from
+`QuantMat::ffn_many` (`quantmat.rs:271`) and `ffn_grouped` (`quantmat.rs:486`) -
+encodes gate, up, a standalone `("swiglu", 1, 1)` pass and a down built with the
+three-argument `gpu.pipeline(kernel, rows, lpr)`, which has no swiglu parameter
+at all. So prefill never fused, this flip changes nothing there, and the prefill
+mm TFLOPS question stays independent of it.
+
+That was not obvious from the knob's name, and the first regression test written
+for it was vacuous because of exactly this: a backend-level A/B on `ffn_many`
+issued 4 dispatches per item in *both* settings, so it agreed bit-for-bit while
+testing nothing and was deleted. The surviving
+check lives at the model level, where the fold is live, and asserts the counts
+apart from the numbers: `crates/allpaka-model/tests/swfuse_fold_is_scheduling.rs`
+measures 2480 dispatches over 8 tokens folded against 2704 standalone on
+`qwen3-0.6b-Q8_0`, requires `d_plain > d_folded` to call the pair non-degenerate,
+and then requires the argmax chains and the final logits to agree exactly
+(max |Δ| = 0.0). A future batched-path fusion therefore needs its own arm here,
+not this one.
+
+Two open consequences of the same reading:
+
+  - The batched path has never been priced against `SWIGLU_X` at `m > 1`. The
+    recompute factor is per output row of the down (`n_out` loads of the
+    activation block) and does not shrink with the batch, so the expectation is
+    that fusion loses there too - but that is an extrapolation from `m = 1`
+    arithmetic, not a measurement.
+  - Every model whose expert or dense down is in `sw_capable` was fused before
+    this flip and is not now. That includes Qwen3.6-35B-A3B (`q5_k` down, bench
+    price 0.733x), so its published decode row is stale by policy - it should
+    read faster, not slower - and needs its own paired re-run before the number
+    in `allpaka-vs-llama-metal-status.md` is quoted again.
+
+## 12. Post-flip confirmation on the shipped binary
+
+Raw runs `p[1-3][ab]-*.txt`, `px30-r*.txt`, `pxglm-r*.txt` (+ `.json`), taken
+2026-09-25 01:27-01:39 UTC against `target/release/allpaka` rebuilt after the
+flip (mtime 01:27:08, i.e. after the `metal.rs` edit at 01:18). Wall only: no
+`ALLPAKA_DECODE_SPLIT`, `ALLPAKA_PROFILE=max-performance ALLPAKA_BENCH_SKIP_MTP=1`,
+pp 480 / tg 64, `ALLPAKA_SWFUSE` unset for "default" and `=1` for "fold" - the
+arms are now the mirror image of sections 1-9, where "base" was the fused policy.
+The point of this run is not the size of the effect, which sections 7-9 already
+settled: it is that the *default* is what §10 decided it should be.
+
+235B, all three reps, ms/token (decode tok/s):
+
+| rep | order | default | fold | Δ | default tok/s | fold tok/s | Δtok/s | dispatches/tok |
+|---|---|---|---|---|---|---|---|---|
+| 1 | AB | 34.84 | 42.34 | -7.50 | 28.60 | 23.60 | +21.2% | 1397 vs 1318 |
+| 2 | BA | 35.31 | 42.34 | -7.03 | 28.30 | 23.60 | +19.9% | 1397 vs 1318 |
+| 3 | AB | 81.72 | 65.78 | +15.94 | 12.20 | 15.20 | -19.7% | 1397 vs 1318 |
+
+REPS 1-2 ARE THE RESULT and they say the flip is live: unset `ALLPAKA_SWFUSE`
+now takes the fast arm, 35.08 ms/token against the old policy's 42.34, i.e.
+-7.27 ms/token and +20.6% tok/s on the clean-pair means. That is the same
+treatment Phase W priced at -7.708 ± 0.239 ms/token; the two agree to 0.44 ms,
+and the direction is now carried by the absence of an env var rather than by one.
+
+Rep 3 is REJECTED as a pair on the same rule that rejected Phase S rep 3: both
+arms are far outside the cluster (81.72 and 65.78 against 34.84-42.34), and the
+arm that cannot be responsible for the treatment - prefill - moved with them
+(96.0 and 116.7 k tok/s against 192.7-198.6, so the model's forward pass halved
+too). The sign even inverted. That is the machine being contended, not the knob.
+It is reported because the pre-registration says report every run, and because
+the machine state is checkable: a GUI process held 112% CPU for the hour around
+this sequence, which is also what moved the 30B pair below.
+
+qwen3-30b-a3b - the no-op control, now on the shipped binary:
+
+| rep | order | default | fold | Δ | dispatches/tok |
+|---|---|---|---|---|---|
+| 1 | AB | 7.81 | 7.19 | +0.62 | 674 vs 674 |
+| 2 | BA | 6.72 | 6.72 | 0.00 | 674 vs 674 |
+
+Identical dispatch counts in all four runs (43 136 over 64 tokens), and the
+`ALLPAKA_SWFUSE` variable cannot reach a q6_k down, so these pairs differ only in
+environment. Rep 1 disagrees with rep 2 by 8.6% inside a single arm (default went
+129.3 → 148.9 tok/s) while rep 2 is flat to 0.00 ms. Read together with §9 that is
+the same floor: on this machine a q6_k-model pair carries ±7% of order-and-load
+drift, and only the settled window collapses to zero - which is why the 235B's
+claim rests on 10 Phase W pairs plus these two, not on any single run.
+[Recomputed in section 14: the two pairs are 0.5403 and 0.0344 ms/token apart, and
+the second's arms' prefill agree to 0.05% while the first's differ by 18.4% - which is
+what turns this control from an adjective into a priced 0.5% floor.]
+
+GLM-4.5-Air:
+
+| rep | order | default | fold | Δ | dispatches/tok |
+|---|---|---|---|---|---|
+| 1 | AB | 20.78 | 21.09 | -0.31 | 824 vs 778 |
+| 2 | BA | 20.78 | 21.09 | -0.31 | 824 vs 778 |
+
+Both reps, both orders: leaving the fold off is 0.31 ms/token faster (+1.5%), and
+the dispatch counts land on §9's split-instrument census exactly (824 standalone
+vs 778 fused = one swiglu per layer of GLM-4.5-Air's 46). §9 predicted -0.18
+ms/token from the stage labels; the wall says -0.31, which is two clock quanta
+(0.156 ms) and the same sign. GLM was not the reason for the flip and is not
+changed by it in any way this instrument can separate from its drift.
+[Recomputed from the JSONs in section 14: the two rows are +0.2736 and +0.1877, not
+-0.31 twice.]
+
+What this closes: §10's decision is now a property of the binary rather than of a
+measurement harness - unset environment reproduces the fast arm (28.6 tok/s) and
+the old policy is opt-in only. `docs/decode-opts.md`, `docs/roadmap.md` and
+`allpaka-vs-llama-metal-status.md` were updated against these numbers, and the
+235B's decode row moves from 0.793× to 0.966× against llama's published median -
+a cross-session ratio, since no llama arm ran in this sequence.
+
+## 13. Annotation added 2026-09-25 - sections 7 and 12 recomputed at full precision from their own JSONs
+
+The `.json` beside every `.txt` in this directory carries
+`.measurements[decode].summary.median` as a float (`28.63956474255374`), while the
+`.txt` prints seconds to 2 decimals, which at TG=64 quantises ms/token at 0.156.
+Section 7 flagged its own SEM as "partly a print artefact". It is not, and that is now
+checked rather than assumed. One refinement to that flag first: the same stdout carries
+*two* precisions - `tok/s` printed to 1 decimal is ~16x finer than the seconds field
+(+/-0.01 ms/token at these rates against 0.156), and sections 7 and 12 derived their
+ms/token from the coarse one (1.33 s / 64 = 20.78) while section 9's percentages come
+from the fine one (99.5 / 97.4 = +2.16%, published "+2.2%"). So the coarser read was
+chosen, not the only one available. The rule is: the JSON median, or failing that the
+tok/s column, never the seconds column. Everything below is a recomputation of the
+coarse reads; section 9's percentages survive it unchanged:
+
+| statistic | from the txt (published above) | from the JSON |
+|---|---|---|
+| pairs 2-10 mean Δ | -7.708 ms/token | **-7.7223** |
+| pairs 2-10 SEM | 0.239 | **0.2403** |
+| pairs 2-10 signs | 9/9 negative | 9/9 negative |
+| pairs 2-10 gain | +18.0% | +18.07% |
+| all 10 mean Δ / SEM | -8.594 / 0.911 | -8.6080 / 0.9114 |
+
+So the print cost 0.014 ms in the mean and 0.001 ms in the SEM. The spread the SEM
+measures is real pair-to-pair spread, and it is dominated by one pair: the Δ series
+is -16.5795, -9.5531, then eight values in -7.22..-7.98. Dropping pair 2 as well as
+pair 1 gives the sharpest bound this same data supports - **pairs 3-10: Δ = -7.4935
+ms/token, sd 0.2350, SEM 0.0831, 8/8 signs, +17.64%** - which is 90x its own SEM.
+The pre-registered exclusion rule was pair 1 only, so -7.708 +/- 0.239 stays the
+headline; 0.0831 is offered as what the series looks like once both leading pairs
+are set aside, not as a replacement chosen after seeing the deltas.
+
+Two corrections to section 7's own wording, both from the same recompute:
+
+  - "the honest spread of the stable cluster is +/-0.16 ms base, +/-0.0 arm" - the
+    second half is a print artefact. Over pairs 3-10 the fold-off arm spans
+    34.908-35.139 ms/token (sd 0.078), not zero; the fold-on arm is sd 0.278. The
+    clean-looking arm was clean only because the printer rounded it.
+  - section 12's clean-pair mean is -7.2105 ms/token, not -7.27 (reps -7.4160 and
+    -7.0050). Its agreement with Phase W is therefore 0.51 ms, not 0.44.
+
+One structural fact these artifacts pin, and it is the reason to read the JSON on
+any future run: `samples_tok_s` has exactly **one element** in every `w*.json` and
+`p*.json` here, and `summary` has p10 == p90 == median. A run reports a single
+whole-token-stream rate, so there is no within-run error bar at all in this
+instrument - the pair is the only noise estimate available, which is what makes
+pair count the knob that buys precision (10 pairs -> SEM 0.08-0.24).
+
+Consequence recorded where it bites: for Qwen3.6-35B-A3B at ~9.8 ms/token and TG=32
+the txt step is 0.3125 ms/token, i.e. 1.4x the low end of that model's pre-registered
+0.23-0.64 ms band. A txt-read pair there would be quantised away before it started.
+See [`../2026-09-25-q35a3b-postflip/preregistration.txt`](../2026-09-25-q35a3b-postflip/preregistration.txt).
+
+## 14. Annotation added 2026-09-25 - sections 9 and 12 recomputed the same way, and the null control now prices the pair
+
+Same method as section 13, applied to `x30-*`, `xglm-*`, `px30-*`, `pxglm-*` (the 16
+JSONs already in this directory). ms/token = 1000 / decode median as a float;
+Δ = slow arm - fast arm in ms/token, and % of the FAST arm so that it is comparable
+with section 9's "+6.2% / +2.2%", which used that denominator. Arm order taken from
+file mtimes, which confirms sections 9 and 12 did run AB/BA as claimed (base 01:05:27
+-> swf0 01:05:47; fold 01:37:12 -> default 01:37:32).
+
+| run | order | slow arm | fast arm | Δ ms/tok | Δ % | published |
+|---|---|---|---|---|---|---|
+| x30 rep1 (split) | base, swf0 | base 10.5960 | swf0 9.9703 | 0.6257 | 6.28% | 10.625 / 10.000, "+6.2%" |
+| x30 rep2 (split) | swf0, base | base 10.2629 | swf0 10.0504 | 0.2125 | 2.11% | 10.312 / 10.000, "+2.2%" |
+| xglm rep1 (split) | base, swf0 | base 24.1713 | swf0 23.9947 | 0.1766 | 0.74% | 24.219 / 24.062, "+0.7%" |
+| xglm rep2 (split) | swf0, base | swf0 24.3861 | base 24.0292 | 0.3569 | 1.49% | 24.062 / 24.375, "-1.4%" |
+| px30 rep1 (shipped) | default, fold | default 7.7347 | fold 7.1944 | 0.5403 | 7.51% | 7.81 / 7.19, "+0.62" |
+| px30 rep2 (shipped) | fold, default | fold 6.7498 | default 6.7154 | 0.0344 | 0.51% | 6.72 / 6.72, "0.00" |
+| pxglm rep1 (shipped) | default, fold | fold 21.0733 | default 20.7997 | 0.2736 | 1.32% | "-0.31" |
+| pxglm rep2 (shipped) | fold, default | fold 21.0289 | default 20.8413 | 0.1877 | 0.90% | "-0.31" |
+
+What changes:
+
+  - **GLM's fold cost is 0.231 ms/token (mean of 0.2736 and 0.1877), not 0.31.** The
+    txt showed the same -0.31 in both orders, which is rounding: the arms actually ran
+    20.7997/21.0733 and 20.8413/21.0289. The sign survives the reversal, so the claim
+    survives, but the size is 26% smaller and 32x below the 235B's 7.49. The honest
+    uncertainty is now the 0.086 two-rep spread, which -0.31 never was.
+  - **The "flat" arms were never flat.** x30's swf0 row prints 10.000 in both reps;
+    the runs were 9.9703 and 10.0504. Section 9's "only the settled window collapses
+    to zero" read a rounding artefact as a finding. What collapses is the print's
+    ability to show 0.1 ms, not the machine's ability to hold still.
+  - **The no-op control gets a number instead of an adjective.** px30 is the pair that
+    cannot differ in code - identical 43 136 dispatches, a q6_k down is not in
+    `sw_capable`, so only the environment differs. Its admitted rep, the one whose two
+    arms' prefill agree to 0.05%, reads **0.0344 ms/token = 0.5%**. Its rejected rep,
+    prefill 18.4% apart, reads 0.5403 = 7.5% - 16x its own admitted sibling. Same model,
+    same binary, identical dispatch census: 0.0344 is this instrument's floor on a
+    7 ms/token model, and 0.5403 is what an ungated pair manufactures on top of it.
+  - **Section 9's split-instrument floor is 6-18x worse than that**, at 0.2125-0.6257
+    ms/token on the same knob-inert model. Which means the -0.18 ms/token that section 9
+    *predicted* for GLM from its split stage labels sits below its own instrument's null
+    swing and is not evidence of anything; the wall figures above are, and they land on
+    0.231 - 1.3x the split prediction, same sign. Removing the print moved GLM's cost
+    down 26% and brought two different instruments into agreement about it.
+  - What does not change: the 235B decision. Its tightest cluster (7.2207-7.9801 ms per
+    pair, section 13) is 210-232x the 0.0344 null floor of the same instrument and
+    34-38x the split floor, with 8/8 and 9/9 sign agreement under order reversal.
+
+The rule these 16 JSONs buy, which is now the admission gate on every pair in this repo:
+**gate the arms against each other, not against history.** An arm's absolute prefill can
+sit inside the published band while the pair still carries half a millisecond of phantom,
+because a 3% within-pair prefill drift is worth ~0.2 ms on a 7 ms/token model - the whole
+size of GLM's effect. So: admit a pair only if |prefill(A)/prefill(B) - 1| <= 1%, print
+that ratio per pair beside the decode delta, and discard rather than correct - applying
+px30 rep1's own 1.1836 prefill ratio as a correction turns its -0.54 into +0.66, so the
+correction manufactures a phantom of its own. Against that floor the
+[`../2026-09-25-q35a3b-postflip/preregistration.txt`](../2026-09-25-q35a3b-postflip/preregistration.txt)
+band of 0.23-0.64 ms/token is 6.7-19 null floors, so that run is resolvable on 10 pairs -
+but only with the ratio gate on. Taking GLM's 0.086 two-rep spread (sd 0.061) as the
+pair-noise proxy for a model where the fold does engage puts the 10-pair SEM near
+0.019 ms/token, five times below the band's low end.

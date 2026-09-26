@@ -9657,8 +9657,11 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                             | "matvec_q8_0_mv"
                     )
                 };
+                // Opt-in since 2026-09-26: the fold costs the 235B's q3_k down
+                // 7.7 ms/token (10/10 signs) and nothing on q8_0; measured in
+                // docs/benchmarks/2026-09-24-235b-swfuse/results.txt.
                 let sw_fused = sw_capable(mats[2].kernel)
-                    && std::env::var("ALLPAKA_SWFUSE").map_or(true, |v| v != "0");
+                    && std::env::var("ALLPAKA_SWFUSE").is_ok_and(|v| v == "1");
                 let mut states = Vec::with_capacity(3);
                 for (i, (mat, n_in)) in mats.iter().zip([hidden, hidden, gate.2]).enumerate() {
                     let lpr = lanes_per_row(mat.ty, n_in);
@@ -9769,7 +9772,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     let swiglu = i == 2
                         && sw_capable(kernel)
                         && shared_down_sw
-                        && std::env::var("ALLPAKA_SWFUSE").map_or(true, |v| v != "0");
+                        && std::env::var("ALLPAKA_SWFUSE").is_ok_and(|v| v == "1");
                     if swiglu {
                         sw_fused = true;
                     }
