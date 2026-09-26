@@ -1,0 +1,84 @@
+# chunk-1: ALLPAKA_PREFILL_CHUNK 512 vs 2048, dense-obuf fix ON
+
+UNCERTIFIED. Do not quote as a speed result. Load 13.8-15.8 throughout; the
+launch gate never opened. This is the "all gates pass but rows depressed"
+failure mode: the pp1024 allpaka arms landed at 5426-9173 tok/s, a spread the
+earlier curve-1 run (9165-9205 at similar load) says is contention, not
+signal. Only the pp4096 arm of this run behaved like a measurement (see 3).
+
+## Shape
+
+Binary: `/tmp/pf-obuf-target/release/allpaka` (worktree build at `548f6fb`),
+unrebuilt main tree. Model qwen3-0.6b-Q8_0, 28 layers, dense.
+Per repeat: allpaka chunk512, allpaka chunk2048, then llama-bench, same
+repeat index. PP in {1024, 4096}, 3 repeats. TG=32 alongside.
+llama-bench 0.4.1 `-p PP -n 0 -d 0 -r 1 -ngl 99 -ctk f16 -ctv f16 -o json`.
+
+## 1. The fix's commit reduction reproduces at both PP
+
+Chunk 2048 halves the commits as designed: pp1024 4 -> 2 waits,
+pp4096 16 -> 4 waits, dispatches 2248 -> 562. Encode stays 0-4 ms either way
+because item 10 (PR #6) already removed the dense per-layer commits. So this
+run varied only the *number of chunks*, not the commit shape - the latter was
+already fixed in both arms.
+
+## 2. Chunk 2048 is not a win here
+
+| PP   | chunk512        | chunk2048       | pairs favouring 2048 |
+|------|-----------------|-----------------|----------------------|
+| 1024 | 9173.5 5426.2 5763.7 | 7211.5 5668.6 6178.0 | 2/3 (rep1 reversed, -21%) |
+| 4096 | 3676.5 3730.9 3835.0 | 3735.5 3854.8 3801.7 | 2/3, max +3.3% |
+
+pp1024 is unusable (rep1 is the one depressed-outlier direction and it is
+60% of the spread). pp4096, the stable arm, gives +1.6% / +3.3% / -0.9% -
+i.e. inside the noise floor of that shape, and its GPU `executing` moves the
+same way (1090/1087/1056 vs 1089/1055/1068 ms). Nothing to claim.
+
+Decision: `prefill_chunk()` stays 512. Do not retry a bigger chunk as a
+speed lever without new evidence; on this shape the amortisation it buys is
+already spent, because item 10 made the per-chunk fixed cost ~0.
+
+## 3. pp4096 was stable even at load 14 - and that is the useful part
+
+All six pp4096 rows land in `executing` 1055-1090 ms (±1.7%) while the
+pp1024 rows of the same run scatter 109-186 ms (±35%). Longer runs average
+over the interference; short ones are dominated by it. So the pp4096 rows
+support a *mechanism* comparison even if the absolute ratios (0.88-0.95x
+llama) still need a quiet window.
+
+In the stable pp4096 arm, chunk size changed nothing while commits dropped
+4x. Combined with item 10's finding that scheduling went 58 -> 0 ms with
+`executing` unchanged, the pp4096 deficit is now boxed in: it is GPU kernel
+time, not commit shape, not CPU encode, not GPU scheduling. That is the
+repo's long-standing "in-model mechanism is unidentified" term (~5 TFLOPS
+effective vs 11-12 microbench), and it is what "make allpaka faster than
+llama" at long context actually means.
+
+## 4. Attempted A + B*L decomposition: NOT IDENTIFIED, do not reuse
+
+Prefill per-token cost grows with context because attention is quadratic over
+the KV. Two points should fit `cost/token = A + B*(L/2)`:
+
+| arm     | pp1024 us/tok | pp4096 us/tok | A (linear) | B (per key) |
+|---------|---------------|---------------|------------|-------------|
+| allpaka | 106 (best row) / 167 (median) | 265 | 53 or 134 | 0.104 or 0.064 |
+| llama   | 144 (median)                | 240 | 112        | 0.063       |
+
+The allpaka column depends on which pp1024 row is used, and the two choices
+give *opposite* conclusions:
+- best row -> allpaka's linear term is 2.1x cheaper than llama's but its
+  attention slope is 1.65x worse, predicting a crossover near context 2850
+  and parity at pp2048.
+- median row -> allpaka's attention slope equals llama's (0.064 vs 0.063) and
+  the whole deficit is a worse fixed per-token cost, i.e. the linear kernels,
+  with no crossover at all.
+
+Difference: 100%, driven entirely by a contention artifact. The two-point fit
+is unidentified on this data. A real fit needs a pp ladder (>=5 points,
+>=5 paired repeats, load <5), so it must wait for the gate. Recorded here so
+the next session does not mistake either row for a result.
+
+## Files
+`ap{512,2048}-{1024,4096}-{1,2,3}.{json,log}`, `ll-{1024,4096}-{1,2,3}.json`.
+`.log` is gitignored; the numbers above are re-readable from the json
+measurements and from the `gpu clock during prefill` lines.
