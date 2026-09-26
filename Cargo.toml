@@ -1,8 +1,8 @@
 [workspace]
 members = [
     "crates/allpaka-core",
-    "crates/allpaka-cli",
     "crates/allpaka-chat",
+    "crates/allpaka-cli",
     "crates/allpaka-gguf",
     "crates/allpaka-backend",
     "crates/allpaka-model",
@@ -24,10 +24,10 @@ codegen-units = 1
 
 [workspace.dependencies]
 allpaka-core = { path = "crates/allpaka-core" }
+allpaka-chat = { path = "crates/allpaka-chat" }
 allpaka-backend = { path = "crates/allpaka-backend" }
 allpaka-model = { path = "crates/allpaka-model" }
 allpaka-gguf = { path = "crates/allpaka-gguf" }
-allpaka-chat = { path = "crates/allpaka-chat" }
 anyhow = "1"
 memmap2 = "0.9"
 clap = { version = "4", features = ["derive"] }
@@ -36,7 +36,5 @@ serde_json = "1"
 toml = "0.8"
 airbug-otel = { git = "https://github.com/themoretheless/airbug", rev = "75b1321b5d7ff2cee983379f539c07726a7d27e5" }
 airbug-bench = { git = "https://github.com/themoretheless/airbug", rev = "75b1321b5d7ff2cee983379f539c07726a7d27e5" }
+airbug = { git = "https://github.com/themoretheless/airbug", rev = "ce464fac", package = "airbug-bench", features = ["macros"] }
 themoretheless-tokenizer = { git = "https://github.com/themoretheless/tokenizer", tag = "v0.3.1" }
-
-[patch.crates-io]
-block = { path = "vendor/block" }
