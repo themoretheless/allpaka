@@ -1,140 +1,142 @@
 #!/usr/bin/env bash
-# scripts-common.sh — общие функции для всех скриптов GitHub workflow automation
-# Подключать через: source "$0"
+# scripts/scripts-common.sh — общие функции для скриптов автоматизации GitHub-потока.
+#
+# Подключать так (работает и из scripts/, и из plugins/<name>/bin/ после materialize):
+#
+#   SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+#   for _cand in "$SCRIPT_DIR/scripts-common.sh" "$SCRIPT_DIR/../scripts/scripts-common.sh"; do
+#     [ -f "$_cand" ] && { source "$_cand"; break; }
+#   done
+#
+# Все функции только читают состояние репозитория и GitHub; ничего не меняют.
+#
+# Библиотека намеренно НЕ задаёт set -e/-u: она подключается через source и не должна
+# менять опции вызывающего шелла. Каждый скрипт ставит `set -euo pipefail` сам.
 
-set -euo pipefail
+# Каталоги логов и отчётов. Путь относительный — от каталога запуска.
+LOG_DIR="${LOG_DIR:-.qoder/logs}"
+REPORTS_DIR="${REPORTS_DIR:-.qoder/reports}"
 
-# Directory structure for logs and reports
-readonly LOG_DIR="${LOG_DIR:-.qoder/logs}"
-readonly REPORTS_DIR="${REPORTS_DIR:-.qoder/reports}"
-
-# Ensure directories exist
-mkdir -p "$LOG_DIR" "$REPORTS_DIR"
-
-# Logging functions (color-coded)
 log_debug() { printf '[DEBUG] %s\n' "$*" >&2; }
 log_info()  { printf '[INFO]  %s\n' "$*" >&2; }
 log_warn()  { printf '[WARN]  %s\n' "$*" >&2; }
 log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 
-# Timestamp for logs
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
-# Log helper that writes to both stdout and log file
+# Пишет действие и в stdout, и в суточный лог. Каталог создаёт по мере надобности.
 log_action() {
   local action="$1"; shift
-  local msg="$*"
-  local log_file="$LOG_DIR/$(date +%Y%m%d).log"
-  printf '[%s] %s: %s\n' "$(timestamp)" "$action" "$msg" | tee -a "$log_file"
+  local line
+  line=$(printf '[%s] %s: %s' "$(timestamp)" "$action" "$*")
+  { mkdir -p "$LOG_DIR" && printf '%s\n' "$line" >>"$LOG_DIR/$(date +%Y%m%d).log"; } || true
+  printf '%s\n' "$line"
 }
 
-# Rate limit backoff for gh API
-# Usage: wait_for_rate_limit [max_wait_seconds]
+# Разбирает длительность вида 30s / 5m / 1h в секунды. Без суффикса — секунды.
+parse_duration() {
+  local dur="$1" num unit
+
+  if [[ "$dur" =~ ^([0-9]+)([smh]?)$ ]]; then
+    num="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+  else
+    printf 'непонятная длительность: %s\n' "$dur" >&2
+    return 1
+  fi
+
+  case "$unit" in
+    s) printf '%s\n' "$num" ;;
+    m) printf '%s\n' "$((num * 60))" ;;
+    h) printf '%s\n' "$((num * 3600))" ;;
+    *) printf '%s\n' "$num" ;;
+  esac
+}
+
+# Достаёт поле из JSON по jq-фильтру; при пустом или невозможном значении — default.
+# json_get <json> <jq-фильтр> [default]
+json_get() {
+  local json="$1" filter="$2" default="${3:-}"
+  local out
+  out=$(printf '%s' "$json" | jq -r "$filter // empty" 2>/dev/null) || out=""
+  if [ -z "$out" ]; then printf '%s\n' "$default"; else printf '%s\n' "$out"; fi
+}
+
+# Сводит массив statusCheckRollup PR к одному состоянию: none|pending|failure|success.
+# У записи два уровня — status (QUEUED/IN_PROGRESS/COMPLETED) и conclusion (SUCCESS/
+# FAILURE, пустой у незавершённых), — поэтому нужна свёртка по массиву, а не чтение
+# .statusCheckRollup.conclusion: у массива такого поля нет.
+pr_checks_rollup() {
+  local pr_json="$1"
+  printf '%s' "$pr_json" | jq -r '
+    (.statusCheckRollup // []) as $c
+    | if ($c | length) == 0 then "none"
+      else
+        (($c | map(((.conclusion // "") + "|" + (.status // "")) | ascii_downcase)) as $s
+         | if   ($s | any(test("failure|timed_out|cancelled|action_required"))) then "failure"
+           elif ($s | any(test("queued|in_progress|pending|waiting")))          then "pending"
+           elif ($s | all(test("success|skipped|neutral")))                     then "success"
+           else "pending"
+           end)
+      end' 2>/dev/null || printf 'none\n'
+}
+
+# true, если PR mergeable. gh отдаёт булево, а не строку "TRUE".
+pr_is_mergeable() {
+  local pr_json="$1"
+  printf '%s' "$pr_json" | jq -r '.mergeable // false' 2>/dev/null | grep -qx true
+}
+
+# Показывает, что именно собирается сделать скрипт, перед изменяющей операцией.
+show_preview() {
+  local action="$1"; shift
+  printf '\n%s\nACTION: %s\n%s\n%s\n\n' \
+    '==================================================' \
+    "$action" \
+    "$*" \
+    '=================================================='
+}
+
+# Пауза при приближении исчерпанного лимита GitHub API. Молча пропускает, если
+# статус недоступен (нет авторизации — тогда и команда упадёт сама собой).
 wait_for_rate_limit() {
-  local max_wait="${1:-60}"
-  local waited=0
-  
+  local max_wait="${1:-60}" waited=0 remaining
+
   while true; do
-    local rate_info
-    if ! rate_info=$(gh api rate_limit --jq '.' 2>/dev/null); then
-      # If we can't check rate limit, assume we're good
-      return 0
-    fi
-    
-    local remaining
-    remaining=$(echo "$rate_info" | jq -r '.resource.remaining // 0')
-    
-    if [[ "$remaining" -gt 5 ]]; then
-      return 0
-    fi
-    
-    local reset_ts
-    reset_ts=$(echo "$rate_info" | jq -r '.resource.reset | fromdateiso8601 // empty')
-    
-    if [[ -n "$reset_ts" ]] && [[ $reset_ts -le $(date +%s) ]]; then
-      return 0
-    fi
-    
-    if [[ $waited -ge $max_wait ]]; then
-      log_error "Exceeded max wait time ($max_wait s) for rate limit"
+    remaining=$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null) || return 0
+    [[ "$remaining" =~ ^[0-9]+$ ]] || return 0
+    [ "$remaining" -gt 5 ] && return 0
+    if [ "$waited" -ge "$max_wait" ]; then
+      log_error "Лимит GitHub API не восстановился за ${max_wait}s"
       return 1
     fi
-    
     sleep 5
     waited=$((waited + 5))
   done
 }
 
-# JSON parsing helper with error handling
-# Usage: json_get <json_string> <jq_filter> [default_value]
-json_get() {
-  local json="$1"
-  local filter="$2"
-  local default="${3:-}"
-  
-  echo "$json" | jq -r "$filter // \"$default\"" 2>/dev/null || echo "$default"
+# Проверяет форму owner/name. gh принимает только её; значение без владельца или с
+# лишними сегментами уходит в API и даёт непонятную ошибку вместо валидации.
+is_owner_name() {
+  case "${1-}" in
+    */*/*) return 1 ;;
+    */*) [ -n "${1%%/*}" ] && [ -n "${1##*/}" ] ;;
+    *) return 1 ;;
+  esac
 }
 
-# Check if PR is mergeable
-# Usage: check_pr_mergeable <repo_owner/repo> <pr_number>
-check_pr_mergeable() {
-  local repo="$1"
-  local pr_num="$2"
-  
-  local pr_data
-  pr_data=$(gh pr view "$pr_num" --repo "$repo" --json mergeable,statusCheckRollup,reviewDecision --jq '.') 2>/dev/null
-  
-  [[ "$(json_get "$pr_data" '.mergeable == "TRUE"')" == "true" ]] || return 1
-}
-
-# Check CI status for PR
-# Usage: check_pr_ci_status <repo_owner/repo> <pr_number>
-check_pr_ci_status() {
-  local repo="$1"
-  local pr_num="$2"
-  
-  local pr_data
-  pr_data=$(gh pr view "$pr_num" --repo "$repo" --json statusCheckRollup --jq '.') 2>/dev/null
-  
-  local conclusion
-  conclusion=$(json_get "$pr_data" '.statusCheckRollup.conclusion // ""')
-  
-  [[ "$conclusion" == "success" ]]
-}
-
-# Show preview of what will be changed
-# Usage: show_preview <action_type> <details...>
-show_preview() {
-  local action="$1"; shift
-  local details="$*"
-  
-  printf '\n%s\n' "=================================================="
-  printf 'ACTION: %s\n' "$action"
-  printf '%s\n' "$details"
-  printf '==================================================\n\n'
-}
-
-# Dry-run mode support
-DRY_RUN=false
-usage_with_dryrun() {
-  cat <<EOF
-Usage: $0 [OPTIONS] <ARGUMENTS>
-
-Common options:
-  --dry-run       Show what would be done without making changes
-  --verbose       Enable debug output
-  -h, --help      Show this help message
-
-Arguments:
-  <ARGUMENTS>     Script-specific arguments
-EOF
-}
-
-parse_dryrun_flag() {
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --dry-run) DRY_RUN=true; shift ;;
-      *) break ;;
-    esac
-  done
+# Репозиторий owner/name из URL remote'а (по умолчанию — origin этого дерева).
+# Пустая строка, если remote не GitHub: угадывать owner/name нельзя.
+detect_repo() {
+  local url owner tail base
+  url="${1-$(git remote get-url origin 2>/dev/null || true)}"
+  [ -n "$url" ] || return 0
+  case "$url" in *github.com*) ;; *) return 0 ;; esac
+  url=${url%.git}
+  url=${url%/}
+  tail=${url##*[/:]}            # имя репозитория — последний сегмент
+  base=${url%/[!/]*}            # всё до последнего '/name'
+  base=${base%/}
+  owner=${base##*[/:]}          # владелец — последний из оставшихся
+  [ -n "$owner" ] && [ -n "$tail" ] && printf '%s/%s\n' "$owner" "$tail"
 }
