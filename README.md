@@ -373,8 +373,8 @@ allpaka fleet --model models/reasoner.gguf --model models/tools.gguf --model mod
   - `scheduler.rs`, `serving_runtime.rs`, `model_registry.rs` - очередь запросов,
     непрерывный батчинг и реестр загруженных моделей.
   - `serve/` - части сервера: вход (`ingress.rs`), запуск моделей (`launch.rs`),
-    бюджет памяти (`memory.rs`), RAG-инструменты, отмена запросов и снимок
-    ресурсов.
+    бюджет памяти (`memory.rs`), RAG-инструменты (`rag_tools.rs`), отмена запросов
+    (`request_control.rs`) и снимок ресурсов (`resources.rs`).
   - `autotune.rs`, `benchmark_report.rs`, `airbug.rs`, `airbug_llama.rs` -
     подбор профилей, сериализуемый отчёт бенча и замеры вместе с llama.cpp.
   - `explain.rs`, `report.rs` - объяснение вердикта и человекочитаемые отчёты.
