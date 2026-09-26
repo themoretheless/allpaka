@@ -1,0 +1,157 @@
+NOTE, added 23:50 local: sections 1-3 were written from a contaminated
+instrument. The "mid-range trough" is WITHDRAWN - see the Retraction at the end
+before quoting anything above it. Section 4 (owed) stands and is now stronger.
+
+# scaling ladder: the two-term model is REJECTED, and the ratio trough is a band
+
+Status: PROVISIONAL. Three runs, all taken while the machine was busy
+(load 5.7-11 through the whole evening; the `series-1` gate expired at its
+180-min cap without ever opening). Within-cell CV was 4.1-7.5% allpaka /
+6.0-7.2% llama against a 3% acceptance limit, so every slope number below is
+provisional. The *shapes* are reproducible across runs, which is why they are
+written down; the *magnitudes* are not certified.
+
+Binary `/tmp/pf-obuf-target/release/allpaka` (sha256 819db0fa..., branch
+`perf/pf-obuf-dense-chunk`, dense one-buffer fix ON), qwen3-0.6b-Q8_0.
+
+## Runs
+
+| dir         | ladder                          | order       | CV ap / ll | note                     |
+|-------------|---------------------------------|-------------|------------|--------------------------|
+| `scaling-1` | 256..8192 (6 pts), 5 reps       | fixed       | 4.1% / 6.0% | pp8192 CV 11.8% - last in every repeat |
+| `scaling-2` | 256..8192 (6 pts), 5 reps       | shuffled    | 7.5% / 7.2% | independent agreement    |
+| `scaling-3` | 1536, 2048, 2560, 5 reps        | shuffled    | (3 pts - too few to fit) | targeted at the anomaly |
+
+`scaling-1` was run with the ladder in fixed order. That was an instrument
+defect of my own making: pp8192 is then always the last point of a repeat, so
+any drift that starts during the run is charged to one shape. Its pp8192 CV
+(11.8%) against pp256's (3.3%) is that confound, not a property of long
+context. `scaling-2` shuffles the ladder per repeat and arms stay adjacent.
+
+## 1. The registered model is rejected, so no verdict is reported
+
+Amendment 2 fitted `cost/token = A + B*(L/2)` per arm and registered the clause:
+if that model cannot predict the held-out middle of the ladder from its two
+ends, the model is wrong and neither the QUADRATIC nor the LINEAR verdict is
+reported. It cannot:
+
+| held-out pp | ladder-1 pred/err | ladder-2 pred/err |
+|-------------|-------------------|-------------------|
+| 512  | 0.977 / 3.5% | 0.950 / 4.0% |
+| 1024 | 0.969 / 2.5% | 0.948 / 5.9% |
+| 2048 | 0.956 / **21.4%** | 0.945 / **19.6%** |
+| 4096 | 0.939 / 8.1% | 0.942 / 3.8% |
+
+The fitted coefficients agreed between the two runs (A ratio 1.11 then 1.15,
+B ratio 1.11 then 1.05, B never separated by bootstrap), and the machine said
+LINEAR both times - but a coefficient extracted under a rejected model is not a
+result, so the goal's "is long context a separate problem?" stays open.
+
+## 2. What survived both runs: the cost curves are smooth, the ratio is not
+
+Median wall cost per token (µs), both arms, both ladders:
+
+| pp   | allpaka L1/L2 | llama L1/L2 | ratio L1/L2 |
+|------|---------------|-------------|-------------|
+| 256  | 102.9 / 105.4 | 101.1 / 100.2 | 0.98 / 0.95 |
+| 512  |  94.8 /  98.9 |  89.5 /  90.3 | 0.94 / 0.91 |
+| 1024 | 102.3 / 110.4 |  96.7 /  98.8 | 0.95 / 0.90 |
+| 2048 | 151.1 / 149.7 | 118.9 / 118.3 | 0.79 / 0.79 |
+| 4096 | 206.3 / 191.7 | 179.2 / 173.9 | 0.87 / 0.91 |
+| 8192 | 272.6 / 268.5 | 251.3 / 251.7 | 0.92 / 0.94 |
+
+Three facts, each reproduced independently:
+
+- **Each arm's own curve is smooth and monotone from 512 up.** allpaka
+  102 -> 165 -> 205 -> 270, llama 97 -> 139 -> 170 -> 250 (µs/tok at
+  1024/2048/4096/8192, probe values interleaved). There is no cliff in
+  allpaka's cost.
+- **The ratio has a trough around 1536-2560, not at 2048.** `scaling-3` maps
+  the band: medians 0.827 (1536), 0.831 (2048), 0.800 (2560) - a plateau, and
+  ladder-1's pp2048 (0.84) and ladder-2's (0.79) sit inside it. So "pp2048 is
+  anomalous" was the wrong description; the deficit *concentrates in the mid
+  range and relaxes at both ends*.
+- **The short end is misspecified by the model, in both arms.** cost/token at
+  pp256 exceeds pp512 (102.9 vs 94.8 allpaka; 101.1 vs 89.5 llama). A pure
+  `A + B*L/2` cannot do that. It is m-efficiency of the tile kernels: at
+  pp256 a chunk is half as tall as the 512 default, and both arms run their
+  matmul at m=256. pp512 is also both arms' natural batch (allpaka's
+  `ALLPAKA_PREFILL_CHUNK` default and llama's `n_ubatch` 512), which is why it
+  is the cheapest point per token. So any fit that uses pp256 is partly
+  measuring tile quantisation, not context scaling.
+
+## 3. Consequences for the goal
+
+- The two candidate targets in Amendment 2 (attention kernel vs tile matmul)
+  were chosen by a model this data rejects. Neither is cleared, and the mid-range
+  trough is a third shape the registered rule had no name for.
+- Marginal cost per key, computed piecewise rather than as one slope, is where
+  the story is: allpaka vs llama is 0.113 vs 0.072 us/key over 1024->2560 and
+  0.029 vs 0.035 over 2560->8192 - allpaka 1.6x worse in the mid band, 0.8x
+  better in the long band. If that survives a quiet window it points at
+  per-chunk work that scales with the base position and is amortised away only
+  once chunks get large, not at the steady-state matmul.
+- decode is unaffected and still ahead (1.14-1.17x), and pp64 stays ahead
+  (1.04-1.07x, `curve-1.txt`). The goal is not "faster than llama everywhere",
+  it is this band.
+
+## 4. Owed
+
+A gated ladder (load < 5 AND CV <= 3%) on a dense mid-range ladder
+1024/1536/2048/2560/3072/4096 with >= 5 paired repeats, shuffled order, plus
+one short point (256) kept OUT of the fit and reported separately as the
+m-efficiency dip. Until that exists, sections 2 and 3 are observations about
+the shape of the deficit, not measurements of its size.
+
+
+## Retraction - added 23:50 local, same day
+
+Two further runs falsified the shape this note claimed to have reproduced.
+
+1. The `ALLPAKA_ATTN_MM` differential (pp 1024/2048/4096/8192, 2 reps, load
+   5.6-6.4) came back with repeats agreeing to 1% and gave allpaka pp2048
+   `executing` 235 ms.
+2. Ten minutes later a paired band re-run, at load 6.5-7.4 - i.e. the SAME
+   nominal window - measured pp2048 at 476 ms and 374 ms, and pp1024 at
+   107 ms then 150 ms. Everything inflated, and it inflated *within* a run.
+
+So the machine is non-stationary on a tens-of-seconds scale, which is faster
+than the repeat structure any of tonight's runs can resolve. That invalidates
+the trough: pp2048 looked 25% bad in `scaling-1` and 2x bad in the re-run
+purely because of when in the evening it was sampled, not because of its
+shape. The ratio profile above is a time series of the machine, ordered by PP.
+
+Cause, found by looking at what the gate cannot see:
+
+    Kimi Helper (Renderer)   76.1% CPU   (GPU-rendering GUI helper)
+    WindowServer             41.5% CPU
+
+No compiler, no foreign bench, no indexer, no thermal or power warning
+recorded. The GPU was being co-tenanted by a desktop application, and every
+gate rule in this campaign - `load < 5.0`, `pgrep -x cargo/rustc/llama-bench`,
+indexer CPU share - is blind to it. Load average was the *lowest* misleading
+signal of the evening: the runs with load 5.6-6.4 were the good ones and the
+load number itself barely moved while GPU time doubled.
+
+This is the failure mode `bench-regime-matters` warns about, in a new guise:
+"all gates pass but rows depressed" was previously explained by builds and
+indexers; tonight it was a GUI app on the Metal device, and no rule in the
+preregistration's Gates section could have caught it.
+
+Consequence, binding on the next run: the ambient gate is not sufficient and
+must be replaced, not supplemented, by a direct measurement of the thing that
+matters - run a fixed calibration shape (`pp1024`, 1 rep) and refuse to
+measure until its GPU `executing` time is within 10% of the quiet baseline
+(~101 ms on this build/model). That detects a GPU co-tenant in 1.2 s, which
+the load proxy took an entire evening to hide.
+
+What still stands, independent of the fit:
+- `ALLPAKA_ATTN_MM` is load-bearing and its benefit grows with context: at
+  pp8192 the reverting kernel took 4640 ms against 2107 ms (2.2x), at pp1024
+  136 ms against 101 ms (1.34x). Those pairs were taken back-to-back inside
+  the same second and their repeats agreed to 1%, so they are the most
+  trustworthy numbers of the evening even though the machine was dirty.
+- Both arms' per-token cost is monotone in PP, and pp512 is the cheapest point
+  for both (both arms' natural batch: `ALLPAKA_PREFILL_CHUNK`=512, llama
+  `n_ubatch`=512), so pp256 must stay out of any slope fit.
+- Nothing about the size of the allpaka/llama gap is measured tonight.

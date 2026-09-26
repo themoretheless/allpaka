@@ -24,7 +24,15 @@ echo "allpaka binary sha256 $(shasum -a 256 "$wt" | awk '{print $1}') head $(git
 
 for ((i = 1; i <= reps; i++)); do
     if ((i % 2 == 1)); then order="ap ll"; else order="ll ap"; fi
-    for pp in $LADDER; do
+    # Ladder order is shuffled per repeat, arms stay adjacent. With a fixed
+    # 256->8192 order the last point of every repeat lands on the worst part of
+    # any drift that starts during the run, which is exactly what ladder-1 hit:
+    # load went 5.71 -> 7.97 across five repeats and pp8192 alone ate 11.8% CV
+    # while pp256 kept 3.3%. A confound that is a function of position in the
+    # script is not a property of the machine.
+    read -r -a ladder <<< "$(printf '%s\n' $LADDER | awk 'BEGIN{srand('"$i"'*13)}{print $0, rand()}' |
+        sort -k2 -n | awk '{print $1}' | tr '\n' ' ')"
+    for pp in "${ladder[@]}"; do
         for arm in $order; do
             if [[ $arm == ap ]]; then
                 ALLPAKA_PF_OBUF_DENSE=1 ALLPAKA_BENCH_PP=$pp ALLPAKA_BENCH_TG=$tg \
@@ -53,6 +61,8 @@ echo "=== done; artifacts in $out ==="
 # is chasing are a handicapped attention path, and closing "the gap" would be
 # closing less than it looks. Probed at both ends, one invocation each, after the
 # ladder so it cannot bias the paired rows.
+[[ ${PROBE_FA:-1} == 1 ]] || { echo "--- -fa probe skipped (PROBE_FA=0; answered in fa-probe-1.txt) ---"; }
+if [[ ${PROBE_FA:-1} == 1 ]]; then
 echo "--- llama -fa probe (what did flash_attn:-1 resolve to?) ---"
 for pp in 256 8192; do
     for fa in default on off; do
@@ -66,4 +76,5 @@ for pp in 256 8192; do
     done
 done
 
+fi
 "$HERE/fit-scaling.py" "$out/ladder-1.txt" 2>&1 | tee "$out/fit-1.txt"
