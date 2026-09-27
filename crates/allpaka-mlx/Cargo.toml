@@ -1,0 +1,20 @@
+[package]
+name = "allpaka-mlx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "MLX weight container format (safetensors) and dequantization"
+
+[features]
+default = []
+libmlx = []  # Enable FFI to /opt/homebrew/lib/libmlxc.dylib
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+glob = "0.3"
+memmap2 = "0.9"
+
+[dev-dependencies]
+tempfile.workspace = true
