@@ -1,0 +1,55 @@
+# ALLPAKA_MV_ID on GLM-4.5-Air, paired AB/BA, pp480/tg32
+  1 dir(s), 10 counted pairs (1 priming discarded)
+  A3 prefill floors {'on': 317.8796596474638, 'off': 317.8796596474638, 'null': 317.8796596474638, 'q5off': 317.8796596474638}
+  A4 decode floors   {'on': 30.0, 'off': 30.0, 'null': 30.0, 'q5off': 30.0}
+  per-process metadata.git_commit seen: ['3ef9d9ce79d9']
+  WARNING no control calibration: q5off falls back to the default arm's prefill floor and the 30 tok/s decode floor, so criterion 0 can then fail for reasons about the band rather than the machine
+
+  per-pair ledger (ratio is on/other; >1 = shipped default faster)
+
+  round1       real     AB     on/off    45.97/ 47.49  ratio 0.9680  pp 351.5/350.4  load 2.24  out 0%/0%  disp same  swap  9.0  admitted
+  round2       real     BA     on/off    21.90/ 23.57  ratio 0.9291  pp 227.7/208.8  load 2.07  out 0%/0%  disp same  swap  9.0  removed: A3 on: prefill 227.7 < 317.9; A4 on: decode 21.90 < 30; A3 off: prefill 208.8 < 317.9; A4 off: decode 23.57 < 30
+  round3       real     AB     on/off    36.37/ 42.03  ratio 0.8655  pp 274.2/321.7  load 4.69  out 0%/0%  disp same  swap  9.0  removed: A3 on: prefill 274.2 < 317.9
+  round4       real     BA     on/off    44.43/ 46.85  ratio 0.9485  pp 330.7/373.5  load 3.44  out 0%/0%  disp same  swap  9.0  admitted
+  round1       null     BA     on/null   46.42/ 47.45  ratio 0.9782  pp 356.7/352.6  load 2.34  out 0%/0%  disp same  swap  9.0  admitted
+  round2       null     AB     on/null   25.48/ 30.94  ratio 0.8234  pp 277.3/292.8  load 5.01  out 0%/0%  disp same  swap  9.0  removed: A3 on: prefill 277.3 < 317.9; A4 on: decode 25.48 < 30; A3 null: prefill 292.8 < 317.9
+  round3       null     BA     on/null   45.97/ 44.86  ratio 1.0247  pp 373.3/356.7  load 3.19  out 0%/0%  disp same  swap  9.0  admitted
+  round4       null     AB     on/null   38.07/ 44.68  ratio 0.8521  pp 287.7/330.3  load 13.94  out 0%/0%  disp same  swap  9.0  removed: A3 on: prefill 287.7 < 317.9; A5 in-window load 13.94
+  round1       control  AB     on/q5off  46.13/ 22.13  ratio 2.0845  pp 368.9/232.6  load 2.20  out 0%/0%  disp same  swap  9.0  removed: A3 q5off: prefill 232.6 < 317.9; A4 q5off: decode 22.13 < 30
+  round3       control  BA     on/q5off  33.10/ 39.74  ratio 0.8328  pp 250.2/374.2  load 2.99  out 0%/0%  disp same  swap  9.0  removed: A3 on: prefill 250.2 < 317.9
+
+  real: admitted 2 of 4
+    removed round2 BA on/off: A3 on: prefill 227.7 < 317.9
+    removed round2 BA on/off: A4 on: decode 21.90 < 30
+    removed round2 BA on/off: A3 off: prefill 208.8 < 317.9
+    removed round2 BA on/off: A4 off: decode 23.57 < 30
+    removed round3 AB on/off: A3 on: prefill 274.2 < 317.9
+  null: admitted 2 of 4
+    removed round2 AB on/null: A3 on: prefill 277.3 < 317.9
+    removed round2 AB on/null: A4 on: decode 25.48 < 30
+    removed round2 AB on/null: A3 null: prefill 292.8 < 317.9
+    removed round4 AB on/null: A3 on: prefill 287.7 < 317.9
+    removed round4 AB on/null: A5 in-window load 13.94
+  control: admitted 0 of 2
+    removed round1 AB on/q5off: A3 q5off: prefill 232.6 < 317.9
+    removed round1 AB on/q5off: A4 q5off: decode 22.13 < 30
+    removed round3 BA on/q5off: A3 on: prefill 250.2 < 317.9
+
+  stop rule: 2/4 of the first real pairs admitted -> STOP, abandon the campaign
+
+  REAL on/off            n= 2  median 0.9582  mean  -4.18%  SEM  0.98  >1 in 0/2  range 0.9485..0.9680  spread 2.06 pp
+  NULL floor on/null     n= 2  median 1.0015  mean  +0.15%  SEM  2.33  >1 in 1/2  range 0.9782..1.0247  spread 4.75 pp
+  CONTROL on/q5off       n= 0   (nothing admissible)
+    real, AB             n= 1  median 0.9680  mean  -3.20%  SEM   nan  >1 in 0/1  range 0.9680..0.9680  spread 0.00 pp
+    real, BA             n= 1  median 0.9485  mean  -5.15%  SEM   nan  >1 in 0/1  range 0.9485..0.9485  spread 0.00 pp
+
+  order split: AB 0.9680 vs BA 0.9485 -> gap 1.96 pp, same sign: True
+
+  measured noise floor (null pairs): median |ratio-1| = 2.33%, max = 2.47%
+  criterion 0: NO control pairs admissible -> nothing from this run can be read as 'no effect', and a near-threshold reading is equally uncertifiable
+
+  decision (preregistration, evaluated in order)
+    ABANDONED under the stop rule (2/4 of the first real pairs admitted) - the decision below is what the surviving pairs would have said, published as the reason for the abandonment and NOT as a verdict on the knob. It may not be quoted as a ship/flip signal.
+    FLIP-TO-OFF CANDIDATE: median 0.9582 is -4.18%, AB/BA agree, exceeds the null floor - but a GLM-only number does not change a shared default: re-measure on qwen3-30b before touching metal.rs
+
+  absolutes: on median 45.20  off median 47.17  llama-parity cross-check: this binary read 46.04 against llama 43.43 in ../2026-09-26-glm-llama-parity/

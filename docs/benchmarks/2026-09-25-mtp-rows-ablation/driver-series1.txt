@@ -1,0 +1,30 @@
+{"started": "2026-09-25T01:32:04Z", "binary_sha256": "f7549dd8818472d79e6c9362c5b1132821c7800fbe133fc2c972e62a0b9b9942", "git_head": "2347752", "tree": "dirty by design; the ablation switch is ALLPAKA_NO_EXPERT_ROWS", "model": "models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_M.gguf", "pp_tg_k": [480, 32, 4], "m_of_round": 5, "arms": {"rows": {}, "norows": {"ALLPAKA_NO_EXPERT_ROWS": "1"}}}
+pair 1 AB rows: spec 53.88656877273339 plain 95.27850353200391 verify 34.977520999999996 ms in 813.0 dispatches, rows engaged 12, load 6.97
+pair 1 AB norows: spec 55.22633087906944 plain 90.1792029849316 verify 34.154375 ms in 1293.0 dispatches, rows engaged 0, load 6.31
+pair 2 BA norows: spec 55.64907295313653 plain 95.17683931100892 verify 34.131146 ms in 1293.0 dispatches, rows engaged 0, load 5.58
+pair 2 BA rows: spec 54.21951745900231 plain 94.7886486541022 verify 35.267854 ms in 813.0 dispatches, rows engaged 12, load 5.28
+pair 3 AB rows: spec 54.66253644968394 plain 94.39270462384138 verify 35.1263125 ms in 813.0 dispatches, rows engaged 12, load 5.13
+pair 3 AB norows: spec 56.11152815712167 plain 90.36329583212317 verify 34.0570835 ms in 1293.0 dispatches, rows engaged 0, load 7.88
+pair 4 BA norows: spec 57.287059412722606 plain 92.77220021646306 verify 33.7585415 ms in 1293.0 dispatches, rows engaged 0, load 6.69
+pair 4 BA rows: spec 55.56138737909404 plain 94.70566926692624 verify 34.9386665 ms in 813.0 dispatches, rows engaged 12, load 9.57
+pair 5 AB rows: spec 55.76733753850078 plain 94.62818700156173 verify 34.6742495 ms in 813.0 dispatches, rows engaged 12, load 7.66
+pair 5 AB norows: spec 55.29344360981699 plain 95.00462476575571 verify 35.6020835 ms in 1293.0 dispatches, rows engaged 0, load 5.62
+pair 6 BA norows: spec 55.47679488018529 plain 94.28078970544051 verify 33.9522085 ms in 1293.0 dispatches, rows engaged 0, load 5.28
+pair 6 BA rows: spec 51.76053906000464 plain 90.9784017189027 verify 35.112458000000004 ms in 813.0 dispatches, rows engaged 12, load 4.92
+pair 7 AB rows: spec 49.375445591216085 plain 71.17761599570294 verify 34.9 ms in 813.0 dispatches, rows engaged 12, load 9.65
+pair 7 AB norows: spec 48.61623511247631 plain 95.49055777875977 verify 34.244687 ms in 1293.0 dispatches, rows engaged 0, load 7.56
+pair 8 BA norows: spec 48.81725262851501 plain 93.46431309234049 verify 33.8327915 ms in 1293.0 dispatches, rows engaged 0, load 5.8
+pair 8 BA rows: spec 53.92320829608559 plain 92.86519601085942 verify 34.7385415 ms in 813.0 dispatches, rows engaged 12, load 5.5
+pair 9 AB rows: spec 55.287751477935764 plain 94.73841579137573 verify 34.7002915 ms in 813.0 dispatches, rows engaged 12, load 10.64
+pair 9 AB norows: spec 57.53841659819191 plain 95.66313423069838 verify 33.7432915 ms in 1293.0 dispatches, rows engaged 0, load 8.81
+pair 10 BA norows: spec 57.11818239405317 plain 94.95047667987808 verify 33.964458 ms in 1293.0 dispatches, rows engaged 0, load 8.92
+pair 10 BA rows: spec 54.479653339155846 plain 93.03081700178068 verify 35.884417 ms in 813.0 dispatches, rows engaged 12, load 8.13
+pair 11 AB rows: spec 55.745531584955685 plain 94.77325498744254 verify 34.90175 ms in 813.0 dispatches, rows engaged 12, load 6.57
+pair 11 AB norows: spec 57.04939627503134 plain 94.2189554364274 verify 34.142250000000004 ms in 1293.0 dispatches, rows engaged 0, load 7.25
+pair 12 BA norows: spec 56.07831625668575 plain 95.34275462564536 verify 34.2673335 ms in 1293.0 dispatches, rows engaged 0, load 6.5
+pair 12 BA rows: spec 54.63401749845971 plain 95.59432150252931 verify 34.9700625 ms in 813.0 dispatches, rows engaged 12, load 6.07
+pair 13 AB rows: spec 55.54755535746989 plain 95.62624501262066 verify 34.99025 ms in 813.0 dispatches, rows engaged 12, load 6.92
+pair 13 AB norows: spec 56.75629780251516 plain 95.0598108457701 verify 34.1667915 ms in 1293.0 dispatches, rows engaged 0, load 7.33
+pair 14 BA norows: spec 57.55664833247598 plain 91.6064405133239 verify 33.6190835 ms in 1293.0 dispatches, rows engaged 0, load 6.76
+pair 14 BA rows: spec 56.25720795476921 plain 95.30105009070247 verify 34.732354 ms in 813.0 dispatches, rows engaged 12, load 7.24
+pairs: /Users/themoretheless/Documents/Sources/allpaka/.airbug-bench/mtp-rows-series1/pairs.jsonl

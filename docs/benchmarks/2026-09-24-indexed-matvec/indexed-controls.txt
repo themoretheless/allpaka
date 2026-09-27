@@ -1,0 +1,24 @@
+--- rep 1 11:30:56 ---
+q2_k gate/up   [1536,4096] sets=25: 137.7 GB/s best, 74.6 median, 420 Gweight/s, 1.85x spread
+q3_k down      [4096,1536] sets=19: 89.9 GB/s best, 73.2 median, 209 Gweight/s, 1.23x spread
+q4_k           [4096,1536] sets=15: 187.6 GB/s best, 134.0 median, 333 Gweight/s, 1.40x spread
+q5_k           [4096,1536] sets=12: 139.6 GB/s best, 137.1 median, 203 Gweight/s, 1.02x spread
+q8_0           [4096,1536] sets=8: 362.8 GB/s best, 358.1 median, 341 Gweight/s, 1.01x spread
+q2_k control   [4096,1536] sets=25: 87.8 GB/s best, 63.0 median, 268 Gweight/s, 1.39x spread
+q4_k control   [1536,4096] sets=15: 316.9 GB/s best, 262.5 median, 563 Gweight/s, 1.21x spread
+--- rep 2 11:31:10 ---
+q2_k gate/up   [1536,4096] sets=25: 199.7 GB/s best, 199.2 median, 609 Gweight/s, 1.00x spread
+q3_k down      [4096,1536] sets=19: 177.1 GB/s best, 176.6 median, 412 Gweight/s, 1.00x spread
+q4_k           [4096,1536] sets=15: 354.6 GB/s best, 349.7 median, 630 Gweight/s, 1.01x spread
+q5_k           [4096,1536] sets=12: 248.9 GB/s best, 248.2 median, 362 Gweight/s, 1.00x spread
+q8_0           [4096,1536] sets=8: 400.2 GB/s best, 398.5 median, 377 Gweight/s, 1.00x spread
+q2_k control   [4096,1536] sets=25: 114.7 GB/s best, 113.6 median, 350 Gweight/s, 1.01x spread
+q4_k control   [1536,4096] sets=15: 350.0 GB/s best, 350.0 median, 622 Gweight/s, 1.00x spread
+--- rep 3 11:31:20 ---
+q2_k gate/up   [1536,4096] sets=25: 142.5 GB/s best, 129.9 median, 434 Gweight/s, 1.10x spread
+q3_k down      [4096,1536] sets=19: 108.8 GB/s best, 108.3 median, 253 Gweight/s, 1.00x spread
+q4_k           [4096,1536] sets=15: 292.2 GB/s best, 253.8 median, 520 Gweight/s, 1.15x spread
+q5_k           [4096,1536] sets=12: 163.2 GB/s best, 160.6 median, 237 Gweight/s, 1.02x spread
+q8_0           [4096,1536] sets=8: 340.1 GB/s best, 339.4 median, 320 Gweight/s, 1.00x spread
+q2_k control   [4096,1536] sets=25: 78.5 GB/s best, 71.6 median, 239 Gweight/s, 1.10x spread
+q4_k control   [1536,4096] sets=15: 282.8 GB/s best, 264.2 median, 503 Gweight/s, 1.07x spread

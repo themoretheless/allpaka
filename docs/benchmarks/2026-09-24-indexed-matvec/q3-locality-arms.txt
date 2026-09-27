@@ -1,0 +1,212 @@
+# q3_k run-locality probes: matvec_q3_k_ic / _icw against their twins
+
+Shape `[4096,1536]` x8 indexed, 12 rotating expert sets, feed=32, one process
+per arm, `q5_shape_ratio_against_q4`. Five reps x six arms, arm order rotated by
+two slots per rep so position cannot be the experiment. Kept only runs whose own
+controls are in band (q5_k 1.72-1.84, q6_k 1.30-1.53 against the in-run q4_k
+meter); 24 of 30 kept, and the per-arm spread after that is +-0.01-0.026.
+
+Each arm differs from its twin in exactly ONE property:
+
+| arm | kernel | vs twin | weight loads per block-row |
+| --- | --- | --- | --- |
+| (incumbent) | matvec_q3_k_mv | - | 32 ushort, real arithmetic |
+| nomath | matvec_q3_k_nm | - | 32 ushort, arithmetic removed |
+| nomath_word | matvec_q3_k_nw | nomath | 16 uint on a 112-byte padded block |
+| nomath_norowstep | matvec_q3_k_ns | nomath | 16 ushort (row 1 reuses row 0's) |
+| contig | matvec_q3_k_ic | nomath | 32 ushort from ONE 32-byte run per lane |
+| contig_word | matvec_q3_k_icw | nomath_word | 16 uint from ONE 32-byte run per lane |
+
+## Result (mean ratio to the in-run q4_k meter, in-band runs only)
+
+| arm | n | mean | sd | range | vs incumbent |
+| --- | --- | --- | --- | --- | --- |
+| incumbent | 4 | 1.808 | 0.070 | 1.739-1.906 | - |
+| nomath | 4 | 1.383 | 0.010 | 1.372-1.396 | -22.9% |
+| nomath_word | 4 | 1.319 | 0.010 | 1.306-1.329 | -26.4% |
+| nomath_norowstep | 4 | 1.198 | 0.056 | 1.118-1.243 | -33.2% |
+| contig | 3 | 1.410 | 0.016 | 1.395-1.426 | -21.3% |
+| contig_word | 4 | 1.372 | 0.024 | 1.337-1.389 | -23.5% |
+
+Pairwise, the two locality arms are slower than their twins: contig vs nomath
+1.410 against 1.383 (+2.0%), contig_word vs nomath_word 1.372 against 1.319
+(+4.0%). Both margins exceed the within-arm spread. Load width still buys what
+correction 6 estimated, now resolved: nomath -> nomath_word is -4.6%.
+
+## What this closes
+
+The interleaved-plane repack was the last `q3_k` layout hypothesis: put each
+16-quant group's mask bytes next to its quants so a lane's weight loads issue
+from one run. It costs ~29% more weight bytes per block (the one-bit plane has
+to be duplicated across the sub-blocks that share it) and cannot share the
+model's zero-copy mmap, so it needed a measured gain to be argued at all.
+Measured directly, contiguity at fixed count and width is worth -2 to -4% - it
+goes the WRONG way, so there is no gain for the memory cost to pay against, and
+the 26 GiB question never has to be asked. Kill condition was "ratio must fall
+below ~1.20"; contig came in at 1.41.
+
+What is left on q3_k is load COUNT, and nomath_norowstep shows where it goes:
+halving the weight loads per block (-33% vs incumbent, 1.198) works only because
+the probe lets row 1 reuse row 0's bytes, which real q3_k rows cannot do - they
+are different output rows, i.e. different weights. A real kernel cannot reach
+1.198 without changing the format's row ownership.
+
+## Raw log
+
+Guard coverage: `q3_probe_kernels_stay_out_of_the_production_choice` now iterates
+the arm table and asserts every arm's kernel is present in the MSL source - a
+name with no kernel makes the pipeline lookup return None, which the harness
+reports as SKIP and reads like a null result. Verified by mutation: renaming the
+`contig` arm's kernel to `matvec_q3_k_iz` in `Q3_PROBE_ARMS` turns that test red,
+and it is green again after the revert.
+
+--- rep1 pos1 arm=incumbent
+q4_k   293 GB/s  492.1 ps/row/block  vs q4_k 1.000
+q5_k   203 GB/s  867.1 ps/row/block  vs q4_k 1.762
+q3_k   125 GB/s  881.2 ps/row/block  vs q4_k 1.791
+q6_k   303 GB/s  693.7 ps/row/block  vs q4_k 1.410
+--- rep1 pos2 arm=nomath
+q4_k   305 GB/s  472.7 ps/row/block  vs q4_k 1.000
+q5_k   208 GB/s  847.2 ps/row/block  vs q4_k 1.792
+q3_k nm 169 GB/s  651.2 ps/row/block  vs q4_k 1.378
+q6_k   318 GB/s  659.9 ps/row/block  vs q4_k 1.396
+--- rep1 pos3 arm=nomath_word
+q4_k   306 GB/s  471.1 ps/row/block  vs q4_k 1.000
+q5_k   210 GB/s  839.1 ps/row/block  vs q4_k 1.781
+q3_k word 182 GB/s  615.3 ps/row/block  vs q4_k 1.306
+q6_k   315 GB/s  667.4 ps/row/block  vs q4_k 1.417
+--- rep1 pos4 arm=nomath_norowstep
+q4_k   286 GB/s  503.5 ps/row/block  vs q4_k 1.000
+q5_k   191 GB/s  923.3 ps/row/block  vs q4_k 1.834
+q3_k no-row-step 176 GB/s  625.8 ps/row/block  vs q4_k 1.243
+q6_k   288 GB/s  729.7 ps/row/block  vs q4_k 1.449
+--- rep1 pos5 arm=contig
+q4_k   301 GB/s  478.2 ps/row/block  vs q4_k 1.000
+q5_k   208 GB/s  847.3 ps/row/block  vs q4_k 1.772
+q3_k contig 165 GB/s  667.0 ps/row/block  vs q4_k 1.395
+q6_k   316 GB/s  664.9 ps/row/block  vs q4_k 1.390
+--- rep1 pos6 arm=contig_word
+q4_k   304 GB/s  473.8 ps/row/block  vs q4_k 1.000
+q5_k   207 GB/s  849.4 ps/row/block  vs q4_k 1.793
+q3_k contig word 171 GB/s  653.9 ps/row/block  vs q4_k 1.380
+q6_k   318 GB/s  659.4 ps/row/block  vs q4_k 1.392
+--- rep2 pos1 arm=nomath_word
+q4_k   307 GB/s  469.3 ps/row/block  vs q4_k 1.000
+q5_k   210 GB/s  838.1 ps/row/block  vs q4_k 1.786
+q3_k word 181 GB/s  620.5 ps/row/block  vs q4_k 1.322
+q6_k   316 GB/s  664.6 ps/row/block  vs q4_k 1.416
+--- rep2 pos2 arm=nomath_norowstep
+q4_k   318 GB/s  453.1 ps/row/block  vs q4_k 1.000
+q5_k   214 GB/s  824.0 ps/row/block  vs q4_k 1.818
+q3_k no-row-step 198 GB/s  556.0 ps/row/block  vs q4_k 1.227
+q6_k   325 GB/s  645.5 ps/row/block  vs q4_k 1.425
+--- rep2 pos3 arm=contig
+q4_k   262 GB/s  549.8 ps/row/block  vs q4_k 1.000
+q5_k   184 GB/s  954.7 ps/row/block  vs q4_k 1.736
+q3_k contig 142 GB/s  775.4 ps/row/block  vs q4_k 1.410
+q6_k   278 GB/s  756.6 ps/row/block  vs q4_k 1.376
+--- rep2 pos4 arm=contig_word
+q4_k   307 GB/s  469.3 ps/row/block  vs q4_k 1.000
+q5_k   209 GB/s  841.2 ps/row/block  vs q4_k 1.792
+q3_k contig word 173 GB/s  649.0 ps/row/block  vs q4_k 1.383
+q6_k   318 GB/s  660.7 ps/row/block  vs q4_k 1.408
+--- rep2 pos5 arm=incumbent
+q4_k   286 GB/s  503.0 ps/row/block  vs q4_k 1.000
+q5_k   193 GB/s  910.8 ps/row/block  vs q4_k 1.811
+q3_k   122 GB/s  903.1 ps/row/block  vs q4_k 1.795
+q6_k   289 GB/s  727.6 ps/row/block  vs q4_k 1.446
+--- rep2 pos6 arm=nomath
+q4_k   281 GB/s  513.0 ps/row/block  vs q4_k 1.000
+q5_k   194 GB/s  907.0 ps/row/block  vs q4_k 1.768
+q3_k nm 156 GB/s  703.9 ps/row/block  vs q4_k 1.372
+q6_k   298 GB/s  705.9 ps/row/block  vs q4_k 1.376
+--- rep3 pos1 arm=contig
+q4_k   277 GB/s  520.4 ps/row/block  vs q4_k 1.000
+q5_k   184 GB/s  954.2 ps/row/block  vs q4_k 1.834
+q3_k contig 148 GB/s  742.0 ps/row/block  vs q4_k 1.426
+q6_k   282 GB/s  743.7 ps/row/block  vs q4_k 1.429
+--- rep3 pos2 arm=contig_word
+q4_k   251 GB/s  574.3 ps/row/block  vs q4_k 1.000
+q5_k   174 GB/s  1011.2 ps/row/block  vs q4_k 1.761
+q3_k contig word 140 GB/s  797.7 ps/row/block  vs q4_k 1.389
+q6_k   272 GB/s  773.0 ps/row/block  vs q4_k 1.346
+--- rep3 pos3 arm=incumbent
+q4_k   239 GB/s  603.0 ps/row/block  vs q4_k 1.000
+q5_k   170 GB/s  1036.3 ps/row/block  vs q4_k 1.719
+q3_k   102 GB/s  1074.6 ps/row/block  vs q4_k 1.782
+q6_k   223 GB/s  941.8 ps/row/block  vs q4_k 1.562
+--- rep3 pos4 arm=nomath
+q4_k   255 GB/s  564.4 ps/row/block  vs q4_k 1.000
+q5_k   179 GB/s  983.3 ps/row/block  vs q4_k 1.742
+q3_k nm 140 GB/s  783.0 ps/row/block  vs q4_k 1.387
+q6_k   267 GB/s  785.9 ps/row/block  vs q4_k 1.392
+--- rep3 pos5 arm=nomath_word
+q4_k   245 GB/s  587.7 ps/row/block  vs q4_k 1.000
+q5_k   171 GB/s  1028.3 ps/row/block  vs q4_k 1.750
+q3_k word 144 GB/s  775.8 ps/row/block  vs q4_k 1.320
+q6_k   255 GB/s  822.9 ps/row/block  vs q4_k 1.400
+--- rep3 pos6 arm=nomath_norowstep
+q4_k   250 GB/s  575.4 ps/row/block  vs q4_k 1.000
+q5_k   170 GB/s  1035.0 ps/row/block  vs q4_k 1.799
+q3_k no-row-step 159 GB/s  691.8 ps/row/block  vs q4_k 1.202
+q6_k   260 GB/s  807.4 ps/row/block  vs q4_k 1.403
+--- rep4 pos1 arm=incumbent
+q4_k   344 GB/s  419.1 ps/row/block  vs q4_k 1.000
+q5_k   241 GB/s  729.1 ps/row/block  vs q4_k 1.740
+q3_k   151 GB/s  729.0 ps/row/block  vs q4_k 1.739
+q6_k   363 GB/s  578.9 ps/row/block  vs q4_k 1.381
+--- rep4 pos2 arm=nomath
+q4_k   230 GB/s  626.1 ps/row/block  vs q4_k 1.000
+q5_k   157 GB/s  1119.5 ps/row/block  vs q4_k 1.788
+q3_k nm 126 GB/s  874.1 ps/row/block  vs q4_k 1.396
+q6_k   243 GB/s  864.0 ps/row/block  vs q4_k 1.380
+--- rep4 pos3 arm=nomath_word
+q4_k   435 GB/s  331.2 ps/row/block  vs q4_k 1.000
+q5_k   288 GB/s  612.1 ps/row/block  vs q4_k 1.848
+q3_k word 262 GB/s  427.8 ps/row/block  vs q4_k 1.292
+q6_k   395 GB/s  531.8 ps/row/block  vs q4_k 1.606
+--- rep4 pos4 arm=nomath_norowstep
+q4_k   369 GB/s  390.2 ps/row/block  vs q4_k 1.000
+q5_k   256 GB/s  688.0 ps/row/block  vs q4_k 1.763
+q3_k no-row-step 252 GB/s  436.4 ps/row/block  vs q4_k 1.118
+q6_k   388 GB/s  541.4 ps/row/block  vs q4_k 1.388
+--- rep4 pos5 arm=contig
+q4_k   189 GB/s  763.8 ps/row/block  vs q4_k 1.000
+q5_k   135 GB/s  1299.0 ps/row/block  vs q4_k 1.701
+q3_k contig 94 GB/s  1174.1 ps/row/block  vs q4_k 1.537
+q6_k   173 GB/s  1217.2 ps/row/block  vs q4_k 1.594
+--- rep4 pos6 arm=contig_word
+q4_k   174 GB/s  826.2 ps/row/block  vs q4_k 1.000
+q5_k   130 GB/s  1352.6 ps/row/block  vs q4_k 1.637
+q3_k contig word 97 GB/s  1155.5 ps/row/block  vs q4_k 1.399
+q6_k   184 GB/s  1138.8 ps/row/block  vs q4_k 1.378
+--- rep5 pos1 arm=nomath_word
+q4_k   262 GB/s  549.8 ps/row/block  vs q4_k 1.000
+q5_k   180 GB/s  977.3 ps/row/block  vs q4_k 1.778
+q3_k word 153 GB/s  731.0 ps/row/block  vs q4_k 1.329
+q6_k   265 GB/s  791.8 ps/row/block  vs q4_k 1.440
+--- rep5 pos2 arm=nomath_norowstep
+q4_k   242 GB/s  595.0 ps/row/block  vs q4_k 1.000
+q5_k   174 GB/s  1013.6 ps/row/block  vs q4_k 1.703
+q3_k no-row-step 161 GB/s  683.2 ps/row/block  vs q4_k 1.148
+q6_k   239 GB/s  879.6 ps/row/block  vs q4_k 1.478
+--- rep5 pos3 arm=contig
+q4_k   372 GB/s  386.6 ps/row/block  vs q4_k 1.000
+q5_k   270 GB/s  652.5 ps/row/block  vs q4_k 1.688
+q3_k contig 212 GB/s  520.1 ps/row/block  vs q4_k 1.345
+q6_k   386 GB/s  543.5 ps/row/block  vs q4_k 1.406
+--- rep5 pos4 arm=contig_word
+q4_k   397 GB/s  362.4 ps/row/block  vs q4_k 1.000
+q5_k   274 GB/s  642.1 ps/row/block  vs q4_k 1.772
+q3_k contig word 231 GB/s  484.5 ps/row/block  vs q4_k 1.337
+q6_k   390 GB/s  538.6 ps/row/block  vs q4_k 1.486
+--- rep5 pos5 arm=incumbent
+q4_k   309 GB/s  466.5 ps/row/block  vs q4_k 1.000
+q5_k   214 GB/s  822.3 ps/row/block  vs q4_k 1.763
+q3_k   124 GB/s  889.1 ps/row/block  vs q4_k 1.906
+q6_k   324 GB/s  648.1 ps/row/block  vs q4_k 1.389
+--- rep5 pos6 arm=nomath
+q4_k   468 GB/s  308.0 ps/row/block  vs q4_k 1.000
+q5_k   306 GB/s  574.3 ps/row/block  vs q4_k 1.865
+q3_k nm 289 GB/s  380.6 ps/row/block  vs q4_k 1.236
+q6_k   466 GB/s  450.5 ps/row/block  vs q4_k 1.463

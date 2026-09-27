@@ -1,0 +1,64 @@
+### NR0=2
+q3_k nb16   180 GB/s  419 Gweight/s 2.39 ps/w
+       A=0.3 ns/row  B=587 ps/row/block  (2.29 ps/weight at the block cost alone)
+q4_k nb16   404 GB/s  718 Gweight/s 1.39 ps/w
+       A=0.6 ns/row  B=319 ps/row/block  (1.25 ps/weight at the block cost alone)
+q5_k nb16   210 GB/s  306 Gweight/s 3.27 ps/w
+       A=-0.3 ns/row  B=845 ps/row/block  (3.30 ps/weight at the block cost alone)
+       A=0.2 ns/row  B=72 ps/row/block  (2.26 ps/weight at the block cost alone)
+### NR0=8
+q3_k nb16   149 GB/s  347 Gweight/s 2.88 ps/w
+       A=0.8 ns/row  B=687 ps/row/block  (2.68 ps/weight at the block cost alone)
+q4_k nb16   399 GB/s  710 Gweight/s 1.41 ps/w
+       A=0.6 ns/row  B=325 ps/row/block  (1.27 ps/weight at the block cost alone)
+q5_k nb16   223 GB/s  324 Gweight/s 3.09 ps/w
+       A=0.1 ns/row  B=784 ps/row/block  (3.06 ps/weight at the block cost alone)
+       A=0.2 ns/row  B=72 ps/row/block  (2.24 ps/weight at the block cost alone)
+### NR0=2
+q3_k nb16   185 GB/s  430 Gweight/s 2.32 ps/w
+       A=0.5 ns/row  B=563 ps/row/block  (2.20 ps/weight at the block cost alone)
+q4_k nb16   415 GB/s  738 Gweight/s 1.36 ps/w
+       A=0.7 ns/row  B=298 ps/row/block  (1.17 ps/weight at the block cost alone)
+q5_k nb16   224 GB/s  325 Gweight/s 3.07 ps/w
+       A=-0.2 ns/row  B=798 ps/row/block  (3.12 ps/weight at the block cost alone)
+       A=0.2 ns/row  B=73 ps/row/block  (2.27 ps/weight at the block cost alone)
+### NR0=8
+q3_k nb16   141 GB/s  327 Gweight/s 3.06 ps/w
+       A=0.7 ns/row  B=729 ps/row/block  (2.85 ps/weight at the block cost alone)
+q4_k nb16   400 GB/s  711 Gweight/s 1.41 ps/w
+       A=0.6 ns/row  B=318 ps/row/block  (1.24 ps/weight at the block cost alone)
+q5_k nb16   209 GB/s  303 Gweight/s 3.30 ps/w
+       A=-0.2 ns/row  B=847 ps/row/block  (3.31 ps/weight at the block cost alone)
+       A=0.2 ns/row  B=72 ps/row/block  (2.27 ps/weight at the block cost alone)
+### NR0=2
+q3_k nb16   168 GB/s  391 Gweight/s 2.56 ps/w
+       A=0.3 ns/row  B=632 ps/row/block  (2.47 ps/weight at the block cost alone)
+q4_k nb16   381 GB/s  677 Gweight/s 1.48 ps/w
+       A=0.6 ns/row  B=337 ps/row/block  (1.32 ps/weight at the block cost alone)
+q5_k nb16   201 GB/s  293 Gweight/s 3.42 ps/w
+       A=-0.3 ns/row  B=881 ps/row/block  (3.44 ps/weight at the block cost alone)
+       A=0.3 ns/row  B=73 ps/row/block  (2.28 ps/weight at the block cost alone)
+### NR0=8
+q3_k nb16   130 GB/s  302 Gweight/s 3.31 ps/w
+       A=0.8 ns/row  B=775 ps/row/block  (3.03 ps/weight at the block cost alone)
+q4_k nb16   345 GB/s  614 Gweight/s 1.63 ps/w
+       A=0.7 ns/row  B=376 ps/row/block  (1.47 ps/weight at the block cost alone)
+q5_k nb16   196 GB/s  285 Gweight/s 3.51 ps/w
+       A=0.0 ns/row  B=891 ps/row/block  (3.48 ps/weight at the block cost alone)
+       A=0.3 ns/row  B=72 ps/row/block  (2.26 ps/weight at the block cost alone)
+### NR0=4
+q3_k nb16   110 GB/s  256 Gweight/s 3.90 ps/w
+       A=-0.2 ns/row  B=999 ps/row/block  (3.90 ps/weight at the block cost alone)
+q4_k nb16   366 GB/s  651 Gweight/s 1.54 ps/w
+       A=0.6 ns/row  B=355 ps/row/block  (1.39 ps/weight at the block cost alone)
+q5_k nb16   213 GB/s  310 Gweight/s 3.23 ps/w
+       A=0.4 ns/row  B=807 ps/row/block  (3.15 ps/weight at the block cost alone)
+       A=0.5 ns/row  B=70 ps/row/block  (2.18 ps/weight at the block cost alone)
+### NR0=2
+q3_k nb16   149 GB/s  346 Gweight/s 2.89 ps/w
+       A=0.3 ns/row  B=722 ps/row/block  (2.82 ps/weight at the block cost alone)
+q4_k nb16   345 GB/s  613 Gweight/s 1.63 ps/w
+       A=0.5 ns/row  B=379 ps/row/block  (1.48 ps/weight at the block cost alone)
+q5_k nb16   192 GB/s  279 Gweight/s 3.59 ps/w
+       A=-0.4 ns/row  B=923 ps/row/block  (3.60 ps/weight at the block cost alone)
+       A=0.4 ns/row  B=74 ps/row/block  (2.30 ps/weight at the block cost alone)

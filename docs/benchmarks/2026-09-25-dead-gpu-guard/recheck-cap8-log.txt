@@ -1,0 +1,32 @@
+airbug: traces and logs -> http://localhost:4318
+prewarmed 82.7 GiB of weights in 13.8s
+metal: Apple M4 Max attached, 82.7 GiB of weights shared with the GPU in 14 windows (maxBufferLength 8.0 GiB)
+engine bench: qwen3-235b-a22b-instruct-2507-Q2_K_XL (94 layers, qwen3moe, MoE)
+  capabilities:
+    model: arch=qwen3moe layers=94 moe=true
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: auto
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=14 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=471 bytes=0.19 GiB matmul-kernel=yes
+      Q2K: tensors=188 bytes=46.27 GiB matmul-kernel=yes
+      Q3K: tensors=79 bytes=25.46 GiB matmul-kernel=yes
+      Q4K: tensors=366 bytes=9.84 GiB matmul-kernel=yes
+      Q5K: tensors=16 bytes=0.18 GiB matmul-kernel=yes
+      Q6K: tensors=11 bytes=0.73 GiB matmul-kernel=yes
+    overrides:
+      none
+allpaka: GPU command buffer failed: MTLCommandBufferErrorDomain: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory) (code 8)
+allpaka: GPU command buffer failed: MTLCommandBufferErrorDomain: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory) (code 8)
+allpaka: GPU command buffer failed: MTLCommandBufferErrorDomain: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory) (code 8)
+  prefill argmax=151935
+  prefill    64 tok in  31.70 s       2.0 tok/s
+  gpu during prefill: 2 waits, 941 dispatches, encode 13 ms, wait 31678 ms of 31695 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 0 ms, scheduling 31662 ms, round trips + idle 16 ms (of 31678 ms waited)
+Error: benchmark invalid: 2 GPU command buffer(s) failed during warmup and prefill: MTLCommandBufferErrorDomain: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory) (code 8)

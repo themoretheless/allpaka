@@ -1,0 +1,209 @@
+Preregistration - ALLPAKA_NORMFLAG as a policy, and the MoE family behind it
+Written 2026-09-25T23:52Z, before any counted pair. Qoder agent session, Denis Mezhov's
+M4 Max. UTC throughout.
+
+WHY THIS EXISTS. `docs/benchmarks/2026-09-25-rfuse-unreachable-arm/README.md` established,
+by grep and one line of policy resolution, that `ALLPAKA_RFUSE`, `ALLPAKA_RMT` and
+`ALLPAKA_RTOPK` are read only inside expressions gated on `!normflag`, so under every
+default profile all three select nothing - which retires the 2026-09-12 verdicts
+("RFUSE -20-27 %", "RMT neutral") as arms that encoded the same command buffers. That
+file's own DoD, quoted here verbatim, is what this series pays:
+
+  1. NORMFLAG itself is the gate, and its own verdict ("30B decode 110 vs 116 tok/s") is a
+     09-12 number too ... It is also not one knob: OFF changes the combine/norm fold, the
+     norm's spin-flag ordering, and eligibility for this whole family.
+  2. DoD for the family, after 1: paired A/B *within* NORMFLAG=0 - {neither, RTOPK, RMT,
+     RFUSE} on qwen3-30b, AB/BA order, the null and drift vetoes.
+
+So this directory measures (a) the policy switch itself, and (b) the first member of the
+family, `RFUSE`, under the only policy where it is reachable. `RMT` and `RTOPK` are
+deliberately not run today and keep their DoD; see "Not in this window".
+
+WHAT IS ALREADY KNOWN ABOUT THE INSTRUMENT, BEFORE DESIGN. The same model on the same
+binary at 23:35Z today (`../2026-09-25-dcomb-ab/results.txt`) gave a null series - two
+arms the code treats identically - a median off centre by 1.69 % and a band of 8.28 %,
+because at ~132 tok/s an arm is a 2.4 s sample of the byte pipe. That number is the
+resolution any claim here has to beat, and it is why criterion 2 below is written as a
+gate on the control series rather than as an assumption.
+
+ARMS. Model `models/qwen3-30b-a3b-Q4_K_M.gguf` (18.6 GiB, fingerprint 958a654869de1762),
+PP=3072, TG=320, `ALLPAKA_BENCH_SKIP_MTP=1`, `ALLPAKA_PROFILE=max-performance`. Binary:
+the clean worktree `/tmp/allpaka-head` at git 8a16214, sha256
+6a4418fa1f0592977b17f0940d4138d0153bed9e6e5c2d68863fc1ce7f622988 - the same executable the
+DCOMB series ran, pinned into the out directory, so nothing built today is in the number
+and the two series share an instrument characterisation. One bench process per arm.
+
+  name      env                                        expected code
+  norm      (unset)                                    normflag true (policy default)
+  null      ALLPAKA_NORMFLAG=1                         runtime.rs:37 is
+                                                       `!is_ok_and(|v| v=="0")`, so =1 is
+                                                       the identical value -> control arm
+  off       ALLPAKA_NORMFLAG=0                         barriers instead of the spin flag
+  off_rf    ALLPAKA_NORMFLAG=0, ALLPAKA_RFUSE=1        reachable only here: moe_plain
+  (rfuse's own normflag=ON partner is not run: the grep result says it encodes the same
+  buffers as `norm`, and the probe below is what re-proves that instead of citing it.)
+
+PROBE (uncounted, run first, printed before any pair). One process per arm, five
+load-independent observables compared against `norm`: decode token stream (the full
+`input_tokens` list), decode dispatch count, decode waits, fast-path
+attempts/successes/declines, residency. Its purpose is to make each series' arms provably
+different or provably identical BEFORE pairs are spent - the failure mode the RFUSE file
+was written about is spending a series on two arms that encode the same thing. A probe
+costs a few minutes and enters no statistic; the DCOMB series set the precedent of
+disclosing such a run without using it.
+
+SERIES AND ORDER. `null` vs `norm` (control, 6 pairs), then `off` vs `norm` (policy, 12
+pairs), then `off_rf` vs `off` (family, 10 pairs). AB/BA alternation by pair parity, 25 s
+between arms, one uncounted priming run of `norm` before all of it.
+
+CRITERIA.
+1. Same work, per series. Within a pair the decode token streams must be identical, and
+   waits = 320 = TG in both arms. Declines are NOT required to be zero or equal across
+   arms here, unlike the DCOMB series: NORMFLAG is a policy switch, so an arm legitimately
+   taking a different engine is the thing under test. What is required is determinism -
+   every run of a given arm reports the same declines and the same dispatch count as that
+   arm's probe run, and the two arms of a series differ in dispatch count only if the
+   probe said they do. A violation stops the series.
+2. The control series must resolve. Report the median `null/norm` decode tok/s and its
+   spread. If the band (max-min) is >= the 3 % decision band, no *level* from the real
+   series is publishable to better than that band, and only the sign, the interval and the
+   census are reported. This is expected to fire today at ~8 % and is not a failure of the
+   design; it is the honest cost of a 2.4 s arm on a machine with a live desktop session.
+3. Cold veto. The residency census (`residency: windows=N set=true`) is reached at a
+   wall-clock point inside each process; a process whose census time exceeds 2x the series
+   median did not have the model resident and its pair is dropped. Weights must be fully
+   resident in all arms of every accepted pair.
+4. Load veto. A pair is dropped if any load reading around its two arms - before and after
+   each - exceeds LOAD_VETO=8.0 (1-minute average: index 1 of the raw
+   `{ a b c }` line from `vm.loadavg`, index 0 if the braces are stripped first).
+   DRIFT_VETO=0.85 against the running median of all arms seen in the process drops a pair
+   whose slower arm sits below 85 % of that median: a GPU-attached co-tenant moves decode
+   2.8x at constant load (`../2026-09-25-instrument-co-tenant/README.md`), so the ratio is
+   gated as well as the load. Both vetoes are recomputed by the analyzer from the capture,
+   because a flag in a row is not a check.
+5. Decision. With a clean control band, the series' median ratio and its sign count are
+   the result: an arm is accepted as better if it beats the control band and wins 95 % of
+   the sign/bootstrap interval away from 1. If the effect is inside 3 % or the control band
+   does not resolve, the verdict is the interval plus the census, and the knob's default
+   stands unchanged. For RFUSE specifically there is a prior to test: the retired 09-12
+   claim was that fusing costs 20-27 % of decode. If `off_rf`/`off` sits within the control
+   band, the retired claim is retired for good and gets written as a negative result.
+6. Secondary read, not a gate: `outside the GPU %`, encode ms, wait ms and dispatch count
+   per arm, per pair. The dispatch census is the structural claim of this whole design -
+   `moe_plain` changes which kernels are encoded - so it must be visible in counters and
+   not only at the wall.
+
+AMENDMENT 2026-09-25T23:57Z - the probe rewrote the design before any pair was
+spent. The probe step exists for exactly this reason, and this is what it caught.
+
+Fourteen uncounted single runs (two probe out directories, `.airbug-bench/
+normflag-probe{,2}`, captured 23:53:58Z and 23:56:03Z, their `probe.json` files are the
+capture) compared five load-independent observables - token stream, dispatch count,
+waits, fast-path stats, residency - against `norm`:
+
+  arm                 tok/s   dispatches  vs norm
+  norm (unset)        132.44      215680  -
+  null  NORMFLAG=1    130.83      215680  IDENTICAL observables
+  off   NORMFLAG=0    131.11      215680  IDENTICAL observables
+  off_rf      +RFUSE   90.93      200320  differs in dispatches (-15360)
+  rf   RFUSE=1 only   106.86      208000  differs in dispatches (-7680)
+  rmt  RMT=1 only     129.53      208000  differs in dispatches (-7680)
+  k    RTOPK=1 only   105.96      208000  differs in dispatches (-7680)
+
+Three consequences, each of which changes this file:
+
+1. **The shipped policy is not what the design assumed.** `../2026-09-25-rfuse-
+   unreachable-arm/README.md` concluded that RFUSE/RMT/RTOPK "select nothing" under
+   every default configuration, and its reasoning is a read of `RuntimePolicy` and the
+   profile table - i.e. of the *policy value* of `normflag`. But the site the encoder
+   actually consults is per-layer and conjunctive
+   (`metal.rs`: `let normflag = runtime.normflag && <q,k,v all matvec_q4_k_mv> &&
+   matches!(l.ffn, Moe)`, stored into `LayerRefs.normflag`), so a model can reach
+   `!normflag` with the policy bit ON. On qwen3-30b all three knobs move the dispatch
+   count by exactly -7680 (-24/token) under `ALLPAKA_PROFILE=max-performance` and no
+   other env. **They are live under the shipped default on this model, so the
+   family's DoD does not need `NORMFLAG=0` at all** - and the 2026-09-12 verdicts
+   this retires were measured on arms that really did differ, which the unreachable-arm
+   file said could not be true. Its own positive check (`census.py --run`, which was
+   never run) would have caught this. The README gets a dated amendment; the claim
+   below about which arms are worth pairs is the measured version.
+2. **`off` alone is a second null arm, not a policy comparison.** NORMFLAG=0 with
+   nothing else set produces byte-identical observables to the default, so the era-audit
+   row's "110 vs 116 tok/s" cannot be a structural difference on this model - only the
+   WAIT pipeline variant differs, which is not a dispatch. It is still worth 6 paired
+   runs, but as a *noise-floor* series (two arms, same encodes), which is what makes
+   criterion 2's band tighter for the same wall clock rather than as the primary result.
+   `off_rf` costing a further -7680 on top of `rf` shows the two levels are not the same
+   knob: what is not yet explained is which site's `!normflag` branch the extra 7680
+   belongs to, and this series does not claim to know.
+3. **The references move to `norm`** for all three family series, because the shipped
+   default is the thing a reader can regress to. The `off_*` arms stay in the driver for
+   the follow-up on a model where the policy bit is actually load-bearing.
+
+So the series set is now, and the counted run below is against these criteria with no
+further change: control `null`/`norm` 6 pairs, policy `off`/`norm` 6 pairs (a second
+null), then `rf`/`norm` 12, `rmt`/`norm` 8, `k`/`norm` 8. Prior to be tested against the
+paired data, from 2026-09-12: RFUSE costs 20-27 % of decode, RTOPK costs ~30 %
+(113.8 against 79.2 in the other direction of that pair), RMT neutral. The probe's
+single-run rates are -19.3 %, -18.4 % and -2.2 % respectively, so all three priors are
+in the right direction and only the paired series can say whether they are inside the
+band.
+
+NOT IN THIS WINDOW. `RMT` and `RTOPK` under NORMFLAG=0, and `NORMFLAG=0` on GLM and the
+235B (this is a qwen3-30b result by construction). The driver takes them as further
+`--series` entries, so the DoD is one command and a free GPU, not new code. If criterion 2
+fires today - which it should at 8 % - the level for any of them needs the TG=1280 arm
+length that the DCOMB results file names, on a machine without a desktop session.
+
+AMENDMENT 2026-09-26T00:54Z - the drift veto was anti-correlated with the hypothesis, and
+the first ten rfuse pairs prove it. This changes the REFERENCE the veto uses, not the
+strictness, and it costs no GPU time: every row it re-decides was already written.
+
+The rule as run: a pair was vetoed if its SLOWEST arm fell under DRIFT_VETO (0.85) x the
+median of every rate seen so far in the series, both arms pooled. On a family pair the two
+arms encode differently BY DESIGN - `rf` is 208000 dispatches over TG=320, `norm` 215680 -
+so a genuine 18 % treatment arm is always under 85 % of a median dominated by the
+reference, and the veto deleted exactly the pairs the series was built to measure:
+
+  rfuse pair 1: drift veto (slowest arm 110.84 under 85% of running median 134.45) - pair dropped
+  rfuse pair 3: drift veto (slowest arm 106.84 under 85% of running median 132.35) - pair dropped
+  ... (quoted verbatim from the driver log; full grep below)
+
+14 drift vetoes fired in the completed run - 10 of the 12 `rfuse` pairs and 4 of the 8
+`rtopk` pairs - and none on the 12 null pairs, because in a null pair both arms are within
+15 % of each other by construction. A drift detector whose false positives are all in the
+hypothesis series is measuring the effect, not the machine. The run therefore admitted
+1 of 12 rfuse pairs and 3 of 8 rtopk pairs - it was blind to its own hypothesis while
+holding the GPU. (Written at 00:54Z from the rfuse half alone, when the count read 10 and
+"every one on an rfuse pair"; `rtopk` pairs 3 and 6-8 turned out to go the same way.)
+
+Fixed in `drive.py` for future series: drift is per arm. Each arm is compared against the
+median of its OWN prior samples, with the same >= 3-sample warm-up and the same 0.85, so a
+machine that slides mid-series still gets caught (both arms fall together, each below its
+own history) while a steady treatment arm does not. The already-running process had loaded
+the old code, so the salvage is analysis-time: `analyze.py` walks every series in time
+order, re-derives admission under the per-arm rule, and prints the run's own decision
+beside it (`N pairs admitted (the run's own flags admitted K)`, per-pair `RECOVERED`). On
+the completed run that is 11/12 rfuse admitted where the run admitted 1, and 7/8 rtopk
+where the run admitted 3. Two pairs stay dropped: rfuse 10 on a load veto (max 11.9 > 8.0)
+and rtopk 5 (max 9.08), plus rmt 3 (max 13.17), which the re-derivation respects whatever
+the rates say.
+
+`python3 analyze.py --selfcheck` (7 cases, all passing) pins the four properties that
+matter, on synthetic rows: a steady 18 % treatment arm is not drift (4 pairs recovered);
+the run's own rule really did veto those four; a pair where BOTH arms slide - 88.0 and 92.0
+against a 131 base - is still vetoed; a load veto is respected whatever the rates; and BA
+pairs keep the AB sign.
+
+That last case is the second defect, found while re-deriving: `ratio()` built the quotient
+from SLOT order, and in a BA pair the first slot is the reference, so half of the rfuse
+pairs would have been reported as +21 % GAINS under the correct veto. `arms()` now returns
+challenge/reference from `SERIES_REF` by arm name, so a sign means the same thing in every
+series. Both defects pushed toward the same wrong conclusion - "no consistent effect" -
+which is the direction that would have closed the family as flat.
+
+Nothing about the criteria moves: still 3 % decision band, still criterion 2 against the
+pooled null. The completed run's floor came out wide - 17.56 pp over the 12 null pairs,
+median 1.53 pp off centre - so criterion 2 fires and the family levels are interval-only
+as published; `results.txt` carries the numbers, the per-order position check that keeps
+them arm-bound rather than slot-bound, and the verdicts.

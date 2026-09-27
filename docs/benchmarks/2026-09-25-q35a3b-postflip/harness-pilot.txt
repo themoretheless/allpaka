@@ -1,0 +1,116 @@
+# Pilot pair from run-pairs.sh - the harness check, not data. PAIRS=1, 2026-09-25 00:29 UTC.
+# The 0.40% prefill agreement and the 725/tok fused census are what Amendment 1 quotes.
+
+pinned binary sha256: 4326c6448fcfea9a42d8f6f09fbecc58394bc81405f7ea1913de6c34603a485a
+git HEAD: 234775259bc966f868d2712657e804251a095330
+dirty rust at start:
+   M crates/allpaka-backend/src/gpu/cuda/mod.rs
+   M crates/allpaka-backend/src/gpu/metal.rs
+   M crates/allpaka-backend/src/gpu/stub.rs
+   M crates/allpaka-backend/tests/gpu_cuda_parity.rs
+   M crates/allpaka-backend/tests/gpu_ffnbench.rs
+   M crates/allpaka-backend/tests/gpu_glm_mvbench.rs
+   M crates/allpaka-backend/tests/gpu_hugeoff.rs
+   M crates/allpaka-backend/tests/gpu_parity.rs
+   M crates/allpaka-backend/tests/gpu_q35_mvbench.rs
+   M crates/allpaka-backend/tests/gpu_windows.rs
+   M crates/allpaka-chat/src/credentials.rs
+   M crates/allpaka-chat/src/swarm.rs
+   M crates/allpaka-chat/src/tools.rs
+  ?? crates/allpaka-model/tests/swfuse_fold_is_scheduling.rs
+model: /Users/themoretheless/Documents/Sources/allpaka/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+start: 2026-09-25T00:29:14Z   4:29  up 1 day, 18:21, 6 users, load averages: 4.22 5.86 6.18
+DONE -> /Users/themoretheless/Documents/Sources/allpaka/.airbug-bench/q35-postflip-pilot
+
+=== stdout allpaka-plain-1.txt =====================
+airbug: traces and logs -> http://localhost:4318
+prewarmed 20.6 GiB of weights in 21.7s
+metal: Apple M4 Max attached, 20.6 GiB of weights shared with the GPU
+engine bench: Qwen3.6-35B-A3B-UD-Q4_K_M (40 layers, qwen35moe, MoE)
+  capabilities:
+    model: arch=qwen35moe layers=40 moe=true
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: auto
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=1 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=361 bytes=0.10 GiB matmul-kernel=yes
+      Q4K: tensors=80 bytes=11.25 GiB matmul-kernel=yes
+      Q5K: tensors=37 bytes=6.36 GiB matmul-kernel=yes
+      Q6K: tensors=4 bytes=1.00 GiB matmul-kernel=yes
+      Q8_0: tensors=251 bytes=1.89 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=23473
+  prefill   480 tok in   0.39 s    1245.9 tok/s
+  gpu during prefill: 2 waits, 461 dispatches, encode 1 ms, wait 384 ms of 385 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 383 ms, scheduling 1 ms, round trips + idle 0 ms (of 384 ms waited)
+  prefill phases, ms/token:
+    embed                  0.0  ( 0.2%)
+    attention              0.0  ( 0.1%)
+    ffn (experts)          0.0  ( 0.1%)
+    router                 0.0  ( 0.0%)
+    unaccounted            0.8  (99.6%)
+  decode     32 tok in   0.33 s      97.8 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 24384 dispatches, encode 9 ms, wait 316 ms of 327 ms total (1% outside the GPU)
+  gpu clock during decode: executing 312 ms, scheduling 2 ms, round trips + idle 2 ms (of 316 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted           10.2  (100.0%)
+  context at end: 33 tokens (attention cost grows with this)
+  benchmark report: /Users/themoretheless/Documents/Sources/allpaka/.airbug-bench/q35-postflip-pilot/allpaka-plain-1.json
+airbug bench run: target/allpaka-bench/airbug-1790296180435206000-7338
+
+=== stdout allpaka-fused-1.txt =====================
+airbug: traces and logs -> http://localhost:4318
+prewarmed 20.6 GiB of weights in 3.2s
+metal: Apple M4 Max attached, 20.6 GiB of weights shared with the GPU
+engine bench: Qwen3.6-35B-A3B-UD-Q4_K_M (40 layers, qwen35moe, MoE)
+  capabilities:
+    model: arch=qwen35moe layers=40 moe=true
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: auto
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=1 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=361 bytes=0.10 GiB matmul-kernel=yes
+      Q4K: tensors=80 bytes=11.25 GiB matmul-kernel=yes
+      Q5K: tensors=37 bytes=6.36 GiB matmul-kernel=yes
+      Q6K: tensors=4 bytes=1.00 GiB matmul-kernel=yes
+      Q8_0: tensors=251 bytes=1.89 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=23473
+  prefill   480 tok in   0.38 s    1250.9 tok/s
+  gpu during prefill: 2 waits, 461 dispatches, encode 1 ms, wait 382 ms of 384 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 381 ms, scheduling 1 ms, round trips + idle 0 ms (of 382 ms waited)
+  prefill phases, ms/token:
+    embed                  0.0  ( 0.2%)
+    attention              0.0  ( 0.1%)
+    ffn (experts)          0.0  ( 0.1%)
+    router                 0.0  ( 0.0%)
+    unaccounted            0.8  (99.6%)
+  decode     32 tok in   0.34 s      92.8 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 23200 dispatches, encode 9 ms, wait 334 ms of 345 ms total (1% outside the GPU)
+  gpu clock during decode: executing 329 ms, scheduling 2 ms, round trips + idle 3 ms (of 334 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted           10.8  (100.0%)
+  context at end: 33 tokens (attention cost grows with this)
+  benchmark report: /Users/themoretheless/Documents/Sources/allpaka/.airbug-bench/q35-postflip-pilot/allpaka-fused-1.json
+airbug bench run: target/allpaka-bench/airbug-1790296188152985000-7412
+
+allpaka-plain-1.json     decode median 97.8205753120273 tok/s = 10.2227981875 ms/token; prefill median 1245.8704844125095 tok/s
+allpaka-fused-1.json     decode median 92.84432590519344 tok/s = 10.7707174375 ms/token; prefill median 1250.8834625054667 tok/s

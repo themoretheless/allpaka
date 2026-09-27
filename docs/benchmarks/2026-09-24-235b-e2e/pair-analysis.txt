@@ -1,0 +1,104 @@
+# paired 235B decode e2E: allpaka vs llama.cpp, same file, alternating order
+# bash scripts/bench-compare.sh models/qwen3-235b-a22b-instruct-2507-Q2_K_XL.gguf 480 64 6
+# env ALLPAKA_PROFILE=max-performance ALLPAKA_BENCH_SKIP_MTP=1; 2026-09-24 18:35-18:44 UTC.
+# Six pairs, order alternates by the harness (odd pairs run allpaka first). Raw per-pair
+# artifacts sit beside this file: allpaka-N.{json,txt}, llama-pp-N.json, llama-tg-N.json.
+#
+# Columns: tok/s; GPU-exec = % of the waited ms inside GPU execution.
+# pair   allpaka_pp allpaka_tg  llama_pp  llama_tg tg_ratio pp_ratio disp/tok  GPU-exec  verdict
+# 1           202.4      23.43     215.8     29.59    0.792    0.938     1318      99.6  in band
+# 2           197.3      23.34     209.4     29.42    0.793    0.942     1318      99.6  in band
+# 3           196.9      23.64     220.0     29.70    0.796    0.895     1318      99.6  in band
+# 4           110.3      15.60     162.1     29.58    0.527    0.680     1318      99.4  REJECTED: degraded window
+# 5           127.9      15.40     158.1     29.27    0.526    0.809     1318      99.7  REJECTED: degraded window
+# 6           171.8      13.91     161.7     28.42    0.489    1.063     1318      99.7  REJECTED: degraded window
+#
+# VERDICT - pairs 1-3 usable, pairs 4-6 rejected by the band, not by the load gate
+# (docs/roadmap.md A9: the throughput band is the instrument). Pairs 1-3 put allpaka
+# decode at 23.34-23.64 (1.013x spread) and llama at 29.42-29.70 (1.010x); the ratio
+# is 0.792/0.793/0.796, median 0.793, three pairs the same way. Allpaka prefill in the
+# same three pairs reads 196.9-202.4, which is its own thermometer band.
+# Pairs 4-6 are a different machine: allpaka decode 15.60/15.40/13.91 (1.700x across
+# the three) with allpaka prefill down to 110-172 - the thermometer flags it, which is
+# what it is for - so those ratios (0.489-0.527) are not usable as a gap number.
+#
+# An honest loose end from the rejection. llama's decode did NOT degrade in pairs 4-6
+# (29.58/29.27/28.42, still inside its pairs-1-3 band) while allpaka's fell 40% and
+# llama's prefill did fall (158-162 against 209-220). So the degradation is not
+# symmetric between the engines on the same file in the same window, and this run does
+# not say why. Two readings are open: allpaka's decode is more sensitive to whatever
+# arrived on the machine after pair 3, or its 83 GiB of weights lost cache residency
+# during the interleaved llama arms. The first is a robustness finding, the second a
+# measurement artifact; either way the recorded gap should be quoted as
+# 0.79x-with-allpaka-prefill-in-band, and the 1.70x spread across the rejected pairs is
+# the reason a 6-pair run that fails the band tells you nothing on its own.
+#
+# Dispatch counters repeat exactly across ALL six pairs (1318/tok, 99.4-99.7% of the
+# waited ms inside GPU execution, 64 waits per 64-token arm), so the degraded pairs are
+# not the engine taking a different path - same work, slower execution.
+#
+# What this decides, and it survives the rejected pairs. The 235B row of
+# allpaka-vs-llama-metal-status.md read 0.72x from the 2026-09-12 matrix - one
+# single-shot arm per engine, never paired. Paired and in band, allpaka decodes at
+# 23.4-23.6 (not the recorded 20.0) and llama at 29.5, so the recorded 0.72x was ~15%
+# contention plus ~7% engine difference, and the gap to close is ~6.1 ms/token, not 13.
+# Against the byte ledger (time-ledger.txt section 3: 30.12 ms/token of weight traffic
+# at measured per-shape rates), the paired wall is 42.6 ms: 12.6 ms/token, 30% of the
+# token, sits OUTSIDE the sum of this model's own measured kernels. The
+# pre-registered fork was 27 tok/s (micro sum; then q3_k stays first) against 20 (12+ ms
+# outside the kernels; then priority changes). It lands nearer 20 than 27: best paired
+# decode 23.6 = 42.4 ms, and the 12.6 ms residue is 2.6x the whole q3_k prize (4.8 ms).
+# So on this model the next measurement is where those 12.6 ms are, not the q3_k unpack
+# chain. The instrument for it is the existing decode-subsystem probe ALLPAKA_SKIP=
+# qkv,attend,experts,router,head (crates/allpaka-backend/src/gpu/metal.rs:15848):
+# skip one group per arm, paired, and see whether the experts' share is the ledger's
+# 30.1 ms or something nearer 21.
+#
+# UPDATE 2026-09-24T19:07Z - the asymmetry has a named candidate, and it is mine.
+# A repo-wide `grep -rln matvec_q2_k .` started by an earlier agent turn at
+# 22:37:54 local (18:37:54 UTC) had no exclusion for models/, so it was reading
+# the 82.7 GiB GGUF through the page cache at ~98% CPU for the rest of this run;
+# it was still alive when pair 6 ended, and was killed at 19:07Z. Pair times
+# (local): pairs 1-3 allpaka arms finished 22:39:00-22:40:31 at prefill
+# 196.9-202.4, pairs 4-6 finished 22:41:46-22:43:32 at 110.3-127.9 - i.e. the
+# breakdown began ~2-3 min after the read storm, which is what cache exhaustion
+# around a wired 82.7 GiB model looks like (PhysMem at the time: 127G used, 88G
+# wired, 22G compressor, 135M unused). llama's arms were started fresh in the
+# same windows and re-mmap the same file, so the pressure landed on the engine
+# that had already committed the model to the GPU, not on both equally.
+# This is a candidate, not a proof: the grep was also alive during part of the
+# clean pairs, and the lag is inferred from four timestamps. What it does
+# establish is that the instrument was dirty, that a 0.489-0.527 decode ratio
+# was reproduced later in the identical setup (see the SKIP differential run at
+# 22:56-23:07, where arms after a second runaway grep read 51-80 ms/token against
+# a 42 ms baseline), and therefore that the pairs-4-6 numbers should never be
+# quoted as an engine finding. The 0.793x stands; the loose end is closed as
+# self-inflicted contention, with the standing rule that a repo-wide grep here
+# must exclude models/ and target/.
+
+# ----------------------------------------------------------------------------
+# Annotation added 2026-09-25 by the full-precision audit (task #26), see
+# [2026-09-25-full-precision-audit/results.txt](../2026-09-25-full-precision-audit/results.txt) section 1. Every number
+# below is recomputed from `.measurements[].summary.median` in the JSONs that
+# sit beside this file; nothing here is a new measurement.
+#
+#  line 44 `the gap to close is ~6.1 ms/token, not 13`  -  WRONG UNIT.
+#    6.169 is pair 1's tok/s DIFFERENCE (29.5949 - 23.4258), printed to 2 dp
+#    and then given a time's unit. In ms/token the three in-band pairs are
+#    42.6881-33.7896 = 8.8985, 42.8469-33.9935 = 8.8534, 42.3028-33.6742 =
+#    8.6285; median 8.853, spread 0.270. The `13` it was contrasted with is a
+#    genuine ms/token figure - the recorded 0.72x row read against llama's own
+#    median gives 46.93 - 33.79 = 13.14 - so the sentence held a real time
+#    against a rate and understated the live gap by 31%.
+#  line 21 `15.60/15.40/13.91 (1.700x across the three)`  -  MISATTRIBUTED.
+#    Those three rejected arms span 1.1212x. 1.6995x is best-clean over
+#    worst-rejected (23.639118 / 13.909391). The spread was real; the subject
+#    of the sentence was not.
+#
+# What survives untouched: the decode ratios 0.791547 / 0.793370 / 0.796029
+# (median 0.793370), the 1.013x allpaka and 1.010x llama spreads, and the
+# conclusion. The residue outside the kernel sum (12.6 ms/token) is 1.4x this
+# 8.85 ms gap, not 2.1x the 6.1 ms one, so `attribute the residue before
+# re-opening the q3_k chain` was the right order then and is the right order
+# now - the residue is simply a somewhat smaller prize against the gap than
+# this file implied.

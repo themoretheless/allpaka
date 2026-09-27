@@ -1,0 +1,311 @@
+# 235B ALLPAKA_SKIP differential - results (protocol: preregistration.txt)
+# Driver /tmp/skip-diff/drive.sh, 21 arms, 2026-09-24 22:55-23:15 local
+# (18:55-19:15 UTC). env ALLPAKA_PROFILE=max-performance ALLPAKA_BENCH_SKIP_MTP=1
+# ALLPAKA_BENCH_PP=480 ALLPAKA_BENCH_TG=64, one process per arm, 20 s apart, arm
+# order rotated by 3 per repetition. Binary ./target/release/allpaka built 16:51
+# local - the same one as the paired A/B run, NOT rebuilt (see "tree drift", 6).
+#
+# Headline: the differential answers its question for ONE group, and it
+# falsifies two things on the way - the instrument and the window.
+#
+# 1. Work-removal check, before any timing. Baseline: 84352 dispatches per
+# 64-token arm (1318/token), identical in all three repetitions.
+#
+#   arm        dispatches   delta/tok
+#   experts        65344       -297
+#   router         72320       -188
+#   qkv            84352          0
+#   attend         84352          0
+#   head           84352          0
+#   all            84352          0   (driver bug - this ran unskipped, see 2a)
+#
+# The zero-delta rows were first read as dead probes. That reading is wrong, and
+# the 30B control (../2026-09-24-30b-skip-control/results.txt) is what refuted
+# it: there the same three arms reproduce to 0.2% across repetitions and each
+# saves a plausible amount (qkv 1.58 ms against 1.34 predicted, head 0.50 against
+# 0.70, attend 0.37 against ~0) while its dispatch total stays exactly 43136. So
+# the counter covers the expert and router dispatches and NOT the attention-half
+# and output-head matvecs - the delta is a valid check on those two groups only,
+# and an arm that saves time without moving the counter is still a differential.
+#
+# 2. Two protocol deviations, both mine, recorded rather than hidden.
+# (a) The arm named `all` passed the literal string ALLPAKA_SKIP=all, which
+#     matches no group, so it ran the full model - it is a fourth baseline, not a
+#     floor. Fixed in the 30B control driver (../2026-09-24-30b-skip-control/).
+# (b) The band gate was applied per repetition; on a model of this size it
+#     belongs per arm - see 3.
+#
+# 3. The window moved more than the effect. ms/token by repetition:
+#
+#   rep   baseline   experts   all(=unskipped duplicate)   baseline prefill
+#   1       42.2      15.1              58.1                     204.9
+#   2       47.4      14.9              50.3                     160.6
+#   3       45.2      15.1                -                      195.0
+#
+# `experts` is flat to 1.3% across all three (15.1/14.9/15.1) while the baseline
+# moves 42.2 -> 47.4 (12%), and the unskipped duplicate at the end of rep 1 reads
+# 58.1 - 38% worse than its own rep-1 baseline six minutes earlier, running the
+# same code on the same file with the same dispatch count. So on this model the
+# window is a +/-38% variable, the residue being measured is 12.6 ms, and any
+# arm-vs-baseline delta needs its own bracketing baseline within the same minute.
+# Rep 1 is the only repetition whose baseline sits in the paired band
+# (42.3-42.9 ms/token); reps 2-3 are rejected, which is the pre-registered
+# outcome "fewer than two usable repetitions -> report as not measured".
+#
+# 4. The one usable arm. S(experts) = 42.2 - 15.1 = 27.1 ms/token against
+# P(experts) = 20.6 ms from the GGUF role census at this model's own streamed
+# rates -> R = 1.32. The expert groups are 64% of the token and carry at least
+# 6.5 ms of the 12.6 ms residue even at this least-inflated estimate. The
+# pre-registered fork was "uniform in-situ inflation" (R similar for every
+# group, so the byte model needs a utilisation factor) against "K-quant-specific
+# inflation" (R ~ 1 for the non-expert groups). It cannot be resolved here,
+# because the only other group that would have removed work - qkv - was a no-op.
+# Direction of the bias matters: contention hits the biggest byte group hardest
+# (the correction-#10 rule) and the baseline was the contended arm, so 1.32 is a
+# lower bound on R(experts), not an upper one.
+#
+# 5. Skipping the router made the token SLOWER, by 30.3 ms, while removing 188
+# dispatches per token. Mechanism, inferred not measured: the expert gather is
+# indexed by the router's top-k, so a skipped router leaves stale indices in the
+# slot buffer and the indexed path then reads rows the memory system had lined
+# up for the real routing. Consequence for the probe as an instrument: skipping
+# any group that feeds an indexed gather does not isolate that group, it
+# corrupts the group downstream. `experts` is safe only because with the experts
+# gone no gather happens at all.
+#
+# 6. The dead-probe theory, and how it died. It was worth checking whether the
+# guards were simply newer than the binary: probe_skip("qkv")/("head") sit in the
+# committed tree at crates/allpaka-backend/src/gpu/metal.rs:11462, 11482, 11707
+# and 12390, inside decode_token (10437), and `git log -S` puts all of them in
+# bbb73ef on 2026-09-14 - ten days before the 16:51 build, and not part of the
+# uncommitted diff that this shared worktree carries. So the guards were in the
+# binary; what was wrong was the inference from the counter (see 1).
+#
+# 7. What the residue question should use next, in cost order. ALLPAKA_DECODE_SPLIT
+# is present in this same binary (verified with strings) and its per-stage GPU
+# counter mechanism already writes into the table report_phases reads, so one
+# 235B decode arm with that env set attributes the token per stage with no group
+# removed - at the cost of extra encoders per submit, whose overhead is measured
+# by running the same arm without it (task #22). Rebuild + rewire is the second
+# option. The 30B control is running the same protocol on a 17 GiB q4_k/q6_k
+# model, where the cache story cannot apply and every arm is checked by dispatch
+# count before it is believed.
+#
+# Verdict on the pre-registered fork: NOT RESOLVED on this model. What is
+# resolved: the expert groups own at least half the residue (6.5 of 12.6 ms, a
+# lower bound), the SKIP probe on this path covers only the expert and router
+# groups, and on an 83 GiB model an unbracketed baseline is a +/-38% ruler.
+
+##############################################################################
+# UPDATE 2 - the bracketed re-run (Amendment 2), 2026-09-24 19:30-19:40 UTC.
+# Same binary, 4 x (baseline, experts) + 1 bracketed qkv + 1 bracketed all,
+# every arm preceded immediately by its own baseline. Files b2-*.txt here.
+#
+# 8.1 The numbers (ms/token; e = that run's own GPU-executing ms/token;
+#     dispatches are for the whole 64-token window)
+#
+#   arm      P     bracket   arm     save    R     disp      e arm / e bracket
+#   experts  20.6  42.55    15.13  +27.42  1.33   65344     14.52 / 41.75     r1
+#   experts  20.6  42.37    15.11  +27.27  1.32   65344     14.56 / 41.67     r2
+#   experts  20.6  42.37    30.77  +11.60   -     65344     30.16 / 41.67     r3 REJECTED
+#   experts  20.6  70.92    15.80   -       -     65344     15.22 / 70.05     r4 REJECTED
+#   qkv       8.4  42.37    35.21   +7.16  0.85   84352     34.59 / 41.64
+#   all      30.3  43.86     2.23  +41.63  1.37   53312      1.92 / 43.22
+#   baselines 42.37 / 42.37 / 42.37 / 70.92 / 42.37 / 43.86
+#
+# 8.2 The gate as written trips, and the reason it is over-reach
+#
+# Amendment 2 said: if the six baselines spread more than 8%, the run is unusable
+# for the fork regardless of R. They spread 60.2% (42.37 to 70.92). Taken
+# literally, this series decides nothing. It is reported rather than hidden
+# because the pooled-spread rule was badly written: five of the six baselines sit
+# in 42.37-43.86 (3.5%) and one is a 70.92 outlier that degrades only its own
+# pair, and the rule's purpose - "do not divide by a ruler that moved" - is served
+# by per-pair brackets, which is what the arms were actually given. Judged
+# per-pair, three pairs (r1, r2, qkv) have brackets inside 42.37-42.55 and their
+# saves reproduce to 0.15 ms. That narrowing is post-hoc and is weighted
+# accordingly; the two supporting facts that are not post-hoc are (a) r1/r2's
+# R = 1.33/1.32 equals the 1.32 that section 4 got from a completely separate,
+# unbracketed series hours earlier, and (b) the GPU-executing counter agrees with
+# the wall-clock save on every pair to within 0.1 ms (41.75 - 27.42 = 14.33
+# against 14.52 measured; 41.64 - 7.16 = 34.48 against 34.59), which two
+# independent instruments could not do if the saves were scheduling artifacts.
+#
+# 8.3 The fork resolves to FORMAT-SPECIFIC
+#
+# R(experts) = 1.32-1.33 with R(qkv) = 0.85 in the same window on the same model.
+# A uniform in-situ inflation cannot produce 0.85 for one group and 1.33 for
+# another; the pre-registered threshold (>= 1.20 keeps the format-specific branch
+# alive) is met with the complementary condition also met, since qkv is the
+# census's q4_k line (8.14 of the 8.4 ms) and it runs FASTER in the model than
+# its dispatched micro rate. The 30B control said the same thing from the other
+# side: a model whose experts are q4_k measured R(experts) = 1.02.
+# Consequence: the byte model needs no global utilisation factor, and the
+# 12.6 ms/token shortfall is located in the q2_k/q3_k expert kernels, which cost
+# 27.3 ms/token measured against 20.6 predicted - i.e. ~6.7 ms of the shortfall
+# is there. It also puts a floor under what the q3_k chain can be worth: at
+# in-situ rather than micro rates, `q3_k` is ~10 ms/token (7.69 x 1.33) not 7.69,
+# so the "+10.7% for a perfect kernel" of the byte census scales to ~+14%.
+#
+# 8.4 What the same numbers do NOT explain - the unpriced ~5 ms
+#
+# 27.3 (experts) + 7.2 (qkv) + 2.2 (what the `all` arm could not remove: norms,
+# bars, sampling, lm_head - the floor of a token with every group skipped) = 36.7,
+# against the 41.7 ms the baseline's GPU clock reports. The remaining ~5 ms can
+# only live in attend + head + router, which the census prices at 1.3 ms total
+# (head 1.1 + router 0.2 + attend 0, attention reading no weight bytes). Either
+# the census has an unpriced line, or one of those guards does not skip what its
+# name says - and the dispatch counter cannot tell, because it does not see those
+# sites (section 1, confirmed 0/3-versus-3/3 in the 30B control). Amendment 3
+# settles it with bracketed attend and head arms (b3-*.txt).
+#
+# 8.5 Window note, unpinned
+#
+# r3's experts arm read 30.77 inside a clean 42.37 bracket and r4's baseline read
+# 70.92; both are degradations of the run, not of the comparison. `ps
+# -Aco pid,pcpu,comm -r` during the series showed nothing but the bench itself
+# (98.8% during its own run), and pmset recorded no thermal or performance
+# warning, so the earlier "a grep of mine read the models dir" explanation covers
+# the 22:37-23:07 local window but NOT this one. Unattributed; brackets are the
+# defence actually working.
+
+##############################################################################
+# UPDATE 3 - bracketed attend/head arms (Amendment 3), 19:43-19:52 UTC.
+# Files b3-*.txt. Clean pairs are only those whose bracket sits in the
+# 42.37 ms cluster; the machine went into a degraded mode from ~19:46 and the
+# later pairs are reported but not used.
+#
+#   arm     bracket  arm     save   census P   R      e arm / e bracket
+#   attend  42.37   41.49  +0.88      0.00      -     40.94 / 41.64    r1 CLEAN
+#   head    42.37   41.49  +0.88      1.10    0.80    40.88 / 41.70    r1 CLEAN
+#   head    75.76   59.52  +16.23                -     65.84 / 58.78    r2 REJECTED
+#   attend  42.37   96.15  -53.78                -     41.75 / 95.11    r2 REJECTED
+#   head    51.81   47.62   +4.19                -     51.12 / 46.94    r3 REJECTED
+#   attend  52.63   55.25   -2.62                -     52.00 / 54.23    r3 REJECTED
+#
+# 9.1 Amendment 3's criterion lands on the "decomposition is wrong" branch
+#
+# Pre-registered: +-30% of the census price defines "priced correctly"; >= 3.5 ms
+# for attend+head combined would amend the census, <= 1.7 ms would put the blame
+# on the decomposition instead. Measured on the one clean pair: attend 0.88 +
+# head 0.88 = 1.76 ms, i.e. 0.06 above the second threshold. So neither branch
+# fires cleanly, and the honest reading is the small one: head is priced
+# correctly (R = 0.80, within the +-30% band), and attention has a real but
+# small unpriced line of ~0.9 ms (2% of the token) that the census gives 0
+# because attention reads no weight bytes. The ~5 ms left over by section 8.4 is
+# NOT located in those groups, and the guards themselves look fine: each arm's
+# GPU-executing delta matches its wall delta to 0.1-0.2 ms.
+#
+# 9.2 The residual is non-additivity of the removal probe, and it is the same
+#     fraction on both models
+#
+# Taking the clean-window costs of the four measurable groups plus the floor:
+#   baseline executing (e)                       41.70 ms/token
+#   experts (r1,r2 clean)                        27.28
+#   qkv                                          7.16
+#   attend  (r1 clean)                           0.88
+#   head    (r1 clean)                           0.88
+#   ---- sum of single-group removals            36.20
+#   e - sum                                     5.50
+#   floor: exec with every group skipped          1.92
+#   => interaction term                           3.58  (8.6% of e)
+# router is not measurable by removal (section 5: skipping it corrupts the
+# expert slots and doubles the token) and is assumed at its census 0.2 ms, which
+# is inside the interaction term's error bar.
+# The 30B control produced the identical ratio independently: parts summed to
+# 5.38 against an `all`-arm save of 5.95, i.e. 0.57 ms = 8.6% of its 6.61 ms of
+# executing time. A removal probe on this engine therefore under-counts the
+# token by ~8.6% no matter which group it removes, because taking one kernel out
+# also leaves the surrounding gaps in place while taking all of them out
+# removes the gaps. Both models, same percentage, measured 12 hours apart.
+#
+# 9.3 Full allocation of the 12.25 ms gap (census 30.12 vs paired wall 42.37)
+#
+#   K-quant expert inflation (27.28 vs 20.60)          +6.68   55% of the gap
+#   inter-kernel interaction (9.2 above)               +3.58   29%
+#   unpriced floor, norms/bars/sampling/lm_head        +1.92   16%
+#   unpriced attention-over-KV line                    +0.88    7%
+#   qkv cheaper in situ than at micro rate (7.16/8.4)  -1.24  -10%
+#   head cheaper than its census price                 -0.22   -2%
+#   wall outside the GPU busy interval (42.37-41.70)   +0.67    5%
+#   --------------------------------------------------  =======
+#   total                                             +12.27 against 12.25
+#
+# The terms are not all equally independent - the floor and the interaction come
+# from the same pair of runs - but the four group costs are measured against
+# their own brackets, and their sum (36.20) is 5.50 below the baseline's own
+# executing time, which is an independent instrument reading, not a subtraction.
+#
+# 9.4 What this changes for optimisation order
+#
+# The prize on this model is ranked by these numbers: the q2_k/q3_k expert
+# kernels are 27.3 ms of a 42.4 ms token and inflate 1.32x over their own
+# dispatched micro rates, so they hold both the census's prediction and the
+# largest unexplained part of it. The interaction term (3.6 ms) is a scheduling
+# property of the whole encode path, not a kernel, and the same 8.6% appears on a
+# q4_k model, so it is not a K-quant artifact either. The floor (1.9 ms) is now
+# priced for the first time and is 4.5% of the token, with no lever attached yet.
+# Caveat carried forward: attend and head rest on ONE clean pair each.
+
+##############################################################################
+# UPDATE 4 - full-precision recompute of every wall number in this file
+# (task #26, 2026-09-25). Generated by
+# [2026-09-25-full-precision-audit/audit.py](../2026-09-25-full-precision-audit/audit.py);
+# prose and verdicts in
+# [results.txt of that directory](../2026-09-25-full-precision-audit/results.txt)
+# section 2. No run was re-measured: the ms/token values below are the bench
+# JSONs' own `.measurements[decode].summary.median`, which this file had
+# already written beside itself but read the printed stdout instead.
+#
+# 1. Why stdout could not carry these claims. The seconds field quantizes at
+#    0.01 s / TG = 0.156 ms/token at TG 64; the 1-dp rate field at
+#    1000/(r-0.05) - 1000/(r+0.05) = 0.180 ms/token at 23.6, 0.240 at 20.4,
+#    0.503 at 14.1. Every `42.37` in this file came from one of those two.
+#
+# 2. Section 3 (unbracketed). True values: rep baselines 42.1500 / 47.3474 /
+#    45.3172 (published 42.2 / 47.4 / 45.2), experts 15.0854 / 14.9505 /
+#    15.1080 (flat to 1.05%, published 1.3%), the rep-1 duplicate 58.2572
+#    (published 58.1, so +38.2% over its baseline holds), rep-2 baseline
+#    prefill 161.254 tok/s (published 160.6). S(experts) = 27.0646, R = 1.3138.
+#
+# 3. Section 8.1 (bracketed) - the loadless one, and it only touches the
+#    printed decimals. The three brackets that printed `42.37` in the arm
+#    column are 42.3503 / 42.3980 / 42.3998, and r1's printed 42.55 is
+#    42.5258: one quantum apart, not equal. The r4 baseline is 70.8020,
+#    not 70.92. The saves are +27.3866 / +27.2810 /
+#    +11.6118 / +55.0084 / +7.1161 / +41.6654 (published 27.42 / 27.27 /
+#    11.60 / - / 7.16 / 41.63) and the R column 1.3294 / 1.3243 / 0.8472 /
+#    1.3751 for the usable pairs. 8.2's `the six baselines spread 60.2%` is
+#    arithmetic wrong in every reading: 67.18% at full precision, 67.38% even
+#    from the quantized 42.37-70.92 it cites; 3.65% excluding r4. The 8% gate
+#    trips either way and 8.2's per-pair defence is unchanged.
+#
+# 4. 8.2's `two independent instruments agree within 0.1 ms` is overstated.
+#    The real agreements are 0.152 / 0.172 / 0.069 / 0.369 ms. The gap is not
+#    a contradiction: (wall save - executing save) is identically the change
+#    in wall-minus-executing residue between the pair, and a removal arm has
+#    less residue than its own baseline (experts r1: 0.7758 -> 0.6236; qkv:
+#    0.7097 -> 0.6404; all: 0.6789 -> 0.3104 ms/token). Two clocks agreeing to
+#    0.6% of the effect still cannot be faked by scheduling; the claim just
+#    needs its threshold moved to 0.4 ms.
+#
+# 5. Section 9.1 - Amendment 3's threshold MOVES. attend 0.8068 + head 0.8801
+#    = 1.6869 ms, which is 0.0131 ms BELOW the pre-registered `<= 1.7` rather
+#    than the 0.06 above it that let the file say "neither branch fires". So
+#    the `decomposition is wrong / guards under suspicion` branch is formally
+#    the one that fires - and it should not be credited, because the attend
+#    pair's own bracket (42.3562) is 0.0138 ms under the 42.37 floor that the
+#    same amendment drew from quantized values, i.e. read at full precision
+#    the admission rule excludes one of the two arms the threshold is computed
+#    from. Published reading: the 1.7 / 3.5 fork does not discriminate at this
+#    resolution. Head's R = 0.8001 stays inside +-30% and attend's ~0.8 ms
+#    unpriced line stays real.
+#
+# 6. Sections 9.2-9.3 shift by less than a quantum per term and close as
+#    before: experts 27.3338, qkv 7.1161, attend 0.8068, head 0.8801, sum
+#    36.1369, e - sum 5.6131, floor 1.9219, interaction 3.6913 = 8.84% of e
+#    (published 3.58 / 8.6%), gap against the census 12.2780 (published
+#    12.25). The 9.3 shares 55/30/16/7/-10/-2/5% are unchanged; the largest
+#    single term move is 0.111 ms. The `identical` cross-model interaction
+#    ratio in 9.2 is 8.84% here against 8.48% on the 30B control - same order,
+#    not identical, and the ~8-9% rule it establishes stands.

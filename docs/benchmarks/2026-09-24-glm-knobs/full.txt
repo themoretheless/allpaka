@@ -1,0 +1,212 @@
+=== mvbench (MV_ID on) ===
+   Compiling allpaka-backend v0.1.0 (/Users/themoretheless/Documents/Sources/allpaka/crates/allpaka-backend)
+    Finished `release` profile [optimized] target(s) in 6.55s
+     Running tests/gpu_glm_mvbench.rs (target/release/build/allpaka-backend/9a6a424e39cc2066/out/gpu_glm_mvbench-9a6a424e39cc2066)
+expert gate/up               Q4K [1408,4096]    3.24 MB x 128: 317.6 best, 236.1 median GB/s GPU-clock
+probe n_out 2048             Q4K [2048,4096]    4.72 MB x 128: 316.5 best, 311.5 median GB/s GPU-clock
+probe n_out 4096             Q4K [4096,4096]    9.44 MB x 71: 296.6 best, 283.5 median GB/s GPU-clock
+probe 8x1408 rows            Q4K [11264,4096]   25.95 MB x 25: 321.9 best, 318.9 median GB/s GPU-clock
+expert down                  Q8_0 [4096,1408]    6.13 MB x 109: 424.3 best, 409.6 median GB/s GPU-clock
+shared gate/up               Q5K [1408,4096]    3.96 MB x 128: 277.2 best, 264.9 median GB/s GPU-clock
+shared down                  Q8_0 [4096,1408]    6.13 MB x 109: 457.4 best, 455.0 median GB/s GPU-clock
+q5_0 down shape              Q5_0 [4096,1408]    3.96 MB x 128: 262.2 best, 251.9 median GB/s GPU-clock
+q5_0 wide shape              Q5_0 [1408,4096]    3.96 MB x 128: 277.6 best, 271.2 median GB/s GPU-clock
+q5_0 short row               Q5_0 [256,512]    0.09 MB x 128: 70.5 best, 60.7 median GB/s GPU-clock
+attn q                       Q4K [12288,4096]   28.31 MB x 23: 462.9 best, 406.7 median GB/s GPU-clock
+attn wo                      Q4K [4096,12288]   28.31 MB x 23: 361.1 best, 337.7 median GB/s GPU-clock
+attn k                       Q4K [1024,4096]    2.36 MB x 128: 433.1 best, 425.3 median GB/s GPU-clock
+attn v                       Q6K [1024,4096]    3.44 MB x 128: 384.2 best, 380.0 median GB/s GPU-clock
+head slice                   Q6K [8192,4096]   27.53 MB x 24: 368.9 best, 337.3 median GB/s GPU-clock
+idx gate/up ×8               Q4K [1408,4096] x8 idx: 403.8 best, 365.7 median GB/s GPU-clock (MV_ID=on)
+idx down ×8                  Q8_0 [4096,1408] x8 idx: 438.7 best, 437.8 median GB/s GPU-clock (MV_ID=on)
+idx down ×8 (q5_0)           Q5_0 [4096,1408] x8 idx: 153.0 best, 130.7 median GB/s GPU-clock (MV_ID=on)
+=== allpaka mvid-on ===
+airbug: traces and logs -> http://localhost:4318
+prewarmed 46.6 GiB of weights in 50.4s
+prewarmed 21.4 GiB of weights in 25.7s
+metal: Apple M4 Max attached, 46.6 GiB of weights shared with the GPU in 2 windows (maxBufferLength 32.0 GiB)
+metal: Apple M4 Max attached, 21.4 GiB of weights shared with the GPU
+engine bench: GLM-4.5-Air-Q4_K_M-00001-of-00002 (46 layers, glm4moe, MoE)
+  capabilities:
+    model: arch=glm4moe layers=46 moe=true
+    model-support: Experimental (sigmoid MoE, shared experts, bias, and partial RoPE are implemented)
+    profile: max-performance
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=3 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=331 bytes=0.09 GiB matmul-kernel=yes
+      Q4K: tensors=263 bytes=39.25 GiB matmul-kernel=yes
+      Q5K: tensors=92 bytes=0.34 GiB matmul-kernel=yes
+      Q5_0: tensors=24 bytes=11.34 GiB matmul-kernel=yes
+      Q6K: tensors=24 bytes=0.55 GiB matmul-kernel=yes
+      Q8_0: tensors=69 bytes=16.38 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=198
+  prefill   480 tok in   1.94 s     247.5 tok/s
+  gpu during prefill: 3 waits, 461 dispatches, encode 1 ms, wait 1937 ms of 1940 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 1938 ms, scheduling 29 ms, round trips + idle 0 ms (of 1937 ms waited)
+  prefill phases, ms/token:
+    embed                  0.0  ( 0.1%)
+    attention              0.0  ( 0.0%)
+    ffn (experts)          0.0  ( 0.0%)
+    router                 0.0  ( 0.0%)
+    unaccounted            4.0  (99.9%)
+  decode     32 tok in   0.82 s      38.8 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 24896 dispatches, encode 11 ms, wait 810 ms of 825 ms total (0% outside the GPU)
+  gpu clock during decode: executing 805 ms, scheduling 2 ms, round trips + idle 3 ms (of 810 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted           25.8  (100.0%)
+  context at end: 33 tokens (attention cost grows with this)
+  benchmark report: target/allpaka-bench/GLM-4.5-Air-Q4_K_M-00001-of-00002.json
+airbug bench run: target/allpaka-bench/airbug-1790257281240022000-70700
+=== allpaka mvid-off ===
+airbug: traces and logs -> http://localhost:4318
+prewarmed 46.6 GiB of weights in 7.0s
+prewarmed 21.4 GiB of weights in 3.3s
+metal: Apple M4 Max attached, 46.6 GiB of weights shared with the GPU in 2 windows (maxBufferLength 32.0 GiB)
+metal: Apple M4 Max attached, 21.4 GiB of weights shared with the GPU
+engine bench: GLM-4.5-Air-Q4_K_M-00001-of-00002 (46 layers, glm4moe, MoE)
+  capabilities:
+    model: arch=glm4moe layers=46 moe=true
+    model-support: Experimental (sigmoid MoE, shared experts, bias, and partial RoPE are implemented)
+    profile: max-performance
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=3 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=331 bytes=0.09 GiB matmul-kernel=yes
+      Q4K: tensors=263 bytes=39.25 GiB matmul-kernel=yes
+      Q5K: tensors=92 bytes=0.34 GiB matmul-kernel=yes
+      Q5_0: tensors=24 bytes=11.34 GiB matmul-kernel=yes
+      Q6K: tensors=24 bytes=0.55 GiB matmul-kernel=yes
+      Q8_0: tensors=69 bytes=16.38 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=198
+  prefill   480 tok in   1.97 s     243.2 tok/s
+  gpu during prefill: 3 waits, 461 dispatches, encode 1 ms, wait 1971 ms of 1974 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 1972 ms, scheduling 31 ms, round trips + idle 0 ms (of 1971 ms waited)
+  prefill phases, ms/token:
+    embed                  0.0  ( 0.1%)
+    attention              0.0  ( 0.0%)
+    ffn (experts)          0.0  ( 0.0%)
+    router                 0.0  ( 0.0%)
+    unaccounted            4.1  (99.9%)
+  decode     32 tok in   0.82 s      38.8 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 24896 dispatches, encode 9 ms, wait 812 ms of 824 ms total (0% outside the GPU)
+  gpu clock during decode: executing 808 ms, scheduling 2 ms, round trips + idle 3 ms (of 812 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted           25.8  (100.0%)
+  context at end: 33 tokens (attention cost grows with this)
+  benchmark report: target/allpaka-bench/GLM-4.5-Air-Q4_K_M-00001-of-00002.json
+airbug bench run: target/allpaka-bench/airbug-1790257302961652000-71424
+=== allpaka stagger-on ===
+airbug: traces and logs -> http://localhost:4318
+prewarmed 46.6 GiB of weights in 7.1s
+prewarmed 21.4 GiB of weights in 3.3s
+metal: Apple M4 Max attached, 46.6 GiB of weights shared with the GPU in 2 windows (maxBufferLength 32.0 GiB)
+metal: Apple M4 Max attached, 21.4 GiB of weights shared with the GPU
+engine bench: GLM-4.5-Air-Q4_K_M-00001-of-00002 (46 layers, glm4moe, MoE)
+  capabilities:
+    model: arch=glm4moe layers=46 moe=true
+    model-support: Experimental (sigmoid MoE, shared experts, bias, and partial RoPE are implemented)
+    profile: max-performance
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=3 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=331 bytes=0.09 GiB matmul-kernel=yes
+      Q4K: tensors=263 bytes=39.25 GiB matmul-kernel=yes
+      Q5K: tensors=92 bytes=0.34 GiB matmul-kernel=yes
+      Q5_0: tensors=24 bytes=11.34 GiB matmul-kernel=yes
+      Q6K: tensors=24 bytes=0.55 GiB matmul-kernel=yes
+      Q8_0: tensors=69 bytes=16.38 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=198
+  prefill   480 tok in   1.88 s     255.5 tok/s
+  gpu during prefill: 3 waits, 461 dispatches, encode 1 ms, wait 1876 ms of 1879 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 1877 ms, scheduling 30 ms, round trips + idle 0 ms (of 1876 ms waited)
+  prefill phases, ms/token:
+    embed                  0.0  ( 0.1%)
+    attention              0.0  ( 0.0%)
+    ffn (experts)          0.0  ( 0.0%)
+    router                 0.0  ( 0.0%)
+    unaccounted            3.9  (99.9%)
+  decode     32 tok in   0.81 s      39.7 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 24896 dispatches, encode 10 ms, wait 794 ms of 807 ms total (0% outside the GPU)
+  gpu clock during decode: executing 789 ms, scheduling 3 ms, round trips + idle 3 ms (of 794 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted           25.2  (100.0%)
+  context at end: 33 tokens (attention cost grows with this)
+  benchmark report: target/allpaka-bench/GLM-4.5-Air-Q4_K_M-00001-of-00002.json
+airbug bench run: target/allpaka-bench/airbug-1790257324159883000-71685
+=== llama ===
+load_backend: loaded BLAS backend from /opt/homebrew/Cellar/ggml/0.24.0/libexec/libggml-blas.so
+ggml_metal_device_init: tensor API disabled for pre-M5 and pre-A19 devices
+ggml_metal_library_init: using embedded metal library
+ggml_metal_library_compile_all: compiled 'fa' library in 0.027 sec
+ggml_metal_library_compile_all: compiled 'mul_mv' library in 0.034 sec
+ggml_metal_library_compile_all: compiled 'mul_mm' library in 0.030 sec
+ggml_metal_library_compile_all: compiled 'quantize' library in 0.035 sec
+ggml_metal_library_compile_all: compiled 'softmax' library in 0.001 sec
+ggml_metal_library_compile_all: compiled 'norm' library in 0.037 sec
+ggml_metal_library_compile_all: compiled 'unary' library in 0.002 sec
+ggml_metal_library_compile_all: compiled 'binbcast' library in 0.002 sec
+ggml_metal_library_compile_all: compiled 'reduce' library in 0.002 sec
+ggml_metal_library_compile_all: compiled 'tri' library in 0.002 sec
+ggml_metal_library_compile_all: compiled 'ssm' library in 0.034 sec
+ggml_metal_library_compile_all: compiled 'wkv' library in 0.036 sec
+ggml_metal_library_compile_all: compiled 'gated_delta_net' library in 0.036 sec
+ggml_metal_library_compile_all: compiled 'solve_tri' library in 0.036 sec
+ggml_metal_library_compile_all: compiled 'rope' library in 0.036 sec
+ggml_metal_library_compile_all: compiled 'conv' library in 0.036 sec
+ggml_metal_library_compile_all: compiled 'upscale' library in 0.002 sec
+ggml_metal_library_compile_all: compiled 'argsort' library in 0.036 sec
+ggml_metal_library_compile_all: compiled 'pool' library in 0.034 sec
+ggml_metal_library_compile_all: compiled 'misc' library in 0.034 sec
+ggml_metal_library_compile_all: loaded 20 libraries from embedded data in 0.037 sec (max single = 0.037 sec)
+ggml_metal_rsets_init: creating a residency set collection (keep_alive = 180 s)
+ggml_metal_device_init: GPU name:   MTL0 (Apple M4 Max)
+ggml_metal_device_init: GPU family: MTLGPUFamilyApple9  (1009)
+ggml_metal_device_init: GPU family: MTLGPUFamilyCommon3 (3003)
+ggml_metal_device_init: GPU family: MTLGPUFamilyMetal4  (5002)
+ggml_metal_device_init: simdgroup reduction   = true
+ggml_metal_device_init: simdgroup matrix mul. = true
+ggml_metal_device_init: has unified memory    = true
+ggml_metal_device_init: has bfloat            = true
+ggml_metal_device_init: has tensor            = false
+ggml_metal_device_init: use residency sets    = true
+ggml_metal_device_init: use shared buffers    = true
+ggml_metal_device_init: recommendedMaxWorkingSetSize  = 115448.73 MB
+load_backend: loaded MTL backend from /opt/homebrew/Cellar/ggml/0.24.0/libexec/libggml-metal.so
+load_backend: loaded CPU backend from /opt/homebrew/Cellar/ggml/0.24.0/libexec/libggml-cpu-apple_m4.so
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| glm4moe 106B.A12B Q4_K - Medium |  67.96 GiB |   110.47 B | BLAS,MTL   |      12 |           pp480 |        381.59 ± 0.00 |
+| glm4moe 106B.A12B Q4_K - Medium |  67.96 GiB |   110.47 B | BLAS,MTL   |      12 |            tg32 |         42.89 ± 0.00 |
+
+build: b29c606e2 (10964)
+DONE -> /Users/themoretheless/Documents/Sources/allpaka/.airbug-bench/glm-mvid-20260924-173859
+Cool matrix baseline (2026-09-12): allpaka decode 39.0 / llama 45.5 = 0.86×
+Ship if mvid-on decode >= llama; else ALLPAKA_MV_ID=0 and capture Q8/Q4 BW.

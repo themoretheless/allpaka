@@ -1,0 +1,28 @@
+[
+  {
+    "case": "prefill",
+    "metric": "tok_s",
+    "unit": "tok/s",
+    "scope": "engine throughput; independent process",
+    "baseline": 410.433,
+    "candidate": 369.4218496760292,
+    "change_percent": -9.994391004903063,
+    "interval_percent": null,
+    "independent_units": 2,
+    "decision": "inconclusive",
+    "note": "Median of process-pair ratios; exact median interval, Bonferroni family correction. Independence across pairs assumed; background drift is not controlled."
+  },
+  {
+    "case": "decode",
+    "metric": "tok_s",
+    "unit": "tok/s",
+    "scope": "engine throughput; independent process",
+    "baseline": 39.02775,
+    "candidate": 45.518298095223386,
+    "change_percent": 18.193505331266934,
+    "interval_percent": null,
+    "independent_units": 2,
+    "decision": "inconclusive",
+    "note": "Median of process-pair ratios; exact median interval, Bonferroni family correction. Independence across pairs assumed; background drift is not controlled."
+  }
+]

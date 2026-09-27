@@ -1,0 +1,192 @@
+# Pre-registration: the two attention knobs that carry no number
+
+Written 2026-09-25T21:11Z, before any measurement in this directory.
+
+## What is open, and why it counts as open
+
+`docs/decode-opts.md` claims every `ALLPAKA_*` lever in the Metal backend is
+closed. Two decode-side attention rows do not meet the standard:
+
+1. **`ALLPAKA_ATTN_MV` - ON by default, no number.** Row 13 says
+   "decode `attend_mv` | ON | `ALLPAKA_ATTN_MV=0` | four-position-in-flight
+   flash-attn vec path". That is a description of the mechanism, not a price.
+   The knob was flipped default in `421b51c` (2026-09-10), which predates the
+   artifact rule, and no A/B of it exists anywhere in `docs/` (`grep -rn
+   attend_mv docs/` finds the table row, the `gpu_glm_mvbench` repro line, and
+   three "these defaults were on" mentions - no pair).
+2. **`ALLPAKA_ATTN_S8` - the registry's own admitted gap.** Row 394: "no
+   measurement of s8/s16 against s32 exists in the repo".
+
+Both are decode-path, both are reachable by env, so the "everything is closed"
+claim is false while neither has an artifact.
+
+## Size first: why PP=480 cannot price either of them
+
+From the already-published per-stage table
+([`../2026-09-24-235b-decode-split/results.txt`](../2026-09-24-235b-decode-split/results.txt)):
+
+    attend     0.686 - 0.700 ms/token on the 235B at PP 480, of 42.37 ms/token
+    ... and in that artifact's own A/B it moved 0.702 -> 0.696.
+
+0.7 ms/token is **1.6%** of the token there. A lever confined to 1.6% of the
+wall time cannot produce an e2e difference this machine can resolve (the control
+bands measured over the last three days run 1-3%), so a paired A/B at PP=480
+would be an experiment whose answer is fixed in advance by arithmetic, not by
+data. It would also be misread as "ATTN_MV does nothing", when what it shows is
+"attention does not matter at 480 tokens".
+
+Attention cost is the only decode stage that grows with context. Bytes per
+decoded token, qwen3-30b-a3b (48 layers, 8 KV heads, head_dim 128, f16 KV):
+
+    KV read  = 48 x 8 x 128 x 2 (K,V) x 2 B x ctx  = 196 KB/token x ctx
+    weights  ~ 3.3 GB/token (A3B active), constant in ctx
+
+    ctx   480 ->  94 MB  =  2.8% of the bytes read per token
+    ctx  3072 -> 603 MB  = 15.5%
+    ctx  8192 -> 1.61 GB = 33%
+
+So the regime that prices the knob is long context, and PP=3072 is chosen as the
+smallest point where the stage clears ~15% of the bytes - the pre-registered
+expectation is an attend share near 15-20% of ms/token, against ~9-13 ms/token
+decode for this model.
+
+## Design: one e2e pair set, one stage-only set, and why they are different
+
+**Primary - `ATTN_MV` (2 arms, e2E).** `mv` (default) against `s32`
+(`ALLPAKA_ATTN_MV=0`), PP=3072, TG=320, `ALLPAKA_PROFILE=max-performance`,
+`ALLPAKA_BENCH_SKIP_MTP=1`, one process per arm, orders alternated AB/BA, 20 s
+cooldown, one uncounted priming run (the 17 GiB page-cache fault-in cost 8.7x on
+the prewarm line of a same-code pair today at 21:03Z - see
+[`../2026-09-25-glm-shared-stagger/pilot-census.txt`](../2026-09-25-glm-shared-stagger/pilot-census.txt)).
+8 real pairs plus 4 `mv`-vs-`mv` control pairs for the band, on the pattern of
+the stagger driver in this repo. Statistic: median of the `mv/s32` decode tok/s
+ratios and the sign count.
+
+**Secondary - the `s8`/`s16`/`s32` ladder (stage only, no e2e claim).** These
+three are the same loop with 8/16/32 positions per thread-step and the matching
+threadgroup widths (256/512/1024, `metal.rs:14771-14773`); they differ in
+achieved bandwidth, not in bytes. Bound the whole family before running it: the
+e2e ceiling of any difference between them is (their spread within the attend
+stage) x (stage share). If a variant moved the stage by 10% - generous for a
+stride change inside a bandwidth-bound loop - at a 15% stage share that is 1.5%
+of the token, which is inside this machine's control band by construction. So
+the ladder is read off the per-stage counter (`ALLPAKA_DECODE_SPLIT=1`, which is
+what populates the `attend` phase; without the probe the phases line prints
+`attention 0.0 (0.0%)` in every artifact in the repo, and that 0.0 means "not
+accounted", not "free"), as a stage-cost table with the three rows, and it makes
+no e2e claim.
+
+## Criteria
+
+1. Both arms `attached=true`, `declines=0`, `attempts == successes == TG`, and
+   the same greedy continuation tokens in both arms - a different token sequence
+   makes the pair void and that is reported as the result, not discarded.
+2. The control series sets the band. If the `mv`-vs-`mv` band is at or above the
+   3% decision threshold, the run states the interval it excludes and the knob
+   stays open; that is a publishable statement about the instrument, and it is
+   the pre-registered outcome for a noisy machine.
+3. Merge/keep branch: `ATTN_MV` stays ON if it wins by more than the band; if it
+   loses, the default is wrong and that is reported as a defect with a reversion
+   DoD, not quietly left as "on".
+4. The attend stage ms/token is reported for every run in both sets, so the e2e
+   verdict and the mechanism (stage cost) can be compared rather than inferred.
+
+## Known limits of transfer
+
+PP=3072 on a 30B MoE with f16 KV. `attend_kernel()` (`metal.rs:14748-14765`) is
+a single global choice - `ATTN_MV` unset or non-zero gives `attend_mv` for every
+shape; `=0` hands over to the `ATTN_S8` ladder - so a verdict here is a verdict
+about the kernel for this shape at this context, and nothing about the 235B at
+PP=480, where the stage is 1.6% of the token. The long-context number is the one
+that can be defended; the short-context claim was never available.
+
+(Correction, same minute, before any run: this section first said `attend_mv`
+was "per-shape gated in the source". Reading `attend_kernel()` says otherwise -
+one global env, no shape test - and the ladder has a fourth rung the registry
+does not mention: `ALLPAKA_ATTN_S8=4` or `=0` selects the original `attend`
+kernel at 128 threads. It is included in the stage table for that reason.)
+
+## Harness amendment - written 2026-09-26T06:24Z, before any process of this design
+
+No arm, no gate, no threshold and no decision rule below changes. What changes is when
+the driver is allowed to start a process, because this design has never produced a row
+and its own `wait_quiet` could not have protected the rows it was about to take. It
+compared one instantaneous `vm.loadavg` reading against 5.0, slept, and launched.
+
+1. **Launch gate: a settle, not an instant.** `wait_quiet` now needs `settle=3`
+   consecutive clean samples (30 s apart) and returns how long it held. A single
+   reading under the ceiling lets a round start one tick after a burst.
+2. **Load average is no longer the only gate.** The driver refuses to start, and refuses
+   each further arm, while any of these is true: a compiler or another bench is live
+   (`pgrep -x` of `cargo`, `rustc`, `llama-bench`); another campaign's `allpaka` process
+   is live (this design pins its binary under that name, so the check is symmetric with
+   the MV_ID campaign's); or the system indexer class is working. The two name classes
+   are vetoed differently and that distinction is the lesson of 2026-09-26: a live
+   `rustc` is by definition building, so existence is the right test, while
+   `corespotlightd`, `mds_stores`, `photoanalysisd` and ~20 `mdworker_shared` are
+   resident for days and sit at 0.0% CPU in the normal state - gating on their
+   liveness is unsatisfiable, and an MV_ID watcher that did exactly that logged
+   `clean 0/5` for its whole first run. Indexers are gated on work in the sampled
+   instant: one process at >= 25% of a core (gate A6's co-tenant threshold) or the
+   class at >= 40% across several workers, measured as a `ps -o cputime` delta over
+   3 s rather than as `ps` %cpu, which divides by the process's entire life and
+   cannot show a burst in a three-day-old daemon. The burst that half-depressed the
+   pair campaign read 153% on one such process; the guard caught one at 48% (fleet
+   62%) while load average read 3.32. See
+   [../2026-09-26-glm-mv-id-rerun/verify-5-guard-fired-on-a-live-burst.txt](../2026-09-26-glm-mv-id-rerun/verify-5-guard-fired-on-a-live-burst.txt).
+3. **No window is a refusal, not a compromise.** After 40 minutes of waiting the driver
+   exits with a message instead of measuring anyway: a run taken into a busy window
+   costs the machine 90 minutes and produces rows that every post-hoc veto then
+   removes, which is the pair campaign's outcome a second time.
+4. **Arms are not gated retroactively.** The load veto, the drift veto and the fast-path
+   census are unchanged: they still only remove pairs, and the drop count is still
+   published. Nothing here makes admission easier; the settle and the name guard make
+   the machine quieter before a single number is taken.
+5. **`--check` exists because probing this driver otherwise means launching it.** While
+   these lines were being written, an attempt to inspect the new guard ran
+   `drive.py --stage` for real: the startup guard passed, a run dir was created under
+   `.airbug-bench/` with its pinned binary copy and `provenance.json`, and only then did
+   `wait_quiet` begin logging the machine it was about to measure into - load 8.14, 7.47,
+   7.23, 6.23 with an indexer fleet at 40% of a core across 24 pids, and 10.48 a minute
+   later. The gate held it off for the two minutes before it was killed, so **no bench
+   process ever started, no arm was timed, and the scratch dir was deleted**; this
+   campaign still has no data. That is a pass for change 2 and an indictment of a design
+   where the only way to ask the guard a question is to accept its answer as a launch.
+   `--check` prints the three class verdicts and the ceiling and exits, writing nothing.
+   Witness for the `allpaka` name test, since a copied binary is the case it must catch:
+   the MV_ID campaign's own process sampler records `"comm": "allpaka"` for its pinned
+   `series-1/allpaka` processes (pids 63600, 71597, in
+   ../2026-09-26-glm-mv-id-rerun/series-1/snaps.jsonl), which is what `pgrep -x allpaka`
+   matches. The end-to-end case - this driver refusing to start while that campaign is
+   mid-arm - has not been exercised, because no quiet window has come since; it is
+   recorded as pending, not as proven.
+   Rehearsal of what HAS been exercised - `--check` on a machine that is load-5 but
+   carries none of the three vetoed classes, and the watcher's give-up path with no run
+   dir left behind - is [verify-1-gate-rehearsal.txt](verify-1-gate-rehearsal.txt),
+   including the caveat that the first of those is not a demonstration of a quiet
+   machine.
+6. **The binary is pinned by sha, and the working tree's build is no longer the default.**
+   This design copied `target/release/allpaka` into its run dir, which on this machine
+   means "whatever the tree last built" - and the tree is edited by another session while
+   these runs queue (a `cargo test --no-run` was live when this line was written, and the
+   rerun's own provenance records 98 dirty files at its pin time). A stage table taken on
+   a WIP build cannot be compared with the published stage tables or the GLM parity
+   anchor, so `--binary` now defaults to the sha-verified copy the MV_ID rerun pins
+   (`7b8ec67aa72c42662ba4608fa1629c139c759c6ce7bacdd6c6aa6fbcc46fe2fe`, whose `metal.rs`
+   is unchanged since `3ef9d9c`, the last decode-path commit), the driver refuses to start
+   on any other hash, and `provenance.json` records the source path and the expected hash
+   beside the measured one. Passing a different binary means passing its sha too.
+
+   Queue, and what it must not do: this campaign runs only after the MV_ID rerun exits,
+   never alongside it - the two would share the GPU, which is the contention this
+   amendment exists to refuse. `wait-then-run.sh` waits for the other campaign's driver
+   and bench processes to be gone, then requires its own five consecutive clean samples,
+   then takes `--stage` and `--e2e` in that order.
+
+Corollary: the stage table needs the same gate. It runs one short process per arm with
+no pairs to veto, so it has no post-hoc defense at all against a burst - which is how
+the 2026-09-25 stagger campaign lost its noise floor (its real series published
+-1.13% on 13 admissible pairs while its control series admitted 0 of 6, so the residual
+1% could not be read) and how the MV_ID campaign lost its verdict entirely.
+`wait_quiet` is therefore called in `--stage` mode too, before every process.
+

@@ -1,0 +1,51 @@
+pinned gpu_ffnbench sha256 7ee7b9e6ff9c86a3  head dcdc131d  dirty files 94  new series
+Q50 NR0=1 r1 ok  load 4.1/3.5 43s  ratio[0,plain,feed8]=0.7577
+Q50 NR0=2 r1 ok  load 3.5/3.5 29s  ratio[0,plain,feed8]=0.7979
+Q50 NR0=4 r1 ok  load 3.5/4.1 44s  ratio[0,plain,feed8]=0.7914
+Q50 NR0=2 r2 VETO spread veto on q5_0 down (367.4/334.2) load 4.1/5.9 47s
+Q50 NR0=4 r2 VETO load veto (4.7, 10.7) load 4.7/10.7 48s
+Q50 NR0=1 r2 ok  load 4.5/3.4 45s  ratio[0,plain,feed8]=0.7595
+Q50 NR0=4 r3 ok  load 3.4/2.7 43s  ratio[0,plain,feed8]=0.7834
+Q50 NR0=1 r3 ok  load 2.7/2.3 44s  ratio[0,plain,feed8]=0.7630
+Q50 NR0=2 r3 VETO spread veto on q5_0 down (397.5/328.0) load 2.3/2.3 48s
+Q50 NR0=1 r4 VETO meter veto (386.4 under 0.85 of 499.3) load 2.3/5.0 53s
+Q50 NR0=2 r4 VETO meter veto (392.8 under 0.85 of 499.3) load 5.0/3.8 51s
+Q50 NR0=4 r4 VETO load veto (3.75, 8.2) load 3.8/8.2 32s
+Q50 NR0=2 r5 ok  load 4.5/5.5 29s  ratio[0,plain,feed8]=0.7884
+Q50 NR0=4 r5 ok  load 4.1/3.6 34s  ratio[0,plain,feed8]=0.7786
+Q50 NR0=1 r5 ok  load 3.6/2.8 44s  ratio[0,plain,feed8]=0.7533
+9/15 processes admitted
+  Q50 vs NR0=2: hold  q5_0 down: -4.35% (0/2 rounds)  q5_0 glm down: -6.41% (0/2 rounds)
+  Q50 vs NR0=2: hold  q5_0 down: -1.22% (0/2 rounds)  q5_0 glm down: -2.30% (0/2 rounds)
+pinned gpu_ffnbench sha256 7ee7b9e6ff9c86a3  head dcdc131d  dirty files 95  continuing from round 6
+Q50 NR0=4 r6 ok  load 2.2/2.5 45s  ratio[0,plain,feed8]=0.7789
+Q50 NR0=1 r6 ok  load 2.5/2.5 43s  ratio[0,plain,feed8]=0.7548
+Q50 NR0=2 r6 VETO spread veto on q5_0 down (296.4/281.3) load 2.5/3.0 42s
+Q50 NR0=1 r7 ok  load 3.0/2.9 30s  ratio[0,plain,feed8]=0.7507
+Q50 NR0=2 r7 VETO spread veto on q5_0 down (396.5/356.5) load 2.9/2.9 31s
+Q50 NR0=4 r7 VETO spread veto on q5_0 down (386.9/349.3) load 2.9/2.8 31s
+Q50 NR0=2 r8 ok  load 2.8/2.7 44s  ratio[0,plain,feed8]=0.6366
+Q50 NR0=4 r8 VETO spread veto on q5_0 down (309.8/278.3) load 2.7/2.9 47s
+Q50 NR0=1 r8 VETO meter veto (403.6 under 0.85 of 499.3) load 2.9/3.1 46s
+Q50 NR0=4 r9 ok  load 3.1/3.4 29s  ratio[0,plain,feed8]=0.7837
+Q50 NR0=1 r9 ok  load 3.4/6.0 49s  ratio[0,plain,feed8]=0.6683
+Q50 NR0=2 r9 ok  load 4.4/2.9 46s  ratio[0,plain,feed8]=0.6883
+16/27 processes admitted
+  Q50 vs NR0=2: hold  q5_0 down: +2.23% (0/3 rounds)  q5_0 glm down: +0.89% (0/3 rounds)
+  Q50 vs NR0=2: hold  q5_0 down: +6.11% (1/3 rounds)  q5_0 glm down: +5.57% (1/3 rounds)
+pinned gpu_ffnbench sha256 7ee7b9e6ff9c86a3  head dcdc131d  dirty files 95  continuing from round 10
+Q50 NR0=1 r10 ok  load 2.5/2.5 44s  ratio[0,plain,feed8]=0.7554
+Q50 NR0=2 r10 ok  load 2.5/2.3 43s  ratio[0,plain,feed8]=0.8050
+Q50 NR0=4 r10 VETO spread veto on q5_0 down (365.9/312.3) load 2.3/2.1 48s
+Q50 NR0=2 r11 VETO meter veto (383.3 under 0.85 of 499.3) load 2.1/1.6 52s
+Q50 NR0=4 r11 VETO meter veto (408.7 under 0.85 of 499.3) load 1.6/2.8 48s
+Q50 NR0=1 r11 VETO spread veto on q5_0 down (269.9/247.8) load 2.8/2.7 48s
+Q50 NR0=4 r12 ok  load 2.7/2.3 47s  ratio[0,plain,feed8]=0.6732
+Q50 NR0=1 r12 VETO spread veto on q5_0 down (292.0/269.4) load 2.3/2.0 48s
+Q50 NR0=2 r12 VETO spread veto on q5_0 down (316.8/297.3) load 2.0/2.3 48s
+Q50 NR0=1 r13 ok  load 2.3/2.0 48s  ratio[0,plain,feed8]=0.6400
+Q50 NR0=2 r13 ok  load 2.0/1.6 47s  ratio[0,plain,feed8]=0.6651
+Q50 NR0=4 r13 ok  load 1.6/2.3 48s  ratio[0,plain,feed8]=0.6537
+22/39 processes admitted
+  Q50 vs NR0=2: hold  q5_0 down: +2.23% (0/5 rounds)  q5_0 glm down: +0.80% (0/5 rounds)
+  Q50 vs NR0=2: hold  q5_0 down: +5.50% (1/4 rounds)  q5_0 glm down: +5.04% (2/4 rounds)

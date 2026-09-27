@@ -1,0 +1,136 @@
+# q3_k load-width control: padding the block buys at most ~6%, not the residual
+
+Second arm of the probe work, and it refutes the attribution the same day's
+Correction #5 made. q3-nomath-probe.log found that deleting nearly all of
+`q3_k`'s dequant arithmetic recovers only 23% of its 1.7-1.8x cost against
+`q4_k`, and attributed the residual to the load *instruction stream*: a
+110-byte block leaves every second block 2-aligned, so the quants can only be
+read as 16 ushorts per block-row where `q4_k` reads its span in ~4 uints.
+
+This arm tests that directly. `matvec_q3_k_nw` (`ALLPAKA_Q3_PROBE=nomath_word`)
+is `matvec_q3_k_nm` with two changes and nothing else: the block stride becomes
+a padded 112 bytes, which makes every block 16-aligned, and the same 32 quant
+bytes plus the same 32 high-bit bytes then arrive as 8 uints instead of 16
+ushorts - half the weight load instructions, at identical addresses within the
+block, identical geometry, identical activation traffic and identical
+arithmetic. The padded arm touches 1.8% more bytes, which biases it *slow*.
+
+Shape as before: the 235B's own `[4096,1536]` nb=6 x8, 12 streamed sets,
+feed=32, one process per arm, `q4_k` the in-run meter, `q5_k`/`q6_k` untouched
+controls. Ratios are ps/row-block against that run's `q4_k`.
+
+    incumbent          1.720, 1.760 | 1.809, 1.809 (earlier, quieter)
+    no-math ushort     1.405  1.388  1.425  1.359  1.513  1.355  1.364   mean 1.401
+    no-math uint       1.470  1.334  1.162  1.333  1.422  1.147          mean 1.311
+    q5_k (ushort arm)  1.800  1.797  1.764  1.825  1.821  1.767  1.722
+    q5_k (uint arm)    1.782  1.779  1.770  1.745  1.836  1.783
+    q6_k (ushort arm)  1.453  1.387  1.442  1.529  1.499  1.407  1.351
+    q6_k (uint arm)    1.534  1.365  1.362  1.304
+
+One further `nomath` run was **discarded**: its `q5_k` control read 2.124
+against the 1.72-1.84 band that control holds in every other run, and a
+`rag-mcp` build was observed at 412% CPU across it. That is the gate this
+directory's own caveat section prescribes - reject on the control's absolute
+band, not on the ratio.
+
+## Read
+
+1. **The width effect is small and unresolved.** 1.401 (seven ushort runs)
+   against 1.311 (six uint runs) is 6.4%, while each arm's own run-to-run spread
+   is +-10% and the standard error of the difference is ~7%. Suggestive, not
+   established, bounded above by roughly a tenth.
+2. **Correction #5's mechanism claim is still wrong.** It named load width as
+   what `q3_k` pays for *after* the arithmetic - a residual of 1.35-1.4x against
+   `q4_k`. Halving the weight load instructions moves that by at most ~6%, so at
+   least ~1.25x of the residual is not load width either.
+3. **The 112-byte repack is withdrawn on economics, not on a null.** Read the
+   data as optimistically as it allows - take the whole 6.4% as real and free of
+   noise - and the change buys a few percent of one format's per-block cost for
+   ~26 GiB of GPU memory that cannot share the model's mmap, the one property
+   the loader is built around. It cannot explain the residual, so it needs a
+   mechanism rather than a decision.
+4. **What is still unexplained**, with three exclusions now on the record: not
+   bytes per block (`q3_k` carries 24% fewer than `q4_k` and costs more), not the
+   unpack arithmetic (bounded at 23% at either load width), not load width or
+   block alignment (<= ~6%). The remaining candidates are the probes' own
+   retained work - both no-math arms still do ~2 ops per element, comparable to a
+   well-vectorized correct kernel, so "arithmetic" and "the residual" may not be
+   separable this way - and the address *pattern* of 110-byte strides across a
+   SIMD group's four concurrent blocks.
+
+DoD for whoever picks this up, cheapest first: (a) re-run the three arms at
+load < 5 with 5+ reps per arm, which is enough to say whether 6.4% is real;
+(b) a probe that keeps the incumbent's addresses but issues its weight loads
+once for both rows, hoisting only the row step, to separate per-row addressing
+from data movement; (c) only then, anything about layouts.
+
+## Follow-up, same day: the row-step discriminator, and what the floor actually is
+
+Correction #6's DoD item (b) - keep the incumbent's addresses, stop loading
+row 1's weights - is now a kernel: `matvec_q3_k_ns`
+(`ALLPAKA_Q3_PROBE=nomath_norowstep`) is `matvec_q3_k_nm` with the sixteen
+weight words loaded once per block instead of once per block-row. It reads half
+the weight bytes and issues half the loads; it is also, like its siblings, not a
+correct dot product. Controls this time were tight: `q5_k` 1.813-1.833 and
+`q6_k` 1.555-1.615 across six runs at load ~10.
+
+    arm                                        q3_k ratio to the in-run q4_k
+    incumbent                                  1.740, 1.773   mean 1.757
+    no arithmetic, weights per row             1.305, 1.324   mean 1.315
+    no arithmetic, weights per block (ns)      1.159, 1.136   mean 1.148
+
+Three bounds now sit on the record for the same dispatch:
+
+| mechanism removed | ratio move | reachable by a correct kernel? |
+| --- | --- | --- |
+| dequant arithmetic | 1.757 -> 1.315 (-25%) | **yes** - that is what an inner-loop rewrite buys |
+| half the weight bytes/loads per row | 1.315 -> 1.148 (-13%) | no - row 1 has its own bytes |
+| ushort -> uint load width | <= -6%, unresolved | only via a repacked layout |
+
+So the ceiling for kernel work on `q3_k` is ~1.32x `q4_k`, against the
+incumbent's 1.76x: a perfect port recovers a quarter, and the earlier
+decision to not write one stands on measurement. What is left is a
+*byte-layout* question, and the probes make it specific: `q3_k` carries fewer
+bytes per element than `q4_k` (0.430 against 0.563) yet lands at 1.32, because
+its bytes live in three planes - 32 bytes of 1-bit masks, 64 of 2-bit quants,
+12 of scales - and the scale plane is re-read by every shift-lane of the block.
+The remaining 0.32 is sector efficiency, not ALU, not instruction width, not
+the byte count.
+
+That reframes the repack lever rather than reviving it. Padding to 112 bytes is
+dead (measured <= 6%). A layout that interleaves the 1-bit plane with the 2-bit
+plane so one lane's per-block read is a single contiguous run is a different
+change with a stated mechanism, and it is testable *before* paying for it:
+repack a bench-side copy in the harness, run the existing kernel against it,
+and see whether 1.32 moves toward 1.0 - no loader change, no 26 GiB, no
+production risk until the number exists. DoD for that experiment: (a) a bench
+arm with the interleaved layout and the same kernel's addressing adjusted;
+(b) the ratio against the in-run `q4_k` at `[4096,1536]` x8, 5 reps, controls
+in band; (c) only if 1.32 drops below ~1.15, cost the loader change against the
+residency dump.
+
+## Caveats on the harness
+
+Every number here came off a machine at load 8-17 with at least one other agent
+session building Rust in the background - this is a shared worktree, so seeing
+an unrelated `rustc`/`rag-mcp` at 400% in `ps` is routine and is a reason to
+discard a run, not to explain it away. Ratios survive that; absolutes do not:
+`q4_k`'s meter in these runs reads 290-549 ps/row-block against ~282 quiet. Do
+not quote any absolute in this file, and treat the 6.4% as provisional pending
+the quiet re-run.
+
+## Repro
+
+```sh
+cd "$(git rev-parse --show-toplevel)"
+for arm in nomath nomath_word; do
+  for i in 1 2 3 4 5; do
+    env ALLPAKA_Q3_PROBE=$arm \
+        ALLPAKA_Q5AB_N_OUT=4096 ALLPAKA_Q5AB_N_IN=1536 \
+        ALLPAKA_Q5AB_SETS=12 ALLPAKA_Q5AB_PER_WAIT=32 \
+        cargo test -p allpaka-backend --test gpu_ffnbench -- \
+        --ignored --nocapture --test-threads=1 q5_shape_ratio \
+      | grep -E '^q[3-6]_k'
+  done
+done
+```

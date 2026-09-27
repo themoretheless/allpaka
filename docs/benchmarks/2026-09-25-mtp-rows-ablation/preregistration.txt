@@ -1,0 +1,157 @@
+# Pre-registration: price ROWS against the per-row fallback on the only MTP model here
+
+Task #27. Roadmap A9, open lever "MTP on MoE: `q2_k`/`q3_k` have no ROWS
+mapping", DoD step (a). Written 2026-09-25T01:28Z (05:28 local), before the
+series and after the one pilot pair declared below. Timestamps in this
+directory are UTC unless they say `local`.
+
+## The question
+
+`encode_verify_tokens` (crates/allpaka-backend/src/gpu/metal.rs:12602) gives a
+speculative verify round one dispatch per expert matrix for all `m` rows when
+the routed kernel carries the ROWS mapping, and falls back to `m` indexed
+dispatches per matrix when it does not. The fallback fires on `q2_k`/`q3_k`
+experts, so the 235B never gets ROWS, and that is the reason its MTP return
+condition ("verify is cheaper") never posts. The open step is to price the
+difference on a model where BOTH forms can run, because if merging `m` dispatches
+into one is not worth a measurable amount there, writing the ROWS branch for
+`q3_k`/`q2_k` is not worth writing.
+
+Said as a number: this measures the cost of `3m` indexed dispatches per MoE
+layer versus `3`, at equal bytes, equal grid occupancy per row and an identical
+emitted stream.
+
+## Arms
+
+One binary, two settings of a kill-switch added for this ablation
+(`ALLPAKA_NO_EXPERT_ROWS`, metal.rs:12685 — it only bans the ROWS pipelines,
+touching nothing else):
+
+* `rows`   — default. ROWS engages; `ALLPAKA_ROWS_DEBUG` prints `true`.
+* `norows` — the per-row indexed fallback carries the whole round.
+
+Model: `models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_M.gguf` (40 layers, qwen35moe,
+21.1 GiB), `ALLPAKA_DRAFT_K=4` so a round verifies `m = 5` rows. This is the
+only local model with an `nextn_predict_layers` block, so it is the only one
+where the verify encoder runs.
+
+## What had already been read before this file existed
+
+One pilot pair at 01:26Z, PP=480/TG=32, both arms, same binary:
+`rows` 55.8 tok/s speculative against `norows` 56.9 (+2.0% for the fallback),
+plain control 95.1 against 95.8, acceptance 21/48 in both, stream PASS in both.
+That pair is a pilot and is not evidence: it is one draw of a 2% effect from a
+machine whose byte meters sit at 0.75x of published
+(`../2026-09-25-q35a3b-postflip/stationarity-vs-level.txt`). The pilot did,
+however, reveal the census bug that criteria 3 and 4 below now gate on: the
+verify stage's `dispatched` tally was a fixed `4 + 3m` per MoE layer regardless
+of which branch ran, so the two arms printed identical dispatch counts while
+issuing 480 apart. The tally is now conditional; the fix is part of this change.
+
+## Criteria, fixed before the series
+
+1. Both arms run the same pinned binary copy (sha256 and `git rev-parse HEAD`
+   recorded once per run; the tree is dirty by design and the diff is not).
+2. Both logs must end with `mtp stream matches plain greedy: PASS`, and the two
+   arms must report the same `acceptance a/d`. The knob is allowed to change
+   only how the round is dispatched; if the stream or the acceptance moves, the
+   pair is void, not slow.
+3. The per-round verify dispatch census from `ALLPAKA_MTP_DEBUG` must differ
+   between the arms by a positive multiple of `3 (m-1)` per MoE layer, with
+   `norows` larger. A pair whose census does not differ did not run the arms it
+   claims to have run and is void.
+4. `mtp-plain` median, which the kill-switch cannot reach, must agree between
+   the arms of a pair to within 2%. Beyond that the window moved during the
+   pair; the pair is void.
+5. Metric per pair: `mtp-speculative` median of `norows` over that of `rows`,
+   read from the report JSON at full float (`measurements[].summary.median`),
+   never from stdout. Series statistic: median of the per-pair ratios, the mean
+   percent, its SEM, and the sign split by AB/BA order. Orders alternate and
+   both must agree in sign for a claim.
+6. Threshold: the roadmap step (a) says write the `q3_k`/`q2_k` ROWS branch if
+   the ablation shows more than ~3%. So: median ratio >= +3% for `rows` (i.e.
+   norows/rows <= 0.97) with consistent sign -> the branch is worth writing;
+   |median| < 3% -> ROWS is e2E-neutral on the model that already has it, the
+   branch is dropped and the result published as negative; median ratio > +3%
+   for `norows` -> the existing ROWS mapping is itself a loss, which opens a
+   separate task to retire it from the three kernels that carry it.
+7. Window: the machine is not quiet, so no absolute rate is claimed here and no
+   comparison to llama.cpp. Everything is a within-run ratio between two arms
+   of the same binary, which is the one thing the 14-probe stationarity record
+   says survives a depressed window.
+8. 20 s between processes. Paired AB/BA. Stop rule: fewer than 8 of the first
+   14 pairs admitted by criteria 2-4 -> abandon the series and publish the
+   admitted ones with the count stated.
+
+## Cost and DoD
+
+One process is ~55 s (25 s of weight prewarm, ~30 s of the bench itself), so a
+14-pair series is about 30 minutes.
+
+DoD: `results.txt` in this directory with the per-pair table, the series
+statistics, the decision under criterion 6 written out in the tense of a
+result, the roadmap line for the lever updated to point here, and `ALLPAKA_NO_EXPERT_ROWS`
+recorded in `docs/decode-opts.md` as an ablation switch rather than a lever.
+Reproduce with `python3 drive.py --pairs 14` and `python3 analyze.py`.
+
+## Amendment, 2026-09-25T01:41Z: criterion 4 is a broken meter, and the primary
+## statistic moves to the verify stage
+
+Written after the first four pairs of `series1` (started 01:32Z), which are in
+`pairs.jsonl` and were visible when this was written. Nothing here rescues the
+hypothesis; the four pairs so far all favour the fallback. It fixes what the
+series can and cannot decide.
+
+**What broke.** Criterion 4 expected `mtp-plain` to act as a window meter and
+agrees within 2%. Observed within-pair plain disagreement as `norows` over
+`rows`: -5.4%, +0.4%, -4.3%, -2.0% - i.e. it voids half the pairs. The cause is
+not the window. The MTP branch of `crates/allpaka-cli/src/bench.rs` opens both of its sessions as
+`new_session_mtp(spec_prompt.len() + 64 + k + 1)`
+(crates/allpaka-cli/src/bench.rs:639 for the plain control, :682 for the
+speculative run), so the whole speculative section is capped at ~69 decoded
+tokens and the driver takes TG=32. That makes the plain control one 0.34 s pass
+of 32 tokens and the speculative arm 12 rounds in 0.59 s, inside a process
+whose other 50 s are prewarm and the ordinary prefill/decode measurements. A
+0.34 s sample cannot resolve a 2% window question on a machine at load 7, and
+criterion 4 as written was measuring its own quantisation.
+
+**Consequence for the design.** The e2E question criterion 6 asks ("is ROWS
+worth >3% of the token rate") is not decidable at this pass length, because the
+lever only touches 12 verify rounds out of a 0.59 s section that also pays 4
+draft steps, an `arm_slots` rollback and the round's non-MoE work per token. The
+verify stage question ("what does the mapping cost the round it is used in")
+IS decidable, and it is the question step (a) was a proxy for: the per-round
+`verify N tok: X ms` line from `ALLPAKA_MTP_DEBUG` times exactly the code the
+kill-switch changes, is sampled 12 times per process, and takes its median
+within the process, so prewarm, capacity ceiling and the 50 s of unrelated work
+are all outside it.
+
+**Revised criteria.**
+
+4'. Criterion 4 stays computed and reported as preregistered, and no longer
+    voids a pair. It is reclassified as a diagnostic of how much the machine
+    moved between the two processes of a pair.
+5'. Primary series statistic: median over pairs of `norows verify ms / rows
+    verify ms`, with mean percent, SEM and the AB/BA sign split. Secondary: the
+    criterion-5 e2E rate ratio, over the pairs criterion 4 would have admitted
+    and over all pairs, both reported.
+6'. The decision needs the two statistics to agree in sign. If the verify ratio
+    says the mapping costs >=3% (ratio > 1.03, consistent sign) the ROWS branch
+    is a loss where it exists, `q3_k`/`q2_k` do not get one, and retiring ROWS
+    from `matvec_q4_k_mv`, `matvec_q5_k_mv`/`q5_k`, `matvec_q6_k` and
+    `matvec_q5_0_mv`/`q8_0_mv` opens as its own task. If they point at a >=3%
+    win for ROWS and the e2E statistic is admissible, step (b) opens. If the
+    e2E statistic contradicts the verify statistic, publish both and call the
+    lever undecided.
+7'. The transfer limit, stated rather than argued: this prices the mapping on
+    kernels whose experts are q4_k/q5_k/q6_k. The 235B's experts are
+    q2_k/q3_k, whose unpack chain is 1.86-2.01x the q4_k one, so per-block
+    traffic saved by merging rows costs relatively less there and ROWS could in
+    principle pay where it does not here. No local model can test that: the
+    235B has no `nextn` block, so `encode_verify_tokens` never runs on it, and
+    the only nextn model here quantises its experts above q3_k. The escalation
+    path if step (b) ever opens is a q3_k re-quantisation of the 35B-MTP
+    experts, not a new kernel written blind.
+8'. Stop rule unchanged in kind: abandon if fewer than 8 of the first 14 pairs
+    pass criteria 2 and 3 (stream, acceptance, census), which are the checks
+    that a pair ran the arms it claims.

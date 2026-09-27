@@ -1,0 +1,44 @@
+{
+  "model": "models/qwen3-0.6b-Q8_0.gguf",
+  "model_sha256": "361cc68159042c36ebff7715dc5a2e4612153e88f3e9c9c234820849d6dc9e1d",
+  "pp": 64,
+  "tg": 8,
+  "decode_context_tokens": 1,
+  "comparison_validated": false,
+  "limitations": [
+    "llama-bench generates its own token stream; MoE routing is not identical",
+    "KV precision must be verified against the allpaka capability report"
+  ],
+  "allpaka_prefill": {
+    "samples": [
+      2467.933732123146
+    ],
+    "median": 2467.933732123146,
+    "min": 2467.933732123146,
+    "max": 2467.933732123146
+  },
+  "allpaka_decode": {
+    "samples": [
+      376.7594430515857
+    ],
+    "median": 376.7594430515857,
+    "min": 376.7594430515857,
+    "max": 376.7594430515857
+  },
+  "llama_prefill": {
+    "samples": [
+      6063.72
+    ],
+    "median": 6063.72,
+    "min": 6063.72,
+    "max": 6063.72
+  },
+  "llama_decode": {
+    "samples": [
+      283.822
+    ],
+    "median": 283.822,
+    "min": 283.822,
+    "max": 283.822
+  }
+}

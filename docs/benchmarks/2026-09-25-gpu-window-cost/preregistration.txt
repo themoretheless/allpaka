@@ -1,0 +1,222 @@
+# Pre-registration: what does a weight window cost? (gap #3, ALLPAKA_GPU_WINDOW_GIB)
+
+Written 2026-09-25T02:30Z, before any measurement of this knob. The gate it
+closes is `docs/decode-opts.md:406-411` ("has no measurement at all in docs/"),
+and the claim under test is a source comment, quoted verbatim at
+`crates/allpaka-backend/src/gpu/metal.rs:8675-8676`:
+
+> Extra windows cost nothing; they alias pages.
+
+That sentence has never been priced. It matters beyond hygiene: the 235B
+(82.7 GiB of weights, `models/qwen3-235b-a22b-instruct-2507-Q2_K_XL.gguf`) runs
+multi-window on every default run this repo has ever measured, so if windowing
+had a cost it would already be a live part of the 235B's published deficit, not
+a hypothetical.
+
+## What the code actually does (read, not assumed)
+
+`add_mapping` (metal.rs:8676-8757) splits the model's mmap into
+`bytesNoCopy` GPU buffers of `max_buf` bytes, stepping by
+`max_buf - CHUNK_OVERLAP` (CHUNK_OVERLAP = 2 GiB, metal.rs:8531), and pins them
+in one residency set. `max_buf` is
+`min(page-rounded maxBufferLength, WINDOW_CAP = 32 GiB)`, and
+`ALLPAKA_GPU_WINDOW_GIB` takes the further `min` (metal.rs:8688-8693) - a
+declared test hook "to exercise multi-window mapping on small regions (the real
+trigger needs an 80+ GiB file)".
+
+Window count is therefore a function of cap and file size, and it is directly
+observable: metal.rs:8735-8746 prints `in {n} windows (maxBufferLength {:.1}
+GiB)` when n > 1, and bench.rs:146 prints the independent census
+`residency: windows={n} set={bool}`.
+
+For the 21.1 GiB `models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` used here the expected
+census is 1 window at the default cap, 2 at 16 GiB, 4 at 8 GiB, 11 at 4 GiB and
+21 at 2 GiB (2 GiB windows step 1 GiB because `max_buf > CHUNK_OVERLAP` is
+false at equality, metal.rs:8696-8700). Those five numbers are predictions; a
+run whose census disagrees with them is a harness bug, not a result.
+
+## Where a cost could live - the complete mechanism inventory
+
+1. **CPU, per dispatch**: `chunk_for` (metal.rs:9172-9177) is a linear scan
+   over every window, and it runs once per weight per encode request
+   (call sites 9731, 10254, 10271, 14044-14047, 16297-16304, 17044, ...). Cost
+   per token is therefore `resolves/token x windows` comparisons, inside the
+   GPU mutex. For the 35B the resolve count is bounded by
+   layers x (4 attention + 3 FFN) + router + norms, i.e. a few hundred per
+   token, so 21 windows instead of 1 adds ~4 x 10^3-10^4 short comparisons per
+   token - microseconds.
+2. **CPU, once at load**: n `new_buffer_with_bytes_no_copy` calls plus n
+   residency-set inserts. Scales linearly, paid once, visible in load seconds.
+3. **Driver/GPU**: page-table and residency bookkeeping per window, which is
+   the axis the comment denies ("they alias pages") and the only one the
+   inventory cannot bound from the source.
+4. **Not a candidate**: the MSL kernels. A `MatRef` carries `chunk` (a buffer
+   index) plus a byte offset (10256-10259), so a kernel reads the same bytes
+   whether the buffer is window 1 of 1 or 7 of 21. Window count is invisible in
+   the shader.
+
+**Prior stated before data**: flat. Mechanism 1 is bounded at well under 0.1 %
+of a 26 ms token and mechanisms 2-3 are either one-shot or outside the source.
+The value of this run is therefore not discovery but the first number attached
+to a claim the code rests on, and the possibility that mechanism 3 - a driver
+effect no one can size from here - is not negligible. A >3 % effect would mean
+exactly that, and would be reported as an unnamed mechanism rather than
+explained on the spot.
+
+## Design
+
+Model: `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` (21.1 GiB, no MTP head, so the plain
+bench decode is the whole measured object). PP=64, TG=160 via
+`ALLPAKA_BENCH_PP`/`ALLPAKA_BENCH_TG`; the bench decode is deterministic (fixed
+seed token, greedy continuation, bench.rs:439-454) and it *refuses to report* if
+the GPU fell back to CPU anywhere in the run (the `is_attached` and
+`attempts == successes && declines == 0` ensures at bench.rs:476-484), which is
+this test's correctness gate for free: a cap too small to wholly contain the
+largest tensor would surface as declines, not as a silently slow arm.
+
+Arms differ only by the cap env var:
+
+* `wide`  - unset, i.e. the shipped 32 GiB cap, 1 window.
+* `narrow` - `ALLPAKA_GPU_WINDOW_GIB=2`, 21 windows.
+* `null`  - `ALLPAKA_GPU_WINDOW_GIB=32`, which computes the same `max_buf` as
+  unset. Same window count, same code path; any difference between `null` and
+  `wide` is pure instrument noise.
+
+The null arm exists because of what this machine has been doing all night: the
+q4_k byte meter has sat at 0.74-0.76x of its published 468.8 GB/s through 20
+consecutive probes (`../2026-09-25-q35a3b-postflip/preflight-window.txt`), and
+arm spreads up to 5.591x have been observed inside single attempts. No verdict
+is admissible here without today's noise floor measured on today's machine, in
+the same harness, on the same statistic.
+
+Pairs, order alternated AB/BA, one process per arm, 20 s cooldown, 12 real
+(`narrow` vs `wide`) and 6 control (`null` vs `wide`) pairs.
+
+## Criteria, in order
+
+1. Census: every `wide`/`null` process reports `windows=1`, every `narrow`
+   process reports `windows=21`. Otherwise stop; the harness is not doing what
+   the source says.
+2. Every process: `attached=true`, decode coverage complete
+   (`attempts == successes`, `declines == 0`). Otherwise the arm silently
+   fell back to CPU and is discarded.
+3. The control series decides what is measurable: let N be the median of the
+   6 `null/wide` tok/s ratios. The instrument can only distinguish the real
+   arms from the null if |N - 1| plus the control spread stays under the 3 %
+   decision band; if it does not, this series reports the band it *can*
+   exclude and the DoD stays open.
+4. Primary statistic: median of the 12 `narrow/wide` decode tok/s ratios, at
+   full float, with the sign count (how many pairs are below 1).
+5. Secondary, because it costs nothing and is scale-free: the same ratio on
+   the bench's GPU-kernel milliseconds per token (`report_gpu_split`) and on
+   load seconds. The first says what the GPU thinks; the second prices
+   mechanism 2 directly and is nearly noise-free.
+6. Decision:
+   * |median ratio - 1| < 3 % **and** consistent in sign with the control band
+     -> the comment's claim is confirmed at the precision criterion 3 permits,
+     and that precision is named in the result. Gap #3 closes as "measured, no
+     effect at the tested cap ratio (1 window -> 21 windows)".
+   * median ratio worse than -3 % -> windowing is a lever. `WINDOW_CAP` and
+     `CHUNK_OVERLAP` become tunables to price next, and the 235B's deficit
+     gains a candidate that is not a kernel.
+   * in between -> reported as an interval, not a verdict.
+7. Transfer limit: this is a statement about a 21 GiB file on this device at
+   these caps. The 235B goes from 3 windows to 14 at the same 2 GiB cap, i.e.
+   the *same* mechanism at 4x the byte volume; a per-token cost here would
+   scale, so a flat result here is the cheap version of the expensive test and
+   is reported as such - not as a 235B measurement. Criterion 8 asks for that
+   one anyway.
+8. One 235B run at `ALLPAKA_GPU_WINDOW_GIB=8` (census 12 windows), for the
+   literal DoD wording: does a model larger than the window run, and with what
+   residency census and CPU-decline count. Single arm; no timing claim is made
+   from a single run, only the census and the coverage counters.
+
+## What this does NOT test
+
+It does not test whether `WINDOW_CAP = 32 GiB` is the right ceiling - the
+source says a single 80.6 GiB buffer "comes back non-nil yet reads wrong", and
+that finding stands on its own artifact, not here. It does not test the
+residency set (windows are pinned either way). And it does not measure
+throughput for a model that would not fit RAM, which is the regime where the
+cap actually decides whether the GPU path exists at all.
+
+## Amendment, 2026-09-25T02:37Z - after a one-pair pilot, before any counted pair
+
+The pilot (`--control 1 --real 1`, archived in ../window-cost-pilot from
+.airbug-bench/) was run to validate the harness and it invalidated two things.
+
+1. **Criterion 1 fired, on my arithmetic rather than on the code.** The file is
+   22,134,528,992 bytes = 20.61 GiB, so 2 GiB windows stepping 1 GiB end at
+   start 19 and the census is 20 windows, not 21. The prediction is corrected
+   here, in the same wording the driver now checks.
+2. **The first control pair disagreed by 6.7 % on identical code paths** (null
+   90.354 tok/s against wide 96.776). The cause is visible in the load census
+   the pilot added: 21.75 s to reach the `residency:` line for the first
+   process against 3.42 s for the second. The 20.6 GiB mapping has to be
+   faulted in from disk once; whichever arm pays that pays it in wall time too.
+   An alternating order spreads the penalty evenly over the arms instead of
+   removing it, which for a 3 % band is not acceptable.
+
+Design changes made from the pilot and before any counted pair, none of them to
+a threshold chosen after seeing an effect:
+
+* one uncounted priming run before the series, so every counted arm starts with
+  a warm page cache;
+* `ALLPAKA_BENCH_TG` raised 160 -> 400, four times the measured tokens for the
+  same number of processes;
+* a cold veto, declared here: an arm whose census time exceeds twice the median
+  census time of the counted arms is cold and its pair is dropped from the
+  medians, with the drop count published;
+* criterion 3 is now load-bearing rather than decorative - if the control series
+  itself has a half-spread at or above the 3 % band, this run reports the
+  interval it excludes and the gap stays open.
+
+One covariate is recorded and not controlled: at 02:34Z this machine had a live
+GUI/remote-desktop tenant (`WindowServer` 40.5 % CPU, `remoting_me2me_host`
+37.6 %, several Electron renderers, load average 5.7/6.2/6.7). The same regime
+was in place through the 20 consecutive rejected byte-meter probes overnight for
+task #25, at 0.74-0.76x of the published 468.8 GB/s. That is a correlation
+between the preflight failures and a screen-sharing session, not a measured
+cause, and nothing in this series depends on which it is - the arms are paired
+and the control measures whatever it is directly.
+
+## Amendment 2, 2026-09-25T03:00Z - the timing half is suspended on measured grounds
+
+The counted series ran three control pairs and stopped by hand. Its control arm -
+`ALLPAKA_GPU_WINDOW_GIB=32` against unset, which the source computes to the same
+32 GiB window and every process confirmed as `windows=1` - disagreed with its own
+reference by 1.8%, 2.75x and 8.1% in pairs 1, 2 and 3. The workloads were
+identical to the dispatch (304800 in all six processes), the host-side encode ms
+did not move, prefill held at 512.7-516.2 tok/s in the fast and slow arms alike,
+and the whole difference sat in the GPU's own executing time (4034 ms against
+12389 ms for the same pass). That is a bandwidth co-tenant, captured with the
+harness's own byte meters in ../2026-09-25-instrument-co-tenant/README.md, and it
+is not a property of the knob under test.
+
+Consequences, adopted rather than discussed:
+
+* Criteria 1-2 stand and were satisfied: the census predicts windows correctly
+  (1 at 32 GiB, 20 at 2 GiB), and every arm - including the 20-window arm of the
+  pilot, which reached `residency: windows=20 set=true` and completed 160 tokens
+  with `attempts=160 successes=160 declines=0` at the same 762 dispatches per
+  token the one-window arms show - reported `attached=true` with full GPU
+  coverage. So the aliasing question has its correctness half answered: the
+  pilot's 160-token greedy continuation is identical between the 20-window arm and
+  the 1-window arms (`220 220 16 220 220 16 ...`, same model fingerprint
+  `2b9ce9d4034d44c1`), which is what a `bytesNoCopy` window mis-aliasing its pages
+  would break first. The stream is a repetitive whitespace continuation, so the
+  weight of the check is in all 160 argmax positions agreeing, not in the text.
+* What is NOT answered, and stays with the timing half: the *seconds* the setup
+  itself takes at 20 windows against 1. The pilot's narrow arm was cut off before
+  its census timestamp was recorded, so no number is claimed for it; the re-run
+  records `census_secs` for every arm and criterion 5's second half is answered
+  then, since setup time is dominated by page faults rather than by the byte pipe
+  and should survive a contended machine.
+* Criteria 4-6 (the timing verdict on "extra windows cost nothing") move behind a
+  new admission gate, taken from the instrument note: an arm is admissible when
+  its decode total-ms per token is within 10% of the fastest arm of the series,
+  and a pair is discarded if its two arms land in different populations. Load
+  average is demoted to a recorded covariate; it separated neither the fast nor
+  the slow arms here (7.36 fast against 5.80 slow).
+* Criterion 8 (the 235B below-window run) is census and coverage only, so it runs
+  now; no timing statement is taken from it.

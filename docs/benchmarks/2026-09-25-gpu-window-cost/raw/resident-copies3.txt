@@ -1,0 +1,10 @@
+file size 20.61 GiB, cap 2.0 GiB, step 1.0 GiB
+copy 0: 20 windows, mapped span now 39.6 GiB
+  residency requested for 20 allocations
+copy 1: 20 windows, mapped span now 79.2 GiB
+  residency requested for 20 allocations
+copy 2: 20 windows, mapped span now 118.8 GiB
+  residency requested for 20 allocations
+  commandBuffer.error: MTLCommandBufferErrorDomain code 8: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+span 118.8 GiB over 3 copies: declines 0, command-buffer errors 1, residency failures 0, windows reading wrong 0, uninformative (all-zero host) 0
+exit 0

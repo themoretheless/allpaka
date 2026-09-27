@@ -1,0 +1,71 @@
+# Reachability pilot: does `ALLPAKA_SHARED_STAGGER=1` change the encode sequence?
+
+Run 2026-09-25T21:03-21:06 UTC, before the counted pairs. Short (PP=96, TG=32),
+`ALLPAKA_FFN_SPLIT=1` on, GLM-4.5-Air at clean HEAD `8a16214` in a detached
+worktree - a worktree because the main tree carries another session's uncommitted
+Metal WIP, and a stagger verdict must attach to a commit.
+
+## Why this pilot exists at all
+
+Reading the gate at HEAD (`metal.rs:11149-11150`):
+
+    let stagger = shared.is_some() && shared_stagger() && down_tail.is_none();
+
+`down_tail` is `Some` only under `ALLPAKA_SHARED_TAIL=1`, which
+`shared_tail()` (`metal.rs:14891-14905`) reads as **off unless the env says `1`**.
+So the knob is reachable in the shipped default configuration - but that
+conclusion came from reading a function, and the comment two screens above it
+(`metal.rs:9876`) still describes the same knob as "Opt out:
+ALLPAKA_SHARED_TAIL=0", i.e. the opposite default. Prose and code disagree, so
+the arm difference has to be shown by a counter, not by a reading.
+
+A paired A/B on a knob that never engages is not a negative result, it is a
+null test that prints "flat" - the cheapest way to spend 41 runs and learn
+nothing. So: measure the dispatch census in both arms first.
+
+## Result: the arms differ, by exactly the arithmetic difference
+
+    arm      decode dispatches   per token   cov (att/suc/dec)   waited ms   executing ms   outside
+    plain          25664            802.0    32/32/0                  787            781        0%
+    stagged        26432            826.0    32/32/0                  782            776        0%
+
+26432 - 25664 = 768 = 32 tokens x 24, i.e. **+1 dispatch per MoE layer per
+token**, which is what the code says it should be: unstaggered, one swiglu
+launch covers `n_slots` rows (routed + shared); staggered, the routed rows get
+their own swiglu (`swiglu_n = n_used`, `metal.rs:11234`) and the shared expert
+gets a second one after its gate/up (`metal.rs:11370-11385`). The delta being
+exactly the predicted integer is the check - an arm that differed by an
+unexplained amount would be an arm whose path I do not understand.
+
+Both arms: `attempts == successes == 32`, `declines = 0`, greedy continuation
+identical (same 32 tokens, `decode ... 40.2` against `40.3` tok/s).
+
+## The mechanism statement this already gives, before any throughput pair
+
+`executing 781 ms` out of `waited 787 ms`, `0% outside the GPU`, in both arms.
+Decode on this machine is not waiting on the host - there is no host-side idle
+gap for a re-ordering to reclaim, which is the only thing a schedule change can
+buy when the bytes are fixed. That is the preregistration's "against" prior
+turned into a number, and it is why the expected verdict here is flat; the
+counted pairs test whether the small in-GPU gap that remains (787 - 781 = 6 ms
+over 32 tokens, 0.19 ms/token, 0.6% of a 24.9 ms/token budget) is worth anything
+at all.
+
+## What this pilot is NOT evidence for
+
+`ALLPAKA_FFN_SPLIT=1` commits after every stage to time it
+(`metal.rs:15315-15317`), so these two runs are the "timing probe only - results
+are racy garbage" kind. 40.2 against 40.3 tok/s here says nothing about the
+knob; it only says both arms completed. Throughput is the paired run's job
+(`drive.py`, alternating order, priming, unpatched binary, no split probe).
+
+## One confound the pilot caught for free
+
+    plain    prewarmed 46.6 GiB of weights in 61.0 s
+    stagged  prewarmed 46.6 GiB of weights in  7.0 s
+
+Same binary, same model, 8.7x: the first process faults the file in from disk,
+the second reads the page cache. Any GLM pair that pays this costs ~54 s to the
+arm that runs first, which is ~1.4% of a 39 s decode - larger than the effect
+being looked for. The priming run in `drive.py` and the census-time cold veto
+exist because of lines like these two.

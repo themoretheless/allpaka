@@ -1,0 +1,64 @@
+235B decode per-stage counter (ALLPAKA_DECODE_SPLIT) - pre-registration
+=======================================================================
+
+WHAT THE INSTRUMENT IS (read from the code before using it; no rebuild needed,
+the knob is live in target/release/allpaka built 2026-09-24 16:51 local):
+crates/allpaka-backend/src/gpu/metal.rs:11096-11170 opens a Metal counter sample
+buffer at AtStageBoundary and replaces the single concurrent encoder with one
+encoder per stage (split_here! labels), still ONE submit and ONE wait per token.
+At metal.rs:12448-12495 the resolved samples are turned into ms per label,
+recorded into telemetry Phases, and printed once to stderr ("decode profile,
+ms/token"); report_phases in allpaka-cli then prints the aggregated per-phase
+table for the whole 64-token window. Label->phase map at 12473-12478 lumps
+gate_up/swiglu/down/combine into Experts, so the split-by-format numbers come
+from the per-label lines, not the phase table.
+
+RUN 1 (this file's first half), design fixed before the data:
+  3 x (plain, split) back to back on qwen3-235b-a22b-instruct-2507-Q2_K_XL,
+  PP 480 TG 64, ALLPAKA_BENCH_SKIP_MTP=1, max-performance, sleep 15.
+  Metric 1: the price of the instrument = split wall minus plain wall, paired.
+  Metric 2: the per-label ms/token table, taken only from pairs whose plain
+  bracket is in the 42.37-42.40 cluster (the window rule learned from
+  ../2026-09-24-30b-skip-control and Amendment 2 of
+  ../2026-09-24-235b-skip-differential).
+  Claim under test, from the skip differential's section 9: `experts` cost
+  27.3 ms/token. The census says q2_k gate/up 20.6-ish predicted ... the split
+  counter is supposed to say WHERE inside those 27.3 ms the money is.
+
+RUN 2 - the question RUN 1 leaves open, criteria fixed now:
+  The counter charges each stage the interval between its own stage boundaries.
+  A barrier drain that stalls the START of `down` is therefore billed to `down`,
+  not to the stage that caused it. So a per-label deficit can be an attribution
+  artifact, and the only measured claim so far (down 16.1 ms against a 222 GB/s
+  indexed, per_wait=1, same-shape bench rate = 2.09x) depends on that label
+  boundary being honest. Test: run split mode again with the barrier-subset skip
+  arms (ALLPAKA_SKIP=barf, then bar), 2 reps each, each preceded by its own
+  split-mode baseline.
+    - If `down` falls to <= 10 ms while gate_up+down stays within 1 ms of its
+      plain-split sum, the q3_k deficit is at least partly barrier-drain
+      attribution, and the ledger's q3_k row gets no blame yet.
+    - If down stays >= 14 ms with the ffn-chain barriers gone, the deficit is
+      kernel time and the q3_k down path is the target at 2.09x its own bench
+      rate.
+    - 10-14 ms is reported as unresolved, with the barrier cost quantified.
+  Known bias, stated now: dropping barriers corrupts activations, and corrupted
+  activations corrupt routing, so the expert set changes; the differential's
+  section 5 shows that a corrupted expert set can change the token cost on its
+  own. This arm is read as a bound, not a clean isolate.
+
+AMENDMENT 4 (written 2026-09-24T20:11Z, AFTER RUN 2 data - this section is
+post-hoc protocol, not pre-registration, so it changes no threshold):
+  1. s2 is rejected on the mechanical rule already used in the differential: a
+     pair is admissible only if its own split-mode baseline sits in the clean
+     cluster (47.8-48.1 ms/token). s2's baselines read 96.72 and 61.25, and each
+     arm beat the baseline taken immediately before it, which is a degrading
+     window, not an effect. s1 stays admissible.
+  2. Because s1 alone is n=1 per arm, RUN 2 is re-run as reps 3-5 with each arm
+     bracketed by three baselines (base1, arm, base2) so the window is visible
+     inside every trial instead of inferred from the next trial.
+  3. Added a positive control, not in the original design: split mode with
+     ALLPAKA_SKIP=head. A probe that cannot bite would make RUN 2's null
+     uninterpretable, and this instrument has already gone silent once (the
+     counter-coverage finding in the 30B control). The control is read as
+     pass/fail on one thing only: does the `head` label go to 0.000 while the
+     other labels stay at their clean values.

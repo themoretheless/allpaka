@@ -1,0 +1,231 @@
+# generated 2026-09-24 by scripts/gguf-bytes-per-token.py --rate ... --tok-s ...
+# rate inputs are the streamed GB/s column of ../2026-09-24-indexed-matvec/README.md
+# (q8_0 400.2, q4_k 354.6, q5_k 248.9, q3_k 177.1, q2_k 199.7, each at the shape the
+# model actually dispatches; q5_0 set to 400 = the post-port assumption; q6_k and f32
+# have no streamed rate anywhere in the repo and are reported as unrated).
+
+## GLM-4.5-Air, published 45.95 tok/s (post-q5_0_mv mv=1 arm of ../2026-09-24-q5-0-mv-e2e/paired-32.txt)
+# time ledger (ms per token) at the rates given:
+    q4_k          5706.8 MiB  @  355 GB/s    16.88 ms   77.5% of wall
+    q8_0          1342.7 MiB  @  400 GB/s     3.52 ms   16.2% of wall
+    q5_0           726.0 MiB  @  400 GB/s     1.90 ms    8.7% of wall
+    q6_k           561.1 MiB   no rate given
+    q5_k           347.9 MiB  @  249 GB/s     1.47 ms    6.7% of wall
+    f32             96.1 MiB   no rate given
+    rated: 23.76 ms/token; unrated bytes: 657.2 MiB
+    published 46.0 tok/s = 21.76 ms/token, i.e. 423 GB/s achieved on the whole byte budget
+    sum of the micro rates: 42.1 tok/s if the unrated bytes were free, 42.1 tok/s if they ran at 500 GB/s
+
+## qwen3-235b, published 20.0 tok/s (single-shot arm of the 2026-09-12 matrix)
+# time ledger (ms per token) at the rates given:
+    q4_k          3667.5 MiB  @  355 GB/s    10.85 ms   21.7% of wall
+    q2_k          2961.0 MiB  @  200 GB/s    15.55 ms   31.1% of wall
+    q3_k          1629.4 MiB  @  177 GB/s     9.65 ms   19.3% of wall
+    q6_k           749.4 MiB   no rate given
+    f32            191.0 MiB   no rate given
+    q5_k           187.0 MiB  @  249 GB/s     0.79 ms    1.6% of wall
+    rated: 36.83 ms/token; unrated bytes: 940.4 MiB
+    published 20.0 tok/s = 50.00 ms/token, i.e. 197 GB/s achieved on the whole byte budget
+    sum of the micro rates: 27.2 tok/s if the unrated bytes were free, 27.2 tok/s if they ran at 500 GB/s
+
+## qwen3-30b, published 137.5 tok/s (../2026-09-21-metal paired arm)
+# time ledger (ms per token) at the rates given:
+    q4_k          1282.5 MiB  @  355 GB/s     3.79 ms   52.1% of wall
+    q6_k           499.4 MiB   no rate given
+    f32             48.8 MiB   no rate given
+    rated: 3.79 ms/token; unrated bytes: 548.2 MiB
+    published 137.5 tok/s = 7.27 ms/token, i.e. 264 GB/s achieved on the whole byte budget
+    sum of the micro rates: 263.7 tok/s if the unrated bytes were free, 263.6 tok/s if they ran at 500 GB/s
+
+# ---- rate sensitivity: the repo carries TWO streamed q4_k rates, 354.6 GB/s
+# (../2026-09-24-indexed-matvec/README.md shape table) and 469 GB/s (quoted in
+# ../allpaka-vs-llama-metal-status.md gap 1). Re-running the ledger at 469 is the
+# sensitivity check, same commands otherwise.
+
+## GLM-4.5-Air at q4_k=469, published 45.95 tok/s
+# time ledger (ms per token) at the rates given:
+    q4_k          5706.8 MiB  @  469 GB/s    12.76 ms   58.6% of wall
+    q8_0          1342.7 MiB  @  400 GB/s     3.52 ms   16.2% of wall
+    q5_0           726.0 MiB  @  400 GB/s     1.90 ms    8.7% of wall
+    q6_k           561.1 MiB   no rate given
+    q5_k           347.9 MiB  @  249 GB/s     1.47 ms    6.7% of wall
+    f32             96.1 MiB   no rate given
+    rated: 19.65 ms/token; unrated bytes: 657.2 MiB
+    published 46.0 tok/s = 21.76 ms/token, i.e. 423 GB/s achieved on the whole byte budget
+    sum of the micro rates: 50.9 tok/s if the unrated bytes were free, 50.9 tok/s if they ran at 500 GB/s
+
+## qwen3-235b at q4_k=469, published 20.0 tok/s
+# time ledger (ms per token) at the rates given:
+    q4_k          3667.5 MiB  @  469 GB/s     8.20 ms   16.4% of wall
+    q2_k          2961.0 MiB  @  200 GB/s    15.55 ms   31.1% of wall
+    q3_k          1629.4 MiB  @  177 GB/s     9.65 ms   19.3% of wall
+    q6_k           749.4 MiB   no rate given
+    f32            191.0 MiB   no rate given
+    q5_k           187.0 MiB  @  249 GB/s     0.79 ms    1.6% of wall
+    rated: 34.18 ms/token; unrated bytes: 940.4 MiB
+    published 20.0 tok/s = 50.00 ms/token, i.e. 197 GB/s achieved on the whole byte budget
+    sum of the micro rates: 29.3 tok/s if the unrated bytes were free, 29.3 tok/s if they ran at 500 GB/s
+
+## qwen3-30b at q4_k=469, published 137.5 tok/s
+# time ledger (ms per token) at the rates given:
+    q4_k          1282.5 MiB  @  469 GB/s     2.87 ms   39.4% of wall
+    q6_k           499.4 MiB   no rate given
+    f32             48.8 MiB   no rate given
+    rated: 2.87 ms/token; unrated bytes: 548.2 MiB
+    published 137.5 tok/s = 7.27 ms/token, i.e. 264 GB/s achieved on the whole byte budget
+    sum of the micro rates: 348.8 tok/s if the unrated bytes were free, 348.6 tok/s if they ran at 500 GB/s
+
+##############################################################################
+# SECTION 2 - the same ledger at the rates measured in ONE process and
+# ONE window (q6k-q5o-streamed-rates.txt): q8_0 499.7, q4_k 475.8,
+# q5_k 345.0, q3_k 222.1, q2_k 257.7 (its real gate/up shape),
+# q5_0 386.4 (GLM's own [5120,1408]), q6_k 460.6 (the wider of its two rows).
+# These supersede section 1 wherever they disagree: the older streamed
+# table's q4_k 354.6 came from a window whose q8_0 meter read 400.2, i.e.
+# the whole section-1 band was one contended afternoon, and its spread
+# was 32% rather than the 1.00x of section 2.
+
+## GLM-4.5-Air, published 45.95 tok/s
+# time ledger (ms per token) at the rates given:
+    q4_k          5706.8 MiB  @  476 GB/s    12.58 ms   57.8% of wall
+    q8_0          1342.7 MiB  @  500 GB/s     2.82 ms   12.9% of wall
+    q5_0           726.0 MiB  @  386 GB/s     1.97 ms    9.1% of wall
+    q6_k           561.1 MiB  @  461 GB/s     1.28 ms    5.9% of wall
+    q5_k           347.9 MiB  @  345 GB/s     1.06 ms    4.9% of wall
+    f32             96.1 MiB   no rate given
+    rated: 19.70 ms/token; unrated bytes: 96.1 MiB
+    published 46.0 tok/s = 21.76 ms/token, i.e. 423 GB/s achieved on the whole byte budget
+    sum of the micro rates: 50.8 tok/s if the unrated bytes were free, 50.8 tok/s if they ran at 500 GB/s
+
+## qwen3-235b, published 20.0 tok/s
+# time ledger (ms per token) at the rates given:
+    q4_k          3667.5 MiB  @  476 GB/s     8.08 ms   16.2% of wall
+    q2_k          2961.0 MiB  @  258 GB/s    12.05 ms   24.1% of wall
+    q3_k          1629.4 MiB  @  222 GB/s     7.69 ms   15.4% of wall
+    q6_k           749.4 MiB  @  461 GB/s     1.71 ms    3.4% of wall
+    f32            191.0 MiB   no rate given
+    q5_k           187.0 MiB  @  345 GB/s     0.57 ms    1.1% of wall
+    rated: 30.10 ms/token; unrated bytes: 191.0 MiB
+    published 20.0 tok/s = 50.00 ms/token, i.e. 197 GB/s achieved on the whole byte budget
+    sum of the micro rates: 33.2 tok/s if the unrated bytes were free, 33.2 tok/s if they ran at 500 GB/s
+
+## qwen3-30b, published 137.5 tok/s
+# time ledger (ms per token) at the rates given:
+    q4_k          1282.5 MiB  @  476 GB/s     2.83 ms   38.9% of wall
+    q6_k           499.4 MiB  @  461 GB/s     1.14 ms   15.6% of wall
+    f32             48.8 MiB   no rate given
+    rated: 3.96 ms/token; unrated bytes: 48.8 MiB
+    published 137.5 tok/s = 7.27 ms/token, i.e. 264 GB/s achieved on the whole byte budget
+    sum of the micro rates: 252.3 tok/s if the unrated bytes were free, 252.3 tok/s if they ran at 500 GB/s
+
+##############################################################################
+# SECTION 3 - the ledger built ENTIRELY at the geometry each model dispatches,
+# from the 15-row single-window run in q6k-q5o-streamed-rates.txt: q4_k 464.6
+# and q8_0 497.0 at GLM's [1408,4096]/[4096,1408], q5_0 383.6 at its [4096,1408]
+# down, q4_k 386.7 and q6_k 363.9 at the 30B's [768,2048]/[2048,768], and the
+# 235B's own gate/up and down shapes (which sections 1-2 already used).
+# Two things change against section 2, both in the same direction: the rate is
+# shape-bound, so every model's per-byte cost goes up, and the 235B's wall
+# reading is the first pair of the A/B run that produced these rates (23.43
+# against llama's 29.59) rather than the single-shot 20.0.
+#
+# Closure, as kernel-sum / wall:
+#   GLM    20.03 / 21.76 = 0.92   (section 2: 0.90 - GLM barely moves, its
+#                                  shapes are wide enough to rate normally)
+#   235B   30.12 / 42.68 = 0.71   at the 23.43 tok/s A/B pair, 0.60 at the
+#                                  published 20.0
+#   30B     4.92 /  7.27 = 0.68   (section 2: 0.54 - the "not byte-limited"
+#                                  reading was a borrowed-shape artifact)
+#                                  ...re-derived at a bracketed clean baseline
+#                                  of 6.70 ms it is 4.92/6.70 = 0.73, and the
+#                                  same runs' GPU clock says 0.944 of that wall
+#                                  is inside kernels (../2026-09-24-30b-skip-con
+#                                  trol/results.txt section 4)
+# The 235B is the only model whose unexplained remainder is large in absolute
+# ms (12.6 at the paired 23.43, 19.9 at the published 20.0), and the same pair's
+# own counters say where it is not: 99.6% of the token inside GPU execution at
+# 1318 dispatches/token (84352 dispatches / 64 tokens), i.e. host-side overhead
+# is not the missing 12 ms.
+## GLM-4.5-Air, published 45.95 tok/s
+# time ledger (ms per token) at the rates given:
+    q4_k          5706.8 MiB  @  465 GB/s    12.88 ms   59.2% of wall
+    q8_0          1342.7 MiB  @  497 GB/s     2.83 ms   13.0% of wall
+    q5_0           726.0 MiB  @  384 GB/s     1.98 ms    9.1% of wall
+    q6_k           561.1 MiB  @  460 GB/s     1.28 ms    5.9% of wall
+    q5_k           347.9 MiB  @  345 GB/s     1.06 ms    4.9% of wall
+    f32             96.1 MiB   no rate given
+    rated: 20.03 ms/token; unrated bytes: 96.1 MiB
+    published 46.0 tok/s = 21.76 ms/token, i.e. 423 GB/s achieved on the whole byte budget
+    sum of the micro rates: 49.9 tok/s if the unrated bytes were free, 49.9 tok/s if they ran at 500 GB/s
+## qwen3-235b, pair 1 of the A/B run at 23.43 tok/s (published single-shot: 20.0)
+# time ledger (ms per token) at the rates given:
+    q4_k          3667.5 MiB  @  472 GB/s     8.14 ms   19.4% of wall
+    q2_k          2961.0 MiB  @  258 GB/s    12.05 ms   28.7% of wall
+    q3_k          1629.4 MiB  @  222 GB/s     7.69 ms   18.3% of wall
+    q6_k           749.4 MiB  @  472 GB/s     1.67 ms    4.0% of wall
+    f32            191.0 MiB   no rate given
+    q5_k           187.0 MiB  @  345 GB/s     0.57 ms    1.4% of wall
+    rated: 30.12 ms/token; unrated bytes: 191.0 MiB
+    measured 23.43 tok/s = 42.68 ms/token, i.e. 230 GB/s achieved on the whole byte budget
+    sum of the micro rates: 33.2 tok/s if the unrated bytes were free, 33.2 tok/s if they ran at 500 GB/s
+## qwen3-235b, published 20.0 tok/s (same rates, for the section-1/2 comparison)
+# time ledger (ms per token) at the rates given:
+    q4_k          3667.5 MiB  @  472 GB/s     8.14 ms   16.3% of wall
+    q2_k          2961.0 MiB  @  258 GB/s    12.05 ms   24.1% of wall
+    q3_k          1629.4 MiB  @  222 GB/s     7.69 ms   15.4% of wall
+    q6_k           749.4 MiB  @  472 GB/s     1.67 ms    3.3% of wall
+    f32            191.0 MiB   no rate given
+    q5_k           187.0 MiB  @  345 GB/s     0.57 ms    1.1% of wall
+    rated: 30.12 ms/token; unrated bytes: 191.0 MiB
+    published 20.0 tok/s = 50.00 ms/token, i.e. 197 GB/s achieved on the whole byte budget
+    sum of the micro rates: 33.2 tok/s if the unrated bytes were free, 33.2 tok/s if they ran at 500 GB/s
+## qwen3-30b, published 137.5 tok/s
+# time ledger (ms per token) at the rates given:
+    q4_k          1282.5 MiB  @  387 GB/s     3.48 ms   47.8% of wall
+    q6_k           499.4 MiB  @  364 GB/s     1.44 ms   19.8% of wall
+    f32             48.8 MiB   no rate given
+    rated: 4.92 ms/token; unrated bytes: 48.8 MiB
+    published 137.5 tok/s = 7.27 ms/token, i.e. 264 GB/s achieved on the whole byte budget
+    sum of the micro rates: 203.4 tok/s if the unrated bytes were free, 203.4 tok/s if they ran at 500 GB/s
+## qwen3-30b, bracketed clean baseline 149.3 tok/s (../2026-09-24-30b-skip-control)
+# Same section-3 rates, but the wall is the mean of 18 immediately-preceding
+# baselines (6.66-6.91 ms/token, prefill 1521-1531) instead of the borrowed
+# 137.5, which was measured in a slower window. This is the row the fork rests
+# on, and it moves closure UP: the 30B is closer to its byte model than section
+# 3 claimed, not further.
+# time ledger (ms per token) at the rates given:
+    q4_k          1282.5 MiB  @  387 GB/s     3.48 ms   51.9% of wall
+    q6_k           499.4 MiB  @  364 GB/s     1.44 ms   21.5% of wall
+    f32             48.8 MiB   no rate given
+    rated: 4.92 ms/token; unrated bytes: 48.8 MiB
+    measured 149.3 tok/s = 6.70 ms/token, i.e. 287 GB/s achieved on the whole byte budget
+    sum of the micro rates: 203.4 tok/s if the unrated bytes were free, 203.4 tok/s if they ran at 500 GB/s
+    closure vs its OWN GPU clock: 6.32 ms executing / 6.70 ms wall = 0.944, so
+    only 0.38 ms/token sits outside kernel execution; the 1.78 ms gap to the
+    rated 4.92 is inside the kernels, i.e. in-situ rate inflation, not overhead
+
+##############################################################################
+# ANNOTATION added 2026-09-25 - the 235B rows changed regime after this file
+# was written, and the change moves closure the right way.
+#
+# 1. `ALLPAKA_SWFUSE` is now OFF by default, so the q3_k `down` stage really does
+#    run plain in the shipped binary. The 222.1 GB/s denominator this file used
+#    for it - an optimistic floor when written, because the model was fused at
+#    108.9 GB/s - is now the live regime. Source:
+#    ../2026-09-24-235b-swfuse/results.txt sections 3 and 12.
+# 2. The 235B wall denominator in every section above (20.0 tok/s = 50.00 ms,
+#    and the 42.3 ms split-window baselines quoted around it) is superseded by
+#    the shipped binary's own measurement: 35.08 ms/token, 28.30-28.60 tok/s,
+#    clean-pair mean, three reps with one rejected on the pre-registration rule.
+# 3. Consequence, section 2's 235B row read against the new wall: rated 30.10 ms
+#    of a 50.00 ms wall left 19.9 ms outside the byte model, which is the number
+#    that spawned the per-stage census. Rated 30.10 ms of 35.08 ms leaves ~4.9 ms
+#    outside, i.e. the byte model now accounts for 86% of the token rather than
+#    60%. Of that 4.9, 0.4-0.5 ms is the unrated f32 rows (191.0 MiB = 0.200 GB
+#    at the 400-500 GB/s band) and the rest is the not-yet-attributed residue the
+#    status doc's gap 2 tracks (~4.3 ms there; the two figures differ by how each
+#    treats the unrated bytes, not by measurement).
+# 4. The section-1 rate table (q4_k 354.6 / q3_k 177.1 / q8_0 400.2) is a
+#    contended afternoon and is superseded in place by its own header note; the
+#    30B rows were re-based again in section 4. Nothing in this annotation
+#    changes a rate - it changes which wall the percentages divide.

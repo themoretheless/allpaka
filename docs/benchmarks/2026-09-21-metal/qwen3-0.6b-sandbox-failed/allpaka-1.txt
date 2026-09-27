@@ -1,0 +1,34 @@
+airbug: traces and logs -> http://localhost:4318
+prewarmed 0.7 GiB of weights in 0.0s
+engine bench: qwen3-0.6b-Q8_0 (28 layers, qwen3)
+  capabilities:
+    model: arch=qwen3 layers=28 moe=false
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: auto
+    gpu: backend=none attached=false
+    weights: gpu-resident=false
+    residency: windows=0 set=false
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=113 bytes=0.00 GiB matmul-kernel=yes
+      Q8_0: tensors=198 bytes=0.74 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=319
+  prefill   480 tok in  14.06 s      34.1 tok/s
+  prefill phases, ms/token:
+    attn out proj          4.9  (16.7%)
+    qkv proj               3.0  (10.3%)
+    attention              0.6  ( 2.1%)
+    q/k norm + rope        0.1  ( 0.2%)
+    ffn norm               0.0  ( 0.1%)
+    ffn combine            0.0  ( 0.0%)
+    attn norm              0.0  ( 0.0%)
+    kv store               0.0  ( 0.0%)
+    embed                  0.0  ( 0.0%)
+    unaccounted           20.7  (70.6%)
+  decode     32 tok in   0.70 s      45.8 tok/s
+Error: benchmark invalid: GPU is not attached; refusing to report CPU fallback as GPU throughput

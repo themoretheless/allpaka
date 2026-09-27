@@ -1,0 +1,20 @@
+# The two pairs the parked driver got, kept because they are instrument evidence
+
+Salvaged from `/tmp/glm-parity/driver.log` on 2026-09-25T00:53:46Z; /tmp does not
+survive a reboot and the repo rule is that a cited number needs a file. Nothing
+here is a result about GLM - it is evidence about the gate.
+
+The driver was waiting for the 1-minute load average to fall below 5 before every
+arm, and both runs below satisfied that gate (loadmax 4.72 and 4.93 at arm start).
+They still read ap_tg 16.00 and 14.20 against this model's post-port anchor of
+~46.5 decode tok/s, and llama tg 19.34 and 26.37 against its own 45.46 anchor -
+i.e. both arms of both pairs sat at roughly a third of their own history while the
+load number said the machine was quiet.
+
+This is the observation that produced criteria 7 and 9 of preregistration.txt beside
+it: the load average is a permission to attempt, not an admission criterion, and what
+admits a pair is each arm reading inside its own historical band - on this run, on
+both engines at once.
+
+    warm 1 AB: ap_tg=16.00 ll_tg=19.34 ap_pp=153.5 ll_pp=161.6 loadmax=4.72
+    pair 2 BA: ap_tg=14.20 ll_tg=26.37 ap_pp=90.3 ll_pp=116.1 loadmax=4.93

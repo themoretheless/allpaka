@@ -1,0 +1,77 @@
+# Pre-registration: sweep `ALLPAKA_Q5_0_NR0`, the last unswept geometry in the NR0 family
+
+Written 2026-09-26 02:25 UTC, before any counted round of this series exists. The
+B1/B2 confirmations in
+[../2026-09-25-nr0-indexed-remeasure/results.txt](../2026-09-25-nr0-indexed-remeasure/results.txt)
+closed `Q4_NR0` and `Q8_NR0` at 2 and, reading `lanes_per_row` to do it, found that
+`matvec_q5_0_mv` returns a hard-coded 16 lanes (NR0 = 2) with no knob at all - so
+this is not a re-measure of a discredited verdict but the first measurement of a
+default that never had one.
+
+## Why this one is worth a process-per-arm sweep
+
+- `q5_0` is the GLM-4.5-Air expert down: `[4096,1408] x 8 routed slots` per layer,
+  ~12% of that model's per-token bytes.
+- The kernel itself is the largest decode win in this repo: porting it moved GLM
+  **+16.05%** (SEM 1.59, 15/15 pairs), i.e. this row of the pipeline is not a
+  place where geometry has proved irrelevant.
+- In the family, two of the four sweepable formats want something other than 2
+  (`q5_k` flipped to 4; `q4_k` and `q8_0` hold at 2), and the `q3_k`/`q5_0`/`q6_k`
+  hard-coded 16-lane geometry was chosen at port time, not measured.
+- Lower prior than `q5_k` had: `q5_0` is closer to byte-bound than K-quant work,
+  and the `q8_0` arm of the same shape family moved <=0.81% across the whole sweep.
+
+## Instrument
+
+The existing series driver, third arm set:
+[../2026-09-25-nr0-indexed-remeasure/drive-nr0.py](../2026-09-25-nr0-indexed-remeasure/drive-nr0.py)
+with `--series Q50`, running
+`gpu_ffnbench::indexed_matvecs_report_effective_bandwidth` at
+`ALLPAKA_BENCH_FEEDS=1,8 ALLPAKA_BENCH_SWFUSES=0,1`, one process per arm, rotation
+across processes, five rounds planned (more if gate 3 eats processes - it admitted
+15/24 for `q4_k` and 15/15 for `q8_0`).
+
+Shapes: `q5_0 down` `[4096,1536]` and `q5_0 glm down` `[4096,1408]`. Meter:
+`q6_k down`, untouched by this knob the same way it is untouched by Q4/Q8 -
+`ALLPAKA_Q5_0_NR0` is read in one branch of `lanes_per_row`, keyed on
+`GgmlType::Q5_0`.
+
+Provenance discipline unchanged: the pinned test binary's sha256 is recorded and a
+continuation refuses a different binary. This series runs on the binary built after
+the `q5_0_nr0()` plumbing landed, which is *not* the binary the 09-26 B1/B2 series
+ran on, so the two are separate series with separate pinned bytes.
+
+## Gates, before a round is counted
+
+1. MSL must compile (the test asserts it; a failed compile is not a missing device).
+2. Absolute meter band: first admitted process sets `q6_k down` at feed=8; a later
+   process below 85% of it is discarded, and the discard count is published.
+3. Within-process spread: `best/med <= 1.05` on both `q5_0` rows and the meter.
+4. `vm.loadavg` under 8.0 at both ends of the process, and every process launched
+   under a 1-minute load of 5.
+
+## Primary metric and decision rule
+
+Per process: `ratio(shape, feed, fuse) = best_GBps(q5_0 row) / best_GBps(q6_k down)`,
+at full float, from the JSON records rather than the printed 0.1 rounding.
+
+The default flips from 2 to some arm N only if, in the **shipped cell** (plain,
+feed=8), N beats 2 by **>3% on the median ratio on both `q5_0` rows**, with the sign
+positive in at least 4 of the shared admitted rounds. Anything narrower is published
+as a confirmation of 2 with the same table.
+
+If an arm passes, it still does not ship until:
+- `gpu_parity::q5_0_matches_cpu_reference` (and the indexed parity test) are green at
+  that arm - `n_out % NR0` is guarded by `mv_indexed_kernel` and the routing unit
+  test already passes at 1/2/4, but correctness at the arm is the other half;
+- one paired alternating e2E A/B on GLM-4.5-Air at PP=480/TG=320, with the
+  control/null discipline the `SHARED_STAGGER` and `Q5_0_MV` series earned:
+  an effect has to beat the run's own null spread, not a remembered number.
+
+## What is not claimed here
+
+That a micro separation implies an e2e one: at 12% of per-token bytes, a 3% kernel
+gain predicts well under 1% tok/s, which this machine cannot resolve. The sweep is
+run because the family has already produced two surprises (a flip, and a
+fusion-dependent sign reversal), not because a +3% cell is expected to be
+collectable at the token.

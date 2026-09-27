@@ -1,0 +1,36 @@
+### def defaults=
+       A=2.6 ns/row  B=303 ps/row/block  (1.19 ps/weight at the block cost alone)
+       A=0.4 ns/row  B=523 ps/row/block  (2.04 ps/weight at the block cost alone)
+       A=0.4 ns/row  B=289 ps/row/block  (1.13 ps/weight at the block cost alone)
+       A=-0.0 ns/row  B=686 ps/row/block  (2.68 ps/weight at the block cost alone)
+       A=0.1 ns/row  B=70 ps/row/block  (2.19 ps/weight at the block cost alone)
+### q51 ALLPAKA_Q5_NR0=1
+       A=2.9 ns/row  B=304 ps/row/block  (1.19 ps/weight at the block cost alone)
+       A=0.4 ns/row  B=536 ps/row/block  (2.09 ps/weight at the block cost alone)
+       A=0.5 ns/row  B=301 ps/row/block  (1.18 ps/weight at the block cost alone)
+       A=0.7 ns/row  B=682 ps/row/block  (2.67 ps/weight at the block cost alone)
+       A=0.2 ns/row  B=71 ps/row/block  (2.22 ps/weight at the block cost alone)
+### q54 ALLPAKA_Q5_NR0=4
+       A=2.9 ns/row  B=326 ps/row/block  (1.27 ps/weight at the block cost alone)
+       A=0.5 ns/row  B=540 ps/row/block  (2.11 ps/weight at the block cost alone)
+       A=0.5 ns/row  B=301 ps/row/block  (1.18 ps/weight at the block cost alone)
+       A=0.6 ns/row  B=557 ps/row/block  (2.18 ps/weight at the block cost alone)
+       A=0.2 ns/row  B=71 ps/row/block  (2.23 ps/weight at the block cost alone)
+### q52 ALLPAKA_Q5_NR0=2
+       A=3.0 ns/row  B=311 ps/row/block  (1.21 ps/weight at the block cost alone)
+       A=0.5 ns/row  B=533 ps/row/block  (2.08 ps/weight at the block cost alone)
+       A=0.5 ns/row  B=304 ps/row/block  (1.19 ps/weight at the block cost alone)
+       A=-0.1 ns/row  B=766 ps/row/block  (2.99 ps/weight at the block cost alone)
+       A=0.2 ns/row  B=72 ps/row/block  (2.24 ps/weight at the block cost alone)
+### q54b ALLPAKA_Q5_NR0=4
+       A=2.7 ns/row  B=319 ps/row/block  (1.24 ps/weight at the block cost alone)
+       A=0.5 ns/row  B=525 ps/row/block  (2.05 ps/weight at the block cost alone)
+       A=0.4 ns/row  B=303 ps/row/block  (1.18 ps/weight at the block cost alone)
+       A=0.6 ns/row  B=531 ps/row/block  (2.07 ps/weight at the block cost alone)
+       A=0.2 ns/row  B=72 ps/row/block  (2.24 ps/weight at the block cost alone)
+### defb defaults=
+       A=3.1 ns/row  B=338 ps/row/block  (1.32 ps/weight at the block cost alone)
+       A=0.4 ns/row  B=586 ps/row/block  (2.29 ps/weight at the block cost alone)
+       A=0.5 ns/row  B=333 ps/row/block  (1.30 ps/weight at the block cost alone)
+       A=-0.2 ns/row  B=853 ps/row/block  (3.33 ps/weight at the block cost alone)
+       A=0.2 ns/row  B=73 ps/row/block  (2.27 ps/weight at the block cost alone)

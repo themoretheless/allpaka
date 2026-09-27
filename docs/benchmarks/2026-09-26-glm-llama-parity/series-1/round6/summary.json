@@ -1,0 +1,35 @@
+{
+  "allpaka_decode": {
+    "max": 44.31200337478002,
+    "median": 44.155539697091804,
+    "unit": "tok/s"
+  },
+  "allpaka_prefill": {
+    "max": 291.2441982487122,
+    "median": 282.57062630714086,
+    "unit": "tok/s"
+  },
+  "comparison_validated": true,
+  "cooldown_ms": 1500,
+  "limitations": [
+    "llama-bench generates its own token stream; MoE routing is not identical",
+    "KV precision must be verified against the allpaka capability report",
+    "Machine thermal state dominates absolute tok/s; prefer Δ% / decision"
+  ],
+  "llama_decode": {
+    "max": 43.9923,
+    "median": 43.87735,
+    "unit": "tok/s"
+  },
+  "llama_prefill": {
+    "max": 413.438,
+    "median": 413.39,
+    "unit": "tok/s"
+  },
+  "model": "/Users/themoretheless/Documents/Sources/allpaka/models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf",
+  "model_sha256": "meta:50000746752:1787675380:61756573",
+  "pp": 480,
+  "schema": "airbug-llama-v1",
+  "tg": 32,
+  "warmup": 0
+}

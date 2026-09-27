@@ -1,0 +1,87 @@
+# q3_k ALU-removal probe: the deficit is not the unpack chain
+
+> The arithmetic conclusion below stands and is what the port was judged on
+> (23% ceiling). The mechanism named in "Read" item 4 - that the residual is the
+> ushort-vs-uint load width a 110-byte block forces - was tested the same day by
+> [q3-load-width-control.txt](q3-load-width-control.txt) and is wrong: halving
+> the weight loads moves the probe 1.401 -> 1.311, i.e. <= ~6% and unresolved.
+
+Instrument: `gpu_ffnbench::q5_shape_ratio_against_q4` at the shape Qwen3-235B's
+`q3_k` expert downs actually dispatch - `[4096,1536]`, nb=6, `slots`=8,
+`sets`=12 (396 MB, streaming), feed=32. All formats in ONE process, interleaved,
+`q4_k` as the in-run meter. Two arms per rep; the only difference between them is
+`ALLPAKA_Q3_PROBE=nomath`, which swaps `matvec_q3_k_mv` for `matvec_q3_k_nm` -
+the incumbent's geometry, its addresses, its activation loads and its 16 weight
+words per block-row, with the dequant arithmetic collapsed to one add per load.
+That kernel does not compute a dot product, so it is a ceiling, not a candidate.
+
+`q5_k` and `q6_k` are in every run and are untouched by the knob: they are the
+control that separates a real q3_k effect from process-to-process drift.
+`q6_k` is also the alignment control - its 210-byte block is only 2-aligned like
+q3_k's 110, against q4_k's 144 and q5_k's 176, both 16-aligned.
+
+    rep1 off  q4 832.8 1.000 | q5 1488.6 1.788 | q3 1506.7 1.809 | q6 1224.4 1.470
+    rep1 on   q4 780.0 1.000 | q5 1401.3 1.797 | q3 1111.2 1.425 | q6 1082.0 1.387
+    rep2 off  q4 858.5 1.000 | q5 1556.3 1.813 | q3 1553.4 1.809 | q6 1238.1 1.442
+    rep2 on   q4 820.9 1.000 | q5 1448.1 1.764 | q3 1115.7 1.359 | q6 1131.6 1.378
+
+ps/row/block, then the ratio to the same run's `q4_k`.
+
+## Read
+
+1. **Deleting the arithmetic moves `q3_k` 1.809 -> 1.39, and nothing else.**
+   The controls repeat to +-1.5% across all four runs (q5 1.76-1.81, q6
+   1.38-1.47), so the -23% on the probed arm is the arithmetic and the
+   incumbent's 1.809 matches the 1.75-1.82 published from the quiet curve-fit
+   work. Roughly three quarters of `q3_k`'s per-block cost is still there with
+   the unpack chain gone.
+2. **The residual is not bytes.** Per byte of block: `q4_k` 5.8 ps/B, `q6_k`
+   5.8, `q5_k` 8.5, `q3_k` 13.7 - and 10.1 with no arithmetic at all. `q6_k`
+   reaches `q4_k`'s byte rate while carrying 46% more bytes per block, so the
+   byte pipe is not what `q3_k` falls out of.
+3. **Alignment is not it either.** The 2-aligned `q6_k` is the cheapest format
+   per byte after `q4_k`; the 16-aligned `q5_k` is 1.5x worse.
+4. What is left in the probe is the load *instruction stream*: 16 ushort weight
+   reads per block-row against `q4_k`'s ~4 uint reads of the same span, because
+   a 110-byte block leaves every second block 2-aligned and MSL forbids a
+   4-byte vector load from a 2-aligned address. 2.5x the load instructions,
+   ~1.7x the residual cost.
+
+**Consequence.** The port this section was written to justify - `q4_k`'s
+per-block extraction structure inside `matvec_q3_k_mv` - is capped at the 23%
+the probe recovered, and a real kernel has to keep the arithmetic it deletes.
+Not pursued; see [README.md Correction #5](README.md) for the reversal of the
+earlier "the fix is the inner loop" claim.
+
+## Caveats on this run
+
+Load average 8-16 throughout (Spotlight at 96%, two chat runtimes at ~99% each,
+`xtask` at 99%), and `q4_k`'s absolute reading is 780-859 ps/row/block against
+the ~282 the same shape produced on a quiet machine - a 3x contention factor on
+the absolute. The ratios are what this result rests on, and they are supported
+by (a) two untouched controls repeating across the arms and (b) the incumbent's
+ratio agreeing with the quiet-machine value. Do not quote the absolute numbers,
+and re-run both arms at load < 5 before any follow-on decision.
+
+## How the first version of this probe was wrong
+
+Worth keeping, because it is the same trap twice in one day. The first probe
+consumed only 2 of its 32 activation registers, so the compiler deleted the
+other six `float4` loads: the "no arithmetic" arm measured an eighth of the
+activation traffic and came out at 0.73x `q4_k` - better than the memory-bound
+format, which should have been the tell. After forcing every load to reach the
+output the same arm reads 1.39. Load liveness, not source text, is what a probe
+kernel has to preserve.
+
+## Repro
+
+```sh
+cd "$(git rev-parse --show-toplevel)"
+for arm in off on; do
+  env ALLPAKA_Q3_PROBE=$([ $arm = on ] && echo nomath) \
+      ALLPAKA_Q5AB_N_OUT=4096 ALLPAKA_Q5AB_N_IN=1536 \
+      ALLPAKA_Q5AB_SETS=12 ALLPAKA_Q5AB_PER_WAIT=32 \
+      cargo test -p allpaka-backend --test gpu_ffnbench -- \
+      --ignored --nocapture --test-threads=1 q5_shape_ratio
+done
+```

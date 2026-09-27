@@ -1,0 +1,9 @@
+05:34:39Z  load  4.26  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:35:39Z  load  3.76  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:36:39Z  load  8.25  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:37:40Z  load  3.96  clean 0/5  busy: 55927 cargo 55929 rustc 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:38:40Z  load  4.59  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:39:40Z  load  6.09  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:40:40Z  load  3.30  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:41:40Z  load  3.69  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:42:40Z  load  2.96  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio

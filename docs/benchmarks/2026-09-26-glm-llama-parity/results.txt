@@ -1,0 +1,235 @@
+# GLM-4.5-Air decode parity, allpaka vs llama.cpp, pp480/tg32 — measured 2026-09-26
+
+Closes the instruction at the end of gap 1 of
+[../allpaka-vs-llama-metal-status.md](../allpaka-vs-llama-metal-status.md): *"Re-run
+GLM against a same-command llama arm on the current build before quoting either
+number"* — where the numbers were the 2026-09-12 cool matrix row (`0.86×`) and the
+arithmetic that tried to retire it (`0.86 × 1.16 ≈ parity`).
+
+## Verdict
+
+**The 0.86× row is dead. GLM-4.5-Air decode on the current build is at parity with
+llama.cpp, point estimate slightly above 1, and this window cannot certify a win.**
+
+| statistic | value | n |
+| --- | ---: | --- |
+| median per-pair decode ratio (admitted) | **1.0578×** | 7 |
+| median per-pair decode ratio (all counted pairs, no gates) | **1.0446×** | 12 |
+| mean of admitted | +3.88% (SEM 3.51) | 7 |
+| admitted ratio interval | 0.846 .. 1.150 | — |
+| AB / BA halves | 1.0539 / 1.1052 (gap 5.13 pp, **same sign**) | 5 / 2 |
+| pairs above parity | 6 of 7 | — |
+| cross-pair spread | 30.44 pp | — |
+
+**Certification: the level is NOT certifiable, so this artifact publishes the
+interval, not the point.** The pre-registered test was cross-pair spread and the
+AB/BA gap against the repo's own published identical-code null floor of 8.28 pp
+([2026-09-25-dcomb-ab](../2026-09-25-dcomb-ab/), pessimistic bookend 17.56 pp from
+[2026-09-25-normflag-policy](../2026-09-25-normflag-policy/)). The AB/BA gap passes
+(5.13 pp < 8.28 pp, same sign); the cross-pair spread fails by 3.7× (30.44 pp).
+Under the pre-registered verdict bands the admitted median 1.0578 is mechanically a
+**win** (>1.05), but the unfiltered median 1.0446 is inside the 0.95-1.05 **parity**
+band, and SEM 3.51 pp on n=7 is wider than the 5 pp distance between them. The
+claim allowed by this data is therefore *"parity, point estimate above 1"*, and a
+`>1.05` row would be reading the gate ledger rather than the measurement — see the
+bias disclosure below.
+
+## What this run does and does not replace
+
+- **Replaces** the decode cell of the GLM row in
+  [../allpaka-vs-llama-metal-status.md](../allpaka-vs-llama-metal-status.md) and
+  gap 1's arithmetic. It confirms the direction the arithmetic guessed (0.86 → ~1.0)
+  **by measurement**. The mechanism underneath it has an independent witness in
+  another artifact — the `q5_0_mv` merge's own clean band, **+16.05% decode**, SEM
+  1.59, 15/15 pairs positive
+  ([../2026-09-24-q5-0-mv-e2e/paired-32.txt](../2026-09-24-q5-0-mv-e2e/paired-32.txt))
+  — and *not* in this run's absolutes: that artifact's post-port anchor, 45.95 tok/s,
+  was printed at pp480/**tg64** while every number here is tg32, so reading 46.04 and
+  45.95 as the same quantity is a cross-geometry comparison. Its paired *delta* is
+  what transfers; its absolute is not (its own file says as much). See "The incumbent
+  moved too" for the arithmetic done the honest way.
+- **Does not replace** the GLM *prefill* cell (`~1.4×`). See "Prefill" below.
+- **Does not** speak for any other model, other prompt/generation lengths, other
+  builds, or e2E chat behaviour.
+
+## Arms and provenance
+
+- Design, gates and statistic are pre-registered in
+  [preregistration.txt](preregistration.txt), written 2026-09-26T03:52Z — before the
+  calibration, before the priming round, before any counted pair. One amendment
+  (A7, memory covariates) was added at 04:02Z, also before any counted pair.
+- Driver [drive-glm-parity.py](drive-glm-parity.py) (binary pinned into the run
+  dir), analyzer [analyze-glm-parity.py](analyze-glm-parity.py), raw data
+  [series-1/](series-1/) (`pairs.jsonl`, `calibration.json`, `provenance.json`,
+  per-round engine JSON under `round*/raw/`). All numbers here are read from the
+  engine JSON at full float, never from the driver's printed lines.
+- allpaka binary sha256 `7b8ec67aa72c42662ba4608f…` (mtime 03:39Z, pinned into the
+  run dir at 04:03Z, when `git rev-parse HEAD` read `dcdc131d` with **96 dirty
+  files**). **Correction appended after the campaign finished, from the report
+  JSON:** each process's `metadata.git_commit` says `3ef9d9c` ("merge: fold cursor
+  decode-opts into the refactored gpu/ layout"), an ancestor of `dcdc131d`, so the
+  source revision this binary was built from is *not* established by either
+  reading — `provenance.json.head` is the tree state when the file was copied, not
+  when it was compiled. What is exact is the sha256, and that is the arm identity
+  this artifact claims. HEAD is not the incumbent either way; re-run before quoting
+  it against a different build.
+- llama-bench `b29c606e2 (10964)`, read from `build_commit/build_number` in all 16
+  decode/prefill rows (`provenance.json.llama_bench` captured the binary's *help
+  text* — llama-bench has no `--version` — so treat that field as broken and the
+  per-row JSON as authoritative).
+- Model `models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf` (67.96 GiB split,
+  110.47 B params, 46 layers, `glm4moe`). `ALLPAKA_BENCH_SKIP_MTP=1`,
+  `ALLPAKA_PROFILE=max-performance`.
+- Each pair: 1 allpaka process (`pp480` then `tg32` in one run) + 2 llama-bench
+  processes (`-p 480 -n 0 -d 0` / `-p 0 -n 32 -d 480`), AB/BA order alternating per
+  round, 1500 ms cooldown between arms. The fast-path gate
+  (`attempts == successes == 32`, `declines == 0`) held in all 12 counted pairs and
+  all 2 priming pairs — nothing in this run fell off the decode fast path.
+
+## Thermometer, calibration and the gate ledger
+
+Calibration (4 standalone allpaka processes before the campaign): prefill
+373.9 / 373.7 / 374.2 / 374.2 → median **374.15**, so A3's floor is **318.03**
+(0.85×). That floor is within 0.6% of the 2026-09-24 document's fixed 320, i.e. the
+re-centring changed the record, not the threshold. Standalone allpaka decode in
+those four was 46.33-46.71, inside the post-port band — which is a loose floor here,
+since the anchor it was drawn from (45.95) is a tg64 print.
+
+12 counted pairs, 7 admitted, 5 removed — remove-only, counts published, as
+pre-registered:
+
+| removed | gate | reading |
+| --- | --- | --- |
+| round2 pair2 (BA) | A4 | llama decode 34.26 outside its own 35-60 band (all other 13 llama decode reads: 37.90-44.11). Note on that gate's other side: A4's *allpaka* floor was anchored on 45.95, a tg64 print, so it is a loose floor (>=30) for a tg32 arm rather than a band; it never fired, so no pair was removed on the cross-geometry side. |
+| round4 pair2 (BA) | A3 | allpaka prefill 248.9 < 318.0 |
+| round5 pair2 (BA) | A3 | allpaka prefill 281.6 < 318.0 |
+| round6 pair1 (AB) | A3 | allpaka prefill 273.9 < 318.0 |
+| round6 pair2 (BA) | A3 | allpaka prefill 291.2 < 318.0 |
+
+A1 (completeness), A2 (GPU-ran), A5 (in-window load ≥8) and A6 (co-tenant) removed
+nothing: sampled load peaked at **4.54** in-pair, so A5 and criterion 5's hot count
+were never in play, and **0 of the 7 admitted pairs** had a sampled load above 5.
+A2 held everywhere: `outside the GPU` read **0%** in all 14 pairs, with GPU
+executing ≈ the whole waited window (675/681 ms/token-set in the fastest pair,
+979/985 ms in the slowest — a 45% window change with the meter at 0% both times, so
+the slow window is real machine state, not a dead arm). A7 (memory) is reported as
+a covariate only: swap sat at **9.0 GiB through every sample of the run** and
+carried no information about which pairs were disturbed.
+
+### Disclosure: A3 is on allpaka's channel, so its firing biases the ratio up
+
+This is the one thing in this artifact that could be used to over-claim, so it is
+stated plainly. The four A3-removed pairs read a median ratio of **1.0003**; the
+admitted set reads **1.0578**. The disturbance A3 detects is **allpaka-side** — in
+the removed pairs allpaka's prefill median is 277.7 against 357.7 admitted, while
+*llama's* prefill in those same pairs is **higher** (413.4 vs 385.3) — so removing
+pairs because one arm looks disturbed mechanically lifts a two-arm ratio.
+
+The saving arithmetic, and the reason the honest verdict is still parity-or-better
+rather than "uninterpretable": the whole gate ledger moves the headline by
+**1.32 pp** (1.0446 unfiltered → 1.0578 admitted), which is 6× *below* the 8.28 pp
+identical-code null floor. The gates are not doing the work — but neither is the
+margin, because 1.32 pp is also the distance from the win band's edge. Also note the
+one-sided band weakness pre-registered as a limitation: A3's floor is a floor with
+no ceiling, so a *faster*-than-calibrated window would pass unremarked, and round3
+pair1 (ratio 0.8458, ap_pp 322.8) squeaks past A3 by 1.5% while being the pair that
+sets the interval's low end.
+
+### Stop rule
+
+The pre-registered abandon rule (<3 of the first 6 admitted) did not fire: 5 of the
+first 6 pairs were admitted. The run completed as planned.
+
+## Per-pair data (full float, from `pairs.jsonl`)
+
+```
+  round   ord   ap_tg   ll_tg   ratio   ap_pp   ll_pp loadmax gpu_out  exec/wait swapGiB
+  round1  AB    46.34   43.81  1.0578   352.1   385.3    3.16      0%    675/681     9.0
+  round1  BA    46.04   43.43  1.0601   357.7   388.6    4.54      0%    679/686     9.0
+  round2  AB    46.15   43.79  1.0539   365.2   407.0    4.54      0%    677/684     9.0
+  round2  BA    44.88   34.26  1.3100   373.6   413.9    3.71      0%    697/703     9.0  vetoed A4
+  round3  AB    32.16   38.03  0.8458   322.8   298.6    3.41      0%    979/985     9.0
+  round3  BA    43.59   37.90  1.1502   322.5   328.4    3.06      0%    719/725     9.0
+  round4  AB    43.37   41.90  1.0352   364.7   328.5    2.76      0%    722/728     9.0
+  round4  BA    39.51   43.60  0.9061   248.9   367.8    2.21      0%    795/801     9.0  vetoed A3
+  round5  AB    46.69   43.69  1.0687   374.3   413.5    2.18      0%    669/675     9.0
+  round5  BA    43.22   43.43  0.9951   281.6   414.1    2.47      0%    725/731     9.0  vetoed A3
+  round6  AB    44.00   43.76  1.0054   273.9   413.4    2.28      0%    712/718     9.0  vetoed A3
+  round6  BA    44.31   43.99  1.0073   291.2   413.3    2.63      0%    707/713     9.0  vetoed A3
+  priming (discarded by design): AB 1.0439  BA 1.0659
+```
+
+## The incumbent moved too (invariant 5)
+
+llama's GLM tg32 in this window: **43.43** median admitted, 37.90-44.11 excluding
+the A4 outlier. Its own 2026-09-12 cool anchor is **45.46 ± 0.21** at build 10809 —
+so llama's arm is **−4.5%** versus that anchor at build 10964 in a warmer window.
+The old 0.86× was allpaka's pre-`q5_0_mv` **39.0** against llama's **45.46**, both
+printed at pp480/tg32 in the 2026-09-12 cool matrix — so the two arms of that cell
+did share a geometry, and the objection to it is that neither arm has been measured
+at this build, not that its tg was mismatched.
+
+What is independent of this run is the *mechanism's own paired measurement*: the
+`q5_0_mv` clean band, **+16.05% decode** (SEM 1.59, 15/15 pairs positive, trimmed
++15.95%). Applying it gives 0.86 × 1.1605 ≈ **1.00** — parity reachable from
+allpaka's arm alone plus llama's *unchanged* anchor, with no help from llama's
+−4.5% drift. Two limits on that product, both stated rather than smoothed: the
++16.05% was measured at pp480/**tg64**, so it carries the merge's delta across
+generation length (paired-32 itself warns that its absolutes are not comparable to
+tg32 reads), and the 0.86 it starts from was a cool-window matrix row, never a pair
+at this build. So 1.00 is a consistency check on the direction, and this run's
+1.045× is the measurement.
+
+The form to avoid — which is what an earlier draft of this section had — is the
+circular one: multiplying *this* run's 46.04 and 43.43 back into the old ratio
+reproduces 1.0592 exactly, and proving nothing, because 46.04/43.43 *is* this run.
+
+## Prefill: this run gives no support to the `~1.4×` cell
+
+In this design allpaka's prefill is the A3 thermometer, not a claim, and it was
+deliberately paired against a channel the repo already documents as near-unusable
+(llama GLM pp480 `255.21 ± 107.51`, ±42%, from
+[../2026-09-12-matrix/driver.txt](../2026-09-12-matrix/driver.txt)). Here llama's
+pp480 spread 298.6 → 414.1 across 12 pairs (38.7%), reproducing that instrument
+verdict. What the run *can* say: on the current build, in this window, allpaka
+pp480 median **357.7** against llama **385.3** reads **0.93×** on the admitted
+pairs and 0.85× over all 12 — the opposite side of 1.0 from the `~1.4×` cool-matrix
+cell, and no pair in this run reaches it. That is a reason to **re-measure the GLM
+prefill cell properly (cool, paired, prefill as the measured quantity, 1.4× as the
+incumbent to beat)**, not a claim that 1.4× is wrong: this window is not cool and
+this cell was not this run's question. The row stays `~1.4× — 2026-09-12 cool
+matrix, unconfirmed at pp480 by the 2026-09-26 parity run` until that re-measure.
+
+## What is not claimed
+
+- No claim about any model other than GLM-4.5-Air Q4_K_M, any shape other than
+  pp480/tg32, any build other than the pinned `7b8ec67a…` binary, or MTP/e2E/chat
+  behaviour (`ALLPAKA_BENCH_SKIP_MTP=1`).
+- No claim resting on the 5 removed pairs, and no claim of a **win** — the
+  certification test failed on cross-pair spread, so the number is an interval
+  (0.846-1.150 admitted; 1.0446-1.0578 depending on whether the gate ledger is
+  applied) around a point estimate that straddles the parity/win boundary.
+- Not a same-process-identical-token comparison: the engines' token streams are not
+  identical, and the third difference named in the pre-registration stands — this
+  run pairs llama's `-p 0 -n 32 -d 480` against allpaka's pp480-then-32, which is
+  the closest same-command reading available but not byte-identical state.
+- The n=2 BA half is thin; it agrees in sign and its median (1.1052) is the higher
+  of the two, so the order split does not support a "first arm is faster" artifact
+  here — but with 5 AB and 2 BA admitted, order balance is this run's weakest
+  design property and any re-run should force equal halves.
+
+## Definition of done / next
+
+Gap 1's stated requirement — a same-command llama arm on the current build — is met,
+so the gap closes as **parity (interval, not certifiable)** rather than as a win.
+What remains open on GLM, in priority order, is what the pre-registration explicitly
+could not resolve:
+
+1. **A cool window, or a paired-difference design** that survives 30 pp of spread —
+   the shared-expert barrier and any spinning-that-reads-as-busy remain the only
+   unquantified per-token costs, and per the 2026-09-24 dispatch census the
+   counters structurally cannot see them.
+2. **The GLM prefill cell** as its own paired question (above).
+3. Equal-count AB/BA with the first ~40 min of a session discarded — this run's
+   rounds 4-6 were progressively more disturbed, so a second series is worth
+   starting early in a machine's day rather than continuing late in this one.

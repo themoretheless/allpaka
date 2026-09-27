@@ -1,0 +1,41 @@
+airbug: traces and logs -> http://localhost:4318
+prewarmed 17.3 GiB of weights in 2.7s
+metal: Apple M4 Max attached, 17.3 GiB of weights shared with the GPU
+engine bench: qwen3-30b-a3b-Q4_K_M (48 layers, qwen3moe, MoE)
+  capabilities:
+    model: arch=qwen3moe layers=48 moe=true
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: max-performance
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=1 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=241 bytes=0.05 GiB matmul-kernel=yes
+      Q4K: tensors=289 bytes=13.28 GiB matmul-kernel=yes
+      Q6K: tensors=49 bytes=3.95 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=319
+  prefill   480 tok in   0.31 s    1530.0 tok/s
+  gpu during prefill: 2 waits, 481 dispatches, encode 1 ms, wait 312 ms of 314 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 311 ms, scheduling 1 ms, round trips + idle 0 ms (of 312 ms waited)
+  prefill phases, ms/token:
+    embed                  0.0  ( 0.2%)
+    attention              0.0  ( 0.2%)
+    ffn (experts)          0.0  ( 0.1%)
+    router                 0.0  ( 0.0%)
+    unaccounted            0.7  (99.5%)
+  decode     64 tok in   0.33 s     195.8 tok/s
+  gpu path decode: attempts=64 successes=64 declines=0
+  gpu during decode: 64 waits, 43136 dispatches, encode 12 ms, wait 312 ms of 327 ms total (1% outside the GPU)
+  gpu clock during decode: executing 303 ms, scheduling 4 ms, round trips + idle 5 ms (of 312 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted            5.1  (100.0%)
+  context at end: 65 tokens (attention cost grows with this)
+  benchmark report: docs/benchmarks/2026-09-24-30b-skip-control/r2-qkv.json
+airbug bench run: target/allpaka-bench/airbug-1790277646576945000-34037

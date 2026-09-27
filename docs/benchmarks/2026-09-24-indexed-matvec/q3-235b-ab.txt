@@ -1,0 +1,9 @@
+# qwen3-235b-a22b-instruct-2507-Q2_K_XL, PP480/TG32, max-performance, M4 Max
+# A = ALLPAKA_Q3_MV=1 (llama-structure port, the shipping default)
+# B = ALLPAKA_Q3_MV=0 (word-load kernel, the one the flat microbench preferred)
+# Alternating order. Prewarm of 82.7 GiB takes ~127 s per run, so the machine
+# state drifts across the four runs; prefill within one arm spread 84-98 tok/s.
+[A]   prefill argmax=198   prefill   480 tok in   4.89 s      98.1 tok/s   decode     32 tok in   3.24 s       9.9 tok/s   gpu path decode: attempts=32 successes=32 declines=0 
+[B]   prefill argmax=198   prefill   480 tok in   4.98 s      96.3 tok/s   decode     32 tok in   3.44 s       9.3 tok/s   gpu path decode: attempts=32 successes=32 declines=0 
+[A]   prefill argmax=198   prefill   480 tok in   5.06 s      94.8 tok/s   decode     32 tok in   3.04 s      10.5 tok/s   gpu path decode: attempts=32 successes=32 declines=0 
+[B]   prefill argmax=198   prefill   480 tok in   5.70 s      84.2 tok/s   decode     32 tok in   3.05 s      10.5 tok/s   gpu path decode: attempts=32 successes=32 declines=0 

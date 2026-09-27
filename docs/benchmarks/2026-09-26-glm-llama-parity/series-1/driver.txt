@@ -1,0 +1,80 @@
+04:03:00Z  # run /Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-26-glm-llama-parity/series-1  binary 7b8ec67aa72c4266  HEAD dcdc131d  dirty 96
+04:03:00Z    llama usage: llama-bench [options]
+
+options:
+  -h, --help
+  --numa <distribute|isolate|numactl>         numa mode (default: disabled)
+  -r, --repetitions <n>                       number of times to repeat each test (default: 5)
+  --prio <-1|0|1|2|3>                         process/thread priority (default: 0)
+  --delay <0...N> (seconds)                   delay between each test (default: 0)
+  -o, --output <csv|json|jsonl|md|sql>        output format printed to stdout (default: md)
+  -oe, --output-err <csv|json|jsonl|md|sql>   output format printed to stderr (default: none)
+  --list-devices                              list available devices and exit
+  -v, --verbose                               verbose output
+  --progress                                  print test progress indicators
+  --no-warmup                                 skip warmup runs before benchmarking
+  -fitt, --fit-target <MiB>                   fit model to device memory with this margin per device in MiB (default: off)
+  -fitc, --fit-ctx <n>                        minimum ctx size for --fit-target (default: 4096)
+
+test parameters:
+  -m, --model <filename>                            (default: models/7B/ggml-model-q4_0.gguf)
+  -hf, -hfr, --hf-repo <user>/<model>[:quant]       Hugging Face model repository; quant is optional, case-insensitive
+                                                    default to Q4_K_M, or falls back to the first file in the repo if Q4_K_M doesn't exist.
+                                                    example: ggml-org/GLM-4.7-Flash-GGUF:Q4_K_M
+                                                    (default: unused)
+  -hff, --hf-file <file>                            Hugging Face model file. If specified, it will override the quant in --hf-repo
+                                                    (default: unused)
+  -hft, --hf-token <token>                          Hugging Face access token
+                                                    (default: value from HF_TOKEN environment variable)
+  --offline                                         Offline mode: forces use of cache, prevents network access
+                                                    (default: disabled)
+  -p, --n-prompt <n>                                (default: 512)
+  -n, --n-gen <n>                                   (default: 128)
+  -pg <pp,tg>                                       (default: )
+  -d, --n-depth <n>                                 (default: 0)
+  -b, --batch-size <n>                              (default: 2048)
+  -ub, --ubatch-size <n>                            (default: 512)
+  -ctk, --cache-type-k <t>                          (default: f16)
+  -ctv, --cache-type-v <t>                          (default: f16)
+  -t, --threads <n>                                 (default: 12)
+  -C, --cpu-mask <hex,hex>                          (default: 0x0)
+  --cpu-strict <0|1>                                (default: 0)
+  --poll <0...100>                                  (default: 50)
+  -ngl, --n-gpu-layers <n>                          (default: -1)
+  -ncmoe, --n-cpu-moe <n>                           (default: 0)
+  -sm, --split-mode <none|layer|row|tensor>         (default: layer)
+  -mg, --main-gpu <i>                               (default: 0)
+  -nkvo, --no-kv-offload <0|1>                      (default: 0)
+  -fa, --flash-attn <on|off|auto>                   (default: auto)
+  -dev, --device <dev0/dev1/...>                    (default: auto)
+  -lm, --load-mode <auto|none|mmap|mlock|mmap+mlock|dio> (default: auto)
+  -lzm, --lazy-mode <on|auto|off>                   (default: auto)
+  -embd, --embeddings <0|1>                         (default: 0)
+  -ts, --tensor-split <ts0/ts1/..>                  (default: 0)
+  -ot --override-tensor <tensor name pattern>=<buffer type>;...
+                                                    (default: disabled)
+  -nopo, --no-op-offload <0|1>                      (default: 0)
+  --no-host <0|1>                                   (default: 0)
+
+Multiple values can be given for each parameter by separating them with ','
+or by specifying the parameter multiple times. Ranges can be given as
+'first-last' or 'first-last+step' or 'first-last*mult'.  model GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf  pp480/tg32
+04:03:19Z    calibration 1 at load 2.74: prefill 373.94  decode 46.47
+04:03:35Z    calibration 2 at load 2.24: prefill 373.66  decode 46.71
+04:03:51Z    calibration 3 at load 2.39: prefill 374.15  decode 46.33
+04:04:06Z    calibration 4 at load 2.43: prefill 374.24  decode 46.39
+04:04:06Z    thermometer: median prefill 374.15218955377424 -> A3 floor 318.0293611207081
+04:05:06Z    priming round (discarded) at load 2.58: AB ap 46.04/ll 44.11 = 1.044  BA ap 46.46/ll 43.58 = 1.066  rc=0
+04:06:06Z    round 1 pair 1 AB  ap_tg  46.34  ll_tg  43.81  ratio 1.0578  ap_pp  352.1  ll_pp  385.3  rc=0
+04:06:06Z    round 1 pair 2 BA  ap_tg  46.04  ll_tg  43.43  ratio 1.0601  ap_pp  357.7  ll_pp  388.6  rc=0
+04:07:06Z    round 2 pair 1 AB  ap_tg  46.15  ll_tg  43.79  ratio 1.0539  ap_pp  365.2  ll_pp  407.0  rc=0
+04:07:06Z    round 2 pair 2 BA  ap_tg  44.88  ll_tg  34.26  ratio 1.3100  ap_pp  373.6  ll_pp  413.9  rc=0
+04:08:08Z    round 3 pair 1 AB  ap_tg  32.16  ll_tg  38.03  ratio 0.8458  ap_pp  322.8  ll_pp  298.6  rc=0
+04:08:08Z    round 3 pair 2 BA  ap_tg  43.59  ll_tg  37.90  ratio 1.1502  ap_pp  322.5  ll_pp  328.4  rc=0
+04:09:11Z    round 4 pair 1 AB  ap_tg  43.37  ll_tg  41.90  ratio 1.0352  ap_pp  364.7  ll_pp  328.5  rc=0
+04:09:11Z    round 4 pair 2 BA  ap_tg  39.51  ll_tg  43.60  ratio 0.9061  ap_pp  248.9  ll_pp  367.8  rc=0
+04:10:12Z    round 5 pair 1 AB  ap_tg  46.69  ll_tg  43.69  ratio 1.0687  ap_pp  374.3  ll_pp  413.5  rc=0
+04:10:12Z    round 5 pair 2 BA  ap_tg  43.22  ll_tg  43.43  ratio 0.9951  ap_pp  281.6  ll_pp  414.1  rc=0
+04:11:15Z    round 6 pair 1 AB  ap_tg  44.00  ll_tg  43.76  ratio 1.0054  ap_pp  273.9  ll_pp  413.4  rc=0
+04:11:15Z    round 6 pair 2 BA  ap_tg  44.31  ll_tg  43.99  ratio 1.0073  ap_pp  291.2  ll_pp  413.3  rc=0
+04:11:15Z    DONE -> /Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-26-glm-llama-parity/series-1

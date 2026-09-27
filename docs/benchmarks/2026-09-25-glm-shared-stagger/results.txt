@@ -1,0 +1,106 @@
+# Result: ALLPAKA_SHARED_STAGGER on GLM-4.5-Air is not a win at the size that would justify it
+
+Captured 2026-09-25T23:10Z from run 3, complete (6 control + 14 real pairs,
+`driver exit=0` at 23:02Z).
+
+    provenance: binary sha256 6a4418fa1f0592977b17f0940d4138d0153bed9e6e5c2d68863fc1ce7f622988
+                (the stagger run's own provenance.json - `git_head` 8a16214, clean
+                HEAD worktree /tmp/allpaka-head; the DCOMB run quoted in
+                ../2026-09-25-dcomb-ab/ reuses the same build),
+                model models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf, PP=480 TG=320,
+                ALLPAKA_PROFILE=max-performance, SKIP_MTP=1,
+                arms plain (unset) / stagged (=1) / null (=0)
+
+## Verdict
+
+* **Real series** - 13 admissible pairs of 14, median `stagged/plain` decode tok/s
+  ratio 0.988710 (**-1.13 %**), SEM 0.64 pp, 95 % interval [-2.39 %, +0.13 %],
+  10/13 pairs below 1 (two-sided sign test p ~ 0.09), min 0.9135, max 1.0072.
+* **Criterion 5's merge branch is excluded.** The +3 % threshold sits 6.5 SEM above
+  the point estimate, and the interval's upper end is +0.13 %. Whatever the 1 %
+  question turns out to be, staggering is not the win its source comment asked for
+  confirmation of, and the default stays OFF - now as a measured negative rather
+  than as an unmeasured guard.
+* **The residual 1 % is not resolved, and this run cannot resolve it.** Criterion 2
+  needs the control series to set the band; with all three pre-registered drop rules
+  applied, run 3's control series admits **0 of 6** pairs (five crossed `LOAD_VETO`,
+  the sixth - pair 3 - is the 7.22x time-to-census distortion described in the
+  22:47Z amendment). So there is no measured noise floor to compare -1.13 % against,
+  and the sign of a ~1 % effect is exactly the kind of claim this machine while a
+  session is live does not support. Definition of the done work for anyone who wants
+  it: repeat the same design on a machine with no co-tenant bursts, at least 8
+  admissible control pairs, and only then read the real median as a number.
+* **Mechanism (criterion 4), and it is exact:** every one of the 14 real pairs
+  reports 264320 dispatches in the `stagged` arm against 256640 in `plain` -
+  **+7680, i.e. +24 per token**, the extra barrier the re-ordering inserts - with
+  `waits` identical (delta 0), `declines` 0 in both arms, 0 % outside the GPU in both
+  arms of all 14 pairs, identical greedy continuations, and the same residency
+  census (`windows=3 set=true`). A schedule change can only win by removing an idle
+  gap; here the gap was already zero on this counter, so the only thing left for the
+  knob to do was add dispatch work - which is what the wall number shows.
+* **Instrument correction found in these same rows** (22:47Z amendment): the drift
+  veto added at 21:15Z could never fire, because its rate pool was initialized and
+  never appended to. Applying the rule as pre-registered drops one counted real pair
+  (pair 3: slower arm 16.47 tok/s against a running median of 38.97, load 2.9->2.06,
+  census 10.34 s - invisible to the load and cold vetoes; its GPU wait_ms is 19324
+  against its partner's 12047). With the driver's flags only, the real series reads
+  14 pairs, median 0.985098 (-1.49 %), SEM 6.04 pp, min ratio 0.6250.
+
+## Reproduce
+
+```sh
+cd /tmp/allpaka-head          # clean HEAD worktree; the run directory lives here
+python3 docs/benchmarks/2026-09-25-glm-shared-stagger/analyze.py \
+  .airbug-bench/glm-stagger-run3
+# the whole series, ~100 min, needs a quiet machine:
+env -u ALLPAKA_SHARED_STAGGER python3 \
+  docs/benchmarks/2026-09-25-glm-shared-stagger/drive.py --real 14 --control 6 \
+  --out .airbug-bench/glm-stagger-run4
+```
+
+Identical-code spread of the same instrument across every capture it has produced:
+`python3 null-spread-witness.py` (output in null-spread-witness.txt). The 22:47Z
+mid-run snapshot, taken while the real series was still incomplete:
+run3-analysis-20260925-2247z.txt.
+
+## Analysis output, complete run
+
+# analysis of glm-stagger-run3  (band 3%, criterion 5)
+
+## per pair  (cold = census over 2x the series median, LOAD/DRIFT = the
+## vetoes of the 21:15Z amendment; DRIFT is recomputed here)
+
+  real     pair  1 AB  ratio 1.0064  outside-GPU % (0, 0)  encode ms (92.0, 90.0)  wait ms (8023.0, 8076.0)  dispatches (264320, 256640)  census (10.06, 10.6)
+  real     pair  2 BA  ratio 0.9838  outside-GPU % (0, 0)  encode ms (80.0, 74.0)  wait ms (8175.0, 8049.0)  dispatches (264320, 256640)  census (10.36, 10.34)
+  real     pair  3 AB  ratio 0.6250  outside-GPU % (0, 0)  encode ms (81.0, 71.0)  wait ms (19324.0, 12047.0)  dispatches (264320, 256640)  census (10.34, 10.13)  DROPPED: drift
+  real     pair  4 BA  ratio 0.9135  outside-GPU % (0, 0)  encode ms (79.0, 74.0)  wait ms (8805.0, 8040.0)  dispatches (264320, 256640)  census (10.29, 10.22)
+  real     pair  5 AB  ratio 0.9864  outside-GPU % (0, 0)  encode ms (78.0, 75.0)  wait ms (8787.0, 8669.0)  dispatches (264320, 256640)  census (10.31, 10.32)
+  real     pair  6 BA  ratio 1.0006  outside-GPU % (0, 0)  encode ms (78.0, 74.0)  wait ms (8544.0, 8554.0)  dispatches (264320, 256640)  census (10.46, 10.43)
+  real     pair  7 AB  ratio 0.9866  outside-GPU % (0, 0)  encode ms (83.0, 74.0)  wait ms (8405.0, 8297.0)  dispatches (264320, 256640)  census (10.36, 10.32)
+  real     pair  8 BA  ratio 0.9926  outside-GPU % (0, 0)  encode ms (80.0, 85.0)  wait ms (8287.0, 8222.0)  dispatches (264320, 256640)  census (10.29, 10.42)
+  real     pair  9 AB  ratio 0.9864  outside-GPU % (0, 0)  encode ms (81.0, 75.0)  wait ms (8210.0, 8101.0)  dispatches (264320, 256640)  census (10.25, 10.29)
+  real     pair 10 BA  ratio 0.9887  outside-GPU % (0, 0)  encode ms (78.0, 74.0)  wait ms (8164.0, 8074.0)  dispatches (264320, 256640)  census (10.3, 10.27)
+  real     pair 11 AB  ratio 0.9852  outside-GPU % (0, 0)  encode ms (79.0, 75.0)  wait ms (8156.0, 8038.0)  dispatches (264320, 256640)  census (10.36, 10.31)
+  real     pair 12 BA  ratio 0.9925  outside-GPU % (0, 0)  encode ms (81.0, 75.0)  wait ms (8076.0, 8018.0)  dispatches (264320, 256640)  census (10.31, 10.26)
+  real     pair 13 AB  ratio 0.9908  outside-GPU % (0, 0)  encode ms (79.0, 75.0)  wait ms (8114.0, 8041.0)  dispatches (264320, 256640)  census (10.33, 10.28)
+  real     pair 14 BA  ratio 1.0072  outside-GPU % (0, 0)  encode ms (87.0, 74.0)  wait ms (7939.0, 8005.0)  dispatches (264320, 256640)  census (10.64, 10.28)
+  control  pair  1 AB  ratio 1.0249  outside-GPU % (0, 0)  encode ms (81.0, 98.0)  wait ms (8047.0, 8227.0)  dispatches (256640, 256640)  census (40.12, 10.43)  DROPPED: cold,load
+  control  pair  2 BA  ratio 0.9822  outside-GPU % (0, 0)  encode ms (90.0, 78.0)  wait ms (8094.0, 7962.0)  dispatches (256640, 256640)  census (10.43, 10.14)  DROPPED: load
+  control  pair  3 AB  ratio 1.0378  outside-GPU % (0, 0)  encode ms (87.0, 80.0)  wait ms (7926.0, 8235.0)  dispatches (256640, 256640)  census (71.88, 9.96)  DROPPED: cold
+  control  pair  4 BA  ratio 2.5562  outside-GPU % (0, 0)  encode ms (77.0, 316.0)  wait ms (8028.0, 20368.0)  dispatches (256640, 256640)  census (9.72, 10.09)  DROPPED: load,drift
+  control  pair  5 AB  ratio 1.1939  outside-GPU % (0, 1)  encode ms (76.0, 220.0)  wait ms (8118.0, 9535.0)  dispatches (256640, 256640)  census (9.89, 9.89)  DROPPED: load,drift
+  control  pair  6 BA  ratio 1.0537  outside-GPU % (0, 1)  encode ms (180.0, 216.0)  wait ms (9078.0, 9522.0)  dispatches (256640, 256640)  census (9.96, 62.22)  DROPPED: cold,load,drift
+
+  drift rule fired on 4 pair(s) whose row carries no drift_vetoed flag:
+    pair 3 AB: slowest arm 16.47 under 85% of running median 38.97
+    pair 4 BA: slowest arm 15.40 under 85% of running median 39.13
+    pair 5 AB: slowest arm 32.62 under 85% of running median 39.13
+    pair 6 BA: slowest arm 32.65 under 85% of running median 38.97
+  control (null vs plain, identical code): no admissible pairs (6 captured, 6 dropped)
+  real    (stagged vs plain, decode tok/s): 13 pairs (dropped 1), median 0.988710 (-1.13%), SEM 0.64 pp, min 0.9135 max 1.0072, 10/13 below 1
+
+## criterion 4 secondary (GPU-idle share, percentage points)
+  real: median +0.0 pp, range +0.0...+0.0
+
+  criterion 2: the control series admits no pair, so no band exists to compare against and this run decides nothing.
+# exit=1

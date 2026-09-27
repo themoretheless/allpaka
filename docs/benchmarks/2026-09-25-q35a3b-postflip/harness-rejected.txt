@@ -1,0 +1,106 @@
+# 2x2 fold/layout harness - two attempts, both rejected by their own gate
+
+Task #25's pre-flight measurement, run 2026-09-25 02:25 local (22:25 UTC), twice,
+90 seconds apart. It answered nothing. It is filed because the first attempt came
+within one decimal place of supporting a conclusion, and only the second run showed
+that the quantity the pre-registration cared about - the fold/plain RATIO - carries
+the window's state just as the absolute rate does.
+
+Harness, verbatim, ~13-15 s per attempt:
+
+    ALLPAKA_BENCH_FEEDS=1 cargo test --release -p allpaka-backend --test gpu_ffnbench \
+      -- q35_down_shape --ignored --nocapture
+
+`gpu_ffnbench.rs::q35_down_shape_priced_fused_and_plain_across_x_layouts`: four shapes
+x four arms (activation x shared / per-slot  x  fold off / on), x8 expert dispatch,
+384 MB streamed per shape, best of 4 interleaved feeds, and two of the four shapes are
+published meters whose absolute rate is the admission gate (q4_k [4096,1536] 468.8,
+q5_k [4096,1536] 344.9, gate = within 3%).
+
+## Attempt 1 - gate FAILED, spreads perfect
+
+Raw log [`harness-attempt-1.txt`](harness-attempt-1.txt). `vm.loadavg` 5.49 just before.
+
+    q4_k meter  [4096,1536]  shared 387.3  spread 1.003x  | vs published 0.83x
+                per-slot 387.7  spread 1.006x     shared+sw 211.1  per-slot+sw 178.1
+                fold/plain shared 0.545  per-slot 0.459
+    q5_k meter  [4096,1536]  shared 294.9  spread 1.030x  | vs published 0.86x
+                per-slot 297.0  spread 1.015x     shared+sw 226.1  per-slot+sw 225.6
+                fold/plain shared 0.767  per-slot 0.759
+    q35 down    [2048,512]   shared 171.6  spread 1.004x  per-slot 169.3  spread 1.006x
+                shared+sw 143.4  per-slot+sw 143.1
+                fold/plain shared 0.836  per-slot 0.845
+    q35 gate/up [512,2048]   shared 251.9  spread 1.004x  per-slot 253.8  spread 1.023x
+                shared+sw 163.2  per-slot+sw 131.3
+                fold/plain shared 0.648  per-slot 0.517
+
+Every one of the 16 within-arm spreads is 1.003-1.036x, i.e. the process repeated
+itself to under four percent. On the strength of that the run *looks* like a settled
+window reading slow meters, and the number the pre-registration asked for is sitting
+right there: the 35B's real down geometry [2048,512] has a per-slot fold ratio of
+0.845 against its own format's meter at 0.759, so the fold would be ~11% CHEAPER at
+that shape than the 0.733 the band was built on, moving the predicted 35B saving from
+0.23-0.64 ms/token down to ~0.12. The rest of this file is why that sentence is not
+in the pre-registration.
+
+## Attempt 2 - gate FAILED, and it reproduces nothing
+
+Same command, 90 s later, load 5.55. Captured through a grep filter, so only these
+lines exist:
+
+    q4_k meter  shared 239.3 spread 1.484x | vs published 0.51x   shared+sw 106.4 spread 1.008x
+                per-slot 330.1 spread 1.054x  per-slot+sw 164.6 spread 1.097x
+    q5_k meter  shared 286.7 spread 1.030x | vs published 0.83x   shared+sw 206.1 spread 1.042x
+                per-slot 228.8 spread 1.015x  per-slot+sw 127.5 spread 1.053x
+    q35 down    shared 117.6 spread 1.615x   shared+sw 86.8 spread 2.643x
+                per-slot 72.5 spread 1.721x   per-slot+sw 40.3 spread 1.106x
+    q35 gate/up shared 131.0 spread 1.027x   shared+sw 52.5 spread 1.632x
+                per-slot 52.8 spread 1.008x   per-slot+sw 59.7 spread 1.075x
+
+Fold ratios derived from those arms: q5_k meter 0.719 shared / 0.557 per-slot; q35 down
+0.738 / 0.556. Attempt 1's same two were 0.767 / 0.759 and 0.836 / 0.845.
+
+So between two 13 s processes 90 seconds apart on the same binary, the same shapes and
+the same arms, the per-slot fold ratio of the shape in question moved 0.845 -> 0.556
+(-34%), and its control - the published q5_k meter shape, which is not the thing under
+study - moved 0.759 -> 0.557 (-27%). They moved together. What attempt 1 reported as a
+*shape* effect (down 11% cheaper than the meter) is in attempt 2 no effect at all
+(0.556 vs 0.557, i.e. the meter and the narrow shape are identical), and the sign of
+the difference is not preserved.
+
+## Verdict
+
+REJECTED, both attempts, no conclusion of any kind. The 35B's fold cost stays at
+0.23-0.64 ms/token, the band the pre-registration carries, and the shape question
+stays open.
+
+## The instrument law this buys
+
+**A within-run ratio is not automatically regime-robust.** The repo already holds that
+an absolute GB/s read under contention is worthless, and that in-process rotated ratio
+harnesses survive a busy CPU. This is the counterexample on the ratio side: a fold/plain
+ratio measured between two arms of one process, interleaved, at 1.003x repeatability,
+moved 34% between two such processes 90 s apart. Contention is therefore not only
+offsetting the level here; it is changing the relative cost of the two arms, which is
+what a ratio is supposed to be immune to. No mechanism is offered for why, and the
+obvious one is contradicted by these same two runs: "a slower window is DRAM-saturated,
+so the fold's extra ALU becomes free and the ratio approaches 1" predicts attempt 2 to
+read CLOSER to 1 than attempt 1, and it read farther (0.556 vs 0.845 at 0.51x vs 0.86x
+of meter). Whatever the window does to the fold, it is not monotone in window speed, and
+settling that is not this artifact's job. The consequence is procedural: a ratio arm
+needs the absolute meter gate exactly as a rate arm does, plus at least two independent
+processes of it, because within-process repeatability - 1.003x here, perfect - is the
+last thing contention corrupts. That also retroactively explains why the first narrow-shape
+attempt at 0.40x of meter printed a non-monotonic rows axis
+([`../2026-09-25-narrow-shape-axes/results.txt`](../2026-09-25-narrow-shape-axes/results.txt))
+- the two artifacts are the same failure, one seen in a rate axis and one in a ratio.
+
+## What a future attempt must do differently
+
+  - Gate on the meter AND require two processes of the harness whose fold ratios agree
+    within 5%, and report the ratio of the *control* shape as the window's own
+    temperature. Only one meter gate is not enough for a ratio claim.
+  - Capture the full stdout to a file, not through a grep, so a rejected attempt stays
+    recomputable. Attempt 2 survives only as filtered lines - its per-arm best-of-4
+    values are gone, which is why the ratios above are quoted to three decimals from
+    the printed GB/s and nothing more can be extracted from them.

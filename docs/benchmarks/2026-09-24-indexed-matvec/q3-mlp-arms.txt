@@ -1,0 +1,234 @@
+# q3_k load schedule: matvec_q3_k_mlp against the incumbent
+
+The last mechanism on the `q3_k` list, and the only one that could have shipped
+for free. `q3-locality-arms.txt` killed the interleaved-plane repack by measuring
+run locality, which left one branch of the original diagnosis untested: "if
+removing the arithmetic does not move it, it is latency and only more bytes in
+flight per lane helps" (`README.md`, the paragraph under the shape table). The
+incumbent `matvec_q3_k_mv` issues each block-row's 16 ushort weight reads
+interleaved with the FMA chains that consume them, so a lane may have only a few
+of them outstanding at a time. `matvec_q3_k_mlp` is that kernel with the sixteen
+loads hoisted into locals ahead of both inner loops - same bytes, same addresses,
+same widths, same arithmetic, same reduction, same geometry. One property
+changes: how many weight loads a lane can have in flight. No memory cost, no
+repack, no format change - if it won, it was shippable as-is.
+
+Shape `[4096,1536]` x8 indexed (the 235B's own dispatch), 12 rotating expert
+sets, feed=32, `q5_shape_ratio_against_q4`, one process per arm, `q4_k` as the
+in-run meter. 6 reps x 4 arms, arm order rotated by one slot per rep so position
+cannot be the experiment. Load over the sequence: the same harness's `q4_k` meter
+went 310 -> 747 ps/row/block between rep 1 and rep 6 as the desktop filled up,
+which is exactly the drift the ratio is built to absorb - rep 6's `mlp` run had
+an absolute 1269 ps and a ratio of 1.779, indistinguishable from rep 1's 593 ps /
+1.739.
+
+```
+arms=("" mlp nomath nomath_norowstep)   # "" = incumbent
+for rep in 1 2 3 4 5 6; do
+  for i in 0 1 2 3; do
+    arm=${arms[$(( (i + rep) % 4 + 1 ))]}   # rotated one slot per rep
+    env ALLPAKA_Q3_PROBE=$arm ALLPAKA_Q5AB_N_OUT=4096 ALLPAKA_Q5AB_N_IN=1536 \
+        ALLPAKA_Q5AB_SETS=12 ALLPAKA_Q5AB_PER_WAIT=32 \
+      cargo test -p allpaka-backend --test gpu_ffnbench -- \
+      --ignored --nocapture --test-threads=1 q5_shape_ratio
+  done
+done
+```
+
+## Result (ratio to the in-run `q4_k` meter; all 24 runs kept)
+
+| arm | kernel | n | mean | sd | range | vs incumbent |
+| --- | --- | --- | --- | --- | --- | --- |
+| incumbent | `matvec_q3_k_mv` | 12 | 1.767 | 0.055 | 1.683-1.882 | - |
+| mlp | `matvec_q3_k_mlp` | 6 | 1.763 | 0.045 | 1.684-1.808 | **-0.26%** |
+| nomath | `matvec_q3_k_nm` | 6 | 1.358 | 0.019 | 1.332-1.384 | -23.1% |
+
+Per-rep, paired where both arms ran in the rep: -2.9%, +0.6%, +5.6%, +4.4%,
+-10.5%, -0.3% - four signs in six, mean -0.5%, spread far wider than the effect.
+The `nomath` column is the instrument check: in the same processes, at the same
+loads, the harness resolves a real `q3_k` difference to 23.1% with sd 0.019. So
+this is a null from a working meter, not an insensitive one.
+
+## What this closes
+
+Bytes in flight per lane is not `q3_k`'s cost. Either the scheduler was already
+issuing those loads ahead of their consumers, or outstanding-load count is not
+what the block-row is waiting on - and the two readings decide the same thing,
+because there is no schedule left inside this kernel to win. The mechanism list
+is now closed at five entries, all measured on the model's own dispatch:
+
+| mechanism | arm | effect on `q3_k` / `q4_k` | shippable? |
+| --- | --- | --- | --- |
+| dequant arithmetic | `nm` | -22.9% | capped at that: the port's whole prize |
+| weight load width (110 -> 112 B, ushort -> uint) | `nw` | -4.6% | costs ~26 GiB of private copy |
+| weight load count (row 1 reuses row 0's bytes) | `ns` | -33.2% | no - real rows own different weights |
+| run locality (one contiguous 32-byte window) | `ic` / `_icw` | +2.0% / +4.0% | no - wrong sign |
+| load schedule (16 loads hoisted ahead of consumers) | `mlp` | **-0.26%** | no effect to ship |
+
+What is left of `q3_k`'s 1.77 is therefore not inside `matvec_q3_k_mv`: it is
+0.44 of arithmetic plus ~1.3 of per-block cost that no reordering, widening,
+locality or pipelining of the same loads reaches. The only arm that moved it
+materially was the one that reads fewer weight bytes, which the format's row
+ownership forbids.
+
+`matvec_q3_k_mlp` computes a real dot product, unlike its four siblings, and it
+was never promoted - so it was never gated on numerical correctness, and the CPU
+parity check is not part of this artifact. That is deliberate: a -0.26% candidate
+does not need to be proven right, only recorded as not worth shipping. If it is
+ever revived, the gate is `gpu_parity::indexed_matvec_matches_cpu_reference`
+against the incumbent's output, not this table.
+
+## Raw log
+
+Arm selection, labels and the tripwire are one table
+(`Q3_PROBE_ARMS` in `crates/allpaka-backend/src/gpu/metal.rs`);
+`q3_probe_kernels_stay_out_of_the_production_choice` asserts every arm's kernel
+exists in the MSL and that `q3_kernel()` still returns only production names.
+`mlp` was added to that table, and the bench prints `q3_k mlp` per line so a log
+row says which kernel produced it.
+
+
+--- rep1 arm=incumbent
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   465 GB/s  309.9 ps/row/block  vs q4_k 1.000
+q5_k   313 GB/s  562.7 ps/row/block  vs q4_k 1.816
+q3_k   205 GB/s  535.5 ps/row/block  vs q4_k 1.728
+q6_k   424 GB/s  495.2 ps/row/block  vs q4_k 1.598
+--- rep1 arm=mlp
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   422 GB/s  341.1 ps/row/block  vs q4_k 1.000
+q5_k   285 GB/s  618.0 ps/row/block  vs q4_k 1.812
+q3_k mlp 185 GB/s  593.3 ps/row/block  vs q4_k 1.739
+q6_k   397 GB/s  528.7 ps/row/block  vs q4_k 1.550
+--- rep1 arm=nomath
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   431 GB/s  333.9 ps/row/block  vs q4_k 1.000
+q5_k   288 GB/s  610.3 ps/row/block  vs q4_k 1.828
+q3_k nm 244 GB/s  450.4 ps/row/block  vs q4_k 1.349
+q6_k   404 GB/s  519.6 ps/row/block  vs q4_k 1.556
+--- rep1 arm=incumbent
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   429 GB/s  335.7 ps/row/block  vs q4_k 1.000
+q5_k   284 GB/s  619.1 ps/row/block  vs q4_k 1.844
+q3_k   183 GB/s  601.0 ps/row/block  vs q4_k 1.791
+q6_k   400 GB/s  525.3 ps/row/block  vs q4_k 1.565
+--- rep2 arm=mlp
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   423 GB/s  340.8 ps/row/block  vs q4_k 1.000
+q5_k   285 GB/s  617.3 ps/row/block  vs q4_k 1.811
+q3_k mlp 180 GB/s  609.5 ps/row/block  vs q4_k 1.788
+q6_k   399 GB/s  526.6 ps/row/block  vs q4_k 1.545
+--- rep2 arm=nomath
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   442 GB/s  325.6 ps/row/block  vs q4_k 1.000
+q5_k   293 GB/s  600.8 ps/row/block  vs q4_k 1.845
+q3_k nm 254 GB/s  433.8 ps/row/block  vs q4_k 1.332
+q6_k   415 GB/s  505.6 ps/row/block  vs q4_k 1.553
+--- rep2 arm=incumbent
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   394 GB/s  365.7 ps/row/block  vs q4_k 1.000
+q5_k   267 GB/s  658.7 ps/row/block  vs q4_k 1.801
+q3_k   171 GB/s  643.5 ps/row/block  vs q4_k 1.759
+q6_k   381 GB/s  551.1 ps/row/block  vs q4_k 1.507
+--- rep2 arm=incumbent
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   387 GB/s  371.7 ps/row/block  vs q4_k 1.000
+q5_k   263 GB/s  668.9 ps/row/block  vs q4_k 1.800
+q3_k   167 GB/s  660.7 ps/row/block  vs q4_k 1.777
+q6_k   374 GB/s  561.1 ps/row/block  vs q4_k 1.509
+--- rep3 arm=nomath
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   383 GB/s  376.4 ps/row/block  vs q4_k 1.000
+q5_k   255 GB/s  689.5 ps/row/block  vs q4_k 1.832
+q3_k nm 211 GB/s  520.8 ps/row/block  vs q4_k 1.384
+q6_k   364 GB/s  576.4 ps/row/block  vs q4_k 1.531
+--- rep3 arm=incumbent
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   411 GB/s  350.8 ps/row/block  vs q4_k 1.000
+q5_k   280 GB/s  629.6 ps/row/block  vs q4_k 1.795
+q3_k   172 GB/s  638.6 ps/row/block  vs q4_k 1.820
+q6_k   384 GB/s  547.0 ps/row/block  vs q4_k 1.559
+--- rep3 arm=incumbent
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   338 GB/s  426.4 ps/row/block  vs q4_k 1.000
+q5_k   229 GB/s  769.4 ps/row/block  vs q4_k 1.805
+q3_k   153 GB/s  717.7 ps/row/block  vs q4_k 1.683
+q6_k   348 GB/s  604.2 ps/row/block  vs q4_k 1.417
+--- rep3 arm=mlp
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   366 GB/s  393.4 ps/row/block  vs q4_k 1.000
+q5_k   251 GB/s  701.7 ps/row/block  vs q4_k 1.783
+q3_k mlp 157 GB/s  699.2 ps/row/block  vs q4_k 1.777
+q6_k   366 GB/s  573.5 ps/row/block  vs q4_k 1.458
+--- rep4 arm=incumbent
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   342 GB/s  420.7 ps/row/block  vs q4_k 1.000
+q5_k   237 GB/s  743.6 ps/row/block  vs q4_k 1.768
+q3_k   148 GB/s  744.4 ps/row/block  vs q4_k 1.770
+q6_k   346 GB/s  606.6 ps/row/block  vs q4_k 1.442
+--- rep4 arm=incumbent
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   405 GB/s  355.8 ps/row/block  vs q4_k 1.000
+q5_k   273 GB/s  644.7 ps/row/block  vs q4_k 1.812
+q3_k   179 GB/s  615.8 ps/row/block  vs q4_k 1.731
+q6_k   405 GB/s  518.0 ps/row/block  vs q4_k 1.456
+--- rep4 arm=mlp
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   459 GB/s  313.8 ps/row/block  vs q4_k 1.000
+q5_k   302 GB/s  582.2 ps/row/block  vs q4_k 1.855
+q3_k mlp 194 GB/s  567.4 ps/row/block  vs q4_k 1.808
+q6_k   408 GB/s  514.9 ps/row/block  vs q4_k 1.641
+--- rep4 arm=nomath
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   462 GB/s  311.7 ps/row/block  vs q4_k 1.000
+q5_k   303 GB/s  581.0 ps/row/block  vs q4_k 1.864
+q3_k nm 259 GB/s  425.2 ps/row/block  vs q4_k 1.364
+q6_k   416 GB/s  504.2 ps/row/block  vs q4_k 1.617
+--- rep5 arm=incumbent
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   395 GB/s  364.4 ps/row/block  vs q4_k 1.000
+q5_k   279 GB/s  630.5 ps/row/block  vs q4_k 1.730
+q3_k   179 GB/s  615.9 ps/row/block  vs q4_k 1.690
+q6_k   396 GB/s  530.8 ps/row/block  vs q4_k 1.457
+--- rep5 arm=mlp
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   396 GB/s  363.9 ps/row/block  vs q4_k 1.000
+q5_k   256 GB/s  687.2 ps/row/block  vs q4_k 1.889
+q3_k mlp 179 GB/s  612.9 ps/row/block  vs q4_k 1.684
+q6_k   399 GB/s  526.8 ps/row/block  vs q4_k 1.448
+--- rep5 arm=nomath
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   290 GB/s  496.7 ps/row/block  vs q4_k 1.000
+q5_k   196 GB/s  895.9 ps/row/block  vs q4_k 1.804
+q3_k nm 161 GB/s  681.7 ps/row/block  vs q4_k 1.372
+q6_k   283 GB/s  741.1 ps/row/block  vs q4_k 1.492
+--- rep5 arm=incumbent
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   247 GB/s  583.6 ps/row/block  vs q4_k 1.000
+q5_k   165 GB/s  1066.1 ps/row/block  vs q4_k 1.827
+q3_k   100 GB/s  1098.1 ps/row/block  vs q4_k 1.882
+q6_k   230 GB/s  913.8 ps/row/block  vs q4_k 1.566
+--- rep6 arm=mlp
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   202 GB/s  713.6 ps/row/block  vs q4_k 1.000
+q5_k   139 GB/s  1264.1 ps/row/block  vs q4_k 1.771
+q3_k mlp 87 GB/s  1269.5 ps/row/block  vs q4_k 1.779
+q6_k   215 GB/s  979.0 ps/row/block  vs q4_k 1.372
+--- rep6 arm=nomath
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   244 GB/s  591.4 ps/row/block  vs q4_k 1.000
+q5_k   167 GB/s  1050.9 ps/row/block  vs q4_k 1.777
+q3_k nm 138 GB/s  796.9 ps/row/block  vs q4_k 1.348
+q6_k   247 GB/s  849.7 ps/row/block  vs q4_k 1.437
+--- rep6 arm=incumbent
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   193 GB/s  746.7 ps/row/block  vs q4_k 1.000
+q5_k   133 GB/s  1324.0 ps/row/block  vs q4_k 1.773
+q3_k   82 GB/s  1337.4 ps/row/block  vs q4_k 1.791
+q6_k   202 GB/s  1037.5 ps/row/block  vs q4_k 1.389
+--- rep6 arm=incumbent
+--- shape ratio, QK [4096,1536] nb=6 x8 x12 feed=32, region 472 MB ---
+q4_k   368 GB/s  391.3 ps/row/block  vs q4_k 1.000
+q5_k   249 GB/s  707.4 ps/row/block  vs q4_k 1.808
+q3_k   158 GB/s  698.0 ps/row/block  vs q4_k 1.784
+q6_k   361 GB/s  581.5 ps/row/block  vs q4_k 1.486

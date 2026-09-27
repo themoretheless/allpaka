@@ -1,0 +1,19 @@
+{
+ "started": "2026-09-25T01:32:04Z",
+ "binary_sha256": "f7549dd8818472d79e6c9362c5b1132821c7800fbe133fc2c972e62a0b9b9942",
+ "git_head": "2347752",
+ "tree": "dirty by design; the ablation switch is ALLPAKA_NO_EXPERT_ROWS",
+ "model": "models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_M.gguf",
+ "pp_tg_k": [
+  480,
+  32,
+  4
+ ],
+ "m_of_round": 5,
+ "arms": {
+  "rows": {},
+  "norows": {
+   "ALLPAKA_NO_EXPERT_ROWS": "1"
+  }
+ }
+}

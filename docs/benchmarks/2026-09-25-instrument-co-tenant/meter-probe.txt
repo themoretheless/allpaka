@@ -1,0 +1,5 @@
+02:54:39Z  load  6.87  q4_k meter 348.2 GB/s (0.74x)  q5_k meter 265.3 GB/s (0.77x)  | top: 58.9 remoting_me2me_host / 36.0 WindowServer / 35.2 Qoder Helper  | disk: iostat silent
+02:55:06Z  load  6.65  q4_k meter 337.8 GB/s (0.72x)  q5_k meter 268.6 GB/s (0.78x)  | top: 88.1 remoting_me2me_host / 44.6 WindowServer / 35.2 Qoder Helper  | disk: iostat silent
+02:55:31Z  load  6.61  q4_k meter 340.7 GB/s (0.73x)  q5_k meter 266.7 GB/s (0.77x)  | top: 64.0 remoting_me2me_host / 36.1 WindowServer / 33.3 Qoder Helper  | disk: iostat silent
+02:56:04Z  load  6.56  q4_k meter 342.5 GB/s (0.73x)  q5_k meter 262.3 GB/s (0.76x)  | top: 42.9 remoting_me2me_host / 40.3 WindowServer / 33.1 Kimi Helper (Renderer)  | disk: iostat silent
+02:56:28Z  load  6.80  q4_k meter 126.0 GB/s (0.27x)  q5_k meter 263.1 GB/s (0.76x)  | top: 100.0 fvid-381aa28fb499f77e / 59.0 remoting_me2me_host / 41.2 WindowServer  | disk: iostat silent

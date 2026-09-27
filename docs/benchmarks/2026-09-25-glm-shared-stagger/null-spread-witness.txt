@@ -1,0 +1,49 @@
+# Identical-code (null vs plain) spread of the GLM stagger instrument, and what its drop rules admit
+# Captured 2026-09-25T22:46Z from the three control captures this design has produced.
+# No GPU, no build: this reads the JSONL that drive.py writes.
+# Repo revision: dcdc131. Binaries under test: commit 8a162146, fingerprint 8b1893cf1b9d2bb1 (all 9 pairs).
+#
+#   cd docs/benchmarks/2026-09-25-glm-shared-stagger && python3 null-spread-witness.py
+# (defaults to the run-3 and 21:06 captures under /tmp/allpaka-head/.airbug-bench/ plus
+#  contended-control-pairs.jsonl in this directory; run while drive.py is still writing run 3,
+#  so the run-3 control series is complete at 6 pairs and its real series is not.)
+# The same rows read through the analyzer, including the real series:
+#   python3 analyze.py /tmp/allpaka-head/.airbug-bench/glm-stagger-run3
+#      -> run-3-analysis-20260925-2247z.txt
+
+
+== /tmp/allpaka-head/.airbug-bench/glm-stagger-run3/control-pairs.jsonl
+pair ord   maxload  era     wall   cens-ratio  encode  wait   disp= ident=  cold drift
+1    AB      25.92 vetoed     2.49%      3.85x  20.99%  2.24%  Y      Y   Y    -
+2    BA      18.92 vetoed     1.82%      1.03x  15.38%  1.66%  Y      Y   -    -
+3    AB       4.38 vetoed     3.78%      7.22x   8.75%  3.90%  Y      Y   Y    -
+4    BA      24.19 vetoed    155.62%      1.04x 310.39% 153.71%  Y      Y   -    Y
+5    AB      24.92 vetoed    19.39%      1.00x 189.47% 17.46%  Y      Y   -    Y
+6    BA      70.08 vetoed     5.37%      6.25x  20.00%  4.89%  Y      Y   Y    Y
+
+== /tmp/allpaka-head/.airbug-bench/glm-stagger-20260925-2106/control-pairs.jsonl
+pair ord   maxload  era     wall   cens-ratio  encode  wait   disp= ident=  cold drift
+1    AB      37.50 pre-veto  103.07%      1.16x 328.57% 99.62%  Y      Y   -    -
+2    BA      18.73 pre-veto  11.50%      1.02x  12.75% 11.80%  Y      Y   -    -
+3    AB       8.49 pre-veto   9.44%      1.02x  12.99%  9.43%  Y      Y   -    -
+
+== /Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-25-glm-shared-stagger/contended-control-pairs.jsonl
+pair ord   maxload  era     wall   cens-ratio  encode  wait   disp= ident=  cold drift
+  skipped pair 1: duplicate of an earlier row (arms ran at 2026-09-25T21:07:02Z / 2026-09-25T21:08:18Z)
+  skipped pair 2: duplicate of an earlier row (arms ran at 2026-09-25T21:09:26Z / 2026-09-25T21:10:29Z)
+  skipped pair 3: duplicate of an earlier row (arms ran at 2026-09-25T21:11:29Z / 2026-09-25T21:12:27Z)
+
+== summary (both arms of every row are the same binary: 9/9 rows share commit and fingerprint)
+  dispatch counts equal in 9 of 9 identical-code pairs,
+  so every wall spread below is the instrument's, not the knob's.
+  wall  spread: median  9.44%   max 155.62%   n=9
+  cens  spread: median  3.81%   max 621.69%   n=9
+  enc   spread: median 20.00%   max 328.57%   n=9
+  veto-era rows (run 3, all three rules exist to fire): 6, of which
+    the capture-time flags admit 1, cold + load + drift admit 0.
+  pre-veto rows (21:06, no load flag existed): 3, of which
+    cold + drift alone admit 3 - at wall 103.07%, 11.50%, 9.44%,
+    which is precisely the series that made the load veto necessary (21:15Z amendment).
+  the veto-era pair the driver kept, which no rule at capture could see:
+    wall 3.78% on identical code - above the 3% decision band - time-to-census ratio 7.22x,
+    load under the veto, and a common-mode slowdown the drift rule cannot see either.

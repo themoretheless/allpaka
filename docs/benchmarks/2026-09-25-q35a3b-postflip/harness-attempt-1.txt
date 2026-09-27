@@ -1,0 +1,18 @@
+    Finished `release` profile [optimized] target(s) in 0.11s
+     Running tests/gpu_ffnbench.rs (target/release/build/allpaka-backend/402d2f60b4b17b8a/out/gpu_ffnbench-402d2f60b4b17b8a)
+
+running 1 test
+metal: Apple M4 Max attached, 0.4 GiB of weights shared with the GPU
+--- 35B down geometry, x8, 384 MB streamed per shape, arms = activation layout x fold ---
+q4_k meter   [4096,1536] feed=1 | shared 387.3 spread 1.003x | vs published 0.83x shared+sw 211.1 spread 1.024x per-slot 387.7 spread 1.006x per-slot+sw 178.1 spread 1.001x
+                                                      fold/plain shared 0.545  per-slot 0.459  |  layout effect plain 1.001 fused 0.843
+q5_k meter   [4096,1536] feed=1 | shared 294.9 spread 1.036x | vs published 0.86x shared+sw 226.1 spread 1.003x per-slot 297.0 spread 1.015x per-slot+sw 225.6 spread 1.010x
+                                                      fold/plain shared 0.767  per-slot 0.759  |  layout effect plain 1.007 fused 0.998
+q35 down     [2048,512] feed=1 | shared 171.6 spread 1.004x shared+sw 143.4 spread 1.010x per-slot 169.3 spread 1.006x per-slot+sw 143.1 spread 1.009x
+                                                      fold/plain shared 0.836  per-slot 0.845  |  layout effect plain 0.986 fused 0.998
+q35 gate/up  [512,2048] feed=1 | shared 251.9 spread 1.004x shared+sw 163.2 spread 1.030x per-slot 253.8 spread 1.023x per-slot+sw 131.3 spread 1.011x
+                                                      fold/plain shared 0.648  per-slot 0.517  |  layout effect plain 1.007 fused 0.805
+test q35_down_shape_priced_fused_and_plain_across_x_layouts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 15.07s
+

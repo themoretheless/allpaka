@@ -1,0 +1,241 @@
+# Pre-registration: does staggering the GLM shared expert pay? (ALLPAKA_SHARED_STAGGER)
+
+Written 2026-09-25T02:40Z, before any measured pair. This is the last decode-path
+knob in `crates/allpaka-backend/src/gpu/metal.rs` whose own documentation says
+"never measured" (docs/decode-opts.md), and the guard it waits on is the source
+comment at metal.rs:16054-16063:
+
+> Stagger GLM shared Q5 gate/up out of the expert Q4 window: expert gate/up ->
+> barrier -> expert Q8 down || shared Q5 gate/up -> barrier -> shared Q8 down.
+> OFF by default until cool Terminal A/B (`scripts/glm-ab-stagger.sh`) confirms
+> a win.
+
+## Why it is plausibly a win, and why it is plausibly nothing
+
+*For*: the shared expert's gate/up is Q5_K while the routed experts are Q4_K, so
+the two are different kernels with different instruction mixes; issuing them in
+the same window may serialise them behind each other in the command queue while
+one SM group idles, and a barrier between the phases is exactly what `SHARED_TAIL`
+(already priced OFF: 25696 -> 25024 dispatches, tok/s unchanged) does from the
+other side.
+
+*Against*: decode on this machine is byte-pipe limited (the standing finding
+throughout `docs/decode-opts.md`), and a re-ordering changes nothing about the
+bytes. Total weight traffic per token is fixed by the routing, so a schedule
+change can only win by removing an idle gap, and the earlier dispatch-census work
+(2026-09-24-dispatch-census) measured how small that gap already is. The prior
+stated before data is therefore "under 2 %, sign unknown".
+
+## Instrument, and what the previous script got wrong
+
+`scripts/glm-ab-stagger.sh` exists and has never been trusted; reading it now it
+would not be admissible even if it had run: one process per arm, no alternation,
+`ALLPAKA_BENCH_TG=32` (a 0.8 s sample at GLM's rate), a 2 s sleep between arms,
+and it also compiles in the middle of its own measurements
+(`cargo test --release ... gpu_glm_mvbench` before the bench arms). Its header
+asks for a "quiet machine" without defining one.
+
+The driver here (`drive.py`, same directory) keeps only the arm definitions from
+that script and rebuilds the rest on the pattern priced out over the last two
+days:
+
+* model `models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf` (68 GiB, sharded), PP=480,
+  TG=320, `ALLPAKA_BENCH_SKIP_MTP=1`, `ALLPAKA_PROFILE=max-performance` (the
+  profile the script already pinned - a moving GPU clock is a confound for a
+  scheduling claim);
+* arms `plain` (env unset) and `stagged` (`ALLPAKA_SHARED_STAGGER=1`), plus
+  `null` (`ALLPAKA_SHARED_STAGGER=0`, which `shared_stagger()` treats identically
+  to unset) as the noise-floor control;
+* one uncounted priming run so no counted arm pays the 68 GiB page-cache fault-in
+  (this cost 6.7 % on an identical-code pair in the window pilot at 02:31Z),
+  orders alternated AB/BA, one process per arm, 25 s cooldown;
+* per-arm records: decode tok/s from the report's full-precision median, the
+  `gpu during decode` counters (waits, dispatches, encode ms, wait ms, total ms),
+  seconds to the residency census line, load average, greedy token ids from the
+  report, and the fast-path decline count;
+* a pre-registered cold veto: an arm whose census time exceeds twice the median
+  census time of counted arms drops its pair, drop count published;
+* a pair is discarded if either arm's greedy continuation differs - a schedule
+  change must not change the tokens, and if it does the ablation is not clean and
+  that is the result instead.
+
+## Criteria
+
+1. Both arms report `attached=true`, `declines=0`, and `attempts == successes`.
+2. The control series sets the band: N = median of the `null/plain` ratios, and
+   half-spread of those pairs. If the control band is at or above 3 %, this run
+   reports the interval it excludes and the knob stays open, not "unmeasured" but
+   "not measurable at this granularity on this machine while a desktop session is
+   live" - which is a publishable statement about the instrument.
+3. Primary statistic: median of 14 `stagged/plain` decode tok/s ratios with the
+   sign count. 14 pairs because the GLM e2E deficit being argued about is 0.86x
+   (39.0 against llama's 45.5 tok/s, 2026-09-12 baseline), and a schedule change
+   that cannot be seen inside 2 % cannot close any part of that gap.
+4. Secondary, and the reason this is worth running even if criterion 3 is flat:
+   the `outside the GPU` percentage and the wait/encode split. A staggering win
+   that exists has to appear there first - it re-orders submissions, it cannot
+   make kernels read fewer bytes. If wall tok/s is flat but the GPU-idle share
+   moves beyond the control band, the mechanism is real and the wall effect is
+   somewhere else, and that is a different next step.
+5. Decision: merge if the median ratio is above +3 % with sign agreement; keep
+   OFF and publish as a measured negative if it is inside the band or negative;
+   report an interval otherwise.
+
+## Limits of transfer
+
+GLM-4.5-Air only. `shared_stagger()` gates the GLM shared-expert shape (Q5 gate/up
+with Q8_0 down); the 35B's shared expert is a different type combination and the
+Qwen3 MoE path does not consult this gate, so a verdict here says nothing about
+Qwen and the knob should be read as GLM-scoped in the docs.
+
+---
+
+## Amendment 2026-09-25T21:15Z - instrument vetoes added before the counted pairs,
+## because the first control series was destroyed by a co-tenant
+
+The first launch (21:05Z) was stopped after three control pairs - before any real
+pair - because the control series, which is the noise floor the whole design rests
+on, produced this (`contended-control-pairs.jsonl`, `contended-control-discard-log.txt`):
+
+    pair  order  null tok/s (load)      plain tok/s (load)     ratio
+      1   AB     39.1335  (9.58)         19.2705  (37.50)      2.0307
+      2   BA     30.2722  (17.00)        27.1503  (18.73)      1.1150
+      3   AB     33.4420  (8.49)         36.5980  (4.43)       0.9138
+
+Identical code, 2.03x apart on the first pair. Nothing in the design as first
+written could see this: both arms printed `0% outside the GPU`, `declines=0`,
+`attempts == successes`, and the census-to-first-line time stayed 10.4-12.1 s
+across all six runs, so the cold veto had nothing to say. The thief took 1-min
+load average to 37.5, which is a host-side number the harness recorded only once,
+after the arm had already run - and since decode here is byte-pipe limited, a
+process that eats memory bandwidth slows the GPU kernels themselves, so there is
+no host-side signature in the run's own counters at all.
+
+Three changes to `drive.py`, and the reason each is admissible rather than
+post-hoc: they can only drop pairs, never re-weight them; the drop count is
+published; and they were written before a single counted pair of the real series
+existed, so they cannot have been tuned to a wanted answer.
+
+1. `load_before` recorded at the start of every arm as well as `load` at its end,
+   and a pair is dropped if the maximum of its four readings exceeds `LOAD_VETO`
+   (= 8.0). 8.0, not 5.0: the pilot pair at 21:03Z was clean by eye at load 4.4
+   while the machine around it ran 9.6, and a veto that fires on every pair
+   measures nothing.
+2. A drift veto: drop a pair whose slower arm is under `DRIFT_VETO` (= 0.85) of
+   the running median of every arm rate seen so far in the process. This catches
+   a burst that started and cleared inside one arm, which the load average
+   reports too late to matter. It is deliberately relative, so it survives the
+   ordinary slow drift of a warming machine.
+3. A launch gate: `load1()` must be under 5.0 before the priming run, waiting up
+   to 45 minutes. The 60 s page-cache prewarm and the 90 s per-arm process make a
+   90-minute run too expensive to start into a burst that would clear in a minute.
+
+The control series stays in the design unchanged (criterion 2), because a veto can
+only remove contaminated pairs; whether what is left can resolve 3% is still the
+control's answer, not the driver's hope.
+
+---
+
+Amendment 2026-09-25T21:55Z - the clean-pair token check was doubted and then
+verified, and one real gap came out of it
+
+Running (21:50Z, while run 3's launch gate held the machine): "does the clean-pair
+check above ("a pair is discarded if either arm's greedy continuation differs",
+`drive.py`'s `tokens_differ`) actually compare continuations, or does it compare
+the prompt and so can never fire?" The driver reads
+`decode_tokens: dec.get("input_tokens")` from the report, which looks like a
+prompt field, and this series is not the only place that would be affected - the
+RFUSE census DoD names the same observable.
+
+It does compare continuations, and the check is not vacuous. In
+`crates/allpaka-cli/src/bench.rs:445-462` the decode measurement's
+`input_tokens` is built as seed token + `outs[..decode_tokens - 1]`, i.e. 1 + 319
+generated tokens at TG=320; `prefill.input_tokens` is the prompt (and a synthetic
+arithmetic ramp, so the two are unmistakable). Verified against run 3's captured
+files rather than inferred: all five reports to date carry a 320-element decode
+stream whose SHA-256 (over the list's repr) starts `f51875547053`, across both the
+`null` and `plain` arms - identical code giving identical tokens, which is what
+the criterion is for. Mutating one token in a copy of a report makes the
+comparison fire, so the check can fail.
+
+The gap that the same reading exposes: the slice stops one token short, so a
+divergence confined to the 320th generated token would pass as clean, and no
+other recorded field catches it either (`bench.rs:479` asserts
+`gpu_successes == decode_tokens`, a count, and the report has no checksum). This
+is left as-is - 319 of 320 tokens agreeing is more than enough to show two arms
+ran the same kernels, and a schedule change that only perturbed the last sampled
+step would be a curiosity, not a merged win - but it is written down so nobody
+later reads the criterion as exhaustive over the stream.
+
+---
+
+Amendment 2026-09-25T22:47Z - the drift veto of the 21:15Z amendment could never
+fire, and one counted pair of run 3 sits inside that hole
+
+Found while asking a different question of the same rows: what does this
+instrument do to a pair whose true answer is zero? `null-spread-witness.py`
+(kept in this directory) reads every control capture the design has produced and
+sets the arms' wall ratio beside witnesses recorded inside the arms; its output is
+[`null-spread-witness.txt`](null-spread-witness.txt), and the same rules applied to
+run 3 including its real series are
+[`run3-analysis-20260925-2247z.txt`](run3-analysis-20260925-2247z.txt).
+
+* The defect. `series()` in `drive.py` opens with `seen_rates = []`, the drift
+  check reads `median(seen_rates)`, and nothing in the file ever appends to it.
+  `median([])` is `None`, `if ref and ...` is therefore false, and the branch that
+  sets `drift_vetoed` is unreachable. `grep -c drift_vetoed` over the four captured
+  JSONL files - 21:06 control, run 3 control, run 3 real, and the contended
+  capture - returns 0 in every one, while the load veto beside it fired 5 times in
+  run 3 alone. So of the two guards the 21:15Z amendment added, one worked and one
+  was a name.
+* What it let through. Applying the rule as that amendment words it ("the running
+  median of every arm rate seen so far in the process", threshold 0.85) drops four
+  further pairs: run 3's control 4, 5, 6 - all also load-vetoed, so no new harm -
+  and real pair 3, whose slower arm ran at 16.47 tok/s against a running median of
+  38.97. That pair is invisible to both live rules: load 2.9 -> 2.06, and its
+  time-to-census is 10.34 s against a series median of 10.3, so it is not cold
+  either. Its own witness is the GPU wait counter: 19324 ms against the other arm's
+  12047 ms.
+* What it cost the statistic, on the snapshot of 22:47Z (six real pairs). With the
+  driver's flags only: 6 pairs, median 0.985098 (-1.49 %), SEM 6.04 pp, min ratio
+  0.6250. With the pre-registered drift rule applied: 5 pairs, median 0.986385
+  (-1.36 %), SEM 1.67 pp, min 0.9135. The median barely moves; the spread is the
+  damage - a 2.4x outlier inside a series whose decision band is 3 %, which would
+  have been reported as a sub-3 % number with a straight face.
+* The old `analyze.py` had a second, smaller flaw of the labelling kind: it folded
+  the three rules into one `cold` boolean and printed a single "COLD" tag, so run
+  3's control pair 2 was called cold while its census times were 10.43/10.14 s
+  against a 2x-median cut of 20.23 s - it was dropped by the load veto. The
+  analyzer now applies all three rules itself from the rates, timestamps and census
+  times in the files, names the rule that dropped each pair, and prints which pairs
+  its recomputed drift rule catches that the driver's flag did not.
+* What changed in the code. `drive.py` keeps one rate pool for the whole process
+  (seeded with the uncounted priming run, as the amendment's wording implies), and
+  appends a pair's two arm rates after its own drift check, so no pair is compared
+  against a median containing itself. `analyze.py` no longer trusts the captured
+  flags, which matters beyond this bug: a run whose driver died mid-series, or whose
+  flags predate a rule, still gets the pre-registered treatment.
+* Why applying a rule after the fact is admissible here and would not be
+  elsewhere: the rule and its 0.85 threshold were written at 21:15Z, before any
+  counted pair of any series existed; it can only drop pairs, never re-weight them;
+  the drop counts are published; and the pair it removes fails a check the design
+  already had on paper. The correction is to an implementation, not to a criterion.
+* What this decides about run 3. Its control series admits zero of six pairs once
+  all three pre-registered rules are applied, so criterion 2 has no band to
+  compare the real ratios against and the run will report the interval it excludes,
+  not a verdict on the knob. The load veto is doing most of that work (five of six
+  control pairs crossed 8.0), which says the machine is not quiet enough for a
+  3 %-band claim on this model while the session is live - the same fallback the
+  design pre-registered at the start, now with a count attached.
+* Mechanism, as an interim note only (six real pairs, one of them dropped):
+  `stagged` issues 264320 decode dispatches against `plain`'s 256640 in every pair
+  - +7680, i.e. +24 per token, exactly the barrier the schedule inserts - with
+  `waits` unchanged and 0 % outside the GPU in both arms. A re-ordering that buys
+  nothing costs 24 dispatches a token; that is consistent with the byte-pipe
+  finding, and it is not a verdict until the series completes and the control band
+  exists.
+* Not yet exercised: the `drive.py` fix itself. It is three lines and it changes
+  no threshold, and the rule it restores is demonstrated on real rows by the
+  analyzer above (it fires on exactly the four pairs named). The next run's
+  `drift_vetoed` flags are the check on the driver; if that series comes back with
+  zero flags again while the analyzer finds firings, the driver is still wrong.

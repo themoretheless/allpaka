@@ -1,0 +1,13 @@
+pinned gpu_ffnbench sha256 b4579c48f9c3a2d1  head dcdc131d  dirty files 93  continuing from round 6
+Q4 NR0=4 r6 ok  load 4.9/4.1 45s  ratio[0,plain,feed8]=0.9782
+Q4 NR0=1 r6 ok  load 4.1/2.9 48s  ratio[0,plain,feed8]=0.7489
+Q4 NR0=2 r6 ok  load 2.9/5.8 43s  ratio[0,plain,feed8]=1.0830
+Q4 NR0=1 r7 VETO spread veto on q4_k glm gate/up (468.3/444.3) load 4.8/4.3 30s
+Q4 NR0=2 r7 ok  load 4.3/4.4 41s  ratio[0,plain,feed8]=1.0672
+Q4 NR0=4 r7 ok  load 4.4/3.1 44s  ratio[0,plain,feed8]=0.9776
+Q4 NR0=2 r8 ok  load 3.1/2.5 45s  ratio[0,plain,feed8]=1.0652
+Q4 NR0=4 r8 VETO spread veto on q4_k glm gate/up (305.5/289.6) load 2.5/3.3 31s
+Q4 NR0=1 r8 VETO spread veto on q4_k (365.7/334.0) load 3.3/3.0 31s
+30/39 processes admitted
+  Q4 vs NR0=2: hold  q4_k: -29.80% (0/2 rounds)  q4_k control: -15.26% (0/2 rounds)  q4_k 30b gate/up: -14.12% (0/2 rounds)  q4_k glm gate/up: -15.46% (0/2 rounds)
+  Q4 vs NR0=2: hold  q4_k: -9.01% (0/5 rounds)  q4_k control: -12.11% (0/5 rounds)  q4_k 30b gate/up: -14.55% (0/5 rounds)  q4_k glm gate/up: -11.11% (0/5 rounds)

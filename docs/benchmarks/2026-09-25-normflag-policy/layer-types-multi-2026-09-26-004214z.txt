@@ -1,0 +1,69 @@
+# layer-types.py on the local MoE models, 2026-09-26T00:42:14Z
+# command: python3 layer-types.py <model>  (a split GGUF stores only its own tensor infos per part, so every part is read and unioned)
+
+### qwen3-30b-a3b-Q4_K_M.gguf
+/Users/themoretheless/Documents/Sources/allpaka/models/qwen3-30b-a3b-Q4_K_M.gguf
+  arch=qwen3moe layers=48 tensors=579 parts=1 dense_first=0 experts=128 experts_used=8 hidden=2048 head_kv=4
+  attn_q           Q4_K:48
+  attn_k           Q4_K:48
+  attn_v           Q6_K:24  Q4_K:24
+  ffn_down_exps    Q6_K:24  Q4_K:24
+  all tensors      {'Q6_K': 49, 'F32': 241, 'Q4_K': 289}   <- compare against the engine's own `tensor-types:` census; a mismatch here means the type table above is mis-numbered, not that the model changed
+
+  MoE layers 48/48 (expert tensors present)
+  refs.normflag can be TRUE in 24/48 MoE layers (q,k,v all matvec_q4_k_mv); the RFUSE/RMT/RTOPK router fold is reachable in the other 24
+    -> RFUSE/RMT/RTOPK under the shipped policy: 24 dispatches/token, 7680 over TG=320
+    -> same knobs on every MoE layer (NORMFLAG=0): 48 dispatches/token, 15360 over TG=320
+  down is sw_capable (no standalone swiglu) in 24/48 MoE layers; DCOMB saves a dispatch only where swiglu is standalone: 24 layers, 7680 over TG=320
+  caveat: this maps a down *dtype* to sw_capable, while the gate reads the chosen kernel name; q4_k/q8_0 select the _mv variant by row shape. The dtype set above lists both spellings as capable, so a wrong count here can only come from a format whose kernel name this map does not know.
+
+### GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf
+/Users/themoretheless/Documents/Sources/allpaka/models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf
+  arch=glm4moe layers=47 tensors=803 parts=2 dense_first=1 experts=128 experts_used=8 hidden=4096 head_kv=8
+  attn_q           Q4_K:47
+  attn_k           Q4_K:47
+  attn_v           Q4_K:24  Q6_K:23
+  ffn_down_exps    Q5_0:24  Q8_0:22
+  all tensors      {'Q6_K': 24, 'F32': 331, 'Q4_K': 263, 'Q8_0': 69, 'Q5_K': 92, 'Q5_0': 24}   <- compare against the engine's own `tensor-types:` census; a mismatch here means the type table above is mis-numbered, not that the model changed
+
+  MoE layers 46/47 (expert tensors present)
+  refs.normflag can be TRUE in 24/46 MoE layers (q,k,v all matvec_q4_k_mv); the RFUSE/RMT/RTOPK router fold is reachable in the other 22
+    -> RFUSE/RMT/RTOPK under the shipped policy: 22 dispatches/token, 7040 over TG=320
+    -> same knobs on every MoE layer (NORMFLAG=0): 46 dispatches/token, 14720 over TG=320
+  down is sw_capable (no standalone swiglu) in 22/46 MoE layers; DCOMB saves a dispatch only where swiglu is standalone: 24 layers, 7680 over TG=320
+  46/46 MoE layers have a shared expert, and the down+combine fold's gate requires shared.is_none() - so on this model DCOMB is not built at all and the line above is about SWFUSE only
+  caveat: this maps a down *dtype* to sw_capable, while the gate reads the chosen kernel name; q4_k/q8_0 select the _mv variant by row shape. The dtype set above lists both spellings as capable, so a wrong count here can only come from a format whose kernel name this map does not know.
+
+### q235-00001-of-00002.gguf
+/Users/themoretheless/Documents/Sources/allpaka/models/q235-00001-of-00002.gguf
+  arch=qwen3moe layers=94 tensors=1131 parts=2 dense_first=0 experts=128 experts_used=8 hidden=4096 head_kv=4
+  attn_q           Q4_K:90  Q5_K:4
+  attn_k           Q4_K:90  Q5_K:4
+  attn_v           Q4_K:90  Q5_K:4
+  ffn_down_exps    Q3_K:79  Q4_K:15
+  all tensors      {'Q6_K': 11, 'F32': 471, 'Q4_K': 366, 'Q3_K': 79, 'Q2_K': 188, 'Q5_K': 16}   <- compare against the engine's own `tensor-types:` census; a mismatch here means the type table above is mis-numbered, not that the model changed
+
+  MoE layers 94/94 (expert tensors present)
+  refs.normflag can be TRUE in 90/94 MoE layers (q,k,v all matvec_q4_k_mv); the RFUSE/RMT/RTOPK router fold is reachable in the other 4
+    -> RFUSE/RMT/RTOPK under the shipped policy: 4 dispatches/token, 1280 over TG=320
+    -> same knobs on every MoE layer (NORMFLAG=0): 94 dispatches/token, 30080 over TG=320
+  down is sw_capable (no standalone swiglu) in 94/94 MoE layers; DCOMB saves a dispatch only where swiglu is standalone: 0 layers, 0 over TG=320
+  caveat: this maps a down *dtype* to sw_capable, while the gate reads the chosen kernel name; q4_k/q8_0 select the _mv variant by row shape. The dtype set above lists both spellings as capable, so a wrong count here can only come from a format whose kernel name this map does not know.
+
+### Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+/Users/themoretheless/Documents/Sources/allpaka/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+  arch=qwen35moe layers=40 tensors=733 parts=1 dense_first=0 experts=256 experts_used=8 hidden=2048 head_kv=2
+  attn_q           Q8_0:10
+  attn_k           Q8_0:10
+  attn_v           Q8_0:10
+  ffn_down_exps    Q5_K:37  Q6_K:3
+  all tensors      {'Q6_K': 4, 'F32': 361, 'Q8_0': 251, 'Q5_K': 37, 'Q4_K': 80}   <- compare against the engine's own `tensor-types:` census; a mismatch here means the type table above is mis-numbered, not that the model changed
+  30 MoE layers are GDN (linear-attention: attn_qkv + attn_gate, no q/k/v). refs.normflag cannot be TRUE there, so the router folds are reachable in them by a different route than the quant split.
+
+  MoE layers 40/40 (expert tensors present)
+  refs.normflag can be TRUE in 0/40 MoE layers (q,k,v all matvec_q4_k_mv); the RFUSE/RMT/RTOPK router fold is reachable in the other 40
+    -> RFUSE/RMT/RTOPK under the shipped policy: 40 dispatches/token, 12800 over TG=320
+    -> same knobs on every MoE layer (NORMFLAG=0): 40 dispatches/token, 12800 over TG=320
+  down is sw_capable (no standalone swiglu) in 37/40 MoE layers; DCOMB saves a dispatch only where swiglu is standalone: 3 layers, 960 over TG=320
+  40/40 MoE layers have a shared expert, and the down+combine fold's gate requires shared.is_none() - so on this model DCOMB is not built at all and the line above is about SWFUSE only
+  caveat: this maps a down *dtype* to sw_capable, while the gate reads the chosen kernel name; q4_k/q8_0 select the _mv variant by row shape. The dtype set above lists both spellings as capable, so a wrong count here can only come from a format whose kernel name this map does not know.

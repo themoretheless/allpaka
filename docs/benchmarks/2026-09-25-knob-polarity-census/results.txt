@@ -1,0 +1,155 @@
+# Polarity census of the Metal decode knobs
+
+Captured 2026-09-25 21:43 UTC at tree `dcdc131`, no GPU and no build.
+Reproduce: `python3 docs/benchmarks/2026-09-25-knob-polarity-census/census.py`
+
+Scope: `crates/allpaka-backend/src/gpu/metal.rs`, `gpu/msl/`, `runtime.rs`, `profile.rs`
+(the CUDA backend has its own env dialect and is excluded).
+
+## Per-name classification (`unclassified` rows are hand-read below)
+
+| `ALLPAKA_ATTN_MM` | `crates/allpaka-backend/src/gpu/metal.rs:15885` -> default ON, `=0` off, any other value ON |
+| `ALLPAKA_ATTN_MV` | `crates/allpaka-backend/src/gpu/metal.rs:15909` -> default ON, `=0` off, any other value ON |
+| `ALLPAKA_ATTN_S8` | `crates/allpaka-backend/src/gpu/metal.rs:15914` -> numeric sweep (explicit default) |
+| `ALLPAKA_ATTN_SPLIT` | `crates/allpaka-backend/src/runtime.rs:38` -> unclassified; `crates/allpaka-backend/src/profile.rs:81` -> policy bool via parse_bool |  <-- MIXED
+| `ALLPAKA_ATTN_T4` | `crates/allpaka-backend/src/gpu/metal.rs:15893` -> numeric sweep (explicit default) |
+| `ALLPAKA_ATTN_ZERO` | `crates/allpaka-backend/src/gpu/metal.rs:13393` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_CFUSE` | `crates/allpaka-backend/src/gpu/metal.rs:15981` -> opt-in `=1` |
+| `ALLPAKA_DCOMB` | `crates/allpaka-backend/src/gpu/metal.rs:16043` -> default ON, `=0` off, any other value ON |
+| `ALLPAKA_DCOMB_SW` | `crates/allpaka-backend/src/gpu/metal.rs:16038` -> opt-in `=1` |
+| `ALLPAKA_DECODE_GUFUSE` | `crates/allpaka-backend/src/gpu/metal.rs:15990` -> opt-in `=1` |
+| `ALLPAKA_DECODE_SERIAL` | `crates/allpaka-backend/src/runtime.rs:41` -> opt-in `=1`; `crates/allpaka-backend/src/profile.rs:69` -> policy bool via parse_bool |  <-- MIXED
+| `ALLPAKA_DECODE_SPLIT` | `crates/allpaka-backend/src/gpu/metal.rs:11176` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_DUAL` | `crates/allpaka-backend/src/gpu/metal.rs:16371` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_FFN_SPLIT` | `crates/allpaka-backend/src/gpu/metal.rs:16532` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_FFN_TIME` | `crates/allpaka-backend/src/gpu/metal.rs:14743` -> presence = ON (`=0` turns it ON); `crates/allpaka-backend/src/gpu/metal.rs:14937` -> presence = ON (`=0` turns it ON); `crates/allpaka-backend/src/gpu/metal.rs:16979` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_GDN_ZERO` | `crates/allpaka-backend/src/gpu/metal.rs:13006` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_GPU_COUNTERS` | `crates/allpaka-backend/src/gpu/metal.rs:15676` -> opt-in `=1` |
+| `ALLPAKA_GPU_ROUTE` | `crates/allpaka-backend/src/runtime.rs:44` -> default ON, `=0` off, any other value ON; `crates/allpaka-backend/src/profile.rs:72` -> policy bool via parse_bool |  <-- MIXED
+| `ALLPAKA_GPU_WINDOW_GIB` | `crates/allpaka-backend/src/gpu/metal.rs:8688` -> numeric sweep |
+| `ALLPAKA_LPR_DIV` | `crates/allpaka-backend/src/gpu/metal.rs:9453` -> numeric sweep (explicit default) |
+| `ALLPAKA_MEGA_DEBUG` | `crates/allpaka-backend/src/gpu/metal.rs:10327` -> opt-in `=1` |
+| `ALLPAKA_MM64` | `crates/allpaka-backend/src/gpu/metal.rs:9542` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_MMID_K64` | `crates/allpaka-backend/src/gpu/metal.rs:16153` -> default OFF, any other value ON |
+| `ALLPAKA_MMID_RTILES` | `crates/allpaka-backend/src/gpu/metal.rs:16391` -> unclassified |
+| `ALLPAKA_MM_BN32` | `crates/allpaka-backend/src/gpu/metal.rs:9546` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_MM_BN64` | `crates/allpaka-backend/src/gpu/metal.rs:9544` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_MM_K64` | `crates/allpaka-backend/src/gpu/metal.rs:16138` -> default OFF, any other value ON |
+| `ALLPAKA_MM_LL` | `crates/allpaka-backend/src/gpu/metal.rs:16158` -> default ON, `=0` off, any other value ON |
+| `ALLPAKA_MM_LL_F32` | `crates/allpaka-backend/src/gpu/metal.rs:9606` -> opt-in `=1` |
+| `ALLPAKA_MM_PIPE` | `crates/allpaka-backend/src/runtime.rs:45` -> default ON, `=0` off, any other value ON; `crates/allpaka-backend/src/profile.rs:73` -> policy bool via parse_bool |  <-- MIXED
+| `ALLPAKA_MOE_ZERO` | `crates/allpaka-backend/src/gpu/metal.rs:13422` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_MV_ID` | `crates/allpaka-backend/src/gpu/metal.rs:9479` -> default ON, `=0` off, any other value ON |
+| `ALLPAKA_MV_TG` | `crates/allpaka-backend/src/gpu/metal.rs:9467` -> numeric sweep (explicit default) |
+| `ALLPAKA_NORMFLAG` | `crates/allpaka-backend/src/runtime.rs:37` -> opt-out: default ON, `=0` reverts; `crates/allpaka-backend/src/profile.rs:68` -> policy bool via parse_bool |  <-- MIXED
+| `ALLPAKA_NO_BARRIER` | `crates/allpaka-backend/src/gpu/metal.rs:16174` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_NO_EXPERT_ROWS` | `crates/allpaka-backend/src/gpu/metal.rs:12688` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_NO_GPU` | `crates/allpaka-backend/src/gpu/metal.rs:8480` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_NO_STAGE_BARRIER` | `crates/allpaka-backend/src/gpu/metal.rs:16168` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_PF_DEFER` | `crates/allpaka-backend/src/runtime.rs:42` -> default ON, `=0` off, any other value ON; `crates/allpaka-backend/src/profile.rs:70` -> policy bool via parse_bool |  <-- MIXED
+| `ALLPAKA_PF_ONEBUF` | `crates/allpaka-backend/src/runtime.rs:43` -> default ON, `=0` off, any other value ON; `crates/allpaka-backend/src/profile.rs:71` -> policy bool via parse_bool |  <-- MIXED
+| `ALLPAKA_PF_SPLIT` | `crates/allpaka-backend/src/gpu/metal.rs:14471` -> presence = ON (`=0` turns it ON); `crates/allpaka-backend/src/gpu/metal.rs:15122` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_Q2_ILV` | `crates/allpaka-backend/src/gpu/metal.rs:9384` -> presence = OFF (any value turns it OFF); `crates/allpaka-backend/src/gpu/metal.rs:9442` -> presence = ON (`=0` turns it ON); `crates/allpaka-backend/src/gpu/metal.rs:15953` -> presence = ON (`=0` turns it ON) |  <-- MIXED
+| `ALLPAKA_Q2_MV` | `crates/allpaka-backend/src/gpu/metal.rs:15696` -> opt-in `=1` |
+| `ALLPAKA_Q2_NR0` | `crates/allpaka-backend/src/gpu/metal.rs:9389` -> numeric sweep (explicit default) |
+| `ALLPAKA_Q3_MV` | `crates/allpaka-backend/src/gpu/metal.rs:15709` -> default ON, `=0` off, any other value ON |
+| `ALLPAKA_Q3_PROBE` | `crates/allpaka-backend/src/gpu/metal.rs:15743` -> unclassified |
+| `ALLPAKA_Q4_MV` | `crates/allpaka-backend/src/gpu/metal.rs:15803` -> default ON, `=0` off, any other value ON |
+| `ALLPAKA_Q4_NR0` | `crates/allpaka-backend/src/gpu/metal.rs:16072` -> numeric sweep (explicit default) |
+| `ALLPAKA_Q5_0_MV` | `crates/allpaka-backend/src/gpu/metal.rs:15868` -> default ON, `=0` off, any other value ON |
+| `ALLPAKA_Q5_MV` | `crates/allpaka-backend/src/gpu/metal.rs:15836` -> default ON, `=0` off, any other value ON |
+| `ALLPAKA_Q5_NR0` | `crates/allpaka-backend/src/gpu/metal.rs:16087` -> numeric sweep (explicit default) |
+| `ALLPAKA_Q6_MV` | `crates/allpaka-backend/src/gpu/metal.rs:15819` -> default ON, `=0` off, any other value ON |
+| `ALLPAKA_Q8_MV` | `crates/allpaka-backend/src/gpu/metal.rs:15852` -> default ON, `=0` off, any other value ON |
+| `ALLPAKA_Q8_NR0` | `crates/allpaka-backend/src/gpu/metal.rs:16127` -> numeric sweep (explicit default) |
+| `ALLPAKA_RFUSE` | `crates/allpaka-backend/src/gpu/metal.rs:16011` -> opt-in `=1` |
+| `ALLPAKA_RMT` | `crates/allpaka-backend/src/gpu/metal.rs:16023` -> opt-in `=1` |
+| `ALLPAKA_ROWS_DEBUG` | `crates/allpaka-backend/src/gpu/metal.rs:13576` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_RTOPK` | `crates/allpaka-backend/src/gpu/metal.rs:16001` -> opt-in `=1` |
+| `ALLPAKA_SERIAL` | `crates/allpaka-backend/src/gpu/metal.rs:16175` -> presence = ON (`=0` turns it ON); `crates/allpaka-backend/src/gpu/metal.rs:16185` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_SHARED_STAGGER` | `crates/allpaka-backend/src/gpu/metal.rs:16062` -> opt-in `=1` |
+| `ALLPAKA_SHARED_TAIL` | `crates/allpaka-backend/src/gpu/metal.rs:16051` -> opt-in `=1` |
+| `ALLPAKA_SKIP` | `crates/allpaka-backend/src/gpu/metal.rs:15942` -> value list (a selector, not a flag) |
+| `ALLPAKA_SWFUSE` | `crates/allpaka-backend/src/gpu/metal.rs:10709` -> unclassified; `crates/allpaka-backend/src/gpu/metal.rs:10820` -> unclassified |
+| `ALLPAKA_TOKENBUF_DEBUG` | `crates/allpaka-backend/src/gpu/metal.rs:10510` -> presence = ON (`=0` turns it ON) |
+| `ALLPAKA_VERIFY_DEBUG` | `crates/allpaka-backend/src/gpu/metal.rs:12936` -> presence = ON (`=0` turns it ON) |
+
+## count per class
+- default OFF, any other value ON: 2 (ALLPAKA_MMID_K64, ALLPAKA_MM_K64)
+- default ON, `=0` off, any other value ON: 11 (ALLPAKA_ATTN_MM, ALLPAKA_ATTN_MV, ALLPAKA_DCOMB, ALLPAKA_MM_LL, ALLPAKA_MV_ID, ALLPAKA_Q3_MV, ALLPAKA_Q4_MV, ALLPAKA_Q5_0_MV, ALLPAKA_Q5_MV, ALLPAKA_Q6_MV, ALLPAKA_Q8_MV)
+- default ON, `=0` off, any other value ON / policy bool via parse_bool: 4 (ALLPAKA_GPU_ROUTE, ALLPAKA_MM_PIPE, ALLPAKA_PF_DEFER, ALLPAKA_PF_ONEBUF)
+- numeric sweep: 1 (ALLPAKA_GPU_WINDOW_GIB)
+- numeric sweep (explicit default): 8 (ALLPAKA_ATTN_S8, ALLPAKA_ATTN_T4, ALLPAKA_LPR_DIV, ALLPAKA_MV_TG, ALLPAKA_Q2_NR0, ALLPAKA_Q4_NR0, ALLPAKA_Q5_NR0, ALLPAKA_Q8_NR0)
+- opt-in `=1`: 12 (ALLPAKA_CFUSE, ALLPAKA_DCOMB_SW, ALLPAKA_DECODE_GUFUSE, ALLPAKA_GPU_COUNTERS, ALLPAKA_MEGA_DEBUG, ALLPAKA_MM_LL_F32, ALLPAKA_Q2_MV, ALLPAKA_RFUSE, ALLPAKA_RMT, ALLPAKA_RTOPK, ALLPAKA_SHARED_STAGGER, ALLPAKA_SHARED_TAIL)
+- opt-in `=1` / policy bool via parse_bool: 1 (ALLPAKA_DECODE_SERIAL)
+- opt-out: default ON, `=0` reverts / policy bool via parse_bool: 1 (ALLPAKA_NORMFLAG)
+- policy bool via parse_bool / unclassified: 1 (ALLPAKA_ATTN_SPLIT)
+- presence = OFF (any value turns it OFF) / presence = ON (`=0` turns it ON): 1 (ALLPAKA_Q2_ILV)
+- presence = ON (`=0` turns it ON): 19 (ALLPAKA_ATTN_ZERO, ALLPAKA_DECODE_SPLIT, ALLPAKA_DUAL, ALLPAKA_FFN_SPLIT, ALLPAKA_FFN_TIME, ALLPAKA_GDN_ZERO, ALLPAKA_MM64, ALLPAKA_MM_BN32, ALLPAKA_MM_BN64, ALLPAKA_MOE_ZERO, ALLPAKA_NO_BARRIER, ALLPAKA_NO_EXPERT_ROWS, ALLPAKA_NO_GPU, ALLPAKA_NO_STAGE_BARRIER, ALLPAKA_PF_SPLIT, ALLPAKA_ROWS_DEBUG, ALLPAKA_SERIAL, ALLPAKA_TOKENBUF_DEBUG, ALLPAKA_VERIFY_DEBUG)
+- unclassified: 3 (ALLPAKA_MMID_RTILES, ALLPAKA_Q3_PROBE, ALLPAKA_SWFUSE)
+- value list (a selector, not a flag): 1 (ALLPAKA_SKIP)
+
+65 names with an env read in scope
+presence-based, so `=0` reads as ON: 20 (ALLPAKA_ATTN_ZERO, ALLPAKA_DECODE_SPLIT, ALLPAKA_DUAL, ALLPAKA_FFN_SPLIT, ALLPAKA_FFN_TIME, ALLPAKA_GDN_ZERO, ALLPAKA_MM64, ALLPAKA_MM_BN32, ALLPAKA_MM_BN64, ALLPAKA_MOE_ZERO, ALLPAKA_NO_BARRIER, ALLPAKA_NO_EXPERT_ROWS, ALLPAKA_NO_GPU, ALLPAKA_NO_STAGE_BARRIER, ALLPAKA_PF_SPLIT, ALLPAKA_Q2_ILV, ALLPAKA_ROWS_DEBUG, ALLPAKA_SERIAL, ALLPAKA_TOKENBUF_DEBUG, ALLPAKA_VERIFY_DEBUG)
+
+---
+
+## Amendment 2026-09-25T23:31Z - the `policy bool via parse_bool` class could label a knob whose read never calls parse_bool
+
+Found by re-reading the tools for instruments that cannot speak, the same sweep that
+turned up the dead drift veto in `../2026-09-25-glm-shared-stagger/`. The census entry
+was the bare word:
+
+    ("policy bool via parse_bool", r"parse_bool"),
+
+Every other idiom pattern interpolates the knob name into its regex; this one did not, so
+it matched any 12-line window in which the word `parse_bool` happened to appear. In
+`crates/allpaka-backend/src/profile.rs` one `parse_bool(&value)` call serves a six-name
+loop, and the function definition `fn parse_bool(value: &str)` sits eight lines below the
+last read in that loop - close enough to catch `ALLPAKA_ATTN_SPLIT` at
+`profile.rs:81`, which is not a bool at either of its sites:
+
+    policy.attention_split = std::env::var("ALLPAKA_ATTN_SPLIT")
+        .ok()
+        .and_then(|v| v.parse().ok());          # runtime.rs:38
+    resolved = resolved.override_attention_split(value.parse().ok());   # profile.rs:81
+
+So the row above (`runtime.rs:38 -> unclassified; profile.rs:81 -> policy bool via
+parse_bool`, marked MIXED) was wrong in both halves, and its MIXED mark was an artefact:
+the two sites agree, they read a numeric selector. The corrected row, after the pattern
+fix, is
+
+    | `ALLPAKA_ATTN_SPLIT` | runtime.rs:38 -> numeric parse (a selector, not a flag);
+      profile.rs:81 -> numeric parse (a selector, not a flag) |            (not MIXED)
+
+and the class census gains
+
+    - numeric parse (a selector, not a flag): 1 (ALLPAKA_ATTN_SPLIT)
+
+replacing
+
+    - policy bool via parse_bool / unclassified: 1 (ALLPAKA_ATTN_SPLIT)
+
+What changed in `census.py`: the `parse_bool` class now has two name-anchored patterns -
+the tuple form `("ALLPAKA_X", "field")` that a `for (env, field) in [...]` loop reads
+through `env::var(env)` + `parse_bool(&value)`, and a direct read whose next 240
+characters call `parse_bool(&` - the `&` being what keeps a knob from matching the
+*definition* below it rather than a call. A `numeric parse (a selector, not a flag)` class
+was added, ordered after both existing numeric-sweep patterns so that a `.parse()` with an
+explicit default keeps the class that names the default.
+
+Re-ran after the fix and diffed against the table above: this is the only classification
+that moves. The six genuine loop knobs (`ALLPAKA_NORMFLAG`, `ALLPAKA_DECODE_SERIAL`,
+`ALLPAKA_PF_DEFER`, `ALLPAKA_PF_ONEBUF`, `ALLPAKA_GPU_ROUTE`, `ALLPAKA_MM_PIPE`) keep
+their `policy bool via parse_bool` second site and their MIXED marks, which is the finding
+this table exists to make - `ALLPAKA_GPU_ROUTE=2`, say, means ON in `runtime.rs:44` and
+leaves the profile override untouched, so the two reads disagree about what a value means.
+The one number in `docs/decode-opts.md` that could be affected is its
+"instrument, not lever" row listing `ALLPAKA_ATTN_SPLIT` with default `off`: checked, and
+it stays right, because unset parses to `None` and the policy keeps its default.
+
+Not republished above: the table's line numbers are the 21:43Z capture at tree `dcdc131`,
+and `crates/allpaka-backend/src/gpu/metal.rs` in this worktree has moved since (another
+session is editing it), so a re-run today prints the same classifications at shifted
+`metal.rs` line numbers. To reproduce this census at the published tree, check out
+`dcdc131` and run the command in the header from there.

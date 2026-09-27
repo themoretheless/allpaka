@@ -1,0 +1,12 @@
+../../../models/qwen3-30b-a3b-Q4_K_M.gguf
+  arch=qwen3moe layers=48 tensors=579 experts=128 experts_used=8 hidden=2048 head_kv=4
+  attn_q           Q4_K:48
+  attn_k           Q4_K:48
+  attn_v           Q6_K:24  Q4_K:24
+  ffn_down_exps    Q6_K:24  Q4_K:24
+  all tensors      {'Q6_K': 49, 'F32': 241, 'Q4_K': 289}   <- compare against the engine's own `tensor-types:` census; a mismatch here means the type table above is mis-numbered, not that the model changed
+
+  refs.normflag can be TRUE in 24/48 layers (q,k,v all matvec_q4_k_mv); the RFUSE/RMT/RTOPK router fold is reachable in the other 24
+    -> RFUSE/RMT/RTOPK under the shipped policy: 24 dispatches/token, 7680 over TG=320
+    -> same knobs with NORMFLAG=0 (all layers): 48 dispatches/token, 15360 over TG=320
+  down is sw_capable (no standalone swiglu) in 24/48 layers; DCOMB saves a dispatch only where swiglu is standalone: 24 layers, 7680 over TG=320

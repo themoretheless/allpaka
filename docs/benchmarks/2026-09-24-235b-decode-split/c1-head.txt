@@ -1,0 +1,60 @@
+airbug: traces and logs -> http://localhost:4318
+prewarmed 82.7 GiB of weights in 13.5s
+metal: Apple M4 Max attached, 82.7 GiB of weights shared with the GPU in 3 windows (maxBufferLength 32.0 GiB)
+engine bench: qwen3-235b-a22b-instruct-2507-Q2_K_XL (94 layers, qwen3moe, MoE)
+  capabilities:
+    model: arch=qwen3moe layers=94 moe=true
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: max-performance
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=3 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=471 bytes=0.19 GiB matmul-kernel=yes
+      Q2K: tensors=188 bytes=46.27 GiB matmul-kernel=yes
+      Q3K: tensors=79 bytes=25.46 GiB matmul-kernel=yes
+      Q4K: tensors=366 bytes=9.84 GiB matmul-kernel=yes
+      Q5K: tensors=16 bytes=0.18 GiB matmul-kernel=yes
+      Q6K: tensors=11 bytes=0.73 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=198
+  prefill   480 tok in   2.93 s     164.1 tok/s
+  gpu during prefill: 2 waits, 941 dispatches, encode 1 ms, wait 2922 ms of 2925 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 2921 ms, scheduling 0 ms, round trips + idle 0 ms (of 2922 ms waited)
+  prefill phases, ms/token:
+    embed                  0.0  ( 0.0%)
+    attention              0.0  ( 0.0%)
+    ffn (experts)          0.0  ( 0.0%)
+    router                 0.0  ( 0.0%)
+    unaccounted            6.1  (99.9%)
+decode profile, ms/token (GPU counters, one submit):
+  resnorm     2.450 ( 5.7%)
+  qkv         5.206 (12.2%)
+  attend      0.699 ( 1.6%)
+  wo          4.417 (10.3%)
+  router      1.731 ( 4.0%)
+  gate_up    11.843 (27.7%)
+  down       16.037 (37.5%)
+  combine     0.347 ( 0.8%)
+  swiglu      0.039 ( 0.1%)
+  head        0.000 ( 0.0%)
+  argmax      0.000 ( 0.0%)
+  decode     64 tok in   3.19 s      20.1 tok/s
+  gpu path decode: attempts=64 successes=64 declines=0
+  gpu during decode: 64 waits, 84352 dispatches, encode 116 ms, wait 3063 ms of 3190 ms total (0% outside the GPU)
+  gpu clock during decode: executing 3051 ms, scheduling 7 ms, round trips + idle 6 ms (of 3063 ms waited)
+  decode phases, ms/token:
+    experts               31.1  (62.4%)
+    qkv                    5.4  (10.8%)
+    attention              5.3  (10.7%)
+    norm                   2.6  ( 5.1%)
+    router                 1.8  ( 3.6%)
+    unaccounted            3.7  ( 7.4%)
+  context at end: 65 tokens (attention cost grows with this)
+  benchmark report: docs/benchmarks/2026-09-24-235b-decode-split/c1-head.json
+airbug bench run: target/allpaka-bench/airbug-1790280592751884000-69510

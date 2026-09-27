@@ -1,0 +1,80 @@
+    Finished `release` profile [optimized] target(s) in 0.08s
+     Running tests/gpu_ffnbench.rs (target/release/build/allpaka-backend/402d2f60b4b17b8a/out/gpu_ffnbench-402d2f60b4b17b8a)
+
+running 1 test
+test indexed_matvecs_report_effective_bandwidth ... metal: Apple M4 Max attached, 0.4 GiB of weights shared with the GPU
+--- indexed x8, 384/420 MB streamed per format ---
+q2_k gate/up   [1536,4096] sets=25 contig  | feed=1 257.9 best 257.5 med 1.00x | feed=8 271.6 best 271.4 med 1.05x | feed=64 272.9 best 272.8 med 1.06x
+q2_k gate/up   [1536,4096] sets=25 scatter | feed=1 260.2 best 259.3 med 1.00x | feed=8 272.1 best 272.1 med 1.05x | feed=64 273.5 best 273.0 med 1.05x
+q2_k gate/up   [1536,4096] sets=25: 257.9 GB/s best, 257.5 median, 786 Gweight/s, 1.00x spread
+q3_k down      [4096,1536] sets=19 contig  | feed=1 221.3 best 221.1 med 1.00x | feed=8 226.5 best 226.0 med 1.02x | feed=64 227.1 best 226.9 med 1.03x
+q3_k down      [4096,1536] sets=19 scatter | feed=1 221.9 best 221.9 med 1.00x | feed=8 226.2 best 226.1 med 1.02x | feed=64 227.7 best 227.6 med 1.03x
+q3_k down      [4096,1536] sets=19: 260.2 GB/s best, 259.3 median, 605 Gweight/s, 1.00x spread
+q4_k           [4096,1536] sets=15 contig  | feed=1 472.2 best 472.0 med 1.00x | feed=8 527.7 best 527.6 med 1.12x | feed=64 533.2 best 532.4 med 1.13x
+q4_k           [4096,1536] sets=15 scatter | feed=1 477.1 best 477.0 med 1.00x | feed=8 528.7 best 527.6 med 1.11x | feed=64 530.1 best 529.9 med 1.11x
+q4_k           [4096,1536] sets=15: 221.3 GB/s best, 221.1 median, 394 Gweight/s, 1.00x spread
+q5_k           [4096,1536] sets=12 contig  | feed=1 345.0 best 345.0 med 1.00x | feed=8 354.1 best 353.1 med 1.03x | feed=64 354.5 best 353.5 med 1.03x
+q5_k           [4096,1536] sets=12 scatter | feed=1 346.2 best 346.0 med 1.00x | feed=8 352.2 best 352.1 med 1.02x | feed=64 353.5 best 353.4 med 1.02x
+q5_k           [4096,1536] sets=12: 221.9 GB/s best, 221.9 median, 323 Gweight/s, 1.00x spread
+q8_0           [4096,1536] sets=8 contig  | feed=1 495.1 best 495.1 med 1.00x | feed=8 504.2 best 503.8 med 1.02x | feed=64 503.4 best 502.3 med 1.02x
+q8_0           [4096,1536] sets=8 scatter | feed=1 495.5 best 495.3 med 1.00x | feed=8 501.7 best 501.0 med 1.01x | feed=64 501.1 best 501.0 med 1.01x
+q8_0           [4096,1536] sets=8: 472.2 GB/s best, 472.0 median, 444 Gweight/s, 1.00x spread
+q2_k control   [4096,1536] sets=25 contig  | feed=1 138.6 best 138.5 med 1.00x | feed=8 139.5 best 139.2 med 1.01x | feed=64 139.5 best 139.3 med 1.01x
+q2_k control   [4096,1536] sets=25 scatter | feed=1 138.9 best 138.6 med 1.00x | feed=8 139.3 best 139.3 med 1.00x | feed=64 139.3 best 139.1 med 1.00x
+q2_k control   [4096,1536] sets=25: 477.1 GB/s best, 477.0 median, 1454 Gweight/s, 1.00x spread
+q4_k control   [1536,4096] sets=15 contig  | feed=1 468.5 best 467.3 med 1.00x | feed=8 576.1 best 575.6 med 1.23x | feed=64 589.0 best 586.5 med 1.26x
+q4_k control   [1536,4096] sets=15 scatter | feed=1 476.8 best 476.0 med 1.00x | feed=8 576.9 best 576.4 med 1.21x | feed=64 586.0 best 585.2 med 1.23x
+q4_k control   [1536,4096] sets=15: 345.0 GB/s best, 345.0 median, 613 Gweight/s, 1.00x spread
+q6_k down      [4096,1536] sets=10 contig  | feed=1 470.4 best 470.2 med 1.00x | feed=8 497.6 best 496.2 med 1.06x | feed=64 498.5 best 497.7 med 1.06x
+q6_k down      [4096,1536] sets=10 scatter | feed=1 473.6 best 473.4 med 1.00x | feed=8 496.2 best 496.0 med 1.05x | feed=64 498.0 best 497.9 med 1.05x
+q6_k down      [4096,1536] sets=10: 346.2 GB/s best, 346.0 median, 422 Gweight/s, 1.00x spread
+q6_k gate/up   [1536,4096] sets=10 contig  | feed=1 459.5 best 458.9 med 1.00x | feed=8 487.1 best 485.7 med 1.06x | feed=64 488.8 best 488.6 med 1.06x
+q6_k gate/up   [1536,4096] sets=10 scatter | feed=1 463.6 best 462.8 med 1.00x | feed=8 486.8 best 486.2 med 1.05x | feed=64 489.3 best 488.4 med 1.06x
+q6_k gate/up   [1536,4096] sets=10: 495.1 GB/s best, 495.1 median, 604 Gweight/s, 1.00x spread
+q5_0 down      [4096,1536] sets=12 contig  | feed=1 395.1 best 394.9 med 1.00x | feed=8 397.8 best 397.0 med 1.01x | feed=64 397.8 best 397.3 med 1.01x
+q5_0 down      [4096,1536] sets=12 scatter | feed=1 395.9 best 395.7 med 1.00x | feed=8 397.8 best 397.5 med 1.00x | feed=64 398.9 best 398.1 med 1.01x
+q5_0 down      [4096,1536] sets=12: 495.5 GB/s best, 495.3 median, 721 Gweight/s, 1.00x spread
+q5_0 glm down  [4096,1408] sets=13 contig  | feed=1 382.4 best 382.1 med 1.00x | feed=8 385.3 best 385.0 med 1.01x | feed=64 385.4 best 385.1 med 1.01x
+q5_0 glm down  [4096,1408] sets=13 scatter | feed=1 382.7 best 382.6 med 1.00x | feed=8 385.0 best 384.7 med 1.01x | feed=64 385.8 best 385.2 med 1.01x
+q5_0 glm down  [4096,1408] sets=13: 138.6 GB/s best, 138.5 median, 202 Gweight/s, 1.00x spread
+q4_k 30b gate/up [768,2048] sets=57 contig  | feed=1 386.4 best 384.9 med 1.00x | feed=8 449.2 best 448.5 med 1.16x | feed=64 444.8 best 444.3 med 1.15x
+q4_k 30b gate/up [768,2048] sets=57 scatter | feed=1 394.0 best 393.9 med 1.00x | feed=8 451.4 best 450.9 med 1.15x | feed=64 447.9 best 446.1 med 1.14x
+q4_k 30b gate/up [768,2048] sets=57: 138.9 GB/s best, 138.6 median, 247 Gweight/s, 1.00x spread
+q6_k 30b down  [2048,768] sets=40 contig  | feed=1 363.2 best 362.9 med 1.00x | feed=8 380.1 best 379.7 med 1.05x | feed=64 379.3 best 379.1 med 1.04x
+q6_k 30b down  [2048,768] sets=40 scatter | feed=1 365.6 best 365.2 med 1.00x | feed=8 381.0 best 379.5 med 1.04x | feed=64 379.3 best 379.2 med 1.04x
+q6_k 30b down  [2048,768] sets=40: 468.5 GB/s best, 467.3 median, 571 Gweight/s, 1.00x spread
+q4_k glm gate/up [1408,4096] sets=16 contig  | feed=1 464.8 best 462.8 med 1.00x | feed=8 574.5 best 574.5 med 1.24x | feed=64 587.9 best 587.6 med 1.26x
+q4_k glm gate/up [1408,4096] sets=16 scatter | feed=1 473.4 best 471.7 med 1.00x | feed=8 574.6 best 573.9 med 1.21x | feed=64 582.4 best 582.0 med 1.23x
+q4_k glm gate/up [1408,4096] sets=16: 476.8 GB/s best, 476.0 median, 848 Gweight/s, 1.00x spread
+q8_0 glm down  [4096,1408] sets=9 contig  | feed=1 493.4 best 492.1 med 1.00x | feed=8 506.7 best 506.4 med 1.03x | feed=64 506.9 best 506.0 med 1.03x
+q8_0 glm down  [4096,1408] sets=9 scatter | feed=1 494.9 best 494.8 med 1.00x | feed=8 506.6 best 505.0 med 1.02x | feed=64 506.4 best 505.9 med 1.02x
+q8_0 glm down  [4096,1408] sets=9: 470.4 GB/s best, 470.2 median, 443 Gweight/s, 1.00x spread
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 49.81s
+
+
+--- annotation, added 2026-09-25 ---
+
+The third line each shape prints ("LABEL [n_out,n_in] sets=N: G GB/s best, ...")
+is MIS-INDEXED in this raw capture and must not be quoted. It is shifted by one
+line: summary_i carries the numbers of row i-1, where rows are the contig and
+scatter arms in print order. The evidence is internal to the file - the first
+summary (257.9) matches its own contig row, and every one after it matches the
+previous row instead: the "q3_k down ... 260.2" line is q2_k's scatter, "q4_k ...
+221.3" is q3_k's contig, "q5_k ... 221.9" is q3_k's scatter, "q8_0 ... 472.2" is
+q4_k's contig, and so on to the end of the table. Only the two arms per shape are
+correct, and everything cited downstream from this run (corrections #10 onward,
+the swfuse rate table) reads those arm lines.
+
+Correct feed=1 contig values for the shapes named in the shifted lines, read off
+the arm lines of this same file:
+
+  q2_k gate/up [1536,4096]  257.9   q3_k down [4096,1536]   221.3
+  q4_k         [4096,1536]  472.2   q5_k    [4096,1536]     345.0
+  q8_0         [4096,1536]  495.1   q2_k control            138.6
+  q4_k control [1536,4096]  468.5   q6_k down [4096,1536]   470.4
+  q6_k gate/up [1536,4096]  459.5   q5_0 down [4096,1536]   395.1
+  q5_0 glm     [4096,1408]  382.4   q4_k 30b [768,2048]     386.4
+  q6_k 30b     [2048,768]   363.2   q4_k glm [1408,4096]    464.8
+  q8_0 glm     [4096,1408]  493.4

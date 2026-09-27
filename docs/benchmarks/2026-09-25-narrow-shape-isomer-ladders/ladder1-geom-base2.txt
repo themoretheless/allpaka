@@ -1,0 +1,21 @@
+
+running 1 test
+metal: Apple M4 Max attached, 0.4 GiB of weights shared with the GPU
+--- isomer ladders x8, region 395 MB, feeds [32], 10 passes ---
+
+### ladder 1: 6144 blocks/dispatch (6 MB per dispatch for q4_k)
+q4_k  [ 768,2048] nb=8   rows=6144   sets=57 | feed=32  361.5 best  347.5 med 0.677 rmax 0.625 rmed :: 352.3 361.5 352.6 347.5 301.9 329.1 315.5 304.0 330.7 348.1
+q6_k  [ 768,2048] nb=8   rows=6144   sets=40 | feed=32  381.0 best  353.1 med 0.713 rmax 0.642 rmed :: 370.0 381.0 362.6 353.1 327.4 312.4 307.4 290.7 328.4 365.3
+q8_0  [ 768,2048] nb=64  rows=6144   sets=31 | feed=32  560.5 best  538.7 med 1.000 rmax 1.000 rmed :: 538.7 534.2 556.2 550.3 529.7 536.8 539.2 488.0 529.2 560.5
+q4_k  [1024,1536] nb=6   rows=8192   sets=57 | feed=32  334.4 best  327.6 med 0.621 rmax 0.596 rmed :: 334.4 334.1 332.6 327.6 286.8 282.7 279.1 277.1 292.5 331.0
+q6_k  [1024,1536] nb=6   rows=8192   sets=40 | feed=32  385.9 best  350.5 med 0.717 rmax 0.658 rmed :: 385.9 368.8 364.2 350.5 327.0 322.4 319.8 303.1 344.7 367.9
+q8_0  [1024,1536] nb=48  rows=8192   sets=31 | feed=32  560.6 best  529.2 med 1.000 rmax 1.000 rmed :: 538.2 560.6 542.6 529.2 518.3 511.6 514.9 487.6 527.6 533.8
+q4_k  [1536,1024] nb=4   rows=12288  sets=57 | feed=32  354.5 best  339.1 med 0.649 rmax 0.607 rmed :: 349.0 348.2 348.4 339.1 317.4 313.4 311.0 305.4 320.8 354.5
+q6_k  [1536,1024] nb=4   rows=12288  sets=40 | feed=32  381.5 best  356.4 med 0.698 rmax 0.633 rmed :: 367.4 363.0 361.2 356.4 337.8 321.2 305.6 306.9 347.1 381.5
+q8_0  [1536,1024] nb=32  rows=12288  sets=31 | feed=32  575.2 best  546.2 med 1.000 rmax 1.000 rmed :: 565.6 575.2 570.5 569.4 510.8 515.9 524.2 516.6 539.1 546.2
+q4_k  [2048, 768] nb=3   rows=16384  sets=57 | feed=32  274.8 best  264.1 med 0.504 rmax 0.475 rmed :: 274.8 269.0 270.1 264.1 257.1 240.5 218.8 248.9 266.1 263.6
+q6_k  [2048, 768] nb=3   rows=16384  sets=40 | feed=32  306.3 best  290.9 med 0.562 rmax 0.512 rmed :: 306.3 293.0 302.1 280.2 268.7 259.1 245.5 269.5 290.9 303.8
+q8_0  [2048, 768] nb=24  rows=16384  sets=31 | feed=32  578.2 best  545.0 med 1.000 rmax 1.000 rmed :: 545.0 577.9 550.6 538.3 536.5 506.1 483.2 525.9 578.2 555.7
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 7.91s
+

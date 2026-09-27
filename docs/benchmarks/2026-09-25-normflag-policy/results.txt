@@ -1,0 +1,147 @@
+NORMFLAG and the router-fold family, priced against the shipped policy
+=======================================================================
+
+Run 2026-09-25T23:58:45Z - 2026-09-26T01:05Z, `.airbug-bench/normflag-run1`, on a
+detached HEAD worktree at git 8a162146e788 (binary sha256 6a4418fa1f0592...), model
+models/qwen3-30b-a3b-Q4_K_M.gguf, fingerprint 958a654869de1762, PP=3072 / TG=320,
+`ALLPAKA_PROFILE=max-performance`, `ALLPAKA_BENCH_SKIP_MTP=1`, `ALLPAKA_DECODE_GUFUSE`
+not set, MEGA not set. Design and criteria: `preregistration.txt`, including its
+2026-09-26T00:54Z amendment; the table below is `analyze.py` output, which re-derives
+pair admission under the corrected per-arm drift rule.
+
+    python3 drive.py --out .airbug-bench/normflag-run1        # 28 counted pairs
+    python3 analyze.py /tmp/allpaka-head/.airbug-bench/normflag-run1
+    python3 analyze.py --selfcheck                            # 7 fixture cases
+
+What every arm is, as measured before any pair was spent (`preregistration.txt`, probe
+step): `null` (NORMFLAG=1) and `off` (NORMFLAG=0) produce observables identical to the
+default `norm` in all five load-independent channels - token stream, dispatch count,
+waits, fast-path stats, residency - so both series are NOISE FLOOR, not policy results.
+`rf`, `rmt`, `k` each differ from the default by exactly -7680 dispatches over TG=320
+(-24/token), which is the reachability result the earlier "unreachable arm" README missed:
+`LayerRefs.normflag` is per layer and conjunctive, so the family is live with the policy
+bit at its default on 24 of this model's 48 layers.
+
+
+1. The instrument, first - criterion 2 FIRES
+---------------------------------------------
+
+12 null pairs (control 6 + policy 6), all admitted:
+
+  series    median ratio  range              below 1
+  control     1.051561    0.959417-1.109353   1/6
+  policy      1.010013    0.934763-1.110402   2/6
+  pooled      1.015337    0.934763-1.110402   3/12
+
+Pooled band 17.56 pp, median 1.53 pp off centre. Criterion 2 asked whether the
+instrument resolves better than the 3 % decision band; it does not today, so every level
+in section 2 is interval-only and the sign counts plus the dispatch census are what carry
+the verdicts. The published levels are quoted at the precision they were tested at: the
+band is 17.56 pp, not "about 3 %".
+
+The band is wide because of FAST outliers, which is worth recording since it changes what
+to fix. The `norm` arm is byte-stable in code and appears 40 times across the run:
+median 131.475 tok/s, deciles 129.7 / 130.1 / 130.7 / 131.0 / 131.5 / 132.5 / 134.3 /
+137.7 / 142.8, range 124.762-144.465, i.e. 4/40 readings above 140 and 1/40 below 128 -
+a +9.9 % right tail, not a left one. The tail has no load signature: the two fastest
+readings sit at load 13.17 and 7.06, and `windows` is 1 and `outside_gpu_pct` is 1 for all
+40. So on this machine, same binary, same model, same arm, a 320-token run spans 15.8 %
+peak-to-peak and the occasional fast run is what a paired ratio inherits. That is the
+mechanical reason the DCOMB file's remedy (TG=1280 on a machine without a desktop session)
+is still the standing requirement for any level below ~18 pp, and a 1.53 pp centre offset
+in the pooled null is small enough to state and not correct for beyond noting it.
+
+Position bias was checked rather than assumed, because with 28 pairs and AB/BA alternation
+it is the failure that would fake this whole result. Taking each pair as second-slot over
+first-slot, by the pair's own order:
+
+  series    AB median   BA median   product
+  control     0.9839     1.0867     1.0692
+  policy      0.9943     1.0332     1.0273
+  rfuse       1.2316     0.8223     1.0127
+  rmt         0.9936     1.0541     1.0474
+  rtopk       1.1610     0.8136     0.9446
+
+For `rfuse` and `rtopk` the two orders point in OPPOSITE directions with medians that are
+near reciprocals (products 1.0127 and 0.9446): the effect follows the ARM, not the slot.
+For the nulls both orders stay near 1, and for `rmt` they do too. No slot term is
+available to explain any of section 2.
+
+
+2. The family, priced
+---------------------
+
+All ratios are challenge/reference, so a negative is a loss. `disp/tok` is the structural
+census: dispatch delta divided by 320 tokens, identical in every admitted pair of a series.
+
+  series  pairs admitted (run's own flags)  median    mean      SEM     ms/token  disp/tok  below 1  vs pooled null
+  rfuse   11/12 (1)                       -18.07 %  -17.91 %  0.80 pp   +1.691     -24     11/11    P = 0.000269, BEATS the floor
+  rtopk    7/8  (3)                       -18.04 %  -17.22 %  1.16 pp   +1.664     -24      7/7     P = 0.00238,  BEATS the floor
+  rmt      7/8  (7)                        +0.82 %   +2.16 %  2.40 pp   -0.062     -24      2/7     P = 0.397,      INSIDE the floor
+
+  (ms/token is the median of the per-pair differences at full float. The rates line under
+  the table is a different estimator - the median of each arm's own readings - and the two
+  differ by up to 0.22 ms/token here, largest for `rtopk` where one pair's `k` reading
+  (116.00) is well above the arm median; the paired column is the one this file quotes.)
+
+  rfuse rates   norm 131.84 -> rf 107.45 tok/s (7.585 -> 9.307 ms/token)
+  rtopk rates   norm 131.29 -> k  110.38 tok/s (7.617 -> 9.061 ms/token)
+  rmt rates     norm 133.17 -> rmt 135.57 tok/s (7.509 -> 7.377 ms/token)
+
+Verdicts.
+
+* `ALLPAKA_RFUSE=1` costs about a sixth of decode on qwen3-30b: median -18.07 %, every one
+  of 11 admitted pairs below 1 against 3/12 for the null, and the 24-dispatch-per-token
+  saving it buys is worth nothing on its own (next bullet). The shipped default - RFUSE off
+  - is now measured rather than assumed, so the knob stays off and this is a closed
+  negative result with its DoD. The 2026-09-12 prior of 20-27 % was the right sign and a
+  little too large.
+* `ALLPAKA_RTOPK=1` costs the same -18.04 % for the same -24 dispatches/token, 7/7 below 1.
+  The 2026-09-12 prior of ~30 % overstated it by about 12 pp; the sign was right. Stays off.
+* `ALLPAKA_RMT=1` folds the same 7680 dispatches and is indistinguishable from the null:
+  median +0.82 % with 2/7 below 1, where the pooled null itself put 3/12 below 1 and sat
+  1.53 pp off centre. That is not a win - it is the absence of a measurable price at this
+  resolution, and a 17.56 pp band means the level is only bounded to roughly the median
+  plus or minus half of it. `preregistration.txt` already names the only instrument that
+  could price it: TG=1280 on a quiet machine.
+
+The pair that matters most for the rest of the programme is `rmt` against `rfuse`. Two
+knobs, the same -7680 dispatches over TG=320, the same token stream, and a measured
+difference of 18.9 pp. Dispatch count is therefore NOT the binding constraint on this
+model at this TG: removing 24 dispatches a token is free by itself, and RFUSE/RTOPK's cost
+is the work the fused kernel adds, not the saving it makes. Consequences recorded where
+they bite: `docs/decode-opts.md` RFUSE/RMT/RTOPK/DCOMB rows, and task #37 (extend the
+down+combine fold to all 48 layers) loses its mechanism argument - a fold that only removes
+dispatches should be expected to be flat, so it needs a per-dispatch-cost story before any
+pair is spent on it.
+
+
+3. NORMFLAG itself
+------------------
+
+`null` vs `norm` and `off` vs `norm` are nulls by structure (five identical observables) and
+remain nulls by measurement, with the pooled median 1.53 pp off centre inside a 17.56 pp
+band. NORMFLAG is not a decode lever on this model: what it decides - the spin-flag
+barrier scheme against barriers - moves nothing resolvable at TG=320, and its only
+measurable consequence is the reachability of the family above, which runs the other way
+(from the per-layer conjunction, not from the bit). The 2026-09-12 era-audit row that read
+"110 vs 116 tok/s" for NORMFLAG is therefore about arms that differed by more than the
+probe here could see, or about that day's instrument; it is not reproduced and not needed,
+because no default depends on it.
+
+
+4. What this window does not settle
+-----------------------------------
+
+* Nothing here is a GLM, 235B or 35B statement. `layer-types.py` says what the family can
+  reach on each (GLM 22 of 47 layers, so the prediction there is -7040 dispatches; 235B 4
+  of 94, i.e. the family is nearly dead there; 35B 40 of 40 because those layers are GDN and
+  have no q/k/v at all), and none of that has been priced with pairs.
+* `off_rf` / `off_rmt` / `off_k` (the knobs under NORMFLAG=0, -15360 dispatches) are not in
+  this window at all; `drive.py --series` takes them.
+* `rmt` stays unpriced at the 3 % level; see section 2.
+* Three load vetoes and 14 drift vetoes are recorded in `preregistration.txt`'s amendment.
+  The drift rule was wrong and is fixed in `drive.py` for future series; the salvage here is
+  arithmetic on rows this run already wrote, at no GPU cost. `analyze.py --selfcheck` pins
+  the fixed behaviour, including that a pair where BOTH arms fall together is still vetoed
+  and that a load veto is respected whatever the rates say.

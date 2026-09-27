@@ -1,0 +1,139 @@
+# Result: `ALLPAKA_Q4_NR0` and `ALLPAKA_Q8_NR0` re-measured in the indexed x8 geometry
+
+Runs 2026-09-26 01:44-02:18 UTC, against the pre-registration in
+[preregistration.txt](preregistration.txt) (written 2026-09-25 21:40 UTC, before any
+counted round). Instrument, arms, rotation, gates and the flip rule are that file's;
+nothing here changes them after the fact. Raw per-process rows:
+[series-2026-09-26/records.jsonl](series-2026-09-26/records.jsonl),
+driver stdout in [series-2026-09-26/](series-2026-09-26/), pinned test binary and
+sha256 in [series-2026-09-26/provenance.json](series-2026-09-26/provenance.json).
+
+## Verdicts
+
+- **B1 `ALLPAKA_Q4_NR0` = 2: CONFIRMED, default unchanged.** The 2026-09-12 "Q4=4
+  regresses the wide shapes" survives the geometry correction that flipped its
+  sibling `Q5_NR0`: at the indexed x8 shape a MoE decode issues, NR0=4 is **9-15%
+  slower** than NR0=2 on all four `q4_k` rows and NR0=1 is **15-30% slower**, with
+  non-overlapping per-round ranges. No arm separates by the pre-registered >3% in
+  the shipped cell, so no e2E pair is owed and none was run.
+- **B2 `ALLPAKA_Q8_NR0` = 2: CONFIRMED, default unchanged.** Every challenger is
+  inside the gate on both `q8_0` rows: NR0=4 **+0.81%** (5/5 rounds positive) and
+  NR0=1 **-2.83%** at feed=8. Consistent in sign, ~4x too small to pass the bar -
+  and a 0.8% kernel delta is under this repo's measured tok/s noise floor, which is
+  why the pre-registration priced an e2E A/B only above 3%.
+- **New, and the reason this file is not just two confirmations:** the two knobs
+  interact with `ALLPAKA_SWFUSE`, and the interaction is large (next section). It
+  does not reopen the SWFUSE decision - the shipped pair is the best cell of the
+  3x2 grid - but it says the SWFUSE verdict and the NR0 verdict are not
+  independent, which is what the earlier files assumed.
+
+## The fused/pair result: fusion's cost is ~1/NR0, and the shipped pair still wins
+
+The harness swept both `q4_k` NR0 arms and both swiglu-fusion states in one process
+(the formats are interleaved, so the drift is common-mode inside a cell). Ratio of
+`q4_k` to the untouched `q6_k down` meter, best GB/s, medians over admitted rounds,
+feed=8:
+
+| `q4_k` row [n_out,n_in] | plain NR0=1 | **plain NR0=2 (shipped)** | plain NR0=4 | fused NR0=1 | fused NR0=2 | fused NR0=4 |
+|---|---|---|---|---|---|---|
+| down `[4096,1536]`     | 0.7489 | **1.0668** | 0.9707 | 0.2161 | 0.6692 | 0.8642 |
+| control `[1536,4096]`  | 0.9915 | **1.1700** | 1.0283 | 0.2759 | 0.7486 | 0.9048 |
+| 30B gate/up `[768,2048]`| 0.7765 | **0.9042** | 0.7726 | 0.2468 | 0.6521 | 0.7861 |
+| GLM gate/up `[1408,4096]`| 0.9907 | **1.1718** | 1.0416 | 0.2759 | 0.7417 | 0.8985 |
+
+Read the two columns the default ships in against the fused ones:
+
+- **Fusing `q4_k`'s down costs 37% at NR0=2 and 11% at NR0=4** (0.6692/1.0668 =
+  0.627; 0.8642/0.9707 = 0.890). So the penalty `ALLPAKA_SWFUSE=1` pays is roughly
+  `1/NR0` in its redundant term - which is the mechanism that file names: a fused
+  down recomputes `silu(gate)*up` for every row that loads the activation, and NR0
+  is exactly how many rows share one load.
+- **The maximum of the whole 3x2 grid is the shipped cell.** Best fused arm
+  (NR0=4, 0.8642) still sits 19% below shipped plain NR0=2 (1.0668) on the down
+  row, and below plain NR0=4 (0.9707) too. So `SWFUSE=1` is not rescued by NR0=4,
+  and NR0=4 is not rescued by `SWFUSE=1` - the two losers stay losers together.
+- Every fused-cell gain of NR0=4 over NR0=2 is **+20.5 to +29.1% with the sign
+  positive in 5/5 shared rounds** on all four shapes; every plain-cell gain is
+  **negative** (-9 to -15%, 0/5). The direction of the knob flips with the fusion
+  state, on the same binary, in the same session, on interleaved formats. A
+  published "NR0 verdict" that does not state the fusion state is therefore not
+  a verdict about a kernel but about a pipeline pair - the same class of finding
+  as the 09-24 regime correction, one level deeper.
+
+`q8_0`, same layout (feed=8, its own rows): plain 1.0805 / **1.1120** / 1.1210 for
+NR0 1/2/4 on `[4096,1536]` and 1.1020 / **1.1206** / 1.1262 on the GLM
+`[4096,1408]` down; fused 1.5131 / 1.7741 / 1.8306 and 1.3831 / 1.7880 / 1.8035.
+`q8_0` carries 1.06 B/weight and one dequant multiply, so it has the smallest
+redundant-swiglu term to reclaim - and correspondingly no NR0 effect at all in the
+shipped cell (|delta| <= 0.81%).
+
+## Absolute levels, because a ratio alone cannot be audited
+
+Median best GB/s per admitted round at feed=8, plain (the meter column is the
+`q6_k down` row the ratio divides by; the Q4 knob cannot touch it - `q4_nr0()` is
+read only for `GgmlType::Q4K` in `lanes_per_row`, metal.rs:9421):
+
+| row | NR0=1 | NR0=2 | NR0=4 |
+|---|---|---|---|
+| `q4_k` down `[4096,1536]` | 368.9 [3] | 526.9 [6] | 476.5 [6] |
+| `q4_k` control `[1536,4096]` | 489.0 [3] | 575.1 [6] | 504.1 [6] |
+| `q4_k` 30B gate/up `[768,2048]` | 385.1 [3] | 447.6 [6] | 379.1 [6] |
+| `q4_k` GLM gate/up `[1408,4096]` | 488.0 [3] | 575.2 [6] | 506.4 [6] |
+| `q6_k down` (Q4-series meter) | 495.1 [3] | 491.1 [6] | 490.1 [6] |
+| `q8_0` `[4096,1536]` | 492.0 [5] | 500.5 [5] | 506.9 [5] |
+| `q8_0` GLM down `[4096,1408]` | 501.6 [5] | 506.4 [5] | 509.0 [5] |
+| `q6_k down` (Q8-series meter) | 454.8 [5] | 450.1 [5] | 452.2 [5] |
+
+The meter is flat across arms within a series (+/-1%) while `q4_k` moves 10-32% -
+so the ratios are numerator-driven, which is the control this table exists for.
+The cross-process drift the ratio normalises out is real and visible here: the same
+`q6_k` shape reads 491.1 GB/s in the Q4 series and 450.1 in the Q8 series, one and
+the same binary on the same machine 25 minutes apart, i.e. 9% of level for no knob
+change at all.
+
+## Gate ledger (what the pre-registration promised to publish)
+
+- 30/39 processes admitted overall: Q4 15/24 (rounds 1-8, because rounds 2-4 lost
+  processes to gate 3), Q8 15/15 (rounds 1-5, first pass).
+- All nine vetoes are gate 3 (`best/med > 1.05` on a `q4_k` family row inside one
+  process); no load veto (max `vm.loadavg` seen 5.83 against a 8.0 threshold, and every
+  process launched under the 5.0 launch gate) and no meter-band veto: gate 2's
+  reference is the first admitted Q4 meter, 495.1 GB/s, so the band floor is
+  420.8 and the lowest admitted meter is 443.1.
+- Per arm, admitted: Q4 NR0=1 3, NR0=2 6, NR0=4 6; Q8 5/5/5. NR0=1's n=3 is the
+  thin one; its margin (-15 to -30%) is 5-10x the gate, so the verdict does not
+  rest on it.
+- `ALLPAKA_Q4_NR0` is a `OnceLock` read, so every arm is its own process: 24 Q4 and
+  15 Q8 processes, one pinned binary (`sha256 b4579c48f9c3a2d1...`), no arm sharing
+  a process with another.
+- The Q4 continuation (rounds 6-8) re-checked the pinned binary's sha256 before
+  running and refused to mix builds; that guard is now in
+  [drive-nr0.py](drive-nr0.py) (`--start-round`), since a series that spans a
+  rebuild is two series.
+
+## Provenance, stated plainly
+
+`head dcdc131d`, **93 modified files in the working tree**. This is not a
+contamination to apologise for but the state the number belongs to: the Metal
+decode work of 2026-09-24/25 (`q5_0_mv`, `INDEXED_SWIGLU`, the NR0 plumbing) is
+uncommitted, so HEAD's `metal.rs` predates every published figure since, and the
+only tree that can re-measure them is the working one. All 39 processes used the
+identical bytes, and the decision is a within-binary ranking. If the decode work
+is later restructured, `q4_k`'s ranking must be re-run, not re-cited.
+
+## What is not claimed
+
+- No e2E pair was run for either series, per the pre-registered >3% bar in the
+  shipped cell. That is a decision rule honoured, not an omission: the largest
+  shipped-cell separation is 0.81%, and this repo has twice measured a 1-2% kernel
+  delta into non-existence at the token.
+- The fused-column interaction is a bench-geometry statement about the down kernel
+  pair. It does not re-price `ALLPAKA_SWFUSE`'s -7.7 ms/token wall measurement on
+  the 235B (that A/B ran at NR0=2, which stays the default, so its regime is the
+  shipped one), and it does not license `SWFUSE=1` at NR0=4 - the grid says that
+  pair is 19% worse than what ships.
+- `q2_k`, `q3_k`, `q5_k`, `q6_k` NR0/geometry were not swept here. `q5_k`'s NR0=4
+  flip stands on its own indexed re-measure; `q6_k` has no NR0 knob (its geometry is
+  fixed at 2 rows/SIMD), which is what makes it usable as a meter for both formats.
+- The meter's 8% cross-series level drift is a limit on this instrument, not a
+  result. Only ratios and signs are portable out of this file.

@@ -1,0 +1,39 @@
+autotune cache applied: profile=max-performance objective=134.2 tok/s (/Users/themoretheless/.cache/allpaka/autotune.json)
+prewarmed 17.3 GiB of weights in 20.7s
+metal: Apple M4 Max attached, 17.3 GiB of weights shared with the GPU
+engine bench: qwen3-30b-a3b-Q4_K_M (48 layers, qwen3moe, MoE)
+  capabilities:
+    model: arch=qwen3moe layers=48 moe=true
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: max-performance
+    metal: attached=true
+    weights: metal-mapped=true
+    residency: windows=1 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=241 bytes=0.05 GiB matmul-kernel=yes
+      Q4K: tensors=289 bytes=13.28 GiB matmul-kernel=yes
+      Q6K: tensors=49 bytes=3.95 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill   480 tok in   0.32 s    1489.4 tok/s
+  gpu during prefill: 2 waits, 481 dispatches, encode 1 ms, wait 320 ms of 322 ms total (1% outside the GPU)
+  gpu clock during prefill: executing 317 ms, scheduling 3 ms, round trips + idle 0 ms (of 320 ms waited)
+  prefill phases, ms/token:
+    embed                  0.0  ( 0.3%)
+    attention              0.0  ( 0.2%)
+    ffn (experts)          0.0  ( 0.1%)
+    router                 0.0  ( 0.0%)
+    unaccounted            0.7  (99.4%)
+  decode     32 tok in   0.28 s     112.6 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 22336 dispatches, encode 9 ms, wait 271 ms of 284 ms total (2% outside the GPU)
+  gpu clock during decode: executing 264 ms, scheduling 3 ms, round trips + idle 4 ms (of 271 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted            8.9  (100.0%)
+  context at end: 512 tokens (attention cost grows with this)
+  benchmark report: .rbench/matrix-20260912-195149/qwen3-30b-ap-1.json

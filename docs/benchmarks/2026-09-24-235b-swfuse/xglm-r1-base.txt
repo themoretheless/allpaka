@@ -1,0 +1,62 @@
+airbug: traces and logs -> http://localhost:4318
+prewarmed 46.6 GiB of weights in 62.7s
+prewarmed 21.4 GiB of weights in 28.7s
+metal: Apple M4 Max attached, 46.6 GiB of weights shared with the GPU in 2 windows (maxBufferLength 32.0 GiB)
+metal: Apple M4 Max attached, 21.4 GiB of weights shared with the GPU
+engine bench: GLM-4.5-Air-Q4_K_M-00001-of-00002 (46 layers, glm4moe, MoE)
+  capabilities:
+    model: arch=glm4moe layers=46 moe=true
+    model-support: Experimental (sigmoid MoE, shared experts, bias, and partial RoPE are implemented)
+    profile: max-performance
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=3 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=331 bytes=0.09 GiB matmul-kernel=yes
+      Q4K: tensors=263 bytes=39.25 GiB matmul-kernel=yes
+      Q5K: tensors=92 bytes=0.34 GiB matmul-kernel=yes
+      Q5_0: tensors=24 bytes=11.34 GiB matmul-kernel=yes
+      Q6K: tensors=24 bytes=0.55 GiB matmul-kernel=yes
+      Q8_0: tensors=69 bytes=16.38 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=198
+  prefill   480 tok in   1.33 s     361.8 tok/s
+  gpu during prefill: 3 waits, 461 dispatches, encode 1 ms, wait 1324 ms of 1327 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 1325 ms, scheduling 21 ms, round trips + idle 0 ms (of 1324 ms waited)
+  prefill phases, ms/token:
+    embed                  0.0  ( 0.1%)
+    attention              0.0  ( 0.0%)
+    ffn (experts)          0.0  ( 0.0%)
+    router                 0.0  ( 0.0%)
+    unaccounted            2.8  (99.9%)
+decode profile, ms/token (GPU counters, one submit):
+  resnorm     1.197 ( 5.4%)
+  qkv         3.663 (16.6%)
+  attend      0.357 ( 1.6%)
+  wo          2.913 (13.2%)
+  gate_up     6.582 (29.8%)
+  down        5.262 (23.8%)
+  router      0.899 ( 4.1%)
+  combine     0.205 ( 0.9%)
+  head        0.997 ( 4.5%)
+  argmax      0.000 ( 0.0%)
+  decode     64 tok in   1.55 s      41.4 tok/s
+  gpu path decode: attempts=64 successes=64 declines=0
+  gpu during decode: 64 waits, 49792 dispatches, encode 60 ms, wait 1481 ms of 1547 ms total (0% outside the GPU)
+  gpu clock during decode: executing 1472 ms, scheduling 4 ms, round trips + idle 5 ms (of 1481 ms waited)
+  decode phases, ms/token:
+    experts               12.1  (50.2%)
+    qkv                    3.7  (15.3%)
+    attention              3.3  (13.7%)
+    norm                   1.2  ( 5.0%)
+    router                 0.9  ( 3.7%)
+    other                  0.6  ( 2.6%)
+    unaccounted            2.3  ( 9.6%)
+  context at end: 65 tokens (attention cost grows with this)
+  benchmark report: docs/benchmarks/2026-09-24-235b-swfuse/xglm-r1-base.json
+airbug bench run: target/allpaka-bench/airbug-1790284063014907000-5252

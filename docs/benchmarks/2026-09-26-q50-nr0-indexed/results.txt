@@ -1,0 +1,126 @@
+Q5_0 NR0 sweep in the indexed x8 geometry: the shipped default 2 holds (2026-09-26)
+
+Runs 2026-09-26 02:30-03:10 UTC. Pre-registration:
+[`preregistration.txt`](preregistration.txt), written 02:25 before the first counted
+process. Driver: `../2026-09-25-nr0-indexed-remeasure/drive-nr0.py --series Q50`, full
+float analysis `../2026-09-25-nr0-indexed-remeasure/analyze-nr0.py`, raw per-process
+records [`series-1/records.jsonl`](series-1/records.jsonl), the driver's own console log
+with the gate verdicts [`series-1/driver-output.txt`](series-1/driver-output.txt).
+
+## Verdict
+
+`ALLPAKA_Q5_0_NR0` **stays at 2**. Neither challenger reaches the pre-registered +3 %
+on the shipped cell, and the one that matters for GLM is a regression:
+
+  row                       NR0=1 vs 2      NR0=4 vs 2     (plain, feed=8, shipped cell)
+  q5_0 down   [4096,1536]       -4.45 %          -1.03 %
+  q5_0 glm down [4096,1408]     -7.86 %          +0.46 %
+
+Those are within-round paired medians (arm / default inside the same round, median over
+the rounds where both ran): NR0=1 n=5 rounds, every pair negative on both rows; NR0=4 n=4
+rounds, three of four negative on both rows. Under the driver's own rule (median over
+pooled admitted rounds) the same data reads -4.76 %/-6.63 % and -1.22 %/-2.30 % with
+0/3 and 1/3 rounds positive. Both estimators say `hold`; the rule's flip condition
+(>3 % on both rows, sign positive in >=4 shared rounds) is not met by either arm under
+either reading, so no parity arm and no e2E A/B is owed.
+
+This was the family's last unswept geometry and it was not sweepable until this series:
+`lanes_per_row` returned a fixed 16 lanes for `Q5_0` with the `_mv` kernel on, while the
+kernel itself derives `NR0 = 32 / LPR` from the function constant, exactly like the
+already-swept `q8_0_mv`. The knob is now `ALLPAKA_Q5_0_NR0` in {1,2,4}, default 2, and the
+routing unit test `indexed_mv_routing_respects_rows_per_simd_group` carries a `q5_0` entry
+at each arm; `matvec_q5_0_mv` takes part in
+`gpu_parity::indexed_matvec_matches_cpu_reference`, which is mutation-verified against the
+`n_out % NR0` guard, so the sweep cannot silently out-run the indexed geometry contract.
+
+## Every cell, all four
+
+Median meter-ratio of arm over default within the same round, feed=8:
+
+  row                   cell     NR0=1        NR0=4
+  q5_0 down             plain    -4.45 %      -1.03 %
+  q5_0 down             fused   -18.00 %      +4.87 %
+  q5_0 glm down         plain    -7.86 %      +0.46 %
+  q5_0 glm down         fused   -20.15 %      +6.55 %
+
+The fusion reversal found for `q4_k` and `q8_0` in
+[the 09-25 series](../2026-09-25-nr0-indexed-remeasure/results.txt) repeats here, and
+sharper: a fused down recomputes `silu(gate) * up` for every row that loads the
+activation, and NR0 is how many rows share one load, so the fused penalty runs ~1/NR0 -
+at NR0=1 it costs q5_0 18-20 %, at NR0=4 it is paid back and overpaid by +5-6.6 %. Three
+formats now agree on the sign and the size of the term, which is the strongest
+mechanistic result this instrument has produced. It does not change what ships:
+`ALLPAKA_SWFUSE` is opt-in and off, so the shipped cell is the plain one, and there NR0=2
+wins or ties. If SWFUSE ever flips, NR0=4 becomes `q5_0`'s paired choice and should be
+re-measured with that conjunction rather than inherited.
+
+Absolute rates, shipped cell, median over admitted processes (GB/s, best of window):
+
+  format/row          meter q6_k     NR0=1     NR0=2     NR0=4
+  q5_0 down            474-495       375.1     395.3     386.5
+  q5_0 glm down        474-495       355.4     384.1     371.9
+
+## What the four gates did not catch, and what caught it
+
+39 processes, 22 admitted: 10 spread vetoes, 5 meter vetoes, 2 load vetoes, max loadavg
+10.7. Every admitted process in rounds 1-3, 5-7 and 10 reads 370-398 GB/s on `q5_0 down`;
+from round 8 onward six admitted processes read 283-331 (r8/2, r9/1, r9/2, r12/4 and all
+three of r13), and the round-4, round-11 and other round-8/12 processes - all of which the
+gates removed - read 225-317. In the slow processes the machine was not busy by the
+instrument's own measures: load 1.6-3.1, best/med under 1.05, and the `q6_k` meter slid
+only to 432-463, still inside gate 2's 424.4 band - while the q5_0 rows fell 25-27 %. So
+the two rows degraded unequally by roughly 2x, which is what breaks a ratio-to-meter
+metric: gate 3 cannot see a *uniform* slowdown of one row (its spread stays clean), and
+gate 2 watches only the meter, which is read earlier in the same process than the q5_0
+rows are. With the working set partly paging, position in the harness's format order
+decides who pays - the run reads its formats one after another, 384-512 MB each, and
+swap was 9.3 of 10 GB used with 295k pageouts while `vm_stat` still reported 80 % of RAM
+free.
+
+Two defences, both applied to every record and reported:
+
+1. Row-absolute floor. `analyze-nr0.py --floor 0.85 --clean r1,r2,r3,r5,r6,r7,r10` reads
+   the reference off the measured rows themselves (381.4 and 363.5 GB/s, the admitted
+   median in the pre-shift window) and drops any process whose shipped-cell best falls
+   under 85 % of it. It removes 6 of the 22 admitted records - 2/r8, 1/r9, 4/r12 and all
+   three of r13 - symmetrically across arms, including records that favour the default
+   (r8/2, r9/1) and records that favour a challenger (r12/4, r13/4). This gate was
+   declared after the rounds it filters; the unfiltered verdict is printed above as well,
+   and it points the same way.
+2. Within-round pairing, which is what the numbers in the Verdict section use. The pooled
+   median-of-ratios is what let the shift read as a flip in the first place: pooled over
+   all 22 admitted records the default's median drops below NR0=4's, and the driver's own
+   line came out `NR0=4 +5.50 %/+5.04 %`. Pairing inside the round cancels the machine
+   state; the floor then removes pairs whose partner is gone.
+
+The single record that would otherwise have been read as a win is round 9's NR0=4 process:
++13.9 % and +15.0 % against the default in that round, the only positive pair NR0=4 has on
+`q5_0 glm down` above +2 %. Its order in the round was 4, then 1, then 2, and the last two
+sat at 0.668 and 0.688 while the first sat at 0.784 - i.e. the round degraded after the
+first process, and the "win" is position in the round, not rows per SIMD group. Rotation
+across rounds is what the design uses to average such drift, and with three processes per
+round a step is not averaged: it is transferred to whichever arm happens to run first. A
+series this long should rotate *within* the round as well, or gate on the row absolutes.
+
+## Provenance
+
+Binary `gpu_ffnbench` sha256 `7ee7b9e6ff9c86a3a39b0aadf8f82d25bcab53ba14184cf55995b5be86ad429c`,
+one pinned copy for all 39 processes; the driver refuses to continue a series whose rebuilt
+test binary has a different sha, and rounds 6-9 and 10-13 each re-verified it. `git rev-parse
+HEAD` = `dcdc131d`, 94 files dirty in the working tree at series start. HEAD is *not* the
+baseline here: the whole 2026-09-24/25 decode arc, `matvec_q5_0_mv` included, is
+uncommitted, so the incumbent build is the dirty tree and a HEAD build would lack the
+kernel being swept. The other live session's own builds were watched for: the pinned sha
+did not change during the campaign.
+
+## What is not claimed
+
+- No e2E number. q5_0 is GLM-4.5-Air's expert-down format and ~12 % of the bytes a token
+  reads there, so the sweep's spread on the row GLM dispatches (<=1.5 %) converts to
+  <=0.2 % of decode - far below the +-2-4 % per-pair noise that made the 09-24 e2E runs
+  need 32 pairs. Spending that campaign on a 1.5 % micro difference is not worth it, and
+  this file does not pretend otherwise.
+- Not a llama.cpp parity claim; no llama arm ran in this sequence.
+- Not a claim that 2 is optimal at *every* geometry: only the two q5_0 shapes the harness
+  carries were measured, both indexed x8, which is what a MoE decode issues.
+- The NR0=4 fused-cell win is an ordering within a configuration that does not ship.

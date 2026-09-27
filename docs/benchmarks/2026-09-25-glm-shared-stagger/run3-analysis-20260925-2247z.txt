@@ -1,0 +1,45 @@
+# analyze.py on run 3, with the drop rules applied as pre-registered (the driver's drift veto was inert)
+# Captured 2026-09-25T22:47Z. No GPU, no build: reads control-pairs.jsonl and real-pairs.jsonl.
+# Repo revision dcdc131; the measured binary is commit 8a162146 / fingerprint 8b1893cf1b9d2bb1,
+# pinned into the run directory by drive.py. Run 3 was still writing real pairs when this was
+# taken (5 real of 14), so the real-series lines are progress, not the verdict.
+#
+#   cd docs/benchmarks/2026-09-25-glm-shared-stagger
+#   python3 analyze.py /tmp/allpaka-head/.airbug-bench/glm-stagger-run3
+#
+# Evidence that the driver's drift flag never existed in any capture:
+#   grep -c drift_vetoed /tmp/allpaka-head/.airbug-bench/*/control-pairs.jsonl \
+#       /tmp/allpaka-head/.airbug-bench/*/real-pairs.jsonl contended-control-pairs.jsonl
+#   -> 0 in every file (the reference pool was initialized and never appended to).
+
+# analysis of glm-stagger-run3  (band 3%, criterion 5)
+
+## per pair  (cold = census over 2x the series median, LOAD/DRIFT = the
+## vetoes of the 21:15Z amendment; DRIFT is recomputed here)
+
+  real     pair  1 AB  ratio 1.0064  outside-GPU % (0, 0)  encode ms (92.0, 90.0)  wait ms (8023.0, 8076.0)  dispatches (264320, 256640)  census (10.06, 10.6)
+  real     pair  2 BA  ratio 0.9838  outside-GPU % (0, 0)  encode ms (80.0, 74.0)  wait ms (8175.0, 8049.0)  dispatches (264320, 256640)  census (10.36, 10.34)
+  real     pair  3 AB  ratio 0.6250  outside-GPU % (0, 0)  encode ms (81.0, 71.0)  wait ms (19324.0, 12047.0)  dispatches (264320, 256640)  census (10.34, 10.13)  DROPPED: drift
+  real     pair  4 BA  ratio 0.9135  outside-GPU % (0, 0)  encode ms (79.0, 74.0)  wait ms (8805.0, 8040.0)  dispatches (264320, 256640)  census (10.29, 10.22)
+  real     pair  5 AB  ratio 0.9864  outside-GPU % (0, 0)  encode ms (78.0, 75.0)  wait ms (8787.0, 8669.0)  dispatches (264320, 256640)  census (10.31, 10.32)
+  real     pair  6 BA  ratio 1.0006  outside-GPU % (0, 0)  encode ms (78.0, 74.0)  wait ms (8544.0, 8554.0)  dispatches (264320, 256640)  census (10.46, 10.43)
+  control  pair  1 AB  ratio 1.0249  outside-GPU % (0, 0)  encode ms (81.0, 98.0)  wait ms (8047.0, 8227.0)  dispatches (256640, 256640)  census (40.12, 10.43)  DROPPED: cold,load
+  control  pair  2 BA  ratio 0.9822  outside-GPU % (0, 0)  encode ms (90.0, 78.0)  wait ms (8094.0, 7962.0)  dispatches (256640, 256640)  census (10.43, 10.14)  DROPPED: load
+  control  pair  3 AB  ratio 1.0378  outside-GPU % (0, 0)  encode ms (87.0, 80.0)  wait ms (7926.0, 8235.0)  dispatches (256640, 256640)  census (71.88, 9.96)  DROPPED: cold
+  control  pair  4 BA  ratio 2.5562  outside-GPU % (0, 0)  encode ms (77.0, 316.0)  wait ms (8028.0, 20368.0)  dispatches (256640, 256640)  census (9.72, 10.09)  DROPPED: load,drift
+  control  pair  5 AB  ratio 1.1939  outside-GPU % (0, 1)  encode ms (76.0, 220.0)  wait ms (8118.0, 9535.0)  dispatches (256640, 256640)  census (9.89, 9.89)  DROPPED: load,drift
+  control  pair  6 BA  ratio 1.0537  outside-GPU % (0, 1)  encode ms (180.0, 216.0)  wait ms (9078.0, 9522.0)  dispatches (256640, 256640)  census (9.96, 62.22)  DROPPED: cold,load,drift
+
+  drift rule fired on 4 pair(s) whose row carries no drift_vetoed flag:
+    pair 3 AB: slowest arm 16.47 under 85% of running median 38.97
+    pair 4 BA: slowest arm 15.40 under 85% of running median 39.13
+    pair 5 AB: slowest arm 32.62 under 85% of running median 39.13
+    pair 6 BA: slowest arm 32.65 under 85% of running median 38.97
+  control (null vs plain, identical code): no admissible pairs (6 captured, 6 dropped)
+  real    (stagged vs plain, decode tok/s): 5 pairs (dropped 1), median 0.986385 (-1.36%), SEM 1.67 pp, min 0.9135 max 1.0064, 3/5 below 1
+
+## criterion 4 secondary (GPU-idle share, percentage points)
+  real: median +0.0 pp, range +0.0...+0.0
+
+  criterion 2: the control series admits no pair, so no band exists to compare against and this run decides nothing.
+# exit=1

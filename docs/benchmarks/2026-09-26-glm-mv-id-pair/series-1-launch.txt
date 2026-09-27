@@ -1,0 +1,17 @@
+# run /Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-26-glm-mv-id-pair/series-1  binary 7b8ec67aa72c4266  HEAD at pin dcdc131d  dirty 97
+  calibration 1 at load 2.72: prefill 374.29  decode 47.48
+  calibration 2 at load 2.92: prefill 373.82  decode 46.21
+  calibration 3 at load 2.85: prefill 373.59  decode 46.20
+  calibration 4 at load 2.84: prefill 373.98  decode 46.14
+  thermometer: median prefill 373.97607017348685  A3 floor 317.8796596474638
+  round-prime prime    AB  on  46.47 / off  45.93  ratio 1.0118  pp  365.3/ 358.1  outside 0%/0%  disp 26368/26368
+  round1 real     AB  on  45.97 / off  47.49  ratio 0.9680  pp  351.5/ 350.4  outside 0%/0%  disp 26368/26368
+  round1 null     BA  on  46.42 / null  47.45  ratio 0.9782  pp  356.7/ 352.6  outside 0%/0%  disp 26368/26368
+  round1 control  AB  on  46.13 / q5off  22.13  ratio 2.0845  pp  368.9/ 232.6  outside 0%/0%  disp 26368/26368
+  round2 real     BA  on  21.90 / off  23.57  ratio 0.9291  pp  227.7/ 208.8  outside 0%/0%  disp 26368/26368
+  round2 null     AB  on  25.48 / null  30.94  ratio 0.8234  pp  277.3/ 292.8  outside 0%/0%  disp 26368/26368
+  round3 real     AB  on  36.37 / off  42.03  ratio 0.8655  pp  274.2/ 321.7  outside 0%/0%  disp 26368/26368
+  round3 null     BA  on  45.97 / null  44.86  ratio 1.0247  pp  373.3/ 356.7  outside 0%/0%  disp 26368/26368
+  round3 control  BA  on  33.10 / q5off  39.74  ratio 0.8328  pp  250.2/ 374.2  outside 0%/0%  disp 26368/26368
+  round4 real     BA  on  44.43 / off  46.85  ratio 0.9485  pp  330.7/ 373.5  outside 0%/0%  disp 26368/26368
+  round4 null     AB  on  38.07 / null  44.68  ratio 0.8521  pp  287.7/ 330.3  outside 0%/0%  disp 26368/26368

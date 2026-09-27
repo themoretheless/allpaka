@@ -1,0 +1,13 @@
+05:51:29Z  # run /Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-26-glm-mv-id-rerun/series-1  binary 7b8ec67aa72c4266  HEAD at pin dcdc131d  dirty 98
+05:55:24Z    calibration 1 at load 4.99: prefill 374.32  decode 47.27
+05:58:29Z    calibration 2 at load 3.17: prefill 373.98  decode 46.08
+06:05:50Z    calibration 3 at load 3.45: prefill 374.00  decode 48.54
+06:07:54Z    calibration 4 at load 3.41: prefill 374.08  decode 48.06
+06:14:08Z    control calibration 1 at load 4.89: prefill 373.99  decode 41.20
+06:21:00Z    control calibration 2 at load 4.80: prefill 334.53  decode 36.31
+07:06:08Z    control calibration 3: load gate timed out at 23.13
+07:06:08Z    thermometer: median prefill 374.0831068158158  A3 floor 317.97064079344347
+07:06:08Z    control thermometer: prefill 373.9942330868413  decode 41.199853496925954  q5off floors 317.8950981238151/35.01987547238706
+07:53:13Z    round-prime prime    AB  on  26.49 / off  25.01  ratio 1.0593  pp  168.0/ 148.5  outside 0%/0%  disp 26368/26368
+08:38:14Z    round 1: load gate timed out at 9.15 - campaign pauses
+08:38:14Z    DONE -> /Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-26-glm-mv-id-rerun/series-1

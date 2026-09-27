@@ -1,0 +1,17 @@
+
+running 1 test
+metal: Apple M4 Max attached, 1.1 GiB of weights shared with the GPU
+--- indexed curve, n_out=4096 x8, region 1122 MB ---
+q2_k    nb=4    162 GB/s  493 Gweight/s 2.03 ps/w (res +26%)  nb=6    139 GB/s  422 Gweight/s 2.37 ps/w (res -17%)  nb=8    212 GB/s  647 Gweight/s 1.55 ps/w (res +8%)  nb=12   208 GB/s  635 Gweight/s 1.58 ps/w (res -12%)  nb=16   288 GB/s  878 Gweight/s 1.14 ps/w (res +9%)
+       A=1.8 ns/row  B=205 ps/row/block  (0.80 ps/weight at the block cost alone)
+q3_k    nb=4    234 GB/s  544 Gweight/s 1.84 ps/w (res +3%)  nb=6    221 GB/s  515 Gweight/s 1.94 ps/w (res -4%)  nb=8    235 GB/s  547 Gweight/s 1.83 ps/w (res +1%)  nb=12   235 GB/s  546 Gweight/s 1.83 ps/w (res +0%)  nb=16   234 GB/s  544 Gweight/s 1.84 ps/w (res -0%)
+       A=0.1 ns/row  B=465 ps/row/block  (1.82 ps/weight at the block cost alone)
+q4_k    nb=4    462 GB/s  821 Gweight/s 1.22 ps/w (res +2%)  nb=6    468 GB/s  831 Gweight/s 1.20 ps/w (res -1%)  nb=8    481 GB/s  855 Gweight/s 1.17 ps/w (res -0%)  nb=12   496 GB/s  882 Gweight/s 1.13 ps/w (res +1%)  nb=16   498 GB/s  886 Gweight/s 1.13 ps/w (res -0%)
+       A=0.2 ns/row  B=279 ps/row/block  (1.09 ps/weight at the block cost alone)
+q5_k    nb=4    343 GB/s  499 Gweight/s 2.01 ps/w (res +6%)  nb=6    312 GB/s  454 Gweight/s 2.20 ps/w (res -6%)  nb=8    342 GB/s  498 Gweight/s 2.01 ps/w (res +1%)  nb=12   347 GB/s  505 Gweight/s 1.98 ps/w (res +1%)  nb=16   347 GB/s  505 Gweight/s 1.98 ps/w (res -0%)
+       A=0.2 ns/row  B=493 ps/row/block  (1.93 ps/weight at the block cost alone)
+q8_0    nb=32   495 GB/s  466 Gweight/s 2.15 ps/w (res -0%)  nb=48   497 GB/s  468 Gweight/s 2.14 ps/w (res -0%)  nb=64   501 GB/s  471 Gweight/s 2.12 ps/w (res +0%)  nb=96   500 GB/s  470 Gweight/s 2.13 ps/w (res +0%)  nb=128  499 GB/s  470 Gweight/s 2.13 ps/w (res -0%)
+       A=0.0 ns/row  B=68 ps/row/block  (2.12 ps/weight at the block cost alone)
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 23.59s
+

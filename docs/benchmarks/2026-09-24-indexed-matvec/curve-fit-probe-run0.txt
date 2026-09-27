@@ -1,0 +1,17 @@
+
+running 1 test
+metal: Apple M4 Max attached, 1.1 GiB of weights shared with the GPU
+--- indexed curve, n_out=4096 x8, region 1105 MB ---
+q2_k    nb=4   163 GB/s 498 Gweight/s  nb=6   139 GB/s 422 Gweight/s  nb=10  165 GB/s 503 Gweight/s  nb=16  289 GB/s 881 Gweight/s
+       A=68.7 us/dispatch (2.1 ns/row)  B=0.2 ns/row/block
+q3_k    nb=4   236 GB/s 550 Gweight/s  nb=6   223 GB/s 518 Gweight/s  nb=10  231 GB/s 538 Gweight/s  nb=16  234 GB/s 544 Gweight/s
+       A=2.3 us/dispatch (0.1 ns/row)  B=0.5 ns/row/block
+q4_k    nb=4   464 GB/s 824 Gweight/s  nb=6   469 GB/s 833 Gweight/s  nb=10  488 GB/s 867 Gweight/s  nb=16  491 GB/s 873 Gweight/s
+       A=3.4 us/dispatch (0.1 ns/row)  B=0.3 ns/row/block
+q5_k    nb=4   340 GB/s 495 Gweight/s  nb=6   312 GB/s 454 Gweight/s  nb=10  332 GB/s 483 Gweight/s  nb=16  349 GB/s 507 Gweight/s
+       A=9.1 us/dispatch (0.3 ns/row)  B=0.5 ns/row/block
+q8_0    nb=32  498 GB/s 469 Gweight/s  nb=48  501 GB/s 471 Gweight/s  nb=80  508 GB/s 478 Gweight/s  nb=128 504 GB/s 474 Gweight/s
+       A=0.9 us/dispatch (0.0 ns/row)  B=0.1 ns/row/block
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 19.15s
+

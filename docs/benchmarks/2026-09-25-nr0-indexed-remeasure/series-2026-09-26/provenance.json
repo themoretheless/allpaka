@@ -1,0 +1,12 @@
+{
+  "started": "2026-09-26T01:44:41Z",
+  "head": "dcdc131dd0dcea44ce1387843514758abb4729d1",
+  "tree_dirty_files": 93,
+  "binary_from": "/Users/themoretheless/Documents/Sources/allpaka/target/release/build/allpaka-backend/402d2f60b4b17b8a/out/gpu_ffnbench-402d2f60b4b17b8a",
+  "binary_sha256": "b4579c48f9c3a2d1c3ad4d5ef5b0e39e3b3cb70159665814e774acae84071c93",
+  "feeds": "1,8",
+  "swfuses": "0,1",
+  "veto_load": 8.0,
+  "meter_band": 0.85,
+  "spread_gate": 1.05
+}

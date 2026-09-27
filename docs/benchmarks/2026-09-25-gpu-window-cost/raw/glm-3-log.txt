@@ -1,0 +1,46 @@
+airbug: traces and logs -> http://localhost:4318
+prewarmed 46.6 GiB of weights in 7.1s
+prewarmed 21.4 GiB of weights in 3.3s
+metal: Apple M4 Max attached, 46.6 GiB of weights shared with the GPU in 45 windows (maxBufferLength 3.0 GiB)
+metal: Apple M4 Max attached, 21.4 GiB of weights shared with the GPU in 20 windows (maxBufferLength 3.0 GiB)
+engine bench: GLM-4.5-Air-Q4_K_M-00001-of-00002 (46 layers, glm4moe, MoE)
+  capabilities:
+    model: arch=glm4moe layers=46 moe=true
+    model-support: Experimental (sigmoid MoE, shared experts, bias, and partial RoPE are implemented)
+    profile: auto
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=65 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=331 bytes=0.09 GiB matmul-kernel=yes
+      Q4K: tensors=263 bytes=39.25 GiB matmul-kernel=yes
+      Q5K: tensors=92 bytes=0.34 GiB matmul-kernel=yes
+      Q5_0: tensors=24 bytes=11.34 GiB matmul-kernel=yes
+      Q6K: tensors=24 bytes=0.55 GiB matmul-kernel=yes
+      Q8_0: tensors=69 bytes=16.38 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=151551
+  prefill    64 tok in   7.54 s       8.5 tok/s
+  gpu during prefill: 3 waits, 461 dispatches, encode 1 ms, wait 7540 ms of 7541 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 2 ms, scheduling 7540 ms, round trips + idle 0 ms (of 7540 ms waited)
+  prefill phases, ms/token:
+    ffn (experts)          0.0  ( 0.0%)
+    attention              0.0  ( 0.0%)
+    embed                  0.0  ( 0.0%)
+    router                 0.0  ( 0.0%)
+    unaccounted          117.8  (100.0%)
+  decode      8 tok in  18.74 s       0.4 tok/s
+  gpu path decode: attempts=8 successes=8 declines=0
+  gpu during decode: 8 waits, 6592 dispatches, encode 3 ms, wait 18739 ms of 18743 ms total (0% outside the GPU)
+  gpu clock during decode: executing 3 ms, scheduling 18735 ms, round trips + idle 0 ms (of 18739 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted         2342.8  (100.0%)
+  context at end: 9 tokens (attention cost grows with this)
+  benchmark report: /Users/themoretheless/Documents/Sources/allpaka/.airbug-bench/glm-window-cliff/glm-3-report.json
+airbug bench run: target/allpaka-bench/airbug-1790307036142513000-74243

@@ -1,0 +1,30 @@
+{
+ "started": "2026-09-26T05:51:29Z",
+ "allpaka_sha256": "7b8ec67aa72c42662ba4608fa1629c139c759c6ce7bacdd6c6aa6fbcc46fe2fe",
+ "binary_mtime_local": "2026-09-26 08:03:00",
+ "head_at_pin_time": "dcdc131dd0dcea44ce1387843514758abb4729d1",
+ "tree_dirty_files_at_pin_time": 98,
+ "note": "head_at_pin_time is the tree state when the binary was copied, not necessarily when it was compiled; the per-process metadata.git_commit in each report is the build-time stamp and the sha256 is the only exact arm identity.",
+ "model": "/Users/themoretheless/Documents/Sources/allpaka/models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf",
+ "pp": 480,
+ "tg": 32,
+ "base_env": {
+  "ALLPAKA_BENCH_PP": "480",
+  "ALLPAKA_BENCH_TG": "32",
+  "ALLPAKA_BENCH_SKIP_MTP": "1",
+  "ALLPAKA_PROFILE": "max-performance"
+ },
+ "arms": {
+  "on": {},
+  "off": {
+   "ALLPAKA_MV_ID": "0"
+  },
+  "null": {
+   "ALLPAKA_MV_ID": "1"
+  },
+  "q5off": {
+   "ALLPAKA_Q5_0_MV": "0"
+  }
+ },
+ "load_gate": 5.0
+}

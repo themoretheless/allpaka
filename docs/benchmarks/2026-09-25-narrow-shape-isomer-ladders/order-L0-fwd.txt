@@ -1,0 +1,18 @@
+
+running 1 test
+metal: Apple M4 Max attached, 0.4 GiB of weights shared with the GPU
+--- isomer ladders x8, region 388 MB, feeds [32], 12 passes ---
+
+### ladder 0: 3072 blocks/dispatch (3 MB per dispatch for q4_k)
+q4_k  [ 768,1024] nb=4   rows=6144   sets=64 | feed=32  290.8 best  284.2 med 0.606 rmax 0.593 rmed :: 280.5 283.7 259.3 285.6 290.8 284.4 265.3 278.2 285.9 284.2 286.1 283.2
+q6_k  [ 768,1024] nb=4   rows=6144   sets=64 | feed=32  344.8 best  313.5 med 0.765 rmax 0.652 rmed :: 312.4 314.5 344.8 315.1 307.8 313.5 342.5 305.5 309.3 306.2 313.0 314.8
+q8_0  [ 768,1024] nb=32  rows=6144   sets=61 | feed=32  483.6 best  480.4 med 1.000 rmax 1.000 rmed :: 475.8 483.6 482.0 478.5 480.0 481.4 447.5 470.7 481.2 469.8 480.8 480.4
+q4_k  [1024, 768] nb=3   rows=8192   sets=64 | feed=32  248.1 best  244.6 med 0.525 rmax 0.507 rmed :: 245.1 235.0 230.1 243.8 248.1 247.9 244.6 245.2 230.6 226.7 246.7 225.6
+q6_k  [1024, 768] nb=3   rows=8192   sets=64 | feed=32  280.3 best  268.7 med 0.581 rmax 0.560 rmed :: 268.7 280.3 267.8 269.6 270.5 265.9 266.9 263.4 265.2 271.1 269.0 266.4
+q8_0  [1024, 768] nb=24  rows=8192   sets=61 | feed=32  484.6 best  480.2 med 1.000 rmax 1.000 rmed :: 483.5 482.6 481.0 484.6 482.7 471.9 479.4 470.9 461.8 477.4 470.3 480.2
+q4_k  [1536, 512] nb=2   rows=12288  sets=64 | feed=32  255.8 best  240.9 med 0.546 rmax 0.509 rmed :: 227.0 226.3 243.3 243.1 241.9 229.8 240.9 223.4 241.5 239.9 255.8 239.9
+q6_k  [1536, 512] nb=2   rows=12288  sets=64 | feed=32  323.3 best  304.9 med 0.724 rmax 0.637 rmed :: 323.3 320.1 322.7 302.0 304.9 320.5 296.9 317.3 292.4 296.5 300.8 299.0
+q8_0  [1536, 512] nb=16  rows=12288  sets=61 | feed=32  486.4 best  474.7 med 1.000 rmax 1.000 rmed :: 476.2 476.3 445.6 474.7 482.0 473.3 486.4 474.1 458.8 471.5 478.7 470.0
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 5.29s
+

@@ -1,0 +1,49 @@
+{"started": "2026-09-25T23:06:56Z", "binary_sha256": "6a4418fa1f0592977b17f0940d4138d0153bed9e6e5c2d68863fc1ce7f622988", "git_head": "8a16214", "tree": "clean HEAD worktree; the ablated variable is ALLPAKA_DCOMB", "model": "models/qwen3-30b-a3b-Q4_K_M.gguf", "pp_tg": [3072, 320], "arms": {"plain": {}, "unfold": {"ALLPAKA_DCOMB": "0"}, "null": {"ALLPAKA_DCOMB": "1"}}, "top_cpu_at_launch": ["  PID  %CPU COMM", "76956  21.0 Qoder", " 3261   7.3 Python", "  596   5.3 com.apple.DriverKit-AppleBCMWLAN", " 1685   5.2 Kimi Helper (Renderer)", "  413   3.7 runningboardd", "  339   3.7 fseventsd", " 3257   3.3 zsh", " 2518   3.1 rider"]}
+priming run: 137.53467620423285 tok/s, census at 3.75s (not a result)
+control pair 1 AB null: 128.81353258230948 tok/s, 1% outside GPU, load 1.92->1.74, census 2.63s
+control pair 1 AB plain: 145.44858702095215 tok/s, 1% outside GPU, load 1.68->1.9, census 2.66s
+control pair 2 BA plain: 142.23611129401786 tok/s, 1% outside GPU, load 1.96->3.36, census 2.65s
+control pair 2 BA null: 132.10708825816792 tok/s, 1% outside GPU, load 3.07->2.84, census 2.68s
+control pair 3 AB null: 134.27071546514946 tok/s, 1% outside GPU, load 2.45->2.27, census 2.68s
+control pair 3 AB plain: 130.07056073876012 tok/s, 1% outside GPU, load 6.03->5.25, census 2.72s
+  quiet gate: held 30 s, load now 4.95
+control pair 4 BA plain: 131.12490312891677 tok/s, 1% outside GPU, load 3.57->3.14, census 2.65s
+control pair 4 BA null: 134.67929389816229 tok/s, 1% outside GPU, load 3.19->2.55, census 2.65s
+control pair 5 AB null: 130.23139561989598 tok/s, 1% outside GPU, load 2.45->2.61, census 2.67s
+control pair 5 AB plain: 128.9332121428292 tok/s, 1% outside GPU, load 2.34->2.12, census 2.67s
+control pair 6 BA plain: 132.4312032035436 tok/s, 1% outside GPU, load 1.79->1.67, census 2.69s
+control pair 6 BA null: 135.57198212629663 tok/s, 1% outside GPU, load 2.13->2.18, census 2.66s
+real pair 1 AB unfold: 119.10328623098975 tok/s, 1% outside GPU, load 3.4->3.08, census 2.69s
+real pair 1 AB plain: 131.9603817820033 tok/s, 1% outside GPU, load 3.15->3.35, census 2.66s
+real pair 2 BA plain: 135.63208048176404 tok/s, 1% outside GPU, load 3.81->3.5, census 2.66s
+real pair 2 BA unfold: 117.22047004584282 tok/s, 1% outside GPU, load 3.12->3.38, census 2.66s
+real pair 3 AB unfold: 116.64002197894591 tok/s, 1% outside GPU, load 3.78->3.31, census 2.68s
+real pair 3 AB plain: 136.44232811970852 tok/s, 1% outside GPU, load 2.96->3.1, census 2.67s
+real pair 4 BA plain: 144.47191206138103 tok/s, 1% outside GPU, load 2.76->2.64, census 2.7s
+real pair 4 BA unfold: 120.22196545415211 tok/s, 1% outside GPU, load 11.03->9.13, census 2.65s
+  real pair 4: load veto (max 11.03 > 8.0) - pair dropped
+  quiet gate: held 90 s, load now 3.76
+real pair 5 AB unfold: 120.7550170003894 tok/s, 1% outside GPU, load 3.75->4.33, census 2.65s
+real pair 5 AB plain: 132.4332014174491 tok/s, 1% outside GPU, load 3.79->3.49, census 2.68s
+real pair 6 BA plain: 131.0176018070105 tok/s, 1% outside GPU, load 3.41->3.12, census 2.65s
+real pair 6 BA unfold: 117.69799457789247 tok/s, 1% outside GPU, load 6.47->5.18, census 2.66s
+  quiet gate: held 30 s, load now 3.79
+real pair 7 AB unfold: 117.77454504890315 tok/s, 1% outside GPU, load 3.06->3.21, census 2.65s
+real pair 7 AB plain: 132.50454961824494 tok/s, 1% outside GPU, load 3.76->3.22, census 2.66s
+real pair 8 BA plain: 130.0250579456366 tok/s, 1% outside GPU, load 3.48->3.11, census 2.67s
+real pair 8 BA unfold: 116.78222986644313 tok/s, 1% outside GPU, load 2.25->1.91, census 2.65s
+real pair 9 AB unfold: 116.33897778848056 tok/s, 1% outside GPU, load 2.23->1.97, census 2.67s
+real pair 9 AB plain: 144.76804060019697 tok/s, 1% outside GPU, load 1.87->1.97, census 2.64s
+real pair 10 BA plain: 135.52084921944726 tok/s, 1% outside GPU, load 2.23->2.61, census 2.65s
+real pair 10 BA unfold: 117.72671730833966 tok/s, 1% outside GPU, load 2.97->2.58, census 2.63s
+real pair 11 AB unfold: 129.7691558790142 tok/s, 1% outside GPU, load 2.18->2.4, census 2.64s
+real pair 11 AB plain: 144.94339762158074 tok/s, 1% outside GPU, load 2.13->1.95, census 2.68s
+real pair 12 BA plain: 131.76110992014623 tok/s, 1% outside GPU, load 1.78->1.74, census 2.67s
+real pair 12 BA unfold: 118.64591637288412 tok/s, 1% outside GPU, load 2.02->1.79, census 2.63s
+real pair 13 AB unfold: 129.41239607185187 tok/s, 0% outside GPU, load 1.71->3.27, census 2.72s
+real pair 13 AB plain: 131.29875878650935 tok/s, 1% outside GPU, load 3.41->2.93, census 2.66s
+real pair 14 BA plain: 144.8144327494219 tok/s, 1% outside GPU, load 2.66->3.09, census 2.66s
+real pair 14 BA unfold: 130.02191224750038 tok/s, 0% outside GPU, load 8.67->7.64, census 2.64s
+  real pair 14: load veto (max 8.67 > 8.0) - pair dropped
+pairs: .airbug-bench/dcomb-run1
+driver exit=0

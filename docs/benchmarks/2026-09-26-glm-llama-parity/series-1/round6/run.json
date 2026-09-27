@@ -1,0 +1,167 @@
+{
+  "schema": 1,
+  "id": "1790395812492754000-3275",
+  "status": "complete",
+  "environment": {
+    "arch": "aarch64",
+    "os": "macos"
+  },
+  "provenance": {
+    "allpaka_bin": "/Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-26-glm-llama-parity/series-1/allpaka",
+    "cooldown_ms": "1500",
+    "llama_bench": "llama-bench",
+    "model": "/Users/themoretheless/Documents/Sources/allpaka/models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf",
+    "model_sha256": "meta:50000746752:1787675380:61756573",
+    "pp": "480",
+    "repeats": "2",
+    "tg": "32",
+    "warmup": "0"
+  },
+  "cases": [
+    {
+      "id": "prefill",
+      "contract": {
+        "limitations": "llama-bench generates its own token stream; MoE routing is not identical",
+        "model": "/Users/themoretheless/Documents/Sources/allpaka/models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf",
+        "workload": "pp480"
+      },
+      "metrics": [
+        {
+          "id": "tok_s",
+          "unit": "tok/s",
+          "scope": "engine throughput; independent process",
+          "phase": "measurement",
+          "statistic": "individual process",
+          "direction": "higher"
+        }
+      ]
+    },
+    {
+      "id": "decode",
+      "contract": {
+        "limitations": "KV cache type must match (f16); verify against allpaka capability report",
+        "model": "/Users/themoretheless/Documents/Sources/allpaka/models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf",
+        "workload": "tg32@pp480"
+      },
+      "metrics": [
+        {
+          "id": "tok_s",
+          "unit": "tok/s",
+          "scope": "engine throughput; independent process",
+          "phase": "measurement",
+          "statistic": "individual process",
+          "direction": "higher"
+        }
+      ]
+    }
+  ],
+  "observations": [
+    {
+      "case": "prefill",
+      "metric": "tok_s",
+      "variant": "candidate",
+      "process": 0,
+      "pair": 1,
+      "sequence": 0,
+      "value": "273.89705436556955",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "decode",
+      "metric": "tok_s",
+      "variant": "candidate",
+      "process": 0,
+      "pair": 1,
+      "sequence": 0,
+      "value": "43.99907601940359",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "prefill",
+      "metric": "tok_s",
+      "variant": "baseline",
+      "process": 1,
+      "pair": 1,
+      "sequence": 0,
+      "value": "413.438",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "decode",
+      "metric": "tok_s",
+      "variant": "baseline",
+      "process": 1,
+      "pair": 1,
+      "sequence": 0,
+      "value": "43.7624",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "prefill",
+      "metric": "tok_s",
+      "variant": "candidate",
+      "process": 2,
+      "pair": 2,
+      "sequence": 0,
+      "value": "291.2441982487122",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "decode",
+      "metric": "tok_s",
+      "variant": "candidate",
+      "process": 2,
+      "pair": 2,
+      "sequence": 0,
+      "value": "44.31200337478002",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "prefill",
+      "metric": "tok_s",
+      "variant": "baseline",
+      "process": 3,
+      "pair": 2,
+      "sequence": 0,
+      "value": "413.342",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "decode",
+      "metric": "tok_s",
+      "variant": "baseline",
+      "process": 3,
+      "pair": 2,
+      "sequence": 0,
+      "value": "43.9923",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    }
+  ],
+  "notes": [
+    "Candidate=allpaka, baseline=llama-bench. Sequential AB/BA pairs; tok/s higher is better. llama-bench owns its token stream so MoE routing is not identical. Warmup pairs discarded; ALLPAKA_BENCH_SKIP_MTP=1."
+  ]
+}

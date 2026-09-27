@@ -1,0 +1,249 @@
+# ALLPAKA_DCOMB measured on Qwen3-30B-A3B: the down+combine fold is worth 0.87 ms/token, and ON is the right default
+
+Captured 2026-09-25T23:06:56Z-23:35:48Z (UTC) as `clean HEAD worktree; the ablated variable is ALLPAKA_DCOMB` at git
+`8a16214`, in a separate worktree so the ablated variable could only be the
+environment: binary sha256 `6a4418fa1f0592977b17f0940d4138d0153bed9e6e5c2d68863fc1ce7f622988`, model
+`models/qwen3-30b-a3b-Q4_K_M.gguf` (18.6 GiB, fingerprint `958a654869de1762`),
+PP/TG = 3072/320, `ALLPAKA_BENCH_SKIP_MTP=1`,
+`ALLPAKA_PROFILE=max-performance`, one uncounted priming run, AB/BA alternation, 25 s
+cooldown, 6 control + 14 real pairs. Arms: `plain` = shipped default (env unset, so
+`dcomb()` returns true), `unfold` = `ALLPAKA_DCOMB=0`, `null` = `ALLPAKA_DCOMB=1`
+(what `map_or(true, |v| v != "0")` treats identically to unset) as the noise floor.
+Design and criteria were written before the first counted pair in
+[`preregistration.txt`](preregistration.txt); the 23:04Z uncounted probe that motivated
+the run is disclosed there and is not part of this data.
+
+## Verdict
+
+**Measured, and the default is right: keep `ALLPAKA_DCOMB` unset.** Turning the fold off
+costs **+0.868 ms/token** - the median paired delta over the 12 admissible pairs - which
+is **11.5 % of the folded per-token time** (7.549 ms/token) on this model. That is about
+three times the `~0.3 ms/token` figure the `dcomb()` doc comment in
+`crates/allpaka-backend/src/gpu/metal.rs` had been carrying without an A/B behind it.
+The registry row in `docs/decode-opts.md` now quotes the measured number, and the comment
+quotes this file.
+
+* Primary statistic (the pre-registered one, a ratio of paired rates): median
+  `unfold/plain` decode tok/s over 12 admissible pairs **0.896730** = `-10.33 %`,
+  SEM 1.23 pp, range 0.8036...0.9856, **12/12 pairs below parity**.
+* Level, in the unit the roadmap asks for. Three reductions of the same 12 pairs, stated
+  separately so the mixing is visible: paired median **+0.868** ms/token, paired mean
+  **+0.933**, range +0.111...+1.688; medians-of-each-arm (132.47 against 117.75 tok/s,
+  i.e. 7.549 against 8.493 ms/token) give **+0.944**, which is +12.5 % of the folded
+  per-token time and -11.11 % of the unfolded rate. The two bracket each other; the
+  paired median is the one to quote, because it is the only one that never compares an
+  arm against a level from a different pair.
+* Dropped pairs and why, as pre-registered: 2 of 14 real pairs by the load veto
+  (pair 4 at max load 11.03, pair 14 at max load 8.67, ceiling 8.0); zero by the drift
+  veto, zero by the cold veto (every arm's census 2.63-2.72 s against a 2x-median threshold),
+  zero for differing greedy continuations. Criterion 1 held in all 40 arms:
+  `declines=0`, `waits=320` (= TG) per arm, `windows=1`, `residency set=true`.
+* Structural, and not subject to the noise floor: the `unfold` arm dispatches **+7680**
+  kernels per pair (+7680 in all 14 real pairs, i.e. +24 per token at TG=320) while the
+  control series moves +0 in all 6 - exactly the combine dispatch and its barrier that the
+  fold removes, per token, per layer group. The mechanism is therefore known
+  independently of any wall number. (The net is 24/token, not 48: in the layers whose
+  down kernel can carry swiglu the dispatch the fold saves is paid back by the standalone
+  swiglu it re-introduces. See Corrections at the foot of this file.)
+* What this run cannot say: the *level* to the 3 % the pre-registration asked for. The
+  control series (identical code, `=1` against unset) admitted all 6 pairs and still spread
+  0.8856...1.0323, a band of **8.28 %**, because at ~132 tok/s an arm is a 2.4 s
+  sample of the byte pipe and the machine's level moves between two such samples.
+  Criterion 2 therefore fails as written, and the pre-registered fallback applies:
+  this file reports an interval, not a certified 3 %-precision level. Taking the paired
+  SEM (1.23 pp) at face value despite that band, the interval on the decode-rate ratio is
+  `0.873...0.921`, i.e. the fold is worth between 7.9 % and 12.7 % of decode tok/s -
+  enough to keep the default, not enough to certify a level to a fraction of a ms/token.
+* The sign does not need the band. Of all 18 recorded pairs, 14 landed below 1;
+  conditioning on that count so no level bias can help either arm, the chance that the
+  12 real pairs are exactly the 12 most-downward ones is
+  C(14,12)/C(18,12) = 4.9e-03. The control put only 2/6 below 1.
+
+## Mechanism, and why the effect is bigger than the comment claimed
+
+`dcomb()` folds the routed experts' decode `down` into the `combine` dispatch (one
+simdgroup per routed slot, the weighted sum reduced through threadgroup memory straight
+into `delta`), so a token stops paying a separate combine dispatch, its barrier, and the
+per-slot down buffer. At `n_used=8` that is a fixed number of dispatches per token per
+MoE layer group, which is what the +24/token census above counts; the wall cost of
+removing them is 0.94 ms/token here, not 0.3. Two reasons the earlier figure was low,
+both visible in this data: it was a comment, not a measurement, and it was written for a
+model class where the fold does not even build - `shared.is_none()` gates it, so GLM and
+the 235B never take this path and cannot calibrate it. Qwen3-30B-A3B is the local model
+that does, and it has 48 layers' worth of these dispatches per token. (Only 24 of them
+come out as a net saving; see Corrections.)
+
+Decode on this machine is byte-pipe limited, so a dispatch-count cut normally buys
+nothing - that is the finding of `../2026-09-25-glm-shared-stagger/results.txt`, where
++24 dispatches/token of *pure re-ordering* cost 1.1 %. The difference is that the fold
+removes work rather than re-ordering it: `outside-GPU` stays 0-1 % in both arms, so this
+is not a scheduling win recovered from idle gaps, it is 320 extra host round trips per
+token that no longer happen. (This sentence is wrong as written - both arms report
+`waits=320`, so no host round trip is removed; Corrections restates what the fold takes
+out instead.)
+
+## Regression check, and one gate condition that is dead
+
+The fold ships by default, so what needs protecting is not the measurement but the
+*gate*: if `shared.is_none()` or the even-`hidden` requirement were ever dropped, the
+fold would start firing on models whose shapes it was never written for, and the next
+wall number on GLM or the 235B would be silently a different code path. So the shape
+half of the gate now lives in its own function, `dcomb_shape()` in
+`crates/allpaka-backend/src/gpu/metal.rs`, with a CPU-only unit test
+(`gpu::metal::tests::dcomb_shape_gate_matches_the_measured_fold`) - CPU-only because the
+conditions are shape arithmetic, and because a check that needed a GPU and an 18.6 GiB
+model would not run in CI. Mutation-verified, as the roadmap now requires of every check:
+dropping the shared gate, dropping the even-hidden test, widening the slot ceiling to 64,
+and inverting the two ceilings below each other are each caught by a failing assert; the
+restored source passes (`46 passed; 0 failed` for the whole backend lib at
+2026-09-25T23:46Z).
+
+What writing the test surfaced: the gate's `n_used <= 32` is dead on every reachable
+model. The fused token path itself declines a MoE layer above 16 routed experts
+(`router shape` in `decode_token`), so `n_used` in `17..=32` can never reach the fold -
+the 32 is the MSL reduce's own width (one 32-lane simdgroup per slot, shadowed at the
+call site by the `max_total_threads_per_threadgroup() >= 32 * n_used` pipeline filter),
+and it is dominated by a ceiling 16. Both bounds are now named constants
+(`DCOMB_MAX_N_USED`, `MOE_DECODE_MAX_N_USED`) and the test asserts they stay in that
+order, so if the router-shape decline is ever raised the dead half of this gate becomes
+live and says so instead of silently widening the fold.
+
+This section is source-only and changes no behaviour: `dcomb_shape(shared.is_some(),
+hidden, *n_used)` is the conjunction that was inline at the call site, and
+`MOE_DECODE_MAX_N_USED` is the literal 16 that was in the decline. The measured arms
+above were a binary at git `8a16214`, before this refactor; nothing about the fold's
+runtime predicate moved, so no re-measure is implied.
+
+## Limits of transfer
+
+Qwen3-30B-A3B at PP=3072/TG=320 only. The gate needs a `q4_k`/`q6_k` matvec `down`
+kernel, `shared.is_none()`, even `hidden` and `n_used <= 32`, so GLM-4.5-Air and the 235B
+never reach it; the 35B's shared expert and `ALLPAKA_SWFUSE` are different folds with
+their own artifacts. Do not quote +0.868 ms/token at another shape.
+
+## What would tighten it (DoD for the level)
+
+The knob needs nothing: ON ships, is 12/12 in sign, and its mechanism is counted exactly.
+To price the level to better than the 8 % this instrument resolves, the same driver at
+`TG=1280` makes an arm a 9.7 s sample instead of 2.4 s; pre-registering that the control
+must first come in under 3 % before any level number is published keeps criterion 2 doing
+its job. A second machine state (no live desktop session) would also help and is not
+available on demand.
+
+## Reproduce
+
+```sh
+cd /tmp/allpaka-head      # a clean worktree of git 8a16214; models/ symlinked to the main repo
+python3 docs/benchmarks/2026-09-25-dcomb-ab/drive.py \
+  --real 14 --control 6 --out .airbug-bench/dcomb-run1        # ~29 min, GPU busy
+python3 docs/benchmarks/2026-09-25-dcomb-ab/analyze.py .airbug-bench/dcomb-run1
+```
+
+The analyzer recomputes all three vetoes from the capture rather than trusting the flags
+(the rule that came out of `../2026-09-25-glm-shared-stagger/preregistration.txt`'s
+22:47Z amendment), names each rule that fires, and exits non-zero when the control series
+admits nothing. The raw rows are archived here as
+[`real-pairs.jsonl`](real-pairs.jsonl) and [`control-pairs.jsonl`](control-pairs.jsonl),
+the driver's own lines as
+[`driver-capture-20260925-2335z.txt`](driver-capture-20260925-2335z.txt).
+
+## Analyzer output, verbatim
+
+```
+# analysis of dcomb-run1  (band 3%, criterion 5)
+
+## per pair  (cold = census over 2x the series median, LOAD/DRIFT = the
+## vetoes of the 21:15Z amendment; DRIFT is recomputed here)
+
+  real     pair  1 AB  ratio 0.9026  outside-GPU % (1, 1)  encode ms (72.0, 67.0)  wait ms (2597.0, 2339.0)  dispatches (223360, 215680)  census (2.69, 2.66)
+  real     pair  2 BA  ratio 0.8643  outside-GPU % (1, 1)  encode ms (70.0, 68.0)  wait ms (2641.0, 2274.0)  dispatches (223360, 215680)  census (2.66, 2.66)
+  real     pair  3 AB  ratio 0.8549  outside-GPU % (1, 1)  encode ms (71.0, 68.0)  wait ms (2654.0, 2261.0)  dispatches (223360, 215680)  census (2.68, 2.67)
+  real     pair  4 BA  ratio 0.8321  outside-GPU % (1, 1)  encode ms (71.0, 70.0)  wait ms (2573.0, 2132.0)  dispatches (223360, 215680)  census (2.65, 2.7)  DROPPED: load
+  real     pair  5 AB  ratio 0.9118  outside-GPU % (1, 1)  encode ms (71.0, 67.0)  wait ms (2563.0, 2330.0)  dispatches (223360, 215680)  census (2.65, 2.68)
+  real     pair  6 BA  ratio 0.8983  outside-GPU % (1, 1)  encode ms (71.0, 74.0)  wait ms (2629.0, 2349.0)  dispatches (223360, 215680)  census (2.66, 2.65)
+  real     pair  7 AB  ratio 0.8888  outside-GPU % (1, 1)  encode ms (71.0, 67.0)  wait ms (2628.0, 2330.0)  dispatches (223360, 215680)  census (2.65, 2.66)
+  real     pair  8 BA  ratio 0.8982  outside-GPU % (1, 1)  encode ms (71.0, 67.0)  wait ms (2651.0, 2375.0)  dispatches (223360, 215680)  census (2.65, 2.67)
+  real     pair  9 AB  ratio 0.8036  outside-GPU % (1, 1)  encode ms (71.0, 69.0)  wait ms (2661.0, 2129.0)  dispatches (223360, 215680)  census (2.67, 2.64)
+  real     pair 10 BA  ratio 0.8687  outside-GPU % (1, 1)  encode ms (71.0, 68.0)  wait ms (2629.0, 2277.0)  dispatches (223360, 215680)  census (2.63, 2.65)
+  real     pair 11 AB  ratio 0.8953  outside-GPU % (1, 1)  encode ms (72.0, 69.0)  wait ms (2381.0, 2127.0)  dispatches (223360, 215680)  census (2.64, 2.68)
+  real     pair 12 BA  ratio 0.9005  outside-GPU % (1, 1)  encode ms (72.0, 68.0)  wait ms (2607.0, 2342.0)  dispatches (223360, 215680)  census (2.63, 2.67)
+  real     pair 13 AB  ratio 0.9856  outside-GPU % (0, 1)  encode ms (72.0, 68.0)  wait ms (2389.0, 2351.0)  dispatches (223360, 215680)  census (2.72, 2.66)
+  real     pair 14 BA  ratio 0.8979  outside-GPU % (0, 1)  encode ms (72.0, 71.0)  wait ms (2377.0, 2125.0)  dispatches (223360, 215680)  census (2.64, 2.66)  DROPPED: load
+  control  pair  1 AB  ratio 0.8856  outside-GPU % (1, 1)  encode ms (67.0, 70.0)  wait ms (2398.0, 2117.0)  dispatches (215680, 215680)  census (2.63, 2.66)
+  control  pair  2 BA  ratio 0.9288  outside-GPU % (1, 1)  encode ms (67.0, 70.0)  wait ms (2337.0, 2168.0)  dispatches (215680, 215680)  census (2.68, 2.65)
+  control  pair  3 AB  ratio 1.0323  outside-GPU % (1, 1)  encode ms (72.0, 67.0)  wait ms (2295.0, 2374.0)  dispatches (215680, 215680)  census (2.68, 2.72)
+  control  pair  4 BA  ratio 1.0271  outside-GPU % (1, 1)  encode ms (67.0, 68.0)  wait ms (2292.0, 2353.0)  dispatches (215680, 215680)  census (2.65, 2.65)
+  control  pair  5 AB  ratio 1.0101  outside-GPU % (1, 1)  encode ms (67.0, 67.0)  wait ms (2371.0, 2395.0)  dispatches (215680, 215680)  census (2.67, 2.67)
+  control  pair  6 BA  ratio 1.0237  outside-GPU % (1, 1)  encode ms (68.0, 67.0)  wait ms (2275.0, 2331.0)  dispatches (215680, 215680)  census (2.66, 2.69)
+
+  drift rule fired on 0 pair(s) whose row carries no drift_vetoed flag:
+  control (null vs plain, identical code): 6 pairs (dropped 0), median 1.016892 (+1.69%), SEM 2.53 pp, min 0.8856 max 1.0323, 2/6 below 1
+  real    (unfold vs plain, decode tok/s): 12 pairs (dropped 2), median 0.896730 (-10.33%), SEM 1.23 pp, min 0.8036 max 0.9856, 12/12 below 1
+
+## criterion 4 secondary (GPU-idle share, percentage points)
+  real: median +0.0 pp, range -1.0...+0.0
+  control: median +0.0 pp, range +0.0...+0.0
+
+## decision
+  control band today: 8.28% (median off-centre 1.69%, half-spread 8.28%)
+  measured effect: -10.33% of decode tok/s over 12 pairs
+  criterion 2 fails: the control band is at or above the decision band, so
+  this run reports only the interval it excludes and the knob stays open.
+  criterion 5, interval branch: between the band and the decision threshold.
+```
+
+## Corrections, 2026-09-26T00:23Z - why the census is +24/token and not +48
+
+Found the next morning while closing the neighbouring `ALLPAKA_NORMFLAG` series, from a
+GGUF header read and a grep, so no GPU and no new numbers: this file's wall result is
+unchanged, its two mechanism sentences are not.
+
+**(1) "+24 per token" is 24 layers x 1 dispatch, and the model is type-split.** In
+`models/qwen3-30b-a3b-Q4_K_M.gguf`, `attn_v` and `ffn_down_exps` are Q6_K in layers
+0,1,2,3,4,5,8,11,14,17,20,23,26,29,32,35,38,41,42,43,44,45,46,47 and Q4_K in the other 24
+(llama.cpp's own Q4_K_M rule; the engine prints it in every log as
+`Q4K: tensors=289 / Q6K: tensors=49`). `sw_capable` in `metal.rs` lists the down kernels
+that carry the fused-swiglu variant - `matvec_q2_k`, `q3_k_mv`, `q4_k_mv`, `q5_k_mv`,
+`q8_0`, `q8_0_mv` - and `matvec_q6_k_mv` is *not* among them, so `SWFUSE` (default ON)
+drops the standalone swiglu dispatch only in the 24 Q4_K-down layers. Per MoE layer, with
+this model's parameters (no shared expert, `ALLPAKA_CFUSE` and `ALLPAKA_DCOMB_SW` at
+their default OFF):
+
+| arm | Q6_K-down layers (24) | Q4_K-down layers (24) |
+|---|---|---|
+| folded (`DCOMB` default) | swiglu 1 + down_combine 1 = **2** | swiglu 1 + down_combine 1 = **2** |
+| unfolded (`DCOMB=0`) | swiglu 1 + down 1 + combine 1 = **3** | down 1 (swiglu on load) + combine 1 = **2** |
+
+So the fold removes one dispatch per token in exactly half the layers - 24/token, 7680
+over TG=320, which is what both arms of all 14 real pairs measured - and in the other
+half it removes no dispatch at all, because the combine it deletes is paid back by the
+standalone swiglu it re-introduces. Reproduce with
+`python3 ../2026-09-25-normflag-policy/layer-types.py ../../../models/qwen3-30b-a3b-Q4_K_M.gguf`
+(capture: `../2026-09-25-normflag-policy/layer-types-qwen3-30b.txt`).
+
+The 24/24 split is conditional on `ALLPAKA_SWFUSE` being ON, because that is what makes
+the Q4_K-down layers' unfolded arm skip its swiglu. Run this same A/B with `SWFUSE=0` and
+the prediction changes to 48/token (15360): the unfolded arm then dispatches swiglu +
+down + combine in every layer. A census that moves with an unrelated knob is a census of
+two knobs, so quote the pair together.
+
+**(2) "320 extra host round trips per token" is false.** Both arms report `waits=320` -
+that is criterion 1's own evidence, and one command buffer is still one token. What the
+fold takes out is 24 kernel launches *inside* that command buffer plus their `bar_c`
+drains, so the 0.87 ms/token is GPU-side serialisation between stages, not CPU/GPU round
+trips. The distinction matters: it is the reason this dispatch cut paid while the
+pure-re-ordering cut in `../2026-09-25-glm-shared-stagger/results.txt` did not.
+
+**(3) What does not move.** The paired median +0.868 ms/token, the 0.873...0.921 interval,
+the sign test, the 8.28 % control band and the "default ON is right" verdict are
+measurements of the two arms as they are actually encoded, and (1) makes the arm
+difference sharper rather than removing it. The `dcomb()` doc comment and the
+`ALLPAKA_DCOMB` row in `docs/decode-opts.md` quote the wall figure, which stands.
+
+**(4) The lever this correction exposes.** Getting the fused down+combine to apply swiglu
+once per slot row - staged through threadgroup memory rather than re-evaluated per row
+pair, which is what `ALLPAKA_DCOMB_SW=1` does and what it measured at -0.8 ms/token -
+would extend the fold's saving to the 24 Q4_K-down layers as well. Ceiling by this file's
+own measurement: about another +0.9 ms/token (~11 % decode) on this model. Floor: the
+`DCOMB_SW` penalty. Both are above this instrument's noise, so the question is worth a
+paired series and not an argument.

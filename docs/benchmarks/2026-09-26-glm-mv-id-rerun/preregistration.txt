@@ -1,0 +1,151 @@
+# Pre-registration: price ALLPAKA_MV_ID on GLM-4.5-Air (re-run campaign)
+
+Written 2026-09-26 ~05:26Z, before any process of this campaign runs. Nothing here is
+decided after a pair exists; if a rule changes mid-campaign it goes in an amendment block
+at the bottom, with the time and what it changed, and any verdict read after that edit.
+
+## What this is
+
+The successor to [../2026-09-26-glm-mv-id-pair/](../2026-09-26-glm-mv-id-pair/), which was
+abandoned under its own stop rule (2 of the first 4 real pairs admitted) and published as
+"no measurement" at
+[../2026-09-26-glm-mv-id-pair/results.txt](../2026-09-26-glm-mv-id-pair/results.txt).
+`ALLPAKA_MV_ID` (llama `mul_mv_id` geometry, `grid.z = slots`, for INDEXED Q4/Q8 `_mv`;
+`=0` runs the flat 1D form) is shipped ON and has never had a paired e2E number.
+
+Question, unchanged: does the indexed grid cost or buy decode tok/s on GLM-4.5-Air at
+pp480/tg32, in the shipped `max-performance` policy. Ship bar +/-3% with AB/BA sign
+agreement and clearance over this campaign's own null floor; a GLM-only number beyond 3%
+then has to be re-measured on qwen3-30b before `metal.rs` moves, because the knob is
+shared.
+
+## Design, unchanged from the pair campaign
+
+- Arms: `on` (variable UNSET, i.e. the incumbent exactly), `off` (`ALLPAKA_MV_ID=0`),
+  `null` (`ALLPAKA_MV_ID=1`, an identical encode, so its spread is this run's noise
+  floor), `q5off` (`ALLPAKA_Q5_0_MV=0`, the env-only positive control).
+- Only the literals "0" and "1" are ever passed; both knobs read `!= "0"`, so any other
+  string, "off" included, means ON.
+- pp480 / tg32, `ALLPAKA_BENCH_SKIP_MTP=1`, `ALLPAKA_PROFILE=max-performance`, one
+  1500 ms cooldown between the pairs of a round.
+- AB/BA alternation per round, the null pair taking the opposite order to the real pair in
+  the same round; one uncounted priming pair first; ratio convention A/B with A = `on`.
+- Gates A0 (env identity echoed in `metadata.resolved_overrides`), A1 (completeness, fast
+  path attempts == successes == 32 and declines == 0, exit 0), A2 (GPU actually ran:
+  `outside the GPU` % and executing-vs-waited ms), A5 (in-window 1-minute load >= 8.0 is
+  disturbed), A6 (co-tenant `remoting_me2me_host`/`fvid` at >= 25% CPU), A7 (swap as a
+  covariate, never a veto). Remove-only; drop counts published.
+- Stop rule: fewer than 3 of the first 4 real pairs admitted -> abandon, publish the
+  abandonment, do not extend the campaign hunting a quieter window. The stop rule
+  outranks the decision block in the analyzer.
+
+## What this campaign changes, all four decided before launch
+
+1. **Launch gate: a settle, not an instant.** `wait_quiet` now needs `settle=3`
+   consecutive clean samples (30 s apart) instead of the first instant under load 5. The
+   pair campaign started rounds one tick after a burst and then had to veto the pairs that
+   followed.
+2. **The co-tenant guard has a second class of names.** The compiler/bench names
+   (`cargo`, `rustc`, `llama-bench`) are joined by the indexer class (`corespotlightd`,
+   `managedcorespotlightd`, `mds`, `mds_stores`, `mdworker_shared`, `photoanalysisd`,
+   `filecoordinationd`), checked between rounds and inside `wait_quiet`, not once at
+   startup. The pair campaign died of a rustc burst that reached 694% two minutes in; on
+   this machine the same class of disturbance is produced by `corespotlightd` at 153%,
+   which the 1-minute load average reports several ticks late (it read 2-3 while a process
+   ran at half speed).
+   2a. **The two classes are vetoed differently, and that is a correction made before
+   launch, not a refinement.** Builders are vetoed by existence - a live `rustc` is
+   building. Indexers cannot be: every name in the class is a resident daemon, and the
+   first draft of this guard vetoed on `pgrep` finding them, which on this machine means
+   25 processes that are never absent. It would have held the campaign off until its cap
+   and the artifact would have read "no quiet window arrived" for a gate that asks for
+   something that does not exist. (Its own log, kept as
+   `wait-then-run-1-broken-guard.log.txt`, shows `clean 0/5` on every tick with four
+   daemons at 0.0% CPU.) Indexers are therefore vetoed by work in the sampled instant: a
+   process at 25% of a core or more - gate A6's threshold - or the class at 40% across
+   several workers, which is how Spotlight actually hogs. Measured as a `cputime` delta
+   over 3 s, not as `ps` %cpu, because that column averages over the process's whole life
+   and a three-day-old daemon cannot show a burst in it. The same draft had two name bugs:
+   `-x mdworker` matched nothing (the worker is `mdworker_shared`) and the class omitted
+   `mds` and `managedcorespotlightd`. See
+   [verify-4-indexer-guard-measures-cpu-not-liveness.txt](verify-4-indexer-guard-measures-cpu-not-liveness.txt)
+   and [verify-5-guard-fired-on-a-live-burst.txt](verify-5-guard-fired-on-a-live-burst.txt),
+   which is the same guard refusing an indexer fleet at 62% of a core while load average
+   read 3.32 - the burst a load-only gate launches straight into.
+3. **The control arm is calibrated and gets its own floors.** `--calibrate-control 3` runs
+   three `q5off` processes in the same window as the four `on` ones, and the analyzer gates
+   `q5off` against 0.85 x its own calibrated prefill and decode medians instead of the
+   default arm's floor and the fixed 30 tok/s. This is NOT a loosening: see the two
+   verification runs below, both taken against the abandoned campaign's data, which show
+   the ledger, every admission and the stop-rule count come out byte-identical. It is
+   recorded because the pair artifact's instrument item 3 asserted that this floor was what
+   made criterion 0 unsatisfiable, and the campaign's own timeline refuted that; a healthy
+   `q5off` prefill floor lands 0.2 pp from the default arm's, so the two bands were never
+   different. The point of the calibration is that a reader no longer has to reconstruct
+   which of "control disturbed" and "control vetoed for being slow" happened from a
+   process table.
+4. **A control pair in every round, not only odd ones.** Criterion 0 needs 2 admissible
+   controls; at one per odd round that is a lottery on two more clean windows landing
+   inside the same campaign as the real pairs.
+
+## Verification done before any process runs
+
+Both taken with [analyze-mv-id.py](analyze-mv-id.py) against the abandoned campaign's own
+`series-1/` (read-only replay; those processes are not re-run and this campaign admits
+nothing from them):
+
+- [verify-1-old-data-unchanged.txt](verify-1-old-data-unchanged.txt) - the patched analyzer
+  on the old `calibration.json`, which has no control keys. Ledger, all 22 process rows,
+  the 2/4 stop-rule count and every verdict line are byte-identical to
+  [../2026-09-26-glm-mv-id-pair/analysis-1.txt](../2026-09-26-glm-mv-id-pair/analysis-1.txt);
+  the only additions are the two header lines naming the floors and the new WARNING that
+  `q5off` is falling back to the default arm's band.
+- [verify-2-control-band-no-admission-change.txt](verify-2-control-band-no-admission-change.txt)
+  - the same data with a control band built from that campaign's healthiest control
+  process (prefill 374.2, decode 39.74, so floors 318.1/33.8). Still 0 of 2 control pairs
+  admissible, still 2 of 4 real, stop rule unchanged: the veto text now names the
+  control's own floor, and the disturbed processes fail it just as they failed the old one.
+
+- [verify-3-launch-rehearsal.txt](verify-3-launch-rehearsal.txt) - the new guards executed
+  against the live machine without starting a measured process, and a refused launch shown
+  to create no run dir. Its line that the indexer class "is what a load-2.5 machine is
+  actually hiding" was the liveness reading of change 2 and is superseded: what the class
+  hid at load 2.5 was 25 idle daemons, not a burst. Verify 4 is the correction.
+- [verify-4-indexer-guard-measures-cpu-not-liveness.txt](verify-4-indexer-guard-measures-cpu-not-liveness.txt)
+  - the broken gate's own log, the idle machine it could never clear, and the rewritten
+  guard fired at duty-cycle burners: one process on a whole core, and a four-worker fleet
+  at 15% each that no single-process rule would see. No gate, band or admission moved;
+  change 2 now does what this file says it does.
+
+## Identity
+
+The driver refuses to start unless the binary it pins hashes to the preregistered
+`7b8ec67aa72c42662ba4608fa1629c139c759c6ce7bacdd6c6aa6fbcc46fe2fe` - the same build the
+pair campaign and the GLM parity run used, so the two are comparable. If the incumbent
+build has moved by the time this runs, the sha check is supposed to fire: register the new
+sha here as an amendment and re-state which build the verdict prices, because a ship
+decision about the default has to be about the binary that ships. `metadata.git_commit` per
+process and the dirty-file count at pin time are recorded in `provenance.json`; the sha is
+the only exact claim.
+
+## Definition of done
+
+1. >= 8 admissible `real` pairs, >= 4 admissible `null`, >= 2 admissible `control`. If the
+   control count is not reached, criterion 0 is unmet and the outcome publishes as "not
+   resolvable in this window", never as "no effect".
+2. Publish the unfiltered median next to the gated one, with the shift in pp, and state
+   A3's arm-side direction, as the parity artifact does.
+3. Decide against this campaign's own null floor, with AB/BA agreement, at +/-3%; if it
+   lands beyond 3% either way, re-measure on qwen3-30b before touching `metal.rs`.
+4. If it does not: the row in `docs/decode-opts.md` becomes a measured negative with the
+   number and the artifact link, and the status page's "Branch knobs pending cool verify"
+   bullet closes.
+
+## The hypothesis this campaign carries in, and what it must not do
+
+Six of six real pairs in the abandoned campaign, admitted or not, read `off` faster
+(0.8655, 0.9291, 0.9485, 0.9680, plus the uncounted smoke pair at 0.9952) while the four
+identical-encode null pairs straddled 1 (0.8234, 0.8521, 0.9782, 1.0247). That is written
+down as the reason to re-run. It is not a prior: no gate, band or threshold here is set
+from it, and a verdict that lands within 3% is a verdict of "no effect at the ship bar"
+even though the sign pointed off.

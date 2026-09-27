@@ -1,0 +1,130 @@
+B4 pre-registration: the in-tree packed_char4 qs loads, scalar-vs-packed (2026-09-26 02:36Z)
+
+Written before any counted round. Implements the DoD that docs/decode-opts.md's
+class-B row B4 sets for itself, on the instrument the same file's 2026-09-25
+pre-registration built (drive-nr0.py's parse, meter, gates and decide, imported
+by drive-packed.py rather than copied so the two campaigns cannot diverge by
+method).
+
+Question
+--------
+
+Two loads in the shipped build read a Q8_0 block's 32 quants as eight
+alignment-1 `packed_char4` loads instead of 32 byte loads:
+
+  crates/allpaka-backend/src/gpu/metal.rs:566   matvec_q8_0     (tile path)
+  crates/allpaka-backend/src/gpu/metal.rs:677   matvec_q8_0_mv  (indexed decode path)
+
+Their acceptance note, from the era the same audit disowns, reads "micro noise vs
+scalar (~509 vs ~518 GB/s); kept (matches matvec_q8_0 style, no regress
+expected)". That is a live default-build kernel path priced on the non-streamed,
+last-level-cache-resident meter, so the number does not bound the thing it
+measured: at 34 B per block the load width is 8 vs 32 memory ops, and whether
+that matters at all depends on whether the stage is latency-bound or
+bandwidth-bound, which is exactly what the small working sets could not tell.
+The prior is still low - identical bytes either way, only the op count changes -
+and Q8_0 is the most bandwidth-saturated of the formats measured so far, but the
+row is the only class-B item whose artifact is in the default build rather than
+beside it, so it gets a measurement rather than an argument.
+
+Arm
+---
+
+Not an env knob: the two arms are two binaries of one source tree.
+
+  packed  the shipped build, target/release/build/allpaka-backend/*/out/gpu_ffnbench-*
+  scalar  a copy of the current working tree at /private/tmp/allpaka-b4 with those
+          two sites reverted to byte-addressed uchar loads and float4 construction
+          from four scalars. No other line differs; the diff is the revert.
+
+The copy carries the whole current dirty tree, not HEAD: HEAD predates the
+q8_0_mv and q5_0_mv work, so a HEAD build would compare two different kernels
+rather than two load widths. `ALLPAKA_Q8_NR0=2` is set explicitly for both arms
+so the confirmed NR0 default cannot drift between them (B2, closed 02:18).
+
+Correctness gate before any timing round: the scalar build must pass this repo's
+q8_0 GPU parity tests unchanged (`cargo test -p allpaka-backend q8_0` in the
+copy). A scalar revert that changes numbers is not the same lever, and the
+timing would be meaningless.
+
+Instrument and cells
+--------------------
+
+`gpu_ffnbench::indexed_matvecs_report_effective_bandwidth`, series `Q8P`:
+
+  shapes   q8_0 [4096,1408]-class and q8_0 glm down  (both x8 indexed, >=384 MiB
+           streamed per format)
+  meter    q6_k down, untouched by either binary
+  cells    feeds 1,8 x swfuses 0,1; the shipped cell is plain x feed=8
+  one process per arm; round r runs packed->scalar, r+1 scalar->packed, so the
+  fixed arm order that biased earlier campaigns cannot carry a sign
+
+Metric: per-process absolute GB/s of each q8_0 row divided by the same process's
+meter, full float, no rounding until the verdict. A binary-vs-binary comparison
+never subtracts one build's absolute rate from the other build's absolute rate
+directly - the two processes run minutes apart - so the in-run meter carries the
+machine state.
+
+Gates (unchanged from the 2026-09-25 pre-registration)
+------------------------------------------------------
+
+1. The process returns 0 and prints every Q8P shape row.
+2. Meter veto: the process's q6_k down best under 85% of the series reference.
+   The reference here is the first admitted process of this series, recorded in
+   meter-ref.json and carried across a continuation, because the two builds are
+   not expected to differ and no pre-existing number transfers to a different
+   binary pair.
+3. Spread veto: best/med above 1.05 on any q8_0 row of the shipped cell.
+4. Load veto: loadavg before or above 8.0 vetoes; the launcher waits for 5.0 and
+   waits again between processes.
+
+Decision rule
+-------------
+
+`packed` **survives** unless, in the shipped cell (plain, feed=8), `scalar` beats
+it by more than 3% on the median meter-ratio on *both* q8_0 rows, with the
+per-round sign positive in at least 4 of the shared admitted rounds and at least
+4 such rounds. The same threshold reads the other way: if `packed` beats `scalar`
+by >3% on both rows under that sign rule, B4's row is rewritten as a measured
+win with a figure, not "micro noise, no regress expected". Anything else is
+published as a null with the number of admissible pairs and the observed spread,
+and the row's wording becomes "measured on the streamed instrument, null at
++-X%" - the outcome the byte-pipe argument predicts, stated as a measurement.
+
+Scale and cost
+--------------
+
+6 rounds = 12 processes, ~45 s each plus queueing: 12-18 minutes. If fewer than 4
+shared round-pairs survive the gates, continue the series (the driver refuses to
+mix a changed binary). One pre-registered extra: if the two q8_0 rows disagree in
+sign, the wide row is the one GLM's shared down and the dense models' rows
+dispatch, so the verdict follows that row and the disagreement is reported.
+
+What is not claimed
+-------------------
+
+Not an e2E claim: a per-kernel percent here converts to tokens only through
+Q8_0's share of a given model's per-token bytes, which is model-specific and
+already priced for GLM's expert downs by the 2026-09-24 campaigns. Not a claim
+about the *tile* path (`matvec_q8_0`): it runs at prefill, and the pre-registered
+cell is the indexed decode shape. Not a claim about the other formats' loads -
+q2_k's word loads and q5_0's ushort pair are separate code with their own
+evidence.
+
+Amendment, 2026-09-26 03:18Z - written after the builds, before the first counted round
+--------------------------------------------------------------------------------------
+
+1. The `packed` arm is not the earlier pinned shipped binary. It is a second build of
+   the same /private/tmp/allpaka-b4 snapshot, made by copying the live metal.rs over
+   the revert and rebuilding (6 s incremental). The two binaries then differ only by
+   the two revert sites by construction, whatever the concurrently edited tree does
+   after 02:30Z. packed sha 4fb5ef9c1330cc17..., scalar sha 254a2d2120fe1083...
+
+2. The correctness gate earned its cost. The first revert used
+   `device const uchar* qb = blk + 2;`, and q8_0_matches_cpu_reference went red
+   immediately (m=1, element 0: gpu 7.993707 vs cpu -3.144671) because `packed_char4`
+   is a signed int8 vector - byte-addressing the same memory as uchar shifts every
+   negative quant by +256. Fixed to `(device const char*)`; then all ten tests of the
+   copy's gpu_parity suite pass, including q8_0_matches_cpu_reference (tile path) and
+   indexed_matvec_matches_cpu_reference (the _mv path). No timing round ran against
+   the numerically wrong build.

@@ -1,0 +1,38 @@
+# qwen3-235b-a22b-instruct-2507-Q2_K_XL.gguf
+arch=qwen3moe shards=1 layers=94 n_expert=128 experts_touched=8 tensors=1131 lm_head_tied=False
+bytes on disk: 82.67 GiB, sum of tensor extents: 82.67 GiB
+
+# streamed per decode token (all shards): 9.17 GiB
+  by quant type:
+    q4_k          3667.5 MiB   39.1%
+    q2_k          2961.0 MiB   31.5%
+    q3_k          1629.4 MiB   17.4%
+    q6_k           749.4 MiB    8.0%
+    f32            191.0 MiB    2.0%
+    q5_k           187.0 MiB    2.0%
+  by role:
+    attention         3713.6 MiB   39.6%
+    routed gate/up    2961.0 MiB   31.5%
+    routed down       2034.4 MiB   21.7%
+    head               486.9 MiB    5.2%
+    router             188.0 MiB    2.0%
+    other                1.5 MiB    0.0%
+  type x role, top 12 (the byte shares the decode prediction uses):
+    q4_k     attention         3262.5 MiB   34.8%  n=350
+    q2_k     routed gate/up    2961.0 MiB   31.5%  n=188
+    q3_k     routed down       1629.4 MiB   17.4%  n=79
+    q6_k     head               486.9 MiB    5.2%  n=1
+    q4_k     routed down        405.0 MiB    4.3%  n=15
+    q6_k     attention          262.5 MiB    2.8%  n=10
+    f32      router             188.0 MiB    2.0%  n=94
+    q5_k     attention          187.0 MiB    2.0%  n=16
+    f32      attention            1.6 MiB    0.0%  n=282
+    f32      other                1.5 MiB    0.0%  n=95
+
+  resident (whole file) by type, for context:
+    q2_k          46.27 GiB
+    q3_k          25.46 GiB
+    q4_k           9.84 GiB
+    q6_k           0.73 GiB
+    f32            0.19 GiB
+    q5_k           0.18 GiB

@@ -1,0 +1,22 @@
+# ALLPAKA_MV_ID on GLM-4.5-Air, paired AB/BA, pp480/tg32
+  1 dir(s), 0 counted pairs (1 priming discarded)
+  A3 prefill floors {'on': 317.97064079344347, 'off': 317.97064079344347, 'null': 317.97064079344347, 'q5off': 317.8950981238151}
+  A4 decode floors   {'on': 30.0, 'off': 30.0, 'null': 30.0, 'q5off': 35.01987547238706}
+  per-process metadata.git_commit seen: []
+
+  per-pair ledger (ratio is on/other; >1 = shipped default faster)
+
+
+
+  real: admitted 0 of 0
+  null: admitted 0 of 0
+  control: admitted 0 of 0
+
+  REAL on/off            n= 0   (nothing admissible)
+  NULL floor on/null     n= 0   (nothing admissible)
+  CONTROL on/q5off       n= 0   (nothing admissible)
+
+  criterion 0: NO control pairs admissible -> nothing from this run can be read as 'no effect', and a near-threshold reading is equally uncertifiable
+
+  decision (preregistration, evaluated in order)
+    no admissible real pairs: publish the abandonment, not a number

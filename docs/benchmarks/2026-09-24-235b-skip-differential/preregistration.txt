@@ -1,0 +1,126 @@
+# Pre-registration: which decode group holds the 235B's 12.6 ms/token residue
+# Registered 2026-09-24T18:56Z, before any differential arm was timed.
+#
+# Question. Paired and in band, qwen3-235b-a22b Q2_K_XL decodes at 23.4 tok/s =
+# 42.7 ms/token, while its own measured kernel rates at its own dispatched
+# geometry sum to 30.12 ms/token (../2026-09-24-per-token-byte-census/time-ledger.txt
+# section 3). 12.6 ms/token - 2.6x the entire q3_k prize - are unaccounted, and
+# 99.6% of the token is inside GPU execution, so they are GPU-side. The existing
+# decode-subsystem probe (ALLPAKA_SKIP=qkv,attend,experts,router,head,
+# crates/allpaka-backend/src/gpu/metal.rs:15851) drops those dispatch groups from
+# the whole-token command buffer, so the time a group saves when dropped is that
+# group's in-situ cost, measured rather than modelled.
+#
+# Arms. baseline (no skip), experts, qkv, head, router, attend,
+# all=qkv,attend,experts,router,head. pp480 + tg64, every arm its own process,
+# ALLPAKA_PROFILE=max-performance ALLPAKA_BENCH_SKIP_MTP=1 (same as the paired
+# run). Three repetitions of the seven arms; arm order rotated per repetition so
+# thermal drift cannot sit on one group.
+#
+# Metric. ms/token = 1000/tok_s from the bench's own decode line, and, read
+# beside it, GPU-executing ms/token from "gpu clock during decode" - the second
+# removes the ~1 ms/token of wait that is not kernel time. Save S(g) =
+# baseline - arm(g). Dispatch counts are recorded per arm because they are the
+# check that the right work vanished.
+#
+# Predictions P(g), from the GGUF role census (instrument-free, same script the
+# byte ledger uses) divided by the streamed rates measured at this model's
+# dispatched shapes:
+#   experts  20.6 ms   q2_k gate/up 12.0 + q3_k down 7.7 + q4_k down 0.9
+#   qkv       8.4 ms   q4_k 7.25 + q6_k 0.58 + q5_k 0.57
+#   head      1.1 ms   q6_k out
+#   router    0.2 ms   f32, no measured rate for it - a floor, not a prediction
+#   attend   ~0.0 ms   no weights; KV is 65 tokens deep at tg64
+#   all      30.3 ms + attention compute + norms/barriers, i.e. the ceiling of
+#             what any byte-side story can explain
+#
+# The fork, decided by R(g) = S(g)/P(g):
+#   R ~ 1.0 for every group  -> the groups cost what the ledger says and the
+#                     residue is NOT in them: it is dispatch/barrier/scheduling
+#                     cost or work outside these five groups. Byte model stands.
+#   R ~ 1.35-1.42 for every
+#   group             -> a uniform utilisation factor: the streamed micro-bench
+#                     is optimistic for every format in the model. Then the fix
+#                     is the model, not a kernel, and every prize computed from
+#                     it (including q3_k's +10.7%) scales by the same factor.
+#   R(experts) >> R(qkv)     -> the inflation is expert-kernel-specific (indexed
+#                     gather over 128 experts, mixed q2_k/q3_k in one buffer),
+#                     and the target narrows to those kernels.
+#
+# Band gate and stop rule. A repetition is usable only if its baseline arm lands
+# in the paired band, 23.34-23.64 tok/s (= 42.3-42.9 ms/token); its prefill line
+# is recorded as the second thermometer (in-band pairs read 196.9-202.4 tok/s).
+# Fewer than two usable repetitions after three -> report as not measured, do
+# not average the degraded ones (that is what rejected pairs 4-6 of the paired
+# run taught).
+#
+# Known biases, stated before the run. (1) Values become garbage, so the router
+# picks garbage experts; the indexed path still touches 8 slots, and if garbage
+# routing collapses onto repeated experts the read rows are fewer, which makes
+# S(experts) an UPPER bound. (2) Dropping a group also drops its bytes, its
+# dispatches and its barriers, and changes how the rest overlaps, so S(g) is the
+# cost of that group in this schedule, not a bound on what a better kernel for
+# the same bytes could win. (3) Skipping the head leaves the sampler running on
+# garbage; timing unaffected, argmax meaningless, so no output check is possible
+# on this arm.
+#
+# Binary. ./target/release/allpaka built 2026-09-24 16:51 local - the same
+# binary as the paired A/B run, deliberately not rebuilt: crates/allpaka-backend/
+# src/gpu/metal.rs in this shared worktree has been modified since (19:11 local)
+# by another session, and comparability with the 23.34-23.64 band matters more
+# than running on the newest tree.
+
+AMENDMENT 2, written 2026-09-24 19:30 UTC BEFORE the data it governs
+---------------------------------------------------------------------
+Why: section 4's R(experts)=1.32 came from single unbracketed reps, and section 3
+showed this model's window spans +/-38% (duplicate baseline 42.2 -> 58.1 ms). The
+30B control (2026-09-24-30b-skip-control/results.txt) then measured R(experts)
+= 1.02 on q4_k in a bracketed 1% window, which supports the format-specific
+branch of the fork - but that is a clean control comparing against a dirty
+measurement, so it does not resolve the fork on its own. This amendment re-meases
+the 235B itself with the same bracketing.
+
+Design: 4 x (baseline immediately followed by experts), then one bracketed qkv
+arm and one bracketed `all` arm (comma list qkv,attend,experts,router,head; the
+literal "all" matches nothing - section 2). sleep 15 between runs, PP 480, TG 64,
+ALLPAKA_BENCH_SKIP_MTP=1, max-performance profile, same binary as section 1.
+Baselines are the ruler: every arm is divided by ITS OWN bracket, and the spread
+of the 6 baselines is reported as the window width for this run.
+
+Fork, as measured by R = median(bracket ms - arm ms) / P(group):
+  P(experts) = 20.6 ms, P(qkv) = 8.4 ms, P(all) = 30.3 ms (role census x streamed
+  micro rates, 2026-09-24-per-token-byte-census).
+  - uniform in-situ inflation: R(experts) ~= R(qkv) ~= R(all) ~= 1.3, so no group
+    is special and the byte model needs a global utilisation factor.
+  - format-specific inflation: R(experts) >= 1.2 while the non-K-quant groups sit
+    near their own prediction, so the target narrows to the q2_k/q3_k kernels.
+  Decision rule, fixed now: R(experts) >= 1.20 after bracketing keeps the
+  format-specific branch alive; R(experts) <= 1.10 kills section 4's 1.32 as a
+  window artifact and the byte model stands for the experts too; 1.10-1.20 is
+  reported as inconclusive and no branch is credited.
+  Secondary, also fixed now: if the 6 baselines spread more than 8%, the run is
+  declared unusable for the fork regardless of R, and that is the finding.
+
+AMENDMENT 3, written 2026-09-24 19:43 UTC BEFORE the data it governs
+---------------------------------------------------------------------
+Why: Amendment 2's three clean pairs split the token into K-quant experts 27.3 ms
+(R = 1.33 against the census), qkv 7.16 ms (R = 0.85) and a never-skipped floor of
+2.23 ms, which adds up to 36.7 of the 41.7 ms the baseline's own GPU clock
+reports. The missing ~5 ms can only be in attend + head + router, whose census
+price is 1.3 ms (head 1.1 + router 0.2 + attend 0, because attention reads no
+weight bytes). Either the census has an unpriced line, or one of those group
+guards does not actually skip its work - and the dispatch counter cannot
+adjudicate that, because it does not see those sites (30B control section 5).
+Design: 3 x (baseline, attend) and 3 x (baseline, head), same binary, same
+bracketing, sleep 15.
+Criterion, fixed now: a group is priced correctly if its bracketed save lands
+within +-30% of its census price. If attend+head together measure 3.5 ms or more
+against 1.3 predicted, the census is amended with a per-model attention+head line
+and the 235B ledger's P(all) is re-derived. If both land at or below 1.7 ms
+combined, the Amendment 2 decomposition is wrong and the group guards themselves
+come under suspicion - in which case the residual stays unattributed and is
+published as such.
+Note on the window: the previous series degraded mid-run (one baseline at 70.92
+against 42.37-42.55 in the same cluster) with no competing process visible in
+`ps -Aco pid,pcpu,comm -r`; brackets, not averages, are the defence, and a pair
+whose bracket leaves the 42.37-42.55 cluster is reported but not used for ratios.

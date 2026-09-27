@@ -1,0 +1,84 @@
+# python3 analyze.py /tmp/allpaka-head/.airbug-bench/normflag-run1, 2026-09-26T01:05Z (pair-by-pair detail behind results.txt)
+
+  # analysis of normflag-run1  (decision band 3.0%, drift per arm at 85%)
+
+  control (null vs norm): 6/6 pairs admitted
+    pair  1 AB  ratio 0.959417 (-4.06%)  ms/token +0.3390  dispatches +0 (+0.0/token)  outside 1%/1%  census 2.65/2.62s
+    pair  2 BA  ratio 1.086721 (+8.67%)  ms/token -0.6022  dispatches +0 (+0.0/token)  outside 1%/1%  census 2.63/2.62s
+    pair  3 AB  ratio 1.016402 (+1.64%)  ms/token -0.1178  dispatches +0 (+0.0/token)  outside 1%/1%  census 2.65/2.62s
+    pair  4 BA  ratio 1.109353 (+10.94%)  ms/token -0.7576  dispatches +0 (+0.0/token)  outside 1%/1%  census 2.63/2.64s
+    pair  5 AB  ratio 1.093560 (+9.36%)  ms/token -0.6533  dispatches +0 (+0.0/token)  outside 1%/1%  census 2.71/2.69s
+    pair  6 BA  ratio 1.001963 (+0.20%)  ms/token -0.0142  dispatches +0 (+0.0/token)  outside 1%/1%  census 2.7/2.67s
+    null: median 1.051561, min 0.959417 max 1.109353, 1/6 below 1
+
+  policy (off vs norm): 6/6 pairs admitted
+    pair  1 AB  ratio 1.005755 (+0.58%)  ms/token -0.0436  dispatches +0 (+0.0/token)  outside 1%/1%  census 2.69/2.69s
+    pair  2 BA  ratio 1.033220 (+3.32%)  ms/token -0.2469  dispatches +0 (+0.0/token)  outside 1%/1%  census 2.57/2.66s
+    pair  3 AB  ratio 1.014271 (+1.43%)  ms/token -0.1085  dispatches +0 (+0.0/token)  outside 1%/1%  census 2.69/2.66s
+    pair  4 BA  ratio 1.110402 (+11.04%)  ms/token -0.7672  dispatches +0 (+0.0/token)  outside 1%/1%  census 2.68/2.65s
+    pair  5 AB  ratio 0.998304 (-0.17%)  ms/token +0.0118  dispatches +0 (+0.0/token)  outside 1%/1%  census 2.7/2.68s
+    pair  6 BA  ratio 0.934763 (-6.52%)  ms/token +0.4852  dispatches +0 (+0.0/token)  outside 1%/1%  census 2.71/2.68s
+    null: median 1.010013, min 0.934763 max 1.110402, 2/6 below 1
+
+  rfuse (rf vs norm): 11/12 pairs admitted (the run's own flags admitted 1)
+    pair  1 AB  ratio 0.837533 (-16.25%)  ms/token +1.4657  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.63/2.68s  RECOVERED
+    pair  2 BA  ratio 0.817560 (-18.24%)  ms/token +1.7191  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.65/2.67s  RECOVERED
+    pair  3 AB  ratio 0.819342 (-18.07%)  ms/token +1.6909  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.69/2.69s  RECOVERED
+    pair  4 BA  ratio 0.885905 (-11.41%)  ms/token +0.9806  dispatches -7680 (-24.0/token)  outside 1%/0%  census 2.65/2.67s
+    pair  5 AB  ratio 0.804728 (-19.53%)  ms/token +1.8211  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.65/2.64s  RECOVERED
+    pair  6 BA  ratio 0.818361 (-18.16%)  ms/token +1.6990  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.65/2.62s  RECOVERED
+    pair  7 AB  ratio 0.791249 (-20.88%)  ms/token +1.9601  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.64/2.69s  RECOVERED
+    pair  8 BA  ratio 0.823413 (-17.66%)  ms/token +1.6402  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.66/2.65s  RECOVERED
+    pair  9 AB  ratio 0.827157 (-17.28%)  ms/token +1.5755  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.67/2.68s  RECOVERED
+    pair 11 AB  ratio 0.783614 (-21.64%)  ms/token +2.0412  dispatches -7680 (-24.0/token)  outside 1%/1%  census 19.64/2.59s  RECOVERED
+    pair 12 BA  ratio 0.821191 (-17.88%)  ms/token +1.6598  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.53/2.54s  RECOVERED
+    pair 10 dropped: load
+    median 0.819342 (-18.07 %), mean 0.820914 (-17.91 %), SEM 0.80 pp, range 0.783614...0.885905, 11/11 below 1
+    dispatch census, all admitted pairs: [-7680] = [-24.0] per token
+
+  rmt (rmt vs norm): 7/8 pairs admitted
+    pair  1 AB  ratio 1.004701 (+0.47%)  ms/token -0.0350  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.53/2.54s
+    pair  2 BA  ratio 1.080693 (+8.07%)  ms/token -0.5750  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.51/2.54s
+    pair  4 BA  ratio 0.926411 (-7.36%)  ms/token +0.5675  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.53/2.52s
+    pair  5 AB  ratio 1.008167 (+0.82%)  ms/token -0.0624  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.53/2.54s
+    pair  6 BA  ratio 1.027501 (+2.75%)  ms/token -0.2019  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.54/2.54s
+    pair  7 AB  ratio 0.983664 (-1.63%)  ms/token +0.1211  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.52/2.54s
+    pair  8 BA  ratio 1.119784 (+11.98%)  ms/token -0.8177  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.53/2.55s
+    pair  3 dropped: load
+    median 1.008167 (+0.82 %), mean 1.021560 (+2.16 %), SEM 2.40 pp, range 0.926411...1.119784, 2/7 below 1
+    dispatch census, all admitted pairs: [-7680] = [-24.0] per token
+
+  rtopk (k vs norm): 7/8 pairs admitted (the run's own flags admitted 3)
+    pair  1 AB  ratio 0.892550 (-10.74%)  ms/token +0.9263  dispatches -7680 (-24.0/token)  outside 1%/0%  census 2.53/2.55s
+    pair  2 BA  ratio 0.807661 (-19.23%)  ms/token +1.6636  dispatches -7680 (-24.0/token)  outside 1%/0%  census 2.55/2.57s
+    pair  3 AB  ratio 0.837748 (-16.23%)  ms/token +1.4884  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.52/2.55s  RECOVERED
+    pair  4 BA  ratio 0.807665 (-19.23%)  ms/token +1.7210  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.53/2.74s
+    pair  6 BA  ratio 0.821624 (-17.84%)  ms/token +1.6492  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.5/2.53s  RECOVERED
+    pair  7 AB  ratio 0.807874 (-19.21%)  ms/token +1.8069  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.51/2.54s  RECOVERED
+    pair  8 BA  ratio 0.819627 (-18.04%)  ms/token +1.6805  dispatches -7680 (-24.0/token)  outside 1%/1%  census 2.44/2.49s  RECOVERED
+    pair  5 dropped: load
+    median 0.819627 (-18.04 %), mean 0.827821 (-17.22 %), SEM 1.16 pp, range 0.807661...0.892550, 7/7 below 1
+    dispatch census, all admitted pairs: [-7680] = [-24.0] per token
+
+## noise floor from 12 null pairs (control+policy)
+  band 17.56 pp, median off centre 1.53 pp
+  criterion 2: the instrument resolves NO better than 3.0 %; levels below are interval-only.
+
+  rfuse: median -18.07 %, mean -17.91 %, SEM 0.80 pp, 11/11 below 1 (null put 3/12 below 1;
+    P(this split | pooled 14 below 1 over 23 pairs) = 0.000269; effect BEATS the 17.56 pp floor)
+
+  rmt: median +0.82 %, mean +2.16 %, SEM 2.40 pp, 2/7 below 1 (null put 3/12 below 1;
+    P(this split | pooled 5 below 1 over 19 pairs) = 0.397; effect INSIDE the 17.56 pp floor)
+
+  rtopk: median -18.04 %, mean -17.22 %, SEM 1.16 pp, 7/7 below 1 (null put 3/12 below 1;
+    P(this split | pooled 10 below 1 over 19 pairs) = 0.00238; effect BEATS the 17.56 pp floor)
+
+# python3 analyze.py --selfcheck
+  ok   a steady 18 % treatment arm is not drift (4 pairs recovered)
+  ok   the run's own rule really did veto those four
+  ok   a pair where both arms slide together is still vetoed
+  ok   a load veto is respected whatever the rates
+  ok   BA pairs keep the AB sign
+  ok   null pairs are all admitted
+  ok   the report runs on the fixture and marks the recovered pairs
+0 failure(s) of 7

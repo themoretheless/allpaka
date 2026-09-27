@@ -1,0 +1,135 @@
+qwen3-30b-a3b Q4_K_M: bracketed ALLPAKA_SKIP control for the 235B skip differential
+====================================================================================
+
+Run 2026-09-24 19:17-19:26 UTC, three reps of every arm, each arm immediately
+preceded by its own baseline (18 bracketed baselines in total). Purpose: test
+the pre-registered fork from preregistration.txt - is the gap between the streamed
+byte model and measured decode cost a UNIFORM in-situ inflation (all groups
+share one R), or FORMAT-SPECIFIC (only the K-quant experts inflate)? The 30B is
+the control because its experts are q4_k and its baselines bracket to ~1%
+whereas the 235B window was +/-38%.
+
+# 1. Repro
+
+  scripts/driver: /tmp/skip-diff/drive30b.sh (bash, 3 reps x 6 arms, sleep 10
+    between runs; the arm value for `all` is the comma list
+    qkv,attend,experts,router,head, NOT the literal string "all")
+  model   models/qwen3-30b-a3b-Q4_K_M.gguf (17 GiB)
+  env     ALLPAKA_SKIP=<arm> ALLPAKA_PROFILE=max-performance
+          ALLPAKA_BENCH_SKIP_MTP=1 ALLPAKA_BENCH_PP=480 ALLPAKA_BENCH_TG=64
+  cmd     ./target/release/allpaka bench --engine <model>
+  binary  target/release/allpaka built 2026-09-24 16:51 local
+          (probe_skip guards date to bbb73ef, 2026-09-14, so all six groups
+           were live in this build)
+
+# 2. Instrument gate: PASSED, and the window was cleaner than the gate asked
+
+ prereg gate: baseline 134-140 tok/s, prefill >= 1300 tok/s
+ measured   : baseline 148.5-149.9 tok/s (6.66-6.91 ms/token), prefill 1521-1531
+ One of the 18 baselines (6.91 ms) sat under the 134-140 band's implied floor
+ only because the band was written from today's CONTAMINATED 56.7 tok/s reading
+ (see 2026-09-24-dispatch-census); 149 tok/s matches the 2026-09-21 clean
+ measurements of 136.2-138.2 and is faster than either. Deviation recorded: the
+ gate was a rejection band for contention, and the run cleared it upward.
+ Deviation #2: one grep of mine (PID 21719, `grep -rn matvec_q2_k_mv .` without
+ --exclude-dir=models) ran at 100% CPU from 19:07:29 to 19:24:52Z, i.e. through
+ reps 1-2 and part of rep 3. The per-arm spreads below are <= 0.17 ms anyway, so
+ on this 17 GiB model that load did not bite - but rep 3's attend bracket (6.91)
+ is the only value outside 6.66-6.73 and it was measured inside that window.
+
+# 3. Results: arm ms/token vs its own bracket, and R = measured save / predicted
+
+ arm       P(ms) R      disp moved   r1 arm/bracket    r2               r3
+ all       4.92  1.21   3/3         0.74/6.70  24704   0.75/6.68 24704   0.77/6.75 24704   spread 0.06
+ experts   2.88  1.02   3/3         3.74/6.68  30848   3.75/6.66 30848   3.75/6.69 30848   spread 0.04
+ qkv       1.34  1.18   0/3         5.10/6.68  43136   5.11/6.69 43136   5.10/6.68 43136   spread 0.01
+ head      0.70  0.72   0/3         6.20/6.73  43136   6.20/6.67 43136   6.18/6.68 43136   spread 0.07
+ router    0.10 -69.48  3/3        13.66/6.67  36992  13.55/6.66 36992  13.62/6.68 36992   spread 0.10
+ attend    0.00    -     0/3        6.31/6.68  43136   6.28/6.68 43136   6.38/6.91 43136   spread 0.17
+
+ P = the GGUF role census times the streamed micro rates
+ (scripts/gguf-bytes-per-token.py; 2026-09-24-per-token-byte-census), per token.
+ R = median(bracket ms - arm ms) / P.
+ "disp moved" = of the reps whose arm and bracket were both counted, how many
+ changed the dispatch total (see #5 - the counter only covers 2 of 5 groups).
+
+# 4. GPU-executing vs wall: the 30B is 95% closed, and dispatch overhead is tiny
+
+ baseline: 403-406 ms "gpu clock during decode: executing" over 64 tokens
+   = 6.30-6.34 ms/token inside kernels of a 6.68 ms/token wall -> closure 0.946.
+ all arm : 36 ms / 64 = 0.56 ms inside kernels of 0.74 ms wall, at 386
+   dispatches/token (24704/64) vs the baseline's 674 (43136/64).
+ => the non-kernel residue of a decode token on this model is ~0.18 ms with 386
+    dispatches still firing, i.e. ~0.47 us per dispatch, NOT a per-dispatch cost
+    anywhere near microseconds. Projected onto the 235B's 1318 dispatches/token
+    that is 0.62 ms, so multi-encoder/dispatch overhead cannot account for the
+    235B's 12.6 ms of rate-sum shortfall. That hypothesis is dead on arithmetic
+    from this control.
+
+# 5. Instrument finding (independent of the fork)
+
+ The "gpu during decode: N dispatches" counter does NOT see the qkv, attend or
+ head dispatches: skipping those three groups leaves the total pinned at exactly
+ 43136 for all six runs, while the wall time they save is reproducible to
+ 0.01-0.17 ms across three reps. It does see experts (43136 -> 30848), router
+ (-> 36992) and all (-> 24704). So a Delta-0 dispatch reading on those three
+ groups is a counter-coverage artifact, not a dead probe - this is the same
+ conclusion the 235B run reached by a different route (2026-09-24-235b-skip-differential/
+ results.txt sections 1 and 6), now confirmed with 3/3 versus 0/3
+ instead of one rep.
+
+# 6. Reading: the fork goes to FORMAT-SPECIFIC, with one caveat
+
+ - experts (q4_k here): R = 1.02. On a clean bracketed window the streamed byte
+   model predicts the expert group's real cost to within 2%. There is no global
+   utilisation factor on this model.
+ - qkv: R = 1.18, head: R = 0.72, attend: no P (KV reads, not GGUF roles). These
+   are the small/latency-bound shapes, and they are where the 30B's own inflation
+   sits (sum of parts 5.38 vs `all` 5.95 - the extra 0.57 ms is the inter-kernel
+   gap that `all` also removes).
+ - The 235B's R(experts) = 1.32 was measured on q2_k/q3_k experts, i.e. the
+   formats the census rates came from, and it is the only group there that large.
+   The 30B control says a q4_k expert group does NOT inflate, which is what the
+   "K-quant-specific inflation" branch of the fork predicts and what a uniform
+   utilisation factor would not.
+ - Caveat, and it is load-bearing: the 235B's 1.32 came from an UNBRACKETED
+   single rep inside a +/-38% window, so the comparison above is a clean control
+   against a dirty measurement. The fork is not resolved until the 235B gets the
+   same bracketed mini-run. See roadmap A9 task and 235B results.txt section 4.
+
+# 7. Negative results recorded here
+
+ - Skipping the router does not remove ~0.10 ms, it ADDS ~6.95 ms: 13.55-13.66
+   ms/token against a 6.66-6.68 bracket, 3/3 reproducible, GPU-executing also
+   doubles (850 ms vs ~404 ms over the run) while 6144 dispatches over the run (96/token)
+   disappear. Removing the router corrupts the top-k slots, so the indexed expert
+   gather then reads the wrong (larger or uncached) expert blocks. Any removal
+   probe that touches anything feeding the indexed gather measures a corrupted
+   token, not a cheaper one - arm isolation, not speed.
+ - The literal ALLPAKA_SKIP value "all" matches no group and silently runs the
+   full model; the 235B run's "all" arm was therefore a duplicate baseline (and
+   is what revealed the +/-38% window). This control uses the comma list.
+
+# ----------------------------------------------------------------------------
+# Annotation added 2026-09-25 by the full-precision audit (task #26); prose in
+# [../2026-09-25-full-precision-audit/results.txt](../2026-09-25-full-precision-audit/results.txt)
+# section 3. Recomputed from this directory's own JSONs, no re-measurement.
+#
+# Section 3's R column survives to three digits: 1.2101 (all), 1.0214
+# (experts), 1.1766 (qkv), 0.7198 (head), -69.4139 (router), against published
+# 1.21 / 1.02 / 1.18 / 0.72 / -69.48. At 150 tok/s the stdout quantum is 0.0045
+# ms/token, so this control - unlike the 235B series it was written to check -
+# was never at risk from the printed precision, which is what made it usable.
+#
+# Section 2 has one wrong range: `baseline 148.5-149.9 tok/s (6.66-6.91
+# ms/token)`. The 18 baselines are 144.6535-150.2102 tok/s = 6.6573-6.9131
+# ms/token, median 6.6790. The ms range is right; the tok/s range is not, and
+# it hides the r3-attend bracket (144.6535) that the next paragraph then
+# discusses. The instrument gate is unaffected: it was written in tok/s and the
+# run clears it in ms/token exactly as stated.
+#
+# Section 6's `sum of parts 5.38 vs all 5.95, extra 0.57 ms` is 5.4182 vs
+# 5.9535, extra 0.5352 ms = 8.48% of this model's executing time (6.3125
+# ms/token), not 8.6%. The 235B differential's 9.2 therefore compares 8.84%
+# with 8.48%: the same order, not `the identical ratio`, and the rule both
+# files use it for (a removal probe under-counts by ~8-9%) survives.

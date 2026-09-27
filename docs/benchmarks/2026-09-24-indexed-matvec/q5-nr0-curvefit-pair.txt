@@ -1,0 +1,30 @@
+=== ALLPAKA_Q5_NR0=4 ===
+q5 B=       A=0.1 ns/row  B=464 ps/row/block  (1.81 ps/weight at the block cost alone)
+q5 B=       A=0.1 ns/row  B=293 ps/row/block  (1.15 ps/weight at the block cost alone)
+q5 B=       A=0.5 ns/row  B=401 ps/row/block  (1.57 ps/weight at the block cost alone)
+q5 B=       A=0.1 ns/row  B=70 ps/row/block  (2.18 ps/weight at the block cost alone)
+=== ALLPAKA_Q5_NR0=2 ===
+q5 B=       A=0.2 ns/row  B=463 ps/row/block  (1.81 ps/weight at the block cost alone)
+q5 B=       A=0.1 ns/row  B=296 ps/row/block  (1.16 ps/weight at the block cost alone)
+q5 B=       A=0.3 ns/row  B=492 ps/row/block  (1.92 ps/weight at the block cost alone)
+q5 B=       A=0.1 ns/row  B=71 ps/row/block  (2.21 ps/weight at the block cost alone)
+=== ALLPAKA_Q5_NR0=4 ===
+q5 B=       A=-0.3 ns/row  B=808 ps/row/block  (3.16 ps/weight at the block cost alone)
+q5 B=       A=0.6 ns/row  B=329 ps/row/block  (1.29 ps/weight at the block cost alone)
+q5 B=       A=0.6 ns/row  B=613 ps/row/block  (2.40 ps/weight at the block cost alone)
+q5 B=       A=0.2 ns/row  B=73 ps/row/block  (2.27 ps/weight at the block cost alone)
+=== ALLPAKA_Q5_NR0=2 ===
+q5 B=       A=-0.7 ns/row  B=1306 ps/row/block  (5.10 ps/weight at the block cost alone)
+q5 B=       A=0.7 ns/row  B=532 ps/row/block  (2.08 ps/weight at the block cost alone)
+q5 B=       A=-0.2 ns/row  B=1311 ps/row/block  (5.12 ps/weight at the block cost alone)
+q5 B=       A=1.0 ns/row  B=81 ps/row/block  (2.52 ps/weight at the block cost alone)
+=== ALLPAKA_Q5_NR0=4 ===
+q5 B=       A=-0.4 ns/row  B=1305 ps/row/block  (5.10 ps/weight at the block cost alone)
+q5 B=       A=0.5 ns/row  B=620 ps/row/block  (2.42 ps/weight at the block cost alone)
+q5 B=       A=0.9 ns/row  B=1155 ps/row/block  (4.51 ps/weight at the block cost alone)
+q5 B=       A=0.8 ns/row  B=105 ps/row/block  (3.29 ps/weight at the block cost alone)
+=== ALLPAKA_Q5_NR0=2 ===
+q5 B=       A=-0.4 ns/row  B=1329 ps/row/block  (5.19 ps/weight at the block cost alone)
+q5 B=       A=0.9 ns/row  B=533 ps/row/block  (2.08 ps/weight at the block cost alone)
+q5 B=       A=-0.6 ns/row  B=1418 ps/row/block  (5.54 ps/weight at the block cost alone)
+q5 B=       A=1.1 ns/row  B=94 ps/row/block  (2.93 ps/weight at the block cost alone)

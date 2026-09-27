@@ -1,0 +1,57 @@
+pair 1/3
+pair 2/3
+pair 3/3
+{
+  "model": "models/qwen3-0.6b-Q8_0.gguf",
+  "model_sha256": "361cc68159042c36ebff7715dc5a2e4612153e88f3e9c9c234820849d6dc9e1d",
+  "pp": 512,
+  "tg": 8,
+  "decode_context_tokens": 1,
+  "comparison_validated": false,
+  "limitations": [
+    "llama-bench generates its own token stream; MoE routing is not identical",
+    "KV precision must be verified against the allpaka capability report"
+  ],
+  "allpaka_prefill": {
+    "samples": [
+      7567.047588689345,
+      8328.058218722363,
+      8515.462641509484
+    ],
+    "median": 8328.058218722363,
+    "min": 7567.047588689345,
+    "max": 8515.462641509484
+  },
+  "allpaka_decode": {
+    "samples": [
+      342.9263404937068,
+      356.6737992509672,
+      377.1220599387431
+    ],
+    "median": 356.6737992509672,
+    "min": 342.9263404937068,
+    "max": 377.1220599387431
+  },
+  "llama_prefill": {
+    "samples": [
+      8901.77,
+      9640.01,
+      10329.9
+    ],
+    "median": 9640.01,
+    "min": 8901.77,
+    "max": 10329.9
+  },
+  "llama_decode": {
+    "samples": [
+      306.902,
+      311.943,
+      343.253
+    ],
+    "median": 311.943,
+    "min": 306.902,
+    "max": 343.253
+  }
+}
+
+Artifacts: /Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-26-postflip-matrix/tg-sweep-1/tg8

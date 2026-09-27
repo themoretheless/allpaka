@@ -1,0 +1,64 @@
+Verify 4 - the indexer guard is corrected to measure work, not liveness
+=======================================================================
+
+Run 2026-09-26T05:41Z, before any campaign process. Proves the second pre-
+registered change (the indexer class in the launch gate) as written could never
+have cleared, and that the rewritten version both clears on an idle machine and
+still fires on a real hog.
+
+1. The machine as it stood, and why liveness cannot be the veto
+---------------------------------------------------------------
+Every name in the class is a resident daemon. `pgrep -x` finds 25 of them and
+`ps` gives their lifetime-average CPU:
+
+== the machine as it is right now ==
+  alive: 728 corespotlightd   ps %cpu,etime: 0.0 02-23:32:39
+  alive: 4320 managedcorespot   ps %cpu,etime: 0.0 01-01:57:49
+  alive: 364 mds   ps %cpu,etime: 1.0 02-23:32:44
+  alive: 513 mds_stores   ps %cpu,etime: 0.3 02-23:32:42
+  alive: 56978..58635 mdworker_shared (20 workers)   ps %cpu: 0.0-1.8
+  alive: 12274 photoanalysisd   ps %cpu,etime: 0.0 01-08:19:30
+  alive: 676 filecoordinatio   ps %cpu,etime: 0.0 02-23:32:39
+  old liveness veto -> 25 pids, always nonzero
+  fixed guard       -> ''
+
+So `wait-then-run.log` showed `busy: 728 corespotlightd 513 mds_stores ...` on
+every tick from 05:34 to 05:40 and the settle counter never left 0/5. Left as
+written, the campaign would have exited 3 at the 240-minute cap having never
+started, and the artifact would have read "no quiet window" instead of "the
+guard asks for something that does not exist".
+
+Two more bugs in the same draft: `mdworker` with `pgrep -x` matched nothing (the
+worker is `mdworker_shared`), and the class was missing `mds` and
+`managedcorespotlightd`.
+
+2. Why the rewrite samples CPU time instead of reading `ps` %cpu
+----------------------------------------------------------------
+`ps` %cpu is total CPU time divided by the process's whole wall life. A daemon
+three days old cannot show the 153% burst that is the reason this class is
+gated at all - the column reads single digits while it indexes. The guard
+therefore takes `ps -o cputime` twice, `INDEX_SAMPLE_S = 3.0` apart, and reports
+percent-of-a-core for that window. A live `ps` call is also free next to `top`.
+
+3. The rewritten guard, against processes that really are working
+-----------------------------------------------------------------
+Duty-cycle burners, pointed at the same `index_busy()` by overriding its name
+tuple; the vetoes are a single process at INDEX_PROC_VETO = 25% (gate A6's
+threshold) or the class at INDEX_CLASS_VETO = 40% (how Spotlight hogs - a fleet
+of small workers):
+
+== one process using a whole core (pid 59288, comm 'Python') ==
+  index_busy() -> 'Python(59288) 100% cpu\nindexer fleet 100% cpu across 2 pids'   (single-process veto 25.0%)
+== a fleet: four workers at ~15% each, none near the single veto ==
+  index_busy() -> 'indexer fleet 56% cpu across 5 pids'   (class veto 40.0%)
+== back to the real names, on a machine doing nothing special ==
+  index_busy() -> '';  others_busy() -> ''
+
+The single-core case is reported twice on purpose: the fleet line counts every
+matching pid, and in this probe the matched name includes the python running the
+probe itself. Against the real `INDEX_NAMES` no bench or shell carries those
+names, so the aggregate is the class only.
+
+Verdict: no gate, band or threshold moved. What changed is that change 2 does
+what preregistration.txt says it does - refuse a launch while an indexer owns a
+core and the disk - without refusing one that will never come.

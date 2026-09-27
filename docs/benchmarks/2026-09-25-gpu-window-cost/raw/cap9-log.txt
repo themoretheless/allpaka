@@ -1,0 +1,44 @@
+airbug: traces and logs -> http://localhost:4318
+prewarmed 82.7 GiB of weights in 104.6s
+metal: Apple M4 Max attached, 82.7 GiB of weights shared with the GPU in 12 windows (maxBufferLength 9.0 GiB)
+engine bench: qwen3-235b-a22b-instruct-2507-Q2_K_XL (94 layers, qwen3moe, MoE)
+  capabilities:
+    model: arch=qwen3moe layers=94 moe=true
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: auto
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=12 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=471 bytes=0.19 GiB matmul-kernel=yes
+      Q2K: tensors=188 bytes=46.27 GiB matmul-kernel=yes
+      Q3K: tensors=79 bytes=25.46 GiB matmul-kernel=yes
+      Q4K: tensors=366 bytes=9.84 GiB matmul-kernel=yes
+      Q5K: tensors=16 bytes=0.18 GiB matmul-kernel=yes
+      Q6K: tensors=11 bytes=0.73 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=291
+  prefill    64 tok in   1.35 s      47.3 tok/s
+  gpu during prefill: 2 waits, 941 dispatches, encode 5 ms, wait 1345 ms of 1352 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 1345 ms, scheduling 0 ms, round trips + idle 0 ms (of 1345 ms waited)
+  prefill phases, ms/token:
+    attention              0.0  ( 0.2%)
+    ffn (experts)          0.0  ( 0.2%)
+    embed                  0.0  ( 0.0%)
+    router                 0.0  ( 0.0%)
+    unaccounted           21.0  (99.6%)
+  decode      8 tok in   0.39 s      20.4 tok/s
+  gpu path decode: attempts=8 successes=8 declines=0
+  gpu during decode: 8 waits, 11176 dispatches, encode 4 ms, wait 387 ms of 391 ms total (0% outside the GPU)
+  gpu clock during decode: executing 385 ms, scheduling 1 ms, round trips + idle 1 ms (of 387 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted           48.9  (100.0%)
+  context at end: 9 tokens (attention cost grows with this)
+  benchmark report: /Users/themoretheless/Documents/Sources/allpaka/.airbug-bench/235b-window-bisect/cap9-report.json
+airbug bench run: target/allpaka-bench/airbug-1790364494607139000-60436

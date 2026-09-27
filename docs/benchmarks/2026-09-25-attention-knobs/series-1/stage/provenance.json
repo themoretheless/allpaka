@@ -1,0 +1,34 @@
+{
+ "started": "2026-09-26T12:48:02Z",
+ "mode": "stage",
+ "binary_sha256": "7b8ec67aa72c42662ba4608fa1629c139c759c6ce7bacdd6c6aa6fbcc46fe2fe",
+ "binary_source": "/Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-26-glm-mv-id-rerun/series-1/allpaka",
+ "preregistered_sha": "7b8ec67aa72c42662ba4608fa1629c139c759c6ce7bacdd6c6aa6fbcc46fe2fe",
+ "git_head": "d25a5fa",
+ "tree_clean": false,
+ "model": "models/qwen3-30b-a3b-Q4_K_M.gguf",
+ "pp_tg": [
+  3072,
+  320
+ ],
+ "arms": {
+  "mv": {},
+  "s32": {
+   "ALLPAKA_ATTN_MV": "0"
+  },
+  "s16": {
+   "ALLPAKA_ATTN_MV": "0",
+   "ALLPAKA_ATTN_S8": "16"
+  },
+  "s8": {
+   "ALLPAKA_ATTN_MV": "0",
+   "ALLPAKA_ATTN_S8": "8"
+  },
+  "attend4": {
+   "ALLPAKA_ATTN_MV": "0",
+   "ALLPAKA_ATTN_S8": "4"
+  }
+ },
+ "pairs": 8,
+ "control": 4
+}

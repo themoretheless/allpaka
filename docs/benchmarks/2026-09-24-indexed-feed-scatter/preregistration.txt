@@ -1,0 +1,91 @@
+# Does the 235B's in-situ rate table exist? Feed depth and expert scatter, fixed before the data
+
+Date: 2026-09-24 (local 00:20, 2026-09-25). Written before any measurement.
+
+## Why this exists
+
+The per-token time ledger prices every decode stage as (bytes in the role census)
+/ (the format's indexed, streamed micro-bench rate). Every one of those published
+rates is measured at `per_wait = 1` - one commit, one `wait_until_completed`, so
+the GPU's queue is empty whenever it finishes. A real decode token is the
+opposite regime: ONE command buffer carrying ~1318 dispatches. The repo already
+knows this artefact is real: `q5_shape_ratio_against_q4` says a 4096-row dispatch
+at feed=1 "swamped the effect", that committing >= 8 buffers per wait tightens
+the meter from 2.4x spread to +-1.3%, and that 32k+-row grids hide the stall by
+themselves - "which is why every number published before the fix survived it".
+
+The decode-split instrument (2026-09-24-235b-decode-split) now says the 235B's
+`down` stage costs 16.0 ms/token against 7.69 ms at its own published rate
+(2.09x), while `gate_up` on the same token costs 0.99x its own rate. Two things
+about the harness could produce exactly that asymmetry, and both are instrument
+problems rather than kernel problems:
+
+  1. FEED. The two shapes have different grid sizes per dispatch: gate/up is
+     n_out 1536 x 8 slots = 12 288 rows, down is 4096 x 8 = 32 768 rows. The
+     documented threshold where the feed artefact disappears is 32k rows. So the
+     two published rates can sit on opposite sides of a known regime boundary,
+     and a ratio of ratios built from them is not a like-for-like comparison.
+  2. SCATTER. The harness routes a round at `slots` CONSECUTIVE expert ids, i.e.
+     one contiguous run of weight bytes. A router hands decode 8 of 128 experts
+     at unrelated addresses, spread over a 352 MB tensor per layer, and the whole
+     9.17 GiB of the token's footprint moves once so nothing is ever reused. The
+     published rates cannot see that at all.
+
+If either is large, the ledger's denominators are wrong, the 2.09x is partly
+meter error, and the q3_k unpack chain prize is re-priced or cancelled.
+
+## Design
+
+One process, `gpu_ffnbench::indexed_matvecs_report_effective_bandwidth`, all 15
+shapes, `ALLPAKA_BENCH_FEEDS=1,8,64` x `ALLPAKA_BENCH_SCATTERS=0,1`, 4 passes,
+axes interleaved INSIDE the shape loop so the machine's 3x-per-minutes drift is
+common-mode in every ratio quoted. Absolute GB/s across passes is not read.
+  - contig  = the published layout (ids base, base+1, ... consecutive).
+  - scatter = 8 distinct experts, equally spaced by a stride coprime to the
+    expert count, from a random offset per round. Deliberately regular: it is a
+    probe of the penalty for spreading 8 streams over the layer, not a replica of
+    a router's clustering, so a scatter effect found here is a lower bound.
+Harness change: `gpu::INDEXED_SCATTER` is a static set per call, not an env read,
+precisely so both arms stay in one process.
+
+## Criteria, fixed now
+
+  A. If feed=64 lifts the q3_k down rate >= 1.6x over feed=1 at the same shape,
+     the ledger's q3_k denominator is a regime artefact and the 2.09x is mostly
+     meter error: the ledger gets rebuilt on fed rates and the q3_k prize shrinks
+     to whatever survives.
+  B. If scatter cuts q3_k down >= 1.6x while cutting q2_k gate/up <= 1.2x, the
+     in-situ deficit is an address-layout effect and NOT the unpack chain. The
+     lever then becomes how the 8 experts are dispatched, and the q3_k unpack
+     chain drops out of the top of the roadmap.
+  C. If scatter cuts both formats within +-15% of each other, layout is not
+     format-specific; any remaining 2.09x stays a q3_k kernel claim.
+  D. If every feed x scatter ratio stays within +-15%, the instrument is not the
+     story: the deficit is something only the model produces (fresh swiglu
+     activations as the matvec input, or the dependency chain), and the next
+     probe has to be in-situ, not in the harness.
+
+Report the 15x6 grid, not a selection. Quote best-of-4 per cell and the
+best/feed=1 ratio next to it.
+
+## Axis 3, added before any x-related measurement (2026-09-24T20:30Z)
+
+After running axes 1-2 the harness itself explains the asymmetry it was asked
+about. `indexed_matvec_bandwidth_fed` passes `x_stride: 0`, so all `slots`
+experts of a round read ONE activation block. In the real decode path
+(metal.rs:12099 against 12215) gate/up runs with `x_stride = 0` because the
+token's hidden state is shared by every expert, and the routed down runs with
+`x_stride = expert_ffn` because each expert reads its own freshly swiglu'd
+slice. So a shared-x rate is the right denominator for gate/up and possibly the
+wrong one for down - which is exactly the pair that came out 0.99x and 2.09x.
+
+Criterion, fixed before the run, on the same shape with x shared against x per
+slot, same process, axes interleaved:
+  E. If q3_k down loses >= 1.5x from x per slot while q2_k gate/up loses
+     <= 1.1x, the 2.09x is an instrument artefact of shared activations. The
+     ledger's q3_k row is then priced correctly at the per-slot rate, the q3_k
+     unpack chain stops being the top lever, and the new lever is activation
+     staging for the down projection (what the down kernel pays to pull in 8
+     separate 6 KB blocks, and whether fusing swiglu into down removes it).
+  F. If both formats lose within +-15% of each other, x layout is not
+     format-specific and the deficit stays where RUN 2 left it.

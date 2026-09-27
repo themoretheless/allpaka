@@ -1,0 +1,26 @@
+
+running 1 test
+metal: Apple M4 Max attached, 2.0 GiB of weights shared with the GPU
+expert gate/up               Q4K [1408,4096]    3.24 MB x 128: 317.6 best, 236.1 median GB/s GPU-clock
+probe n_out 2048             Q4K [2048,4096]    4.72 MB x 128: 316.5 best, 311.5 median GB/s GPU-clock
+probe n_out 4096             Q4K [4096,4096]    9.44 MB x 71: 296.6 best, 283.5 median GB/s GPU-clock
+probe 8x1408 rows            Q4K [11264,4096]   25.95 MB x 25: 321.9 best, 318.9 median GB/s GPU-clock
+expert down                  Q8_0 [4096,1408]    6.13 MB x 109: 424.3 best, 409.6 median GB/s GPU-clock
+shared gate/up               Q5K [1408,4096]    3.96 MB x 128: 277.2 best, 264.9 median GB/s GPU-clock
+shared down                  Q8_0 [4096,1408]    6.13 MB x 109: 457.4 best, 455.0 median GB/s GPU-clock
+q5_0 down shape              Q5_0 [4096,1408]    3.96 MB x 128: 262.2 best, 251.9 median GB/s GPU-clock
+q5_0 wide shape              Q5_0 [1408,4096]    3.96 MB x 128: 277.6 best, 271.2 median GB/s GPU-clock
+q5_0 short row               Q5_0 [256,512]    0.09 MB x 128: 70.5 best, 60.7 median GB/s GPU-clock
+attn q                       Q4K [12288,4096]   28.31 MB x 23: 462.9 best, 406.7 median GB/s GPU-clock
+attn wo                      Q4K [4096,12288]   28.31 MB x 23: 361.1 best, 337.7 median GB/s GPU-clock
+attn k                       Q4K [1024,4096]    2.36 MB x 128: 433.1 best, 425.3 median GB/s GPU-clock
+attn v                       Q6K [1024,4096]    3.44 MB x 128: 384.2 best, 380.0 median GB/s GPU-clock
+head slice                   Q6K [8192,4096]   27.53 MB x 24: 368.9 best, 337.3 median GB/s GPU-clock
+--- indexed ×8 (GLM n_used) ---
+idx gate/up ×8               Q4K [1408,4096] x8 idx: 403.8 best, 365.7 median GB/s GPU-clock (MV_ID=on)
+idx down ×8                  Q8_0 [4096,1408] x8 idx: 438.7 best, 437.8 median GB/s GPU-clock (MV_ID=on)
+idx down ×8 (q5_0)           Q5_0 [4096,1408] x8 idx: 153.0 best, 130.7 median GB/s GPU-clock (MV_ID=on)
+test glm_decode_matvecs_report_effective_bandwidth ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 43.41s
+

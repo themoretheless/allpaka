@@ -1,0 +1,43 @@
+# feed-depth experiment at the real expert-down shape [512,2048] x8, sets=60 (330 MB).
+# per_wait = command buffers committed per wait; 1 is what every published number in this file uses.
+# q4_k is the meter: if its own B repeats, the run is readable.
+=== per_wait=1 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=1, region 330 MB ---
+q4_k   91 GB/s  1579.7 ps/row/block  vs q4_k 1.000
+q5_k   64 GB/s  2744.0 ps/row/block  vs q4_k 1.737
+q3_k   40 GB/s  2718.0 ps/row/block  vs q4_k 1.721
+=== per_wait=8 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=8, region 330 MB ---
+q4_k   310 GB/s  464.4 ps/row/block  vs q4_k 1.000
+q5_k   219 GB/s  805.4 ps/row/block  vs q4_k 1.734
+q3_k   127 GB/s  864.0 ps/row/block  vs q4_k 1.860
+=== per_wait=32 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=32, region 330 MB ---
+q4_k   324 GB/s  444.5 ps/row/block  vs q4_k 1.000
+q5_k   231 GB/s  761.3 ps/row/block  vs q4_k 1.713
+q3_k   130 GB/s  849.4 ps/row/block  vs q4_k 1.911
+=== per_wait=128 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=128, region 330 MB ---
+q4_k   317 GB/s  454.4 ps/row/block  vs q4_k 1.000
+q5_k   225 GB/s  781.7 ps/row/block  vs q4_k 1.720
+q3_k   130 GB/s  848.1 ps/row/block  vs q4_k 1.866
+=== per_wait=128 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=128, region 330 MB ---
+q4_k   329 GB/s  438.2 ps/row/block  vs q4_k 1.000
+q5_k   234 GB/s  751.9 ps/row/block  vs q4_k 1.716
+q3_k   134 GB/s  821.9 ps/row/block  vs q4_k 1.876
+=== per_wait=32 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=32, region 330 MB ---
+q4_k   341 GB/s  422.8 ps/row/block  vs q4_k 1.000
+q5_k   238 GB/s  739.8 ps/row/block  vs q4_k 1.750
+q3_k   132 GB/s  830.2 ps/row/block  vs q4_k 1.963
+=== per_wait=8 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=8, region 330 MB ---
+q4_k   327 GB/s  441.0 ps/row/block  vs q4_k 1.000
+q5_k   232 GB/s  757.9 ps/row/block  vs q4_k 1.719
+q3_k   130 GB/s  845.7 ps/row/block  vs q4_k 1.918
+=== per_wait=1 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=1, region 330 MB ---
+q4_k   221 GB/s  652.2 ps/row/block  vs q4_k 1.000
+q5_k   177 GB/s  996.2 ps/row/block  vs q4_k 1.528
+q3_k   105 GB/s  1043.6 ps/row/block  vs q4_k 1.600

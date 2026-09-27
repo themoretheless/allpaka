@@ -1,0 +1,42 @@
+# GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf
+arch=glm4moe shards=2 layers=47 n_expert=128 experts_touched=8 tensors=803 lm_head_tied=False
+bytes on disk: 67.96 GiB, sum of tensor extents: 67.96 GiB
+
+# streamed per decode token (all shards): 8.57 GiB
+  by quant type:
+    q4_k          5706.8 MiB   65.0%
+    q8_0          1342.7 MiB   15.3%
+    q5_0           726.0 MiB    8.3%
+    q6_k           561.1 MiB    6.4%
+    q5_k           347.9 MiB    4.0%
+    f32             96.1 MiB    1.1%
+  by role:
+    attention         2776.5 MiB   31.6%
+    routed gate/up    2277.0 MiB   25.9%
+    routed down       1754.5 MiB   20.0%
+    other              684.8 MiB    7.8%
+    shared expert      616.7 MiB    7.0%
+    head               485.6 MiB    5.5%
+    dense FFN           93.5 MiB    1.1%
+    router              92.0 MiB    1.0%
+  type x role, top 12 (the byte shares the decode prediction uses):
+    q4_k     attention         2697.8 MiB   30.7%  n=165
+    q4_k     routed gate/up    2277.0 MiB   25.9%  n=92
+    q8_0     routed down       1028.5 MiB   11.7%  n=22
+    q5_0     routed down        726.0 MiB    8.3%  n=24
+    q4_k     other              684.0 MiB    7.8%  n=3
+    q6_k     head               485.6 MiB    5.5%  n=1
+    q5_k     shared expert      347.9 MiB    4.0%  n=92
+    q8_0     shared expert      268.8 MiB    3.1%  n=46
+    f32      router              92.0 MiB    1.0%  n=92
+    q6_k     attention           75.5 MiB    0.9%  n=23
+    q4_k     dense FFN           48.1 MiB    0.5%  n=2
+    q8_0     dense FFN           45.4 MiB    0.5%  n=1
+
+  resident (whole file) by type, for context:
+    q4_k          39.25 GiB
+    q8_0          16.38 GiB
+    q5_0          11.34 GiB
+    q6_k           0.55 GiB
+    q5_k           0.34 GiB
+    f32            0.09 GiB

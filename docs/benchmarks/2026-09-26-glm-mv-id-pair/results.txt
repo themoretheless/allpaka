@@ -1,0 +1,229 @@
+# ALLPAKA_MV_ID on GLM-4.5-Air: campaign abandoned under the stop rule
+
+Question (preregistered in [preregistration.txt](preregistration.txt) before any
+counted pair): does the shipped default `ALLPAKA_MV_ID=1` - llama `mul_mv_id`
+geometry, `grid.z = slots`, for the INDEXED Q4/Q8 `_mv` kernels
+(`crates/allpaka-backend/src/gpu/metal.rs:9477-9509`) - cost or gain anything e2E on
+GLM-4.5-Air decode, and is the +/-3% ship rule met for the first time on this knob?
+
+## Verdict
+
+**No measurement. The campaign was abandoned under its own pre-registered stop
+rule**, which reads: if fewer than 3 of the first 4 real pairs are admitted, stop and
+publish the abandonment rather than extend the run hunting a quieter window. It
+admitted **2 of 4**. The machine went bad two minutes into the campaign - a compiler
+that started after the driver's only build check (see below) - and 8 of the 22
+measured processes ran depressed. MV_ID's default stands **as shipped and still
+unpriced**, exactly as `docs/decode-opts.md` described it before this attempt, which
+is the one thing this artifact does not change.
+
+What this artifact is instead: a characterisation of the disturbance that killed the
+run, three instrument bugs and one false cause it retracted, and a re-run definition concrete enough that the
+next attempt does not repeat this one.
+
+## What ran
+
+- 4 calibration processes (A3's thermometer): prefill 373.59 / 373.82 / 373.98 /
+  374.29, median **374.15**, so the band floor is **317.88**; their decode read
+  46.14-47.48, i.e. the window opened healthy.
+- 1 priming pair (discarded by design): on 46.47 / off 45.93.
+- Rounds 1-4 counted - 4 `real` (on/off), 4 `null` (on/MV_ID=1, an identical
+  encode), 2 `control` (on/Q5_0_MV=0, the positive control) = 10 pairs, 20 processes.
+- Killed during round 5, on the analyzer's stop-rule line and not on a judgement made
+  afterwards; the later rounds are not analysed and not counted.
+- Arm identity: `metadata.resolved_overrides` matched the preregistered env in all 22
+  processes (A0 fired 0 times), all four arms dispatched **26368** kernels per
+  token-set (MV_ID changes `grid.z`/threads-per-block, not the dispatch count),
+  `outside the GPU` read **0%** in every process, and `fast_path` was 32/32 with
+  `declines=0` everywhere (A1 fired 0 times) - so no arm was dead and no arm was the
+  wrong arm.
+
+## The ledger, as the analyzer printed it
+
+Full output: [analysis-1.txt](analysis-1.txt), plus
+[analysis-1-pre-windowfix.txt](analysis-1-pre-windowfix.txt) kept to show what the A5
+window bug below did and did not change.
+
+| kind | admitted | median ratio (on/other) | range |
+| --- | --- | --- | --- |
+| real `on/off` | 2 of 4 | **0.9582** | 0.9485 (BA) .. 0.9680 (AB) |
+| null `on/MV_ID=1` | 2 of 4 | 1.0015 | 0.9782 .. 1.0247 |
+| control `on/Q5_0_MV=0` | **0 of 2** | - | - |
+
+Every removal traces to A3: in 6 of the 10 counted pairs an arm's prefill fell under
+the 317.88 floor. Three of those pairs additionally trip A4 (decode under the 30
+tok/s arm floor, always on an arm A3 had already caught) and one additionally A5
+(in-window load 13.94, round4 null) - so the thermometer alone decided admissions,
+and the two bands only ever agreed with it. The null floor this run could measure is
+max |ratio-1| = **2.47%** on n=2.
+
+## The disturbance, and what sees it
+
+Ratios are against the levels the clean processes held (prefill median 374.15, decode
+about 46.5):
+
+  t+    0s  round-prime  prime    AB     on  pp  365.3 (0.976)  tg  46.47 (0.999)  load  2.58  0% out
+  t+   17s  round-prime  prime    AB    off  pp  358.1 (0.957)  tg  45.93 (0.988)  load  2.26  0% out
+  t+   34s  round1       real     AB     on  pp  351.5 (0.939)  tg  45.97 (0.989)  load  2.20  0% out
+  t+   51s  round1       real     AB    off  pp  350.4 (0.937)  tg  47.49 (1.021)  load  2.24  0% out
+  t+   69s  round1       null     BA   null  pp  352.6 (0.942)  tg  47.45 (1.020)  load  2.12  0% out
+  t+   87s  round1       null     BA     on  pp  356.7 (0.953)  tg  46.42 (0.998)  load  2.34  0% out
+  t+  105s  round1       control  AB     on  pp  368.9 (0.986)  tg  46.13 (0.992)  load  2.13  0% out
+  t+  123s  round1       control  AB  q5off  pp  232.6 (0.622)  tg  22.13 (0.476)  load  2.20  0% out  <-- depressed
+  t+  143s  round2       real     BA    off  pp  208.8 (0.558)  tg  23.57 (0.507)  load  2.07  0% out  <-- depressed
+  t+  163s  round2       real     BA     on  pp  227.7 (0.609)  tg  21.90 (0.471)  load  1.98  0% out  <-- depressed
+  t+  183s  round2       null     AB     on  pp  277.3 (0.741)  tg  25.48 (0.548)  load  1.77  0% out  <-- depressed
+  t+  202s  round2       null     AB   null  pp  292.8 (0.783)  tg  30.94 (0.665)  load  5.01  0% out  <-- depressed
+  t+  219s  round3       real     AB     on  pp  274.2 (0.733)  tg  36.37 (0.782)  load  4.69  0% out  <-- depressed
+  t+  238s  round3       real     AB    off  pp  321.7 (0.860)  tg  42.03 (0.904)  load  3.77  0% out
+  t+  256s  round3       null     BA   null  pp  356.7 (0.953)  tg  44.86 (0.965)  load  3.19  0% out
+  t+  274s  round3       null     BA     on  pp  373.3 (0.998)  tg  45.97 (0.989)  load  2.72  0% out
+  t+  292s  round3       control  BA  q5off  pp  374.2 (1.000)  tg  39.74 (0.855)  load  2.39  0% out
+  t+  310s  round3       control  BA     on  pp  250.2 (0.669)  tg  33.10 (0.712)  load  2.99  0% out  <-- depressed
+  t+  328s  round4       real     BA    off  pp  373.5 (0.998)  tg  46.85 (1.007)  load  3.44  0% out
+  t+  346s  round4       real     BA     on  pp  330.7 (0.884)  tg  44.43 (0.956)  load  3.24  0% out
+  t+  364s  round4       null     AB     on  pp  287.7 (0.769)  tg  38.07 (0.819)  load 13.94  0% out  <-- depressed
+  t+  385s  round4       null     AB   null  pp  330.3 (0.883)  tg  44.68 (0.961)  load 11.23  0% out
+
+The 8 depressed processes are not scattered: they occupy t+127s..t+220s and then
+recur at t+312s and t+368s, and inside each one **both channels fall together**
+(prefill to 0.56-0.78 of the clean level, decode to 0.47-0.82). That correlation is
+why an in-run prefill thermometer works as a detector here, and why "a dead arm" is
+not a competing explanation for the slow readings - each of them still reports 0%
+outside the GPU and the exact dispatch count.
+
+What the covariates saw:
+
+  t+  -68s  allpaka 54%, mediaanalysisd 38%, mds_stores 13%
+  t+   -6s  kernel_task 8%, top 6%, com.apple.Virtua 4%
+  t+   56s  allpaka 63%, mds_stores 18%, kernel_task 10%
+  t+  118s  kernel_task 6%, top 6%, rider 4%
+  t+  180s  kernel_task 18%, top 6%, rider 5%
+  t+  242s  allpaka 64%, loginwindow 14%, kernel_task 10%
+  t+  303s  Qoder 10%, kernel_task 8%, top 6%
+  t+  365s  rustc 694%, allpaka 43%, kernel_task 9%
+  t+  428s  kernel_task 16%, mds_stores 10%, fseventsd 8%
+  t+  490s  kernel_task 14%, top 8%, Qoder 8%
+
+- `vm.loadavg`: 116 ticks, min 1.60, median 2.85, **max 16.99**; all 20 ticks >= 8
+  fall in t+373..t+470. The first depressed process starts at t+127, so through most
+  of the damage the load average sat at 2-3 and A5 was blind. That is the 2026-09-25
+  co-tenant finding from the other side: load average lags the thing that matters.
+- The one `top` snapshot that caught a culprit reads **rustc 693.6%** at t+365s - the
+  other session's build, which began ~4 minutes after the driver's startup check
+  passed. `top` runs every 60 s for 1.8 s, so it missed the t+127 episode entirely;
+  a 60 s cadence is a witness, not a detector.
+- swap: 9.0 GiB used in every snapshot, before, during and after - a covariate that
+  carried no information, recorded anyway (A7).
+
+## Three instrument bugs, and one cause this file invented and then checked
+
+1. **The driver's build check ran once.** [drive-mv-id.py](drive-mv-id.py) refused to
+   start while `cargo`/`rustc`/`llama-bench` was live and never looked again, so a
+   build that starts mid-campaign is invisible to it. Fixed: `wait_quiet()` now
+   requires a clear compiler at every launch (calibration, priming, each round), not
+   only a load under the gate.
+2. **A5's window was a point, not a span.** [analyze-mv-id.py](analyze-mv-id.py)
+   attributed covariates to each arm's `st_birthtime..st_mtime` of the *report JSON*,
+   and the engine writes that file when the process closes, so the window was 0.0 s
+   long and A5 sampled a timestamp instead of an arm. The stdout log, created at
+   process start, gives the real ~16 s span, and the analyzer now uses `win_log`.
+   Effect on this campaign: the attributed maxima moved (round4 null 11.95 -> 13.94,
+   round2 real 0.00 -> 2.07) and **no admission changed** - still 2 of 4 real, still
+   abandoned. The stop-rule count is window-independent by construction anyway, since
+   A5 is applied to pairs while the rule reads `arm_problems` (A0-A4).
+3. **A cause this file first asserted and then disproved with its own timeline.** The
+   draft explanation of `criterion 0` failing was structural: A4's 30 tok/s floor comes
+   from the *default* arm's history, so an intentionally-slow control arm "gets vetoed
+   for being slow" and 0-of-2 was unsatisfiable by construction. The records in this
+   file say otherwise. The healthy control process (round3, t+292 s) read prefill 374.2
+   = 1.000 of the calibration median and decode **39.74** - ten tok/s clear of that
+   floor - so a ~16% knob does not trip A4 at all. Both vetoed control processes sat at
+   0.48 and 0.62 of the clean level, which is the same depression that vetoed `on`
+   processes elsewhere in the campaign; round3's control pair in fact fell to the *`on`*
+   arm's A3 (250.2), not to the control's band. What is actually missing is narrower:
+   nothing in the artifact states what a healthy `q5off` reads, so telling "control
+   disturbed" from "control working" takes a hand read of the timeline, and control
+   pairs run only in odd rounds, so two admissible ones need two more lucky windows. On
+   cost: the three control ratios this campaign printed (1.1469 in the uncounted smoke
+   pair, 2.0845, 0.8328) each pit a healthy arm against a depressed one, so none of
+   them is `ALLPAKA_Q5_0_MV`'s cost.
+4. **A4's floor carried the anchor error documented the same morning.** The 30 tok/s
+   came from a band anchored on 45.95, which is a **tg64** print, applied to a tg32
+   arm ([../2026-09-26-glm-llama-parity/results.txt](../2026-09-26-glm-llama-parity/results.txt),
+   "The incumbent moved too"). At 30 it is loose enough to have mattered little; the
+   lesson is that a floor's provenance has to name its generation length.
+
+## The reading this artifact refuses
+
+Both admitted real pairs sit below parity: 0.9680 (AB) and 0.9485 (BA), median
+**0.9582** = -4.18%, same sign in both orders, and that excess does clear the 2.47%
+null floor - so the pre-registered decision rules, run mechanically, print
+`FLIP-TO-OFF CANDIDATE`. Every real pair of the whole campaign, admissible or not,
+read `off` faster (0.8655, 0.9291, 0.9485, 0.9680, and the smoke pair at 0.9952),
+while the identical-encode null pairs straddle 1 in both directions (0.8234, 0.8521,
+0.9782, 1.0247). That asymmetry is a *reason to re-run*, and it is written down so the
+next attempt starts from a hypothesis rather than a blank sheet.
+
+It is not a verdict, for three independent reasons: the campaign was pre-registered to
+stop at 2 of 4; criterion 0 never obtained an admissible control, so the run has not
+shown it can see a ~16% knob on this model in this window; and n=2 admitted pairs
+cannot move a shared default that also serves qwen3-30b, which the ship rule already
+requires re-measuring before `metal.rs` is touched.
+
+## What is not claimed
+
+- Nothing about MV_ID's size, sign or ship-worthiness. The -4.18% above is an
+  abandoned campaign's arithmetic, not a measurement.
+- Nothing about `ALLPAKA_Q5_0_MV`'s cost: every control ratio here pairs a healthy arm
+  with a depressed one.
+- No llama arm was run, so nothing here speaks to engine parity. The clean-level
+  absolutes (on 45.20 / off 47.17) only say this binary still decodes GLM at the
+  ~46 tok/s the parity run measured (46.04) when the machine allows it.
+- No generated-text check: the bench writes no continuation field, so arm identity is
+  carried by `resolved_overrides` plus identical dispatch counts, as item 2 of the
+  04:29Z amendment set out before the run.
+
+## Definition of done (the re-run)
+
+The re-run is registered as its own campaign,
+[../2026-09-26-glm-mv-id-rerun/preregistration.txt](../2026-09-26-glm-mv-id-rerun/preregistration.txt),
+whose four changes to this design are exactly items 1-3 below plus the launch settle, and
+which replays this campaign's data to show the gates move nothing here.
+
+1. A window where `build_busy()` is clear at **every** launch, and where the
+   calibration decode absolutes land in the 45-48 band this campaign began with.
+2. The control arm's expected absolutes measured *in the campaign's own calibration*
+   (one `q5off` process beside the four `on` ones) and printed next to each control
+   verdict, plus control pairs in every round rather than only odd ones. Criterion 0 is
+   then a check on the machine, not a coin toss on the window.
+3. >= 8 admissible `real` pairs, >= 4 admissible `null`, >= 2 admissible `control`. If
+   the third is not reached, the outcome is published as "not resolvable", never as
+   "no effect".
+4. The +/-3% decision with AB/BA sign agreement against the null floor, on GLM; and
+   if it lands beyond 3% either way, the same test on qwen3-30b before any default
+   changes, because `MV_ID` is a shared knob.
+5. A3 kept as a *removal* gate only, with its allpaka-side direction reported beside
+   the headline, as the parity artifact does.
+
+## Files
+
+- [preregistration.txt](preregistration.txt) - design, arms, gates, stop rule and
+  decision thresholds, with six amendment blocks appended: two before any counted
+  pair (04:29Z, 04:34Z) and four after the launch but before any pair was analysed
+  (04:41Z, 04:49Z, 04:52Z, 04:53Z, plus a 04:55Z tooling note). None of the later
+  blocks changes a gate, a band or a threshold; each says what it did change.
+- [drive-mv-id.py](drive-mv-id.py) - campaign driver (binary pinned into the run dir,
+  sha-checked against the preregistered `7b8ec67aa72c4266...`).
+- [analyze-mv-id.py](analyze-mv-id.py) / [analysis-1.txt](analysis-1.txt) - the
+  remove-only gates and the printed decision.
+- [series-1/](series-1/) - `pairs.jsonl` (22 processes in 11 pairs incl. priming),
+  `calibration.json`, `provenance.json`, `loads.jsonl`, `snaps.jsonl`, `driver.txt`,
+  and per-arm report JSON plus stdout log under `round*/` and `calibration/`.
+- [series-0-failed-launch/](series-0-failed-launch/) - the first launch, which died at
+  calibration 1 on a relative `--out` before any process ran (amendment 4).
+
+Binary identity is the sha256 above. Every process reported
+`metadata.git_commit = 3ef9d9ce79d9`, an ancestor of the `dcdc131d` the tree happened
+to sit at when the binary was copied, with 97 dirty files - the same distinction the
+parity artifact records, and why the sha is the only identity claimed here.

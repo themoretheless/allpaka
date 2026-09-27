@@ -1,0 +1,35 @@
+{
+  "allpaka_decode": {
+    "max": 391.64770153468623,
+    "median": 389.0431681448341,
+    "unit": "tok/s"
+  },
+  "allpaka_prefill": {
+    "max": 4488.2226932674275,
+    "median": 4363.778930277552,
+    "unit": "tok/s"
+  },
+  "comparison_validated": true,
+  "cooldown_ms": 500,
+  "limitations": [
+    "llama-bench generates its own token stream; MoE routing is not identical",
+    "KV precision must be verified against the allpaka capability report",
+    "Machine thermal state dominates absolute tok/s; prefer Δ% / decision"
+  ],
+  "llama_decode": {
+    "max": 344.666,
+    "median": 342.679,
+    "unit": "tok/s"
+  },
+  "llama_prefill": {
+    "max": 8564.95,
+    "median": 8521.73,
+    "unit": "tok/s"
+  },
+  "model": "/Users/themoretheless/Documents/Sources/allpaka/models/qwen3-0.6b-Q8_0.gguf",
+  "model_sha256": "meta:804753632:1786987865:59599759",
+  "pp": 128,
+  "schema": "rbench-llama-v1",
+  "tg": 32,
+  "warmup": 1
+}

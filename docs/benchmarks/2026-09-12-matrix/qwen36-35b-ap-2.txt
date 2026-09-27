@@ -1,0 +1,40 @@
+prewarmed 20.6 GiB of weights in 3.2s
+metal: Apple M4 Max attached, 20.6 GiB of weights shared with the GPU
+engine bench: Qwen3.6-35B-A3B-UD-Q4_K_M (40 layers, qwen35moe, MoE)
+  capabilities:
+    model: arch=qwen35moe layers=40 moe=true
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: auto
+    metal: attached=true
+    weights: metal-mapped=true
+    residency: windows=1 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=361 bytes=0.10 GiB matmul-kernel=yes
+      Q4K: tensors=80 bytes=11.25 GiB matmul-kernel=yes
+      Q5K: tensors=37 bytes=6.36 GiB matmul-kernel=yes
+      Q6K: tensors=4 bytes=1.00 GiB matmul-kernel=yes
+      Q8_0: tensors=251 bytes=1.89 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill   480 tok in   0.33 s    1442.0 tok/s
+  gpu during prefill: 2 waits, 461 dispatches, encode 1 ms, wait 330 ms of 333 ms total (1% outside the GPU)
+  gpu clock during prefill: executing 327 ms, scheduling 3 ms, round trips + idle 0 ms (of 330 ms waited)
+  prefill phases, ms/token:
+    embed                  0.0  ( 0.4%)
+    attention              0.0  ( 0.1%)
+    ffn (experts)          0.0  ( 0.1%)
+    router                 0.0  ( 0.0%)
+    unaccounted            0.7  (99.4%)
+  decode     32 tok in   0.30 s     107.7 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 23200 dispatches, encode 8 ms, wait 286 ms of 297 ms total (1% outside the GPU)
+  gpu clock during decode: executing 280 ms, scheduling 3 ms, round trips + idle 3 ms (of 286 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted            9.3  (100.0%)
+  context at end: 512 tokens (attention cost grows with this)
+  benchmark report: .rbench/matrix-20260912-195149/qwen36-35b-ap-2.json

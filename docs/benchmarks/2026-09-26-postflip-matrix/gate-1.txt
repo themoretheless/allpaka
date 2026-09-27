@@ -1,0 +1,182 @@
+16:03:08Z  load 13.90  not clean - not measuring yet
+16:04:09Z  load  9.81  not clean - not measuring yet
+16:05:09Z  load  8.39  not clean - not measuring yet
+16:06:09Z  load  6.66  not clean - not measuring yet
+16:07:09Z  load  6.98  not clean - not measuring yet
+16:08:10Z  load  5.95  not clean - not measuring yet
+16:09:10Z  load  4.98  clean 1/5
+16:10:10Z  load 11.16  builders:62283 cargo   not clean - not measuring yet
+16:11:10Z  load 11.50  not clean - not measuring yet
+16:12:11Z  load 10.65  builders:64061 cargo   not clean - not measuring yet
+16:13:11Z  load 11.98  builders:64301 cargo   not clean - not measuring yet
+16:14:11Z  load  7.09  not clean - not measuring yet
+16:15:12Z  load  6.86  not clean - not measuring yet
+16:16:12Z  load  7.89  not clean - not measuring yet
+16:17:12Z  load  6.84  not clean - not measuring yet
+16:18:12Z  load  7.79  not clean - not measuring yet
+16:19:13Z  load  7.85  not clean - not measuring yet
+16:20:13Z  load  8.24  not clean - not measuring yet
+16:21:13Z  load  7.82  not clean - not measuring yet
+16:22:14Z  load  9.18  not clean - not measuring yet
+16:23:14Z  load 10.68  not clean - not measuring yet
+16:24:14Z  load  9.46  not clean - not measuring yet
+16:25:14Z  load  6.90  not clean - not measuring yet
+16:26:15Z  load  4.42  clean 1/5
+16:27:15Z  load  4.94  builders:71357 cargo   not clean - not measuring yet
+16:28:15Z  load  6.96  builders:71682 cargo   indexer:mds 87.3   not clean - not measuring yet
+16:29:16Z  load  7.92  not clean - not measuring yet
+16:30:16Z  load  9.18  builders:74089 cargo   not clean - not measuring yet
+16:31:16Z  load  6.26  not clean - not measuring yet
+16:32:17Z  load 14.08  builders:74838 cargo 74874 rustc 75123 rustc 75126 rustc 75130 rustc 75362 rustc 75418 rustc 75439 rustc 75441 rustc 75442 rustc 75443 rustc   not clean - not measuring yet
+16:33:17Z  load 15.87  builders:76281 cargo   not clean - not measuring yet
+16:34:18Z  load 28.18  not clean - not measuring yet
+16:35:18Z  load 14.50  not clean - not measuring yet
+16:36:18Z  load 17.88  builders:77419 cargo   not clean - not measuring yet
+16:37:18Z  load 12.42  not clean - not measuring yet
+16:38:19Z  load  7.02  not clean - not measuring yet
+16:39:19Z  load 10.90  builders:80712 cargo   not clean - not measuring yet
+16:40:19Z  load  9.27  not clean - not measuring yet
+16:41:19Z  load  5.62  not clean - not measuring yet
+16:42:20Z  load  5.28  not clean - not measuring yet
+16:43:20Z  load  5.89  not clean - not measuring yet
+16:44:20Z  load  8.79  builders:83566 cargo 85474 rustc   not clean - not measuring yet
+16:45:21Z  load  7.76  not clean - not measuring yet
+16:46:21Z  load  7.50  not clean - not measuring yet
+16:47:21Z  load 16.30  builders:86582 cargo 86637 rustc 86677 rustc 86719 rustc   not clean - not measuring yet
+16:48:22Z  load 12.96  not clean - not measuring yet
+16:49:22Z  load 12.54  not clean - not measuring yet
+16:50:22Z  load 10.87  not clean - not measuring yet
+16:51:23Z  load  9.73  builders:89542 cargo 89564 rustc   not clean - not measuring yet
+16:52:23Z  load 32.31  not clean - not measuring yet
+16:53:23Z  load 13.90  not clean - not measuring yet
+16:54:23Z  load  9.17  not clean - not measuring yet
+16:55:24Z  load  8.16  not clean - not measuring yet
+16:56:24Z  load  9.03  not clean - not measuring yet
+16:57:24Z  load 10.11  not clean - not measuring yet
+16:58:25Z  load  9.18  not clean - not measuring yet
+16:59:25Z  load 10.66  not clean - not measuring yet
+17:00:25Z  load  9.41  not clean - not measuring yet
+17:01:25Z  load 10.91  not clean - not measuring yet
+17:02:26Z  load 10.10  not clean - not measuring yet
+17:03:26Z  load 10.96  not clean - not measuring yet
+17:04:26Z  load  9.61  not clean - not measuring yet
+17:05:27Z  load  9.03  not clean - not measuring yet
+17:06:27Z  load  9.34  not clean - not measuring yet
+17:07:27Z  load 18.48  not clean - not measuring yet
+17:08:27Z  load 14.23  not clean - not measuring yet
+17:09:28Z  load 14.16  not clean - not measuring yet
+17:10:28Z  load 14.13  not clean - not measuring yet
+17:11:28Z  load 10.45  not clean - not measuring yet
+17:12:28Z  load  9.63  not clean - not measuring yet
+17:13:29Z  load 10.38  not clean - not measuring yet
+17:14:29Z  load  6.47  not clean - not measuring yet
+17:15:29Z  load  8.18  builders:4178 cargo   not clean - not measuring yet
+17:16:30Z  load  7.47  not clean - not measuring yet
+17:17:30Z  load  6.63  not clean - not measuring yet
+17:18:30Z  load  7.78  builders:5604 cargo   not clean - not measuring yet
+17:19:30Z  load 10.36  not clean - not measuring yet
+17:20:31Z  load  7.88  builders:7214 cargo   not clean - not measuring yet
+17:21:31Z  load  9.66  builders:7214 cargo   not clean - not measuring yet
+17:22:31Z  load  8.81  builders:7214 cargo   not clean - not measuring yet
+17:23:32Z  load  7.87  builders:7214 cargo   not clean - not measuring yet
+17:24:32Z  load 11.84  not clean - not measuring yet
+17:25:32Z  load 30.49  builders:9666 cargo   not clean - not measuring yet
+17:26:33Z  load 20.98  builders:18971 llama-bench   not clean - not measuring yet
+17:27:33Z  load 12.62  not clean - not measuring yet
+17:28:33Z  load 18.41  builders:21751 cargo 22246 cargo   not clean - not measuring yet
+17:29:34Z  load 16.25  builders:21751 cargo   not clean - not measuring yet
+17:30:34Z  load 12.49  builders:21751 cargo   not clean - not measuring yet
+17:31:34Z  load 13.50  builders:21751 cargo   not clean - not measuring yet
+17:32:34Z  load 10.50  builders:21751 cargo   not clean - not measuring yet
+17:33:35Z  load 40.82  builders:25337 cargo   not clean - not measuring yet
+17:34:35Z  load 22.99  not clean - not measuring yet
+17:35:36Z  load 12.75  not clean - not measuring yet
+17:36:36Z  load 11.71  builders:35351 cargo   not clean - not measuring yet
+17:37:36Z  load 10.16  not clean - not measuring yet
+17:38:36Z  load  9.06  not clean - not measuring yet
+17:39:37Z  load  8.18  builders:38525 cargo   not clean - not measuring yet
+17:40:37Z  load  7.17  not clean - not measuring yet
+17:41:37Z  load  7.61  not clean - not measuring yet
+17:42:38Z  load  7.94  not clean - not measuring yet
+17:43:38Z  load 10.79  not clean - not measuring yet
+17:44:38Z  load  7.79  not clean - not measuring yet
+17:45:38Z  load  8.84  not clean - not measuring yet
+17:46:39Z  load 11.84  builders:43959 cargo   not clean - not measuring yet
+17:47:39Z  load 16.06  not clean - not measuring yet
+17:48:39Z  load 12.15  builders:47707 cargo   not clean - not measuring yet
+17:49:40Z  load 13.84  not clean - not measuring yet
+17:50:40Z  load 11.47  not clean - not measuring yet
+17:51:40Z  load  9.63  not clean - not measuring yet
+17:52:40Z  load 10.59  not clean - not measuring yet
+17:53:41Z  load  8.34  builders:54403 cargo 54405 rustc   not clean - not measuring yet
+17:54:41Z  load 16.61  builders:54806 cargo 56670 cargo 56693 rustc 56848 rustc 57074 rustc 57075 rustc 57076 rustc 57077 rustc 57079 rustc 57080 rustc 57081 rustc 57082 rustc 57083 rustc 57084 rustc 57085 rustc 57086 rustc 57087 rustc 57088 rustc 57089 rustc 57090 rustc 57261 rustc   not clean - not measuring yet
+17:55:42Z  load 15.67  builders:59012 cargo   not clean - not measuring yet
+17:56:42Z  load 11.02  builders:60183 cargo   not clean - not measuring yet
+17:57:42Z  load 10.96  not clean - not measuring yet
+17:58:43Z  load 10.63  builders:61237 cargo 61634 cargo   not clean - not measuring yet
+17:59:43Z  load 10.32  not clean - not measuring yet
+18:00:43Z  load  8.27  builders:63861 cargo   not clean - not measuring yet
+18:01:43Z  load  8.03  builders:67877 cargo   not clean - not measuring yet
+18:02:44Z  load  6.24  builders:67877 cargo   not clean - not measuring yet
+18:03:44Z  load  8.67  not clean - not measuring yet
+18:04:44Z  load  7.08  not clean - not measuring yet
+18:05:45Z  load 20.69  builders:70091 cargo   not clean - not measuring yet
+18:06:45Z  load 12.16  not clean - not measuring yet
+18:07:45Z  load 24.44  not clean - not measuring yet
+18:08:46Z  load 16.15  builders:72643 cargo   not clean - not measuring yet
+18:09:46Z  load 32.52  builders:72643 cargo   indexer:mds_stores 80.8   not clean - not measuring yet
+18:10:46Z  load 19.59  builders:72643 cargo   indexer:mds_stores 88.9   not clean - not measuring yet
+18:11:47Z  load 12.94  builders:72643 cargo   not clean - not measuring yet
+18:12:47Z  load 73.23  builders:72643 cargo 82052 cargo 85131 rustc 85133 rustc 85520 rustc 85606 rustc 86065 rustc   not clean - not measuring yet
+18:13:48Z  load 124.79  builders:72643 cargo 82052 cargo   not clean - not measuring yet
+18:14:48Z  load 138.36  builders:72643 cargo 82052 cargo 94250 rustc   not clean - not measuring yet
+18:15:49Z  load 90.46  builders:72643 cargo 97006 cargo 98802 rustc 98804 rustc 98805 rustc 98806 rustc   not clean - not measuring yet
+18:16:49Z  load 71.02  builders:72643 cargo   not clean - not measuring yet
+18:17:49Z  load 33.60  builders:2764 cargo 72643 cargo 2773 rustc 2775 rustc 2776 rustc   not clean - not measuring yet
+18:18:50Z  load 32.55  builders:2764 cargo 3208 cargo 72643 cargo   not clean - not measuring yet
+18:19:50Z  load 43.40  builders:3400 cargo 3410 cargo 3667 cargo   indexer:mds 55.0   not clean - not measuring yet
+18:20:50Z  load 23.37  builders:3410 cargo   not clean - not measuring yet
+18:21:50Z  load 13.07  builders:3410 cargo   not clean - not measuring yet
+18:22:51Z  load  8.91  builders:3410 cargo   not clean - not measuring yet
+18:23:51Z  load  8.78  builders:3410 cargo   indexer:mds_stores 47.3   not clean - not measuring yet
+18:24:51Z  load 31.55  builders:3410 cargo 6947 cargo 7794 rustc   indexer:mds_stores 80.3   not clean - not measuring yet
+18:25:52Z  load 17.79  builders:3410 cargo 8528 cargo 8562 rustc   indexer:mds_stores 84.8   not clean - not measuring yet
+18:26:52Z  load 14.55  builders:3410 cargo 8863 cargo 10095 rustc 10184 rustc 10251 rustc 10252 rustc 10253 rustc 10254 rustc 10258 rustc 10269 rustc 10270 rustc 10272 rustc 10273 rustc 10274 rustc 10276 rustc 10277 rustc   not clean - not measuring yet
+18:27:52Z  load 12.52  indexer:mds_stores 89.0   not clean - not measuring yet
+18:28:53Z  load 13.86  builders:11382 cargo 11632 cargo   indexer:mds_stores 89.3   not clean - not measuring yet
+18:29:53Z  load  9.95  builders:12226 cargo 12229 rustc   indexer:mds_stores 88.7   not clean - not measuring yet
+18:30:53Z  load 12.85  builders:12226 cargo   indexer:mds_stores 87.7   not clean - not measuring yet
+18:31:54Z  load  8.94  builders:12226 cargo   not clean - not measuring yet
+18:32:54Z  load  7.90  builders:12226 cargo 14402 cargo 14403 rustc   indexer:mds_stores 83.5   not clean - not measuring yet
+18:33:54Z  load  8.79  builders:12226 cargo   not clean - not measuring yet
+18:34:54Z  load  7.88  builders:15759 cargo   not clean - not measuring yet
+18:35:55Z  load 11.11  builders:15759 cargo   not clean - not measuring yet
+18:36:55Z  load  8.99  builders:15759 cargo   not clean - not measuring yet
+18:37:55Z  load  7.19  builders:15759 cargo   not clean - not measuring yet
+18:38:56Z  load  6.83  not clean - not measuring yet
+18:39:56Z  load  5.86  not clean - not measuring yet
+18:40:56Z  load  4.50  clean 1/5
+18:41:57Z  load  5.88  not clean - not measuring yet
+18:42:57Z  load 10.66  not clean - not measuring yet
+18:43:57Z  load  7.79  builders:20096 cargo   not clean - not measuring yet
+18:44:57Z  load  7.65  builders:20096 cargo   not clean - not measuring yet
+18:45:58Z  load  5.42  not clean - not measuring yet
+18:46:58Z  load  6.60  builders:21252 cargo   not clean - not measuring yet
+18:47:58Z  load  7.15  builders:21252 cargo   not clean - not measuring yet
+18:48:59Z  load  6.48  builders:21252 cargo   not clean - not measuring yet
+18:49:59Z  load 12.81  builders:21252 cargo   indexer:corespotlightd 70.4   not clean - not measuring yet
+18:50:59Z  load  8.48  builders:21252 cargo   not clean - not measuring yet
+18:51:59Z  load  7.36  not clean - not measuring yet
+18:53:00Z  load  6.18  builders:24453 cargo 24467 cargo 24455 rustc   not clean - not measuring yet
+18:54:00Z  load  8.17  builders:24782 cargo   not clean - not measuring yet
+18:55:00Z  load 12.10  builders:24782 cargo   not clean - not measuring yet
+18:56:01Z  load 15.03  not clean - not measuring yet
+18:57:01Z  load 11.35  builders:26393 cargo   not clean - not measuring yet
+18:58:01Z  load  8.95  builders:26393 cargo   not clean - not measuring yet
+18:59:02Z  load  7.21  builders:27022 cargo   not clean - not measuring yet
+19:00:02Z  load  9.10  not clean - not measuring yet
+19:01:02Z  load  9.13  not clean - not measuring yet
+19:02:03Z  load 11.69  builders:27950 cargo 28504 cargo 28545 rustc 28548 rustc 28569 rustc 28570 rustc 28571 rustc 28572 rustc 28574 rustc 28575 rustc 28576 rustc 28577 rustc 28578 rustc 28579 rustc 28580 rustc 28581 rustc   not clean - not measuring yet
+19:03:03Z  load 12.48  builders:27950 cargo   not clean - not measuring yet
+19:04:03Z  load 10.52  builders:29770 cargo   not clean - not measuring yet
+cap 180min reached; campaign did NOT run

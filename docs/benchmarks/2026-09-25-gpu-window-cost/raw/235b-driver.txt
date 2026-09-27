@@ -1,0 +1,8 @@
+cap 32GiB 03:18:08 exit 0 in 3 windows prefill argmax=291
+cap 24GiB 03:18:38 exit 0 in 4 windows prefill argmax=291
+cap 16GiB 03:19:05 exit 0 in 6 windows prefill argmax=291
+cap 12GiB 03:19:28 exit 0 in 9 windows prefill argmax=291
+cap 10GiB 03:19:54 exit 0 in 11 windows prefill argmax=291
+cap 8GiB 03:22:29 exit 0 in 14 windows prefill argmax=151935
+cap 6GiB 03:24:08 exit 0 in 21 windows prefill argmax=151935
+cap 4GiB 03:26:24 exit 0 in 41 windows prefill argmax=151935

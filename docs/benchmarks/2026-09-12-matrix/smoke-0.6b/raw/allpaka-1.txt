@@ -1,0 +1,37 @@
+prewarmed 0.7 GiB of weights in 0.0s
+metal: Apple M4 Max attached, 0.7 GiB of weights shared with the GPU
+engine bench: qwen3-0.6b-Q8_0 (28 layers, qwen3)
+  capabilities:
+    model: arch=qwen3 layers=28 moe=false
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: max-performance
+    metal: attached=true
+    weights: metal-mapped=true
+    residency: windows=1 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=113 bytes=0.00 GiB matmul-kernel=yes
+      Q8_0: tensors=198 bytes=0.74 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill   128 tok in   0.03 s    4488.2 tok/s
+  gpu during prefill: 29 waits, 281 dispatches, encode 12 ms, wait 14 ms of 29 ms total (9% outside the GPU)
+  gpu clock during prefill: executing 22 ms, scheduling 28 ms, round trips + idle 0 ms (of 14 ms waited)
+  prefill phases, ms/token:
+    ffn (experts)          0.2  (88.6%)
+    attention              0.0  ( 1.1%)
+    embed                  0.0  ( 0.4%)
+    router                 0.0  ( 0.2%)
+    unaccounted            0.0  ( 9.7%)
+  decode     32 tok in   0.08 s     389.0 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 10816 dispatches, encode 4 ms, wait 78 ms of 82 ms total (1% outside the GPU)
+  gpu clock during decode: executing 73 ms, scheduling 2 ms, round trips + idle 3 ms (of 78 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted            2.6  (100.0%)
+  context at end: 160 tokens (attention cost grows with this)
+  benchmark report: .rbench/matrix-20260912-195149/smoke-0.6b/raw/allpaka-1.json

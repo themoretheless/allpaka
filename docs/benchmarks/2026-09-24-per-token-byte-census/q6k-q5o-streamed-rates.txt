@@ -1,0 +1,62 @@
+# cargo test -q -p allpaka-backend --test gpu_ffnbench -- --ignored --nocapture \
+#   --test-threads=1 indexed_matvecs_report_effective_bandwidth
+# 2026-09-24 18:20 UTC, one process, one window, load average 2.6/5.6/6.5 -
+# readable by the repo's own criterion, not the load gate: every row's
+# best/median spread is 1.00-1.01x and the q8_0 meter repeats between its two
+# arms (495.6 at [4096,1536], 497.0 at [4096,1408]) and against the run this
+# file replaces (496.4, 0.2% away).
+# Rows 1-7 are the published table's geometry re-measured here; 8-15 are new:
+# q6_k and q5_0 (the two formats the byte ledger had no rate for) and each
+# format at the geometry the model that owns it actually dispatches - GLM's
+# [1408,4096]/[4096,1408] expert set, the 30B's [768,2048]/[2048,768] expert
+# set. slots=8, 384 MB streamed per format, ~1 s of burn before the first
+# window, ~150 ms windows.
+metal: Apple M4 Max attached, 0.4 GiB of weights shared with the GPU
+--- indexed x8, 384/420 MB streamed per format ---
+q2_k gate/up   [1536,4096] sets=25: 257.7 GB/s best, 257.5 median, 785 Gweight/s, 1.00x spread
+q3_k down      [4096,1536] sets=19: 222.1 GB/s best, 222.0 median, 517 Gweight/s, 1.00x spread
+q4_k           [4096,1536] sets=15: 472.2 GB/s best, 471.4 median, 840 Gweight/s, 1.00x spread
+q5_k           [4096,1536] sets=12: 345.2 GB/s best, 344.9 median, 502 Gweight/s, 1.00x spread
+q8_0           [4096,1536] sets=8: 495.6 GB/s best, 494.7 median, 466 Gweight/s, 1.00x spread
+q2_k control   [4096,1536] sets=25: 138.7 GB/s best, 138.6 median, 423 Gweight/s, 1.00x spread
+q4_k control   [1536,4096] sets=15: 468.6 GB/s best, 466.3 median, 833 Gweight/s, 1.01x spread
+q6_k down      [4096,1536] sets=10: 471.7 GB/s best, 471.3 median, 575 Gweight/s, 1.00x spread
+q6_k gate/up   [1536,4096] sets=10: 459.7 GB/s best, 458.8 median, 560 Gweight/s, 1.00x spread
+q5_0 down      [4096,1536] sets=12: 396.6 GB/s best, 395.3 median, 577 Gweight/s, 1.00x spread
+q5_0 glm down  [4096,1408] sets=13: 383.6 GB/s best, 381.5 median, 558 Gweight/s, 1.01x spread
+q4_k 30b gate/up [768,2048] sets=57: 386.7 GB/s best, 383.4 median, 688 Gweight/s, 1.01x spread
+q6_k 30b down  [2048,768] sets=40: 363.9 GB/s best, 363.7 median, 444 Gweight/s, 1.00x spread
+q4_k glm gate/up [1408,4096] sets=16: 464.6 GB/s best, 464.3 median, 826 Gweight/s, 1.00x spread
+q8_0 glm down  [4096,1408] sets=9: 497.0 GB/s best, 497.0 median, 468 Gweight/s, 1.00x spread
+
+# What this window says, beyond filling the two missing rates:
+#
+# 1. q6_k is a full-rate format. 471.7 GB/s at [4096,1536] against q4_k's
+#    472.2 in the same run, and 459.7 vs 468.6 at [1536,4096]. Its cost per
+#    token is 1.46x q4_k's in bytes and not at all in bytes/s, so a ledger
+#    that treats q6_k as slow is wrong: q6_k carries 27.3% of the 30B's
+#    decode weight bytes and 3.4% of the 235B's, and it runs at q4_k's rate.
+# 2. q5_0 is NOT at q8_0's rate. 396.6 against 495.6 GB/s, i.e. 0.80x, where
+#    the byte-share arithmetic that justified the _mv port assumed 400 and the
+#    post-port summary implied parity with q8_0 by treating both as
+#    "non-k-quant". The assumption survives (396.6 vs 400 is a 0.9% error in
+#    the ledger), but it is now a measurement rather than an assumption.
+# 3. Rates are shape-bound in one direction only. Swapping n_out and n_in
+#    costs ~1% (q4_k 472.2 vs 468.6; q6_k 471.7 vs 459.7) and narrowing a
+#    4096-wide row to 1408 costs 3% (q5_0 396.6 vs 383.6). What actually
+#    moves is a dimension at 768: the 30B's q4_k gate/up at [768,2048] runs
+#    386.7 (-18% vs the [4096,1536] arm) and its q6_k down at [2048,768] runs
+#    363.9 (-23% vs the wide q6_k arms). Both 30B expert shapes sit at the
+#    repo's narrowest recorded byte rates; the mechanism is not identified
+#    here - 3 blocks per row at n_in 768 against 6-16 elsewhere is the
+#    obvious candidate and untested. Consequence, and it cuts against the
+#    earlier reading: the 30B ledger built from the wide table UNDER-states
+#    its per-byte cost by ~20%, so its kernel sum goes from 3.96 to 4.92 ms
+#    and the model explains 68% of its wall time instead of 54%. The
+#    "30B is not byte-limited" verdict from section 2 was partly an artifact
+#    of borrowing wide-shape rates (section 3 of time-ledger.txt).
+# 4. Not measured, still open: none of these are dense lm-head rates. The
+#    head (q6_k 561.1 MiB on GLM, 749.4 on 235B, 499.4 on the 30B, 6-9% of
+#    each token) goes through the un-indexed matvec path, which this bench
+#    does not exercise; using an indexed rate for it is an approximation and
+#    the ledger says so.

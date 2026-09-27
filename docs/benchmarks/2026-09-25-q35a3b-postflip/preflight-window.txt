@@ -1,0 +1,69 @@
+# gate log: 14 probes of the pre-flight harness, 2026-09-25 00:49-01:17 UTC, 0 admitted
+#
+# command (run unattended in the repo, docs/benchmarks/2026-09-25-q35a3b-postflip/preflight.py):
+#   python3 docs/benchmarks/2026-09-25-q35a3b-postflip/preflight.py \
+#     --out .airbug-bench/q35-preflight-20260925-044145 \
+#     --max-wait 14400 --load-max 7.0 --interval 60 --then
+# The first block of the file is the 00:41Z launch header, which never probed (it
+# carried --load-max 5.0 and the window sat above it); the second header is the
+# 00:49Z relaunch at --load-max 7.0 whose 14 attempts follow.
+#
+# What this log establishes, and what it does not:
+#   * Establishes: gate A (q4_k meter within 3% of the published 468.8 GB/s) never
+#     fires in 14 consecutive probes over 27 minutes. The two byte meters sit at
+#     0.74-0.76x and 0.79-0.81x of published with a spread of 0.02x across the
+#     whole run - a stationary, depressed window, not a transient one.
+#   * Establishes: gate B rejects on its own too - 11 of 14 attempts carry an arm
+#     spread above 1.03x, peaking at 5.591x, while the fold/plain RATIOS of those
+#     same attempts stay inside ~4% (see stationarity-vs-level.txt).
+#   * Does NOT establish anything about the fold cost of the 35B. No pair of the
+#     wall A/B ran, so the pre-registered band stays published as-is: +0.23...0.64
+#     ms/token, low end the honest one for the reason given in
+#     stationarity-vs-level.txt.
+#
+# Stopped by hand at 01:17Z (SIGTERM to the probe) to give the GPU to the MTP
+# ROWS-versus-per-row ablation; relaunching it with a longer horizon is planned
+# for the end of the session. Nothing in this file is a result about allpaka.
+#
+# pre-flight for task #25  start 2026-09-25T00:41:45Z
+  harness binary /Users/themoretheless/Documents/Sources/allpaka/target/release/build/allpaka-backend/402d2f60b4b17b8a/out/gpu_ffnbench-402d2f60b4b17b8a
+  sha256 b192dc4d0eac513212ff8936c334fc6800f35c8060e469612a071935709ef2d0
+  mtime 2026-09-24T22:03:02Z  git HEAD 2347752
+  gates: meters within 3% of {'q4_k meter': 468.8, 'q5_k meter': 344.9}, spreads <= 1.03x, two attempts agreeing to 5%
+# pre-flight for task #25  start 2026-09-25T00:49:14Z
+  harness binary /Users/themoretheless/Documents/Sources/allpaka/target/release/build/allpaka-backend/402d2f60b4b17b8a/out/gpu_ffnbench-402d2f60b4b17b8a
+  sha256 b192dc4d0eac513212ff8936c334fc6800f35c8060e469612a071935709ef2d0
+  mtime 2026-09-24T22:03:02Z  git HEAD 2347752
+  gates: meters within 3% of {'q4_k meter': 468.8, 'q5_k meter': 344.9}, spreads <= 1.03x, two attempts agreeing to 5%
+  attempt  1  meters q4_k 0.75x  q5_k 0.80x  q4_k        0.567/0.480 q5_k        0.772/0.771 q35 down    0.856/0.851 q35 gate/up 0.623/0.525  REJECT: q4_k meter meter at 0.75x of published; q5_k meter meter at 0.80x of published; worst arm spread 1.140x > 1.03x
+  attempt  2  meters q4_k 0.75x  q5_k 0.80x  q4_k        0.563/0.477 q5_k        0.770/0.782 q35 down    0.874/0.854 q35 gate/up 0.669/0.544  REJECT: q4_k meter meter at 0.75x of published; q5_k meter meter at 0.80x of published; worst arm spread 1.179x > 1.03x
+  attempt  3  meters q4_k 0.75x  q5_k 0.80x  q4_k        0.553/0.475 q5_k        0.773/0.768 q35 down    0.837/0.843 q35 gate/up 0.640/0.517  REJECT: q4_k meter meter at 0.75x of published; q5_k meter meter at 0.80x of published; worst arm spread 1.182x > 1.03x
+  attempt  4  meters q4_k 0.75x  q5_k 0.80x  q4_k        0.572/0.478 q5_k        0.771/0.771 q35 down    0.853/0.846 q35 gate/up 0.624/0.516  REJECT: q4_k meter meter at 0.75x of published; q5_k meter meter at 0.80x of published; worst arm spread 1.915x > 1.03x
+  attempt  5  meters q4_k 0.76x  q5_k 0.80x  q4_k        0.556/0.485 q5_k        0.775/0.769 q35 down    0.862/0.849 q35 gate/up 0.643/0.519  REJECT: q4_k meter meter at 0.76x of published; q5_k meter meter at 0.80x of published; worst arm spread 1.031x > 1.03x
+  attempt  6  meters q4_k 0.75x  q5_k 0.80x  q4_k        0.572/0.483 q5_k        0.767/0.778 q35 down    0.868/0.856 q35 gate/up 0.631/0.521  REJECT: q4_k meter meter at 0.75x of published; q5_k meter meter at 0.80x of published
+  attempt  7  meters q4_k 0.74x  q5_k 0.81x  q4_k        0.570/0.477 q5_k        0.770/0.772 q35 down    0.864/0.856 q35 gate/up 0.641/0.546  REJECT: q4_k meter meter at 0.74x of published; q5_k meter meter at 0.81x of published; worst arm spread 1.295x > 1.03x
+  attempt  8  meters q4_k 0.75x  q5_k 0.80x  q4_k        0.566/0.466 q5_k        0.774/0.790 q35 down    0.869/0.813 q35 gate/up 0.673/0.520  REJECT: q4_k meter meter at 0.75x of published; q5_k meter meter at 0.80x of published; worst arm spread 1.135x > 1.03x
+  attempt  9  meters q4_k 0.74x  q5_k 0.80x  q4_k        0.570/0.472 q5_k        0.766/0.769 q35 down    0.845/0.839 q35 gate/up 0.617/0.515  REJECT: q4_k meter meter at 0.74x of published; q5_k meter meter at 0.80x of published
+  attempt 10  meters q4_k 0.76x  q5_k 0.80x  q4_k        0.564/0.475 q5_k        0.761/0.763 q35 down    0.870/0.847 q35 gate/up 0.614/0.527  REJECT: q4_k meter meter at 0.76x of published; q5_k meter meter at 0.80x of published; worst arm spread 5.591x > 1.03x
+  attempt 11  meters q4_k 0.76x  q5_k 0.79x  q4_k        0.562/0.496 q5_k        0.777/0.777 q35 down    0.843/0.868 q35 gate/up 0.653/0.533  REJECT: q4_k meter meter at 0.76x of published; q5_k meter meter at 0.79x of published; worst arm spread 1.055x > 1.03x
+  attempt 12  meters q4_k 0.75x  q5_k 0.80x  q4_k        0.572/0.479 q5_k        0.773/0.771 q35 down    0.869/0.856 q35 gate/up 0.652/0.559  REJECT: q4_k meter meter at 0.75x of published; q5_k meter meter at 0.80x of published; worst arm spread 1.084x > 1.03x
+  attempt 13  meters q4_k 0.75x  q5_k 0.80x  q4_k        0.561/0.474 q5_k        0.774/0.766 q35 down    0.867/0.867 q35 gate/up 0.634/0.528  REJECT: q4_k meter meter at 0.75x of published; q5_k meter meter at 0.80x of published; worst arm spread 1.095x > 1.03x
+  attempt 14  meters q4_k 0.76x  q5_k 0.81x  q4_k        0.563/0.482 q5_k        0.763/0.775 q35 down    0.819/0.846 q35 gate/up 0.635/0.535  REJECT: q4_k meter meter at 0.76x of published; q5_k meter meter at 0.81x of published; worst arm spread 2.764x > 1.03x
+
+# Relaunch record, 2026-09-25T02:01Z
+#
+# The MTP ROWS-versus-per-row ablation finished at 01:45Z (its own directory:
+# ../2026-09-25-mtp-rows-ablation/results.txt), so the GPU went back to this
+# gate as planned. Relaunched unattended with a longer horizon and the same
+# ceilings that the 14 attempts above were judged by - the gates are NOT
+# relaxed, because this series' pre-registered claim is an absolute
+# ms/token delta and a depressed byte meter inflates absolute deltas even when
+# within-run ratios stay stable:
+#
+#   python3 docs/benchmarks/2026-09-25-q35a3b-postflip/preflight.py \
+#     --out .airbug-bench/q35-preflight-20260925-020058 \
+#     --max-wait 12600 --load-max 7.0 --interval 90 --then
+#
+# `--then` hands the GPU to run-pairs.sh the moment a probe passes both gates,
+# so the series runs without an agent in the loop; the log lands in the out
+# dir above and gets copied here as an artifact whichever way it goes.

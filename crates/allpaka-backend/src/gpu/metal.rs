@@ -5928,7 +5928,7 @@ kernel void attend_mm(
         // Q . K^T: each simdgroup scores ALL 8 rows against its two
         // 8-position strips of the tile, K straight from device memory.
         for (ushort cc = 0; cc < 2; cc++) {
-            uint pb = sgitg + 4 * cc;
+            uint pb = sgitg * 2 + cc;
             uint pstart = ic + pb * 8;
             ulong p0 = pstart < max_pos ? pstart : min(pstart, span8);
             device const half* pk =
@@ -6069,7 +6069,7 @@ kernel void attend_mm256(
         // Q . K^T: each simdgroup scores ALL 8 rows against its two
         // 8-position strips of the tile, K straight from device memory.
         for (ushort cc = 0; cc < 2; cc++) {
-            uint pb = sgitg + 4 * cc;
+            uint pb = sgitg * 2 + cc;
             uint pstart = ic + pb * 8;
             ulong p0 = pstart < max_pos ? pstart : min(pstart, span8);
             device const half* pk =

@@ -1,0 +1,97 @@
+Verify 1 - the hardened gate, rehearsed before any measured process (2026-09-26T06:24-06:42Z)
+================================================================================================
+
+What this proves: the attention campaign's driver can be inspected without launching it,
+its guard distinguishes the three co-tenant classes on work rather than liveness, and a
+watcher that cannot get a window gives up without creating a run dir.
+Nothing here is a measurement of `ATTN_MV` or `ATTN_S8`; the campaign still has no data.
+
+Rehearsal 1 - `drive.py --check` (writes nothing, exits 0)
+----------------------------------------------------------
+
+    $ sha256sum drive.py
+    3b4dc07eaf40d7d47c5b97f73bd526784d513e42d29257efe822c6b06511d58c  drive.py
+
+    $ python3 drive.py --check
+    binary /Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-26-glm-mv-id-rerun/series-1/allpaka
+      sha256 7b8ec67aa72c42662ba4608fa1629c139c759c6ce7bacdd6c6aa6fbcc46fe2fe
+      expects 7b8ec67aa72c42662ba4608fa1629c139c759c6ce7bacdd6c6aa6fbcc46fe2fe -> ok
+    load 5.33 against ceiling 5.0; settle 3 samples 30s apart; cap 40 min
+      builders:      none
+      other bench:   none
+      indexer work:  none (class is resident and idle)
+    rc=0
+
+Read this the right way round: the three class verdicts are all "none" while the machine
+carried load 5.33, so the guard was NOT clearing a quiet machine - it was clearing a busy
+one whose busyness belongs to none of the three vetoed classes (the load at that minute
+was the MV_ID rerun's own calibration processes plus ordinary desktop work, and the
+rerun's driver is a `Python .../drive-mv-id.py` process, which this driver does not veto
+by name - the serialization is done by the chained watcher, rehearsal 3, not by
+`others_busy()`). `--check` prints the load and does not gate on it: it exists to be run
+before a launch, and its only contract is that it starts no process and creates no
+directory. Confirmed after the run: `ls series-1` -> "No such file or directory", and the
+directory listing of `2026-09-25-attention-knobs/` holds only the driver, analyzer,
+preregistration, this artifact, the watcher script and the watcher log.
+
+Two things that gate buys and one it does not:
+- The pinned binary is the rerun's build (`7b8ec67a...`), not `target/release/allpaka`,
+  which at rehearsal time was whatever the other session's `cargo test --no-run` had last
+  produced. A sha mismatch is a `SystemExit` before the quiet gate, not a warning.
+- `builders: none` is an existence check (`pgrep -xl cargo,rustc,llama-bench`), so a live
+  compile is what would have shown here; there was none at this sample.
+- `other bench: none` was true at this instant because the rerun's bench processes fit
+  between the sampler's windows; it is not a guarantee, and rehearsal 3 is the layer that
+  does not depend on catching them.
+
+Rehearsal 2 - the same guard against a real burst
+--------------------------------------------------
+
+Recorded in the MV_ID campaign's artifacts, with the identical indexer-work logic:
+[../2026-09-26-glm-mv-id-rerun/verify-5-guard-fired-on-a-live-burst.txt](../2026-09-26-glm-mv-id-rerun/verify-5-guard-fired-on-a-live-burst.txt)
+(`05:46:10Z ... clean 0/5 busy: mds_stores(513) 48% cpu  indexer fleet 62% cpu across 14
+pids`, at load average 3.32). That is the direction the guard must refuse; rehearsal 1 is
+the direction it must pass. The idle-machine half of the argument - 25 resident indexer
+pids at 0.0% - is
+[../2026-09-26-glm-mv-id-rerun/verify-4-indexer-guard-measures-cpu-not-liveness.txt](../2026-09-26-glm-mv-id-rerun/verify-4-indexer-guard-measures-cpu-not-liveness.txt).
+
+Rehearsal 3 - the chained watcher refuses to launch over a live campaign
+-------------------------------------------------------------------------
+
+Run with `NEED=999` and `CAP_MIN=0` so it could only fail, to test the give-up path:
+
+    driver sha256 3b4dc07eaf40d7d47c5b97f73bd526784d513e42d29257efe822c6b06511d58c  (wait for 'drive-mv-id.py' to exit, then load<5.0 x999 clean samples 8s apart, cap 0min)
+    06:38:53Z  another campaign is live (pids 62852) - not measuring yet
+    cap reached; the campaign did NOT run
+    watcher gave up (rc=3)
+
+Then `ls series-1` in the campaign directory: "No such file or directory". The failure
+path leaves nothing behind to mistake for a campaign - the same contract the MV_ID driver
+has for a refused launch.
+
+The live watcher (pid 81780, real parameters) is ticking on the same logic:
+
+    driver sha256 3b4dc07eaf40d7d47c5b97f73bd526784d513e42d29257efe822c6b06511d58c  (wait for 'drive-mv-id.py' to exit, then load<5.0 x5 clean samples 60s apart, cap 600min)
+    06:39:19Z  another campaign is live (pids 62852) - not measuring yet
+    06:40:19Z  another campaign is live (pids 62852) - not measuring yet
+    06:41:19Z  another campaign is live (pids 62852) - not measuring yet
+
+Rehearsal 4 - what is NOT proven
+---------------------------------
+
+The end-to-end refusal of `drive.py` itself while an `allpaka` bench process is mid-arm.
+The name semantics are established indirectly: the rerun's sampler records
+`"comm": "allpaka"` for its pinned copy (seen in `series-1/snaps.jsonl`), so `pgrep -x
+allpaka` is a valid detector for it. But a synthetic executable named `allpaka` could not
+be run here (exec was denied from both `/tmp` and `~/.cache`), so the
+`other bench: allpaka(...)` string has never been printed by a live test. Recorded as
+pending in preregistration.txt item 5 rather than claimed.
+
+Rehearsal 5 - the incident that motivated `--check`
+-----------------------------------------------------
+Amendment item 5, quoted for the record: a probe of this driver at 06:26Z launched it for
+real (the design had no dry-run path, so any invocation with a mode flag started the
+campaign). The quiet gate held it in `wait_quiet` at load 8-10 for about two minutes until
+it was killed; **no bench process ever started, no arm was timed, and the scratch dir was
+deleted**; this campaign still has no data. Verified after the fact: no
+`attn-stage-20260926-*` directory remains under `.airbug-bench/`.

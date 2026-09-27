@@ -1,0 +1,53 @@
+# Launch rehearsal, 2026-09-26 05:28Z - no measured process was started by any of this
+
+The re-run driver has never carried a campaign, so its new guards were executed against
+the live machine instead of against data. Three checks, in the order run.
+
+## 1. The guard functions, imported without running main()
+
+    BUILD_NAMES  ('cargo', 'rustc', 'llama-bench')
+    INDEX_NAMES  ('corespotlightd', 'mdworker', 'mds_stores', 'photoanalysisd',
+                  'filecoordinationd')
+    load1()      2.51
+    build_busy() -> ''
+    others_busy() -> '728 corespotlightd / 513 mds_stores / 12274 photoanalysisd /
+                      676 filecoordinatio'
+    wait_quiet(ceiling 1.0, tries 3, poll 2, settle 2) -> None after 6.0s
+    wait_quiet(ceiling 99.0, tries 3, poll 2, settle 2) -> None after 6.4s
+
+Both calls return None, and the second is the interesting one: a ceiling of 99 can only
+be refused by the name guard, not by load. The indexer class was live while load average
+read 2.51 - which is the whole failure mode the pair campaign died of, caught here by a
+check that campaign did not have. `pgrep -l` prints a name truncated to 15 characters, so
+`filecoordinatio` in the text block is the `filecoordinationd` pattern matching; `-x` did
+match the full name.
+
+## 2. Startup refusal, end to end
+
+    $ python3 drive-mv-id.py --out /tmp/mvid-rehearse --rounds 0 --no-prime \
+        --calibrate 0 --calibrate-control 0
+    refusing to start: a build, another bench or an indexer is live
+    728 corespotlightd
+    513 mds_stores
+    12274 photoanalysisd
+    676 filecoordinatio
+    exit=2
+
+Exit 2, and `/tmp/mvid-rehearse` was never created: the guard runs before the binary is
+pinned, so a refused launch leaves no directory, no `provenance.json` and no partial
+record. `--rounds 0 --calibrate 0 --calibrate-control 0 --no-prime` would have started
+zero bench processes anyway, so nothing was measured here at all.
+
+## 3. Binary identity still holds
+
+`target/release/allpaka` (mtime 2026-09-26 07:39 local) hashes to
+`7b8ec67aa72c42662ba4608f...`, the sha preregistered above and used by the pair campaign
+and the GLM parity run, so the re-run would price the same build it is compared to. HEAD
+at rehearsal time is `dcdc131`, 97 files dirty: the sha, not the commit, is the identity
+claim.
+
+## What this does NOT establish
+
+That the re-run can start. It cannot until `corespotlightd` and friends go quiet, and the
+driver is now designed to say so instead of measuring through it. The campaign is queued
+against a quiet window, not measured.

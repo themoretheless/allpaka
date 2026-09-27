@@ -1,0 +1,89 @@
+# Narrow-shape rate deficit: rows, or blocks per row?
+
+Question. The published indexed table prices two shapes well below their own
+format's wide meter, both of them in qwen3-30b:
+
+  q4_k 30b gate/up [768,2048]  386.4 GB/s   against q4_k [4096,1536] 472.2 = 0.818
+  q6_k 30b down    [2048,768]  363.2 GB/s   against q6_k [4096,1536] 470.4 = 0.772
+
+while every other rate in the table sits within ~3% of its format's wide row
+(`2026-09-24-indexed-feed-scatter/rates.txt`, feed=1 contig lines; note that
+file's 2026-09-25 annotation - its third line per shape is mis-indexed by one
+row, so only the contig lines are quoted here). Swapping `n_out`/`n_in` between
+the other rows costs ~1% and 4096 -> 1408 costs 3%, so shape does matter, and
+the two narrow rows are the only shape effect in the repo big enough to chase.
+
+DoD. Say which axis the loss tracks, at slots=8, shared activation, feed=1,
+each row normalised to the in-run same-format meter. Two candidate mechanisms
+are separable because the inner loop walks `n_in/256` quant blocks per row while
+the grid carries `n_out * slots` rows: `[768,2048]` is few rows at many blocks,
+`[2048,768]` is many rows at three blocks. A verdict either way, with the grid,
+or an explicit blocked line naming what window is needed. Nothing in between.
+
+Admission gate, fixed before the data. A run counts only if its own meters land
+where the published table put them: q4_k [4096,1536] >= 460 GB/s (published
+472.2) and q6_k [4096,1536] >= 458 (published 470.4), with every shape's
+four-pass median spread <= 1.03x. Below that the machine is bandwidth-starved
+and shape comparisons are not interpretable - and the second rejection below is
+the direct evidence that the spread arm alone buys nothing.
+
+Harness. `cargo test --release -p allpaka-backend --test
+gpu_ffnbench -- narrow_shapes_separate_rows_from_blocks_per_row --ignored
+--nocapture` with `ALLPAKA_BENCH_FEEDS=1`. 10 shapes, 384 MiB streamed per
+shape to defeat the last-level cache, four interleaved passes, ~16 s.
+
+## Attempt 1 - 2026-09-24 21:41, REJECTED
+
+q4_k meter 427.5 GB/s (0.91x of published) and a non-monotonic rows axis. As a
+control the already-published table was re-run in the same window and read
+186.9 at q4_k [4096,1536] and 84.5 at q6_k 30b down, i.e. the machine was being
+hammered between the two readings; neither number is usable. Not published,
+because there is no admissible run to publish it beside.
+
+## Attempt 2 - 2026-09-24 21:54, REJECTED (raw, inadmissible)
+
+meters 119.5 (0.253x published) and 127.5 (0.271x). Window load:
+`fvid` debug test binary 197-200% CPU for 15 min, `opener-gui` 111%.
+
+  shape                     sets b/row  GB/s   vs own meter
+  q4_k meter   [4096,1536]    15    6   119.5   1.000
+  q6_k meter   [4096,1536]    10    6   127.5   1.000
+  q4_k         [  768,2048]   57    8   106.8   0.894
+  q4_k         [ 1024,2048]   43    8   113.2   0.947
+  q4_k         [ 2048,2048]   22    8   127.3   1.066
+  q4_k         [  768,2560]   46   10   104.9   0.877
+  q4_k         [  768,3072]   38   12   114.5   0.959
+  q6_k         [ 2048,  768]   40    3    84.2   0.660
+  q6_k         [ 2048, 1024]   30    4   111.0   0.871
+  q6_k         [ 4096,  768]   20    3    89.7   0.703
+
+Read it as a lesson, not a result. All four passes of every shape agreed to
+1.00-1.03x, and every row still landed between 84 and 127 GB/s, i.e. crushed
+against one ceiling that is the machine's, not the kernel's. Under that
+compression the two formats' rows axes run in OPPOSITE directions (q4_k
+768 -> 2048 rows: 0.894 -> 1.066 up; q6_k 2048 -> 4096 rows at three blocks:
+0.660 -> 0.703 up) while the published table has both narrow rows BELOW their
+meter. A saturated instrument does not just shrink an effect, it can flip its
+sign - which is why the gate above is absolute-meter AND spread, not spread
+alone.
+
+## Verdict: BLOCKED, no claim survives
+
+Nothing here says whether the 768-class deficit tracks rows or blocks per row.
+Re-run cost is ~16 s; what it needs is a window where both meters are within
+~3% of 472.2 / 470.4. The earlier probe of the same question on the wide shapes
+(2026-09-21 / 2026-09-24 sessions) showed that window exists on this machine,
+and it is not this one.
+
+## Price of the answer (arithmetic on published rates, not a measurement)
+
+qwen3-30b dispatches both shapes, and they are nearly its whole weight budget:
+1282.5 + 499.4 of the 1830.7 MiB its census counts = 97.3% of its decode bytes
+(q4_k gate/up 70.0%, q6_k down 27.3%). Its ledger's rebaselining section
+(`../2026-09-24-per-token-byte-census/time-ledger.txt`, section 4) prices them at
+3.48 ms (q4_k at 387) + 1.44 ms (q6_k at 364) of a 6.70 ms/token wall. If the
+narrow shapes reached their formats' wide meters - 476 and 461 GB/s in that same
+window - the two rows would cost 2.83 + 1.14 ms. So the ceiling is 0.95 ms/token,
+~14% of the 30B's decode wall, and that number is only reachable if shape is the
+cause, which is precisely the open question. It is stated so that a future run
+knows what it is buying before it waits for a quiet window.

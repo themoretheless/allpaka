@@ -25,6 +25,16 @@ pub enum GgmlType {
     Q4K,
     Q5K,
     Q6K,
+    /// MLX affine group quant, 4 bits per element in a 64-element group: eight
+    /// little-endian `u32` nibble words, then one bfloat16 scale and one
+    /// bfloat16 bias, value `q * scale + bias`.
+    ///
+    /// Not a ggml type id - `from_id` never produces these. They exist so the
+    /// weights an MLX checkpoint carries can be repacked into one contiguous
+    /// block and shared with every other quantised matrix in the engine.
+    MlxQ4,
+    /// The same affine group quant at 8 bits: 64 payload bytes, scale, bias.
+    MlxQ8,
     Other(u32),
 }
 
@@ -53,6 +63,7 @@ impl GgmlType {
             GgmlType::Q2K | GgmlType::Q3K | GgmlType::Q4K | GgmlType::Q5K | GgmlType::Q6K => {
                 Some(256)
             }
+            GgmlType::MlxQ4 | GgmlType::MlxQ8 => Some(64),
             GgmlType::Other(_) => None,
         }
     }
@@ -76,6 +87,10 @@ impl GgmlType {
             GgmlType::Q5K => Some(176),
             // 128 low bytes + 64 high bytes + 16 scales + d.
             GgmlType::Q6K => Some(210),
+            // 8 nibble words (32 bytes) + bfloat16 scale + bfloat16 bias.
+            GgmlType::MlxQ4 => Some(36),
+            // 64 payload bytes + bfloat16 scale + bfloat16 bias.
+            GgmlType::MlxQ8 => Some(68),
             GgmlType::Other(_) => None,
         }
     }

@@ -1,0 +1,265 @@
+# Pre-registration: is ALLPAKA_MV_ID worth anything on GLM-4.5-Air decode?
+
+Written 2026-09-26T04:26Z, before the calibration, before the priming round, and
+before any counted pair. Nothing here may be edited once a counted pair exists;
+amendments are appended below with a timestamp and a reason.
+
+## Question
+
+`ALLPAKA_MV_ID` switches the indexed MoE matvec grid between llama's `mul_mv_id`
+packing (`grid.z = slots`, rows on x) and allpaka's own flat `n_out * slots` 1D
+packing. It is **shipped ON**, and this repo's own roadmap record says it shipped
+under a ship rule that was never met. Task: price ON against OFF on GLM-4.5-Air
+decode with a paired, order-alternating design whose noise floor **and** positive
+control are measured in the same runs — the one thing the two previous attempts
+could not do.
+
+## What is already known, and why this is not a repeat
+
+- `docs/benchmarks/2026-09-24-glm-knobs/README.md`: single-shot arms read
+  `mvid-on 38.8` / `mvid-off 38.8` (identical to the printed precision), and its
+  4-round round-robin loop had `off` beat `on` in 4/4 pairs by
+  +2.1 / +3.0 / +92.5 / +33.3% — with `off` always running second, which that
+  artifact itself diagnoses as position, not effect. Its verdict is explicitly "no
+  conclusion is drawn from these 24 runs", and its stated design requirement is
+  round-to-round AB/BA alternation.
+- That attempt ran on allpaka's **pre-`q5_0_mv`** arm at load 10-13 with another
+  session compiling throughout. Neither applies here.
+- The same artifact's other two knobs are since closed: `Q5_0_MV` shipped ON on a
+  32-pair e2E (+16.05%), `SHARED_STAGGER` measured negative 2026-09-25 (0.9887,
+  default stays OFF). `MV_ID` is the last of the three without a paired verdict,
+  and it is the only one whose default is ON while unmeasured.
+
+## Reachability, checked before measuring (no GPU, no build)
+
+`mv_id_grid()` — `crates/allpaka-backend/src/gpu/metal.rs:9477-9480` — reads
+`std::env::var("ALLPAKA_MV_ID").map_or(true, |v| v != "0")`:
+
+- unset → ON, `"1"` → ON, `"0"` → OFF. **Value-based, not presence-based**, so the
+  "`NAME=0` silently means ON" trap that applies to 20 of 65 Metal env names does
+  not apply — but any *other* string (`off`, `false`) also means ON, so the driver
+  passes only the literals `"0"` and `"1"`, never a word.
+- The flag gates exactly `id_grid_kernel(name)` = {`matvec_q4_k_mv`,
+  `matvec_q5_0_mv`, `matvec_q8_0_mv`} (`metal.rs:9495-9497`), and `metal.rs:9508`
+  then dispatches through a different grid. GLM-4.5-Air Q4_K_M issues all three on
+  its decode path (expert `q4_k` gate/up, `q8_0` down, shared-expert `q5_0`), and
+  `!ROWS` holds because `ALLPAKA_BENCH_SKIP_MTP=1` — so the knob is on the measured
+  path, not beside it.
+- The pipeline cache key carries the flag (`+80000`, `metal.rs:8842-8850`) and
+  function constant 9 is bound from the same expression (`metal.rs:9098`), so ON
+  and OFF bind different pipelines, and `null` (below) is an *identical* encode to
+  ON rather than a near-identical one.
+- Dispatch count is the same in both arms (one dispatch per site, different
+  `threads_per_grid`), so no counter in the bench can witness the difference. That
+  is why this run carries an env-only positive control instead (below).
+- Not reachable on the 235B's `q2_k`/`q3_k` experts nor on `q6_k` — which is why a
+  GLM verdict cannot flip a default that other models share (see decisions).
+
+## Design
+
+- One cell: `pp480 / tg32`, MEGA off, `ALLPAKA_BENCH_SKIP_MTP=1`,
+  `ALLPAKA_PROFILE=max-performance` — the same cell and the **same pinned binary**
+  as `docs/benchmarks/2026-09-26-glm-llama-parity/` (`sha256 7b8ec67aa72c4266…`,
+  built 04:03Z from HEAD `dcdc131d` + 96 dirty files). Two artifacts on one arm
+  under test, so the parity row and the knob row cannot disagree about what
+  allpaka's GLM decode level was in this window.
+- Four arms, one binary, differing only by env:
+  - `on` — default, variable unset. Shipped behaviour.
+  - `off` — `ALLPAKA_MV_ID=0`. Flat 1D indexed packing. **Test arm.**
+  - `null` — `ALLPAKA_MV_ID=1`. Identical encode to `on`; its spread is this run's
+    noise floor, measured rather than borrowed from another artifact.
+  - `q5off` — `ALLPAKA_Q5_0_MV=0` (grammar checked: same `!= "0"` shape,
+    `metal.rs:15873-15876`). **Positive control**: this knob is published at
+    +16.05% decode on this model, so if the harness cannot see *it* in this window,
+    a ~0 reading for `MV_ID` is a blind meter and not a null.
+- 8 rounds. Each round runs one **real pair** (`on` vs `off`) and one **null pair**
+  (`on` vs `null`); the null pair takes the opposite order of the real pair in the
+  same round, so across 8 rounds each design is 4 AB + 4 BA. In rounds 1, 3, 5, 7 a
+  third **control pair** (`on` vs `q5off`) runs too, its order also alternating.
+- Arms inside a pair are separated by 1500 ms of cooldown; the whole round is
+  primed once by a discarded run (page cache: the first process to touch a 68 GiB
+  mapping pays the fault-in and loses ~6.7%).
+- Plus 4 standalone calibration processes to centre the prefill thermometer.
+- Total counted processes: 8×4 + 4×2 = 40, plus 4 calibration + 1 priming pair = 46
+  at ~35-50 s → ~35-40 min.
+- Every number is read from the `ALLPAKA_BENCH_REPORT` JSON at full float. The
+  driver's printed lines are never the data source.
+
+## Gates (all remove-only; counts published; no gate may add a pair)
+
+- **A1 completeness** — both arms of the pair report `prefill` and `decode`, and
+  `decode.fast_path.attempts == successes == 32` with `declines == 0`.
+- **A2 GPU-ran** — from the run's own counters: ≤ 5% of the waited window outside
+  the GPU, and `executing` the bulk of the waited ms.
+- **A3 thermometer** — both arms' allpaka prefill ≥ `0.85 ×` the median of this
+  campaign's 4 calibration processes. Unlike the parity run, this gate is
+  **symmetric**: all arms here are allpaka, so the channel being watched is the
+  channel being compared and the gate cannot favour one side — the weakness
+  published in the parity artifact is designed out rather than papered over.
+- **A4 arm band** — decode ≥ 30 tok/s in both arms. Recorded weakness, carried
+  forward deliberately: a floor with no ceiling admits a slow window, so the
+  calibration median and the null series are what make a level readable here.
+- **A5 in-window load** — remove the pair if `vm.loadavg.1min` sampled at ≥ 5 s
+  cadence inside the pair's own file window reaches ≥ 8.
+- **A6 co-tenant** — remove the pair if `remoting_me2me_host` or any `fvid-*`
+  process holds ≥ 25% CPU inside that window (the separator load average is blind
+  to).
+- **A7 memory covariates** — `vm.swapusage` and top's summary recorded per
+  snapshot, reported as covariates, never as gates.
+- **Stop rule** — if fewer than 3 of the first 4 real pairs are admitted, abandon
+  the campaign and publish the abandonment; do not extend it hunting a quieter
+  window.
+
+## Statistics and decision rules (fixed now)
+
+Primary statistic: **median per-pair `on/off` decode tok/s ratio** over admissible
+real pairs, plus mean %, SEM, count above 1, and AB/BA halves reported separately
+with a same-sign requirement for any directional claim. The null series is
+analyzed identically; its `median |ratio − 1|` and its max are published as this
+run's floor. The control series is analyzed identically and must clear a bar before
+the real median is read as anything:
+
+- **Instrument gate (criterion 0):** if the control pairs' median `on/q5off` is
+  below 1.05 — i.e. the run cannot see a published +16% knob — then no null result
+  from this campaign is publishable as "no effect", only as "not resolvable", and
+  the artifact says so in its verdict line.
+- **Confirm ON** only if `median(on/off) − 1 ≥ +3%`, AB and BA agree in sign, and
+  the excess over 1 exceeds the null floor's max.
+- **Flip default OFF** only if `1 − median(on/off) ≥ +3%` under the same two
+  conditions — *and* the flip is then gated on a same-design re-measure on
+  qwen3-30b, whose experts are `q4_k` so the knob is reachable there too. A
+  GLM-only number does not change a default for models it did not measure.
+- Otherwise: publish a **negative row** — "ON is not distinguishable from OFF on
+  GLM at ±(measured floor)", name the ship rule as still unmet on this model, and
+  leave the default as shipped. No code change in that branch: neither direction
+  cleared the bar, and a coin-flip default is not worth a cross-model re-measure.
+
+A `>3%` reading that fails sign agreement or the null-floor test is reported as "a
+pair-level effect this window cannot resolve", not as a win or a loss.
+
+## What is not claimed
+
+- Nothing about other models, other shapes, or MTP verify — `ROWS` is excluded from
+  the flag's guard, so the MTP path is untouched by this test.
+- Nothing about absolute tok/s. This is a within-run paired difference, the
+  regime-robust quantity; levels are reported only as gate evidence.
+- Token streams: `MV_ID` is a grid packing of the same math and decoding is greedy,
+  so arms are expected to continue identically; the driver still records each arm's
+  first continuation line from the bench log so an unexpected divergence is visible
+  instead of silently averaged.
+- No claim rests on the priming round, the calibration processes, or any removed
+  pair, and no removed pair is replaced after the fact.
+
+
+---
+
+## Amendment 2026-09-26T04:29Z (before any counted pair; found while writing the driver)
+
+1. **The pinned binary's source revision is named by its sha, not by a commit.**
+   The design line above says "built 04:03Z from HEAD `dcdc131d` + 96 dirty files".
+   That is the *tree state at copy time*. Each measured process's own report JSON
+   carries `metadata.git_commit`, and for this binary it reads `3ef9d9c` (an
+   ancestor of `dcdc131d`), so the compile-time revision is not established by
+   either reading. Arm identity here is `sha256 7b8ec67aa72c4266…` and nothing
+   else; the driver records both readings and the analyzer prints them side by side.
+   The parity artifact in `../2026-09-26-glm-llama-parity/results.txt` carries the
+   same correction.
+2. **The arms' identity witness is stronger than planned.** `metadata.
+   resolved_overrides` in every report JSON echoes the env the measured process
+   actually saw, so the analyzer can assert per arm that `ALLPAKA_MV_ID` was unset
+   / `"0"` / `"1"` rather than trusting the driver's bookkeeping — which catches a
+   driver that silently ran one arm twice, the failure mode the 2026-09-24 knobs
+   attempt had no defence against.
+3. **What the plan overstated:** the bench report has no generated-text field, so
+   the "record each arm's first continuation line" witness in "What is not claimed"
+   is not available from this harness. The math-equality of the two packings is
+   therefore *not* verified by this run — only that the shipped default's rate
+   differs (or does not) from the alternative, with the same fast-path coverage and
+   the same dispatch count. `Q5_0_MV`'s published e2E and the `gpu_glm_mvbench`
+   test remain the only continuations-level evidence.
+
+
+## Amendment 3 2026-09-26T04:34Z (still before any counted pair of this campaign)
+
+**A scratch smoke run of the driver happened first, in `/tmp/mvid-smoke`, and none
+of its pairs count.** It ran 1 calibration process and one round (real, null,
+control) purely to prove the driver's arms are distinct and its gates computable,
+and it is recorded here because its numbers are the only pre-campaign readings in
+existence. What it showed:
+
+- calibration process: prefill 373.76, decode 46.10 at load 3.49 — the window is
+  in the same population the parity campaign's admitted pairs came from.
+- `control` `on/q5off` = **1.1469**: the harness sees a published ~16% knob on this
+  model in this window, so criterion 0 is satisfiable here and a ~0 real reading can
+  mean "no effect" rather than "blind meter".
+- `real` `on/off` = 0.9952 and `null` `on/null` = 0.9861, i.e. the identical-encode
+  pair moved *more* than the arm pair in the same round. One pair each, so this
+  proves nothing about the knob — it is the reason the null series exists: an
+  early hint that the floor is around 1.4 pp on a quiet window, which is under the
+  ±3% decision bar.
+- All three pairs report 26368 dispatches in both arms, including the control,
+  confirming the code reading in "Reachability": these knobs repack or swap kernels
+  without changing the dispatch tally, so no counter can witness an arm switch and
+  the env echo in `metadata.resolved_overrides` is the arm identity of record.
+- Tree state at that moment: HEAD `dcdc131d`, 97 dirty files (the count moved from
+  96 during this session — another agent is editing this worktree, which is why the
+  sha256, not HEAD, is the arm identity).
+
+Amendment 4 (2026-09-26T04:41Z — still before any counted pair; none has run). The
+first launch measured nothing: it died at calibration 1 with
+`FileNotFoundError: 'series-1/allpaka'`. Cause: `--out` was passed relative while
+every engine subprocess runs with `cwd=ROOT`, so the pinned binary path resolved
+against the repo root. The pin itself was sound — the copy existed and its sha256
+(`7b8ec67aa72c4266…`) matched `ARM_SHA`, so the identity refusal worked and the
+spawn path did not. Fix in drive-mv-id.py: `--out` and `--binary` are abspath'd at
+parse time. No gate, arm, ordering, criterion or statistic changed, and no arm
+process ran, so the failure could not have tuned anything that will be counted. The
+empty run dir is kept as `series-0-failed-launch/` (driver.txt, provenance.json,
+loads/snaps covariates, one zero-length calibration log) rather than deleted.
+
+Amendment 5 (2026-09-26T04:49Z, after the counted rounds began and before any pair
+has been analyzed). Two code fixes to the tools, neither of which touches a gate, a
+threshold, or the decision rule: analyze-mv-id.py printed its AB/BA order split
+unconditionally and would raise TypeError if one arm-order ended with no admissible
+pair, so the split is now guarded and, when one side is empty, says outright that
+the position check cannot run and the verdict is not certifiable; a dead local
+variable was removed. Recording it here because any edit made while data exists is a
+tuning suspicion, and the honest answer to that is to state what changed and prove
+nothing threshold-shaped changed with it.
+
+Amendment 6 (2026-09-26T04:52Z, after rounds 1-4 and before any pair was analysed).
+The analyzer computed the stop rule but printed the decision rules as if the campaign
+were live, so its first run labelled the abandoned run "FLIP-TO-OFF CANDIDATE" from
+n=2 pairs. The stop rule now outranks the decision block and the would-be decision is
+printed under an explicit "not a verdict" banner. No gate, band, floor or threshold
+changed: only which of the pre-registered rules is allowed to speak last.
+
+Amendment 7 (2026-09-26T04:53Z, same reason). analyze-mv-id.py attributed the A5/A6
+covariates to each arm's report-JSON (birth, mtime) window, but the engine writes
+that file when the process closes, so the span was 0.0 s and A5 sampled a timestamp
+instead of an arm; it now uses the stdout log's window, which is created at process
+start and is ~16 s wide. Under the fix the attributed load maxima moved (round4 null
+11.95 -> 13.94, round2 real 0.00 -> 2.07) and no pair changed admission - still 2 of 4
+real, still abandoned - and the stop-rule count is independent of the window anyway
+because A5 is applied to pairs while the rule reads `arm_problems` (A0-A4). The
+pre-fix output is kept as analysis-1-pre-windowfix.txt rather than overwritten away.
+
+Amendment 8 (2026-09-26T04:55Z, tooling for future campaigns, not this data).
+drive-mv-id.py checked for a live compiler once, at startup; the campaign then ran
+into a build that began two minutes in (rustc at 694% in one snapshot, 8 of 22
+processes depressed). `wait_quiet()` now requires the compiler to be clear at every
+launch. This changes nothing about the pairs that exist - they are already recorded -
+and is shipped so a re-run cannot repeat the failure mode.
+
+Amendment 9 (2026-09-26, after publication, corrects prose only).
+results.txt item 3 originally explained criterion 0's failure structurally: that A4's
+30 tok/s floor, drawn from the default arm's history, vetoes an intentionally-slow
+q5off control for being slow, making an admissible control impossible by construction.
+That is false, and the campaign's own timeline refutes it: the healthy control process
+(round3, t+292 s) read prefill 374.2 = 1.000 of the calibration median and decode 39.74,
+ten tok/s above that floor. Both vetoed control processes sat at 0.48 and 0.62 of the
+clean level, i.e. they were disturbed, and round3's control pair was removed on the *on*
+arm's A3 (250.2), not on the control's band. Item 3 now states the narrower defect
+(nothing records what a healthy q5off reads; control pairs run only in odd rounds) and
+"What is not claimed" drops the vetoed-band phrasing. No gate, band, threshold or
+admission changes; the stop rule, the ledger and the abandonment stand as printed.

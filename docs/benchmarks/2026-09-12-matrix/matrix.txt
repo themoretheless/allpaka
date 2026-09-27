@@ -1,0 +1,146 @@
+rbench warmup 1/1 (discarded)
+rbench pair 1/3
+  allpaka  prefill  4488.22  decode   389.04 tok/s
+  llama    prefill  8521.73  decode   344.67 tok/s
+rbench pair 2/3
+  allpaka  prefill  4363.78  decode   391.65 tok/s
+  llama    prefill  8564.95  decode   336.69 tok/s
+rbench pair 3/3
+  allpaka  prefill  2590.18  decode   361.56 tok/s
+  llama    prefill  8067.18  decode   342.68 tok/s
+RBENCH_RESULT={"schema":1,"id":"1789228309922837000-98306","status":"complete","environment":{"arch":"aarch64","os":"macos"},"provenance":{"allpaka_bin":"/Users/themoretheless/Documents/Sources/allpaka/allpaka/target/release/allpaka","cooldown_ms":"500","llama_bench":"llama-bench","model":"/Users/themoretheless/Documents/Sources/allpaka/models/qwen3-0.6b-Q8_0.gguf","model_sha256":"meta:804753632:1786987865:59599759","pp":"128","repeats":"3","tg":"32","warmup":"1"},"cases":[{"id":"prefill","contract":{"limitations":"llama-bench generates its own token stream; MoE routing is not identical","model":"/Users/themoretheless/Documents/Sources/allpaka/models/qwen3-0.6b-Q8_0.gguf","workload":"pp128"},"metrics":[{"id":"tok_s","unit":"tok/s","scope":"engine throughput; independent process","phase":"measurement","statistic":"individual process","direction":"higher"}]},{"id":"decode","contract":{"limitations":"KV cache type must match (f16); verify against allpaka capability report","model":"/Users/themoretheless/Documents/Sources/allpaka/models/qwen3-0.6b-Q8_0.gguf","workload":"tg32@pp128"},"metrics":[{"id":"tok_s","unit":"tok/s","scope":"engine throughput; independent process","phase":"measurement","statistic":"individual process","direction":"higher"}]}],"observations":[{"case":"prefill","metric":"tok_s","variant":"candidate","process":0,"pair":1,"sequence":0,"value":"4488.2226932674275","operations":1,"availability":{"state":"available"}},{"case":"decode","metric":"tok_s","variant":"candidate","process":0,"pair":1,"sequence":0,"value":"389.0431681448341","operations":1,"availability":{"state":"available"}},{"case":"prefill","metric":"tok_s","variant":"baseline","process":1,"pair":1,"sequence":0,"value":"8521.73","operations":1,"availability":{"state":"available"}},{"case":"decode","metric":"tok_s","variant":"baseline","process":1,"pair":1,"sequence":0,"value":"344.666","operations":1,"availability":{"state":"available"}},{"case":"prefill","metric":"tok_s","variant":"candidate","process":2,"pair":2,"sequence":0,"value":"4363.778930277552","operations":1,"availability":{"state":"available"}},{"case":"decode","metric":"tok_s","variant":"candidate","process":2,"pair":2,"sequence":0,"value":"391.64770153468623","operations":1,"availability":{"state":"available"}},{"case":"prefill","metric":"tok_s","variant":"baseline","process":3,"pair":2,"sequence":0,"value":"8564.95","operations":1,"availability":{"state":"available"}},{"case":"decode","metric":"tok_s","variant":"baseline","process":3,"pair":2,"sequence":0,"value":"336.69","operations":1,"availability":{"state":"available"}},{"case":"prefill","metric":"tok_s","variant":"candidate","process":4,"pair":3,"sequence":0,"value":"2590.18209688394","operations":1,"availability":{"state":"available"}},{"case":"decode","metric":"tok_s","variant":"candidate","process":4,"pair":3,"sequence":0,"value":"361.56234342655705","operations":1,"availability":{"state":"available"}},{"case":"prefill","metric":"tok_s","variant":"baseline","process":5,"pair":3,"sequence":0,"value":"8067.18","operations":1,"availability":{"state":"available"}},{"case":"decode","metric":"tok_s","variant":"baseline","process":5,"pair":3,"sequence":0,"value":"342.679","operations":1,"availability":{"state":"available"}}],"notes":["Candidate=allpaka, baseline=llama-bench. Sequential AB/BA pairs; tok/s higher is better. llama-bench owns its token stream so MoE routing is not identical. Warmup pairs discarded; ALLPAKA_BENCH_SKIP_MTP=1."]}
+
+case            llama    allpaka         Δ% decision        
+prefill       8521.73    4363.78     -49.05 Inconclusive    
+decode         342.68     389.04     +12.88 Inconclusive    
+
+artifacts: .rbench/matrix-20260912-195149/smoke-0.6b
+  run:         .rbench/matrix-20260912-195149/smoke-0.6b/run.json
+  comparison:  .rbench/matrix-20260912-195149/smoke-0.6b/comparison.json
+
+######## qwen3-30b ########
+(cooldown 25s)
+=== allpaka qwen3-30b warm 1 ===
+engine bench: qwen3-30b-a3b-Q4_K_M (48 layers, qwen3moe, MoE)
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+  prefill   480 tok in   0.32 s    1489.4 tok/s
+  gpu during prefill: 2 waits, 481 dispatches, encode 1 ms, wait 320 ms of 322 ms total (1% outside the GPU)
+  decode     32 tok in   0.28 s     112.6 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 22336 dispatches, encode 9 ms, wait 271 ms of 284 ms total (2% outside the GPU)
+=== allpaka qwen3-30b warm 2 ===
+engine bench: qwen3-30b-a3b-Q4_K_M (48 layers, qwen3moe, MoE)
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+  prefill   480 tok in   0.32 s    1496.6 tok/s
+  gpu during prefill: 2 waits, 481 dispatches, encode 1 ms, wait 318 ms of 321 ms total (1% outside the GPU)
+  decode     32 tok in   0.28 s     114.6 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 22336 dispatches, encode 9 ms, wait 269 ms of 279 ms total (1% outside the GPU)
+=== allpaka qwen3-30b warm 3 ===
+engine bench: qwen3-30b-a3b-Q4_K_M (48 layers, qwen3moe, MoE)
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+  prefill   480 tok in   0.32 s    1499.5 tok/s
+  gpu during prefill: 2 waits, 481 dispatches, encode 1 ms, wait 318 ms of 320 ms total (1% outside the GPU)
+  decode     32 tok in   0.28 s     114.6 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 22336 dispatches, encode 9 ms, wait 268 ms of 279 ms total (1% outside the GPU)
+=== llama qwen3-30b ===
+load_backend: loaded MTL backend from /opt/homebrew/Cellar/ggml/0.23.0/libexec/libggml-metal.so
+load_backend: loaded CPU backend from /opt/homebrew/Cellar/ggml/0.23.0/libexec/libggml-cpu-apple_m4.so
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen3moe 30B.A3B Q4_K - Medium |  17.28 GiB |    30.53 B | BLAS,MTL   |      12 |           pp480 |       1464.94 ± 3.62 |
+| qwen3moe 30B.A3B Q4_K - Medium |  17.28 GiB |    30.53 B | BLAS,MTL   |      12 |            tg32 |        119.57 ± 1.13 |
+
+build: 5266f24da (10809)
+
+######## qwen36-35b ########
+(cooldown 25s)
+=== allpaka qwen36-35b warm 1 ===
+engine bench: Qwen3.6-35B-A3B-UD-Q4_K_M (40 layers, qwen35moe, MoE)
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+  prefill   480 tok in   0.33 s    1448.8 tok/s
+  gpu during prefill: 2 waits, 461 dispatches, encode 1 ms, wait 329 ms of 331 ms total (1% outside the GPU)
+  decode     32 tok in   0.30 s     108.4 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 23200 dispatches, encode 8 ms, wait 284 ms of 295 ms total (1% outside the GPU)
+=== allpaka qwen36-35b warm 2 ===
+engine bench: Qwen3.6-35B-A3B-UD-Q4_K_M (40 layers, qwen35moe, MoE)
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+  prefill   480 tok in   0.33 s    1442.0 tok/s
+  gpu during prefill: 2 waits, 461 dispatches, encode 1 ms, wait 330 ms of 333 ms total (1% outside the GPU)
+  decode     32 tok in   0.30 s     107.7 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 23200 dispatches, encode 8 ms, wait 286 ms of 297 ms total (1% outside the GPU)
+=== allpaka qwen36-35b warm 3 ===
+engine bench: Qwen3.6-35B-A3B-UD-Q4_K_M (40 layers, qwen35moe, MoE)
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+  prefill   480 tok in   0.33 s    1448.1 tok/s
+  gpu during prefill: 2 waits, 461 dispatches, encode 1 ms, wait 329 ms of 331 ms total (0% outside the GPU)
+  decode     32 tok in   0.30 s     108.2 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 23200 dispatches, encode 8 ms, wait 285 ms of 296 ms total (1% outside the GPU)
+=== llama qwen36-35b ===
+load_backend: loaded MTL backend from /opt/homebrew/Cellar/ggml/0.23.0/libexec/libggml-metal.so
+load_backend: loaded CPU backend from /opt/homebrew/Cellar/ggml/0.23.0/libexec/libggml-cpu-apple_m4.so
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen35moe 35B.A3B Q4_K - Medium |  20.60 GiB |    34.66 B | BLAS,MTL   |      12 |           pp480 |      1402.34 ± 14.68 |
+| qwen35moe 35B.A3B Q4_K - Medium |  20.60 GiB |    34.66 B | BLAS,MTL   |      12 |            tg32 |         80.21 ± 0.58 |
+
+build: 5266f24da (10809)
+
+######## glm45-air ########
+(cooldown 25s)
+=== allpaka glm45-air warm 1 ===
+engine bench: GLM-4.5-Air-Q4_K_M-00001-of-00002 (46 layers, glm4moe, MoE)
+    model-support: Experimental (sigmoid MoE, shared experts, bias, and partial RoPE are implemented)
+  prefill   480 tok in   1.31 s     367.3 tok/s
+  gpu during prefill: 3 waits, 461 dispatches, encode 1 ms, wait 1302 ms of 1307 ms total (0% outside the GPU)
+  decode     32 tok in   0.87 s      36.9 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 25696 dispatches, encode 9 ms, wait 815 ms of 867 ms total (5% outside the GPU)
+=== allpaka glm45-air warm 2 ===
+engine bench: GLM-4.5-Air-Q4_K_M-00001-of-00002 (46 layers, glm4moe, MoE)
+    model-support: Experimental (sigmoid MoE, shared experts, bias, and partial RoPE are implemented)
+  prefill   480 tok in   1.30 s     368.9 tok/s
+  gpu during prefill: 3 waits, 461 dispatches, encode 1 ms, wait 1298 ms of 1301 ms total (0% outside the GPU)
+  decode     32 tok in   0.82 s      38.9 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 25696 dispatches, encode 9 ms, wait 811 ms of 823 ms total (0% outside the GPU)
+=== allpaka glm45-air warm 3 ===
+engine bench: GLM-4.5-Air-Q4_K_M-00001-of-00002 (46 layers, glm4moe, MoE)
+    model-support: Experimental (sigmoid MoE, shared experts, bias, and partial RoPE are implemented)
+  prefill   480 tok in   1.30 s     368.6 tok/s
+  gpu during prefill: 3 waits, 461 dispatches, encode 1 ms, wait 1299 ms of 1302 ms total (0% outside the GPU)
+  decode     32 tok in   0.82 s      39.0 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 25696 dispatches, encode 9 ms, wait 809 ms of 821 ms total (0% outside the GPU)
+=== llama glm45-air ===
+load_backend: loaded MTL backend from /opt/homebrew/Cellar/ggml/0.23.0/libexec/libggml-metal.so
+load_backend: loaded CPU backend from /opt/homebrew/Cellar/ggml/0.23.0/libexec/libggml-cpu-apple_m4.so
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| glm4moe 106B.A12B Q4_K - Medium |  67.96 GiB |   110.47 B | BLAS,MTL   |      12 |           pp480 |      255.21 ± 107.51 |
+| glm4moe 106B.A12B Q4_K - Medium |  67.96 GiB |   110.47 B | BLAS,MTL   |      12 |            tg32 |         45.46 ± 0.21 |
+
+build: 5266f24da (10809)
+
+######## qwen3-235b one-shot ########
+engine bench: qwen3-235b-a22b-instruct-2507-Q2_K_XL (94 layers, qwen3moe, MoE)
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+  prefill   128 tok in   1.04 s     123.0 tok/s
+  gpu during prefill: 2 waits, 941 dispatches, encode 1 ms, wait 1038 ms of 1041 ms total (0% outside the GPU)
+  decode      8 tok in   0.40 s      20.0 tok/s
+  gpu path decode: attempts=8 successes=8 declines=0
+  gpu during decode: 8 waits, 10544 dispatches, encode 4 ms, wait 351 ms of 400 ms total (11% outside the GPU)
+ggml_metal_device_init: use shared buffers    = true
+ggml_metal_device_init: recommendedMaxWorkingSetSize  = 115448.73 MB
+load_backend: loaded MTL backend from /opt/homebrew/Cellar/ggml/0.23.0/libexec/libggml-metal.so
+load_backend: loaded CPU backend from /opt/homebrew/Cellar/ggml/0.23.0/libexec/libggml-cpu-apple_m4.so
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen3moe 235B.A22B Q2_K - Medium |  82.67 GiB |   235.09 B | BLAS,MTL   |      12 |           pp128 |        123.53 ± 0.00 |
+| qwen3moe 235B.A22B Q2_K - Medium |  82.67 GiB |   235.09 B | BLAS,MTL   |      12 |             tg8 |         27.77 ± 0.00 |
+
+build: 5266f24da (10809)

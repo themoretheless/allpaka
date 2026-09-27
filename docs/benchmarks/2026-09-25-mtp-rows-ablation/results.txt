@@ -1,0 +1,169 @@
+# Result: the ROWS verify mapping costs 2.7% of a round, so the q3_k/q2_k branch is not worth writing
+
+Task #27, roadmap A9 lever "MTP on MoE: `q2_k`/`q3_k` have no ROWS mapping",
+DoD step (a). Series `mtp-rows-series1`, run 2026-09-25T01:32Z-01:45Z (05:32-05:45
+local). Design and criteria: `preregistration.txt`, including the 01:41Z
+amendment that moved the primary statistic to the verify stage; the amendment
+was written with four pairs already collected, and it cuts against the
+hypothesis rather than for it.
+
+Artifacts: `provenance-series1.txt` (pinned binary `f7549dd8818472d7…`, git head
+`2347752`, dirty tree by design - the diff is only the ablation switch, the
+dispatch-census fix and the report wiring), `driver-series1.txt` (live
+per-pair lines), `pairs-series1.txt` (one JSON per pair with every field the
+statistics use, rates at full float from the report JSON), `analyze-series1.txt`
+(the whole analysis, from `analyze.py`).
+
+## What was held equal
+
+All 28 processes: one fingerprint (`659ac1d5f208545a`), one model
+(`Qwen3.6-35B-A3B-MTP-UD-Q4_K_M.gguf`, 40 MoE layers, 21.1 GiB),
+PP=480/TG=32/`ALLPAKA_DRAFT_K=4` so `m = 5` rows per round, 12 rounds,
+acceptance 21/48, and `mtp stream matches plain greedy: PASS` in every log of
+both arms. Load averaged 4.9-10.6 over the series; no absolute rate is claimed
+here (criterion 7).
+
+Criteria 2 and 3 admitted 14 of 14 pairs: the emitted stream and the acceptance
+never moved, and the per-round verify census was 813 dispatches under `rows`
+against 1293 under `norows` in every pair - a gap of 480 = `3 (m-1)` per MoE
+layer x 40 layers, exactly what criterion 3 requires and exactly the amount the
+pre-fix tally hid.
+
+## The measurement
+
+The pass-level GPU counter, which does not go through the hand-maintained
+tally, says the `norows` arm issued 17574 dispatches against 11814 - 5760 more,
+i.e. 480 per round x 12 rounds - and spent 499.5 ms of GPU time against 511.4
+ms. So merging five rows into one dispatch per expert matrix took a third of a
+verify pass's dispatches away (5760 of 17574) and became 2.3% *slower*.
+
+Per-round verify milliseconds, median of 12 rounds, `norows` over `rows`:
+
+    primary  5' verify-stage ms, norows/rows: median 0.9732, mean -2.50% SEM 0.46 n 14, 1/14 above 1
+    secondary 5 e2E speculative rate, norows/rows (all admitted): median 1.0256, mean +1.76% SEM 1.03 n 14, 11/14 above 1
+    secondary 5 e2E speculative rate, norows/rows (criterion-4 clean): median 1.0234, mean +0.51% SEM 1.75 n 7, 5/7 above 1
+      verify AB: n 7, median 0.9765, 1 of 7 above 1
+      verify BA: n 7, median 0.9678, 0 of 7 above 1
+      e2E AB: n 7, median 1.0234, 5 of 7 above 1
+      e2E BA: n 7, median 1.0264, 6 of 7 above 1
+
+    ROWS worth -2.68% by the verify stage, -2.50% by the e2E rate (positive favours ROWS)
+
+Both orderings agree on both statistics, and the two statistics - one taken
+inside the round, one end to end - agree to 0.18 points on a number neither was
+tuned to. 13 of 14 pairs put the verify stage on the same side. The series
+table is in `analyze-series1.txt`.
+
+## Decision, in the tense of a result
+
+Criterion 6 (and 6') asked whether the ROWS-per-row difference is worth more
+than about 3%. It is worth 2.68% of the verify stage and 2.50% of the
+speculative token rate, and it points the wrong way: the ROWS mapping is a
+small consistent *loss* on the kernels that already carry it
+(`matvec_q4_k_mv`, `matvec_q5_k_mv`/`q5_k`, `matvec_q6_k`,
+`matvec_q5_0_mv`, `matvec_q8_0_mv`), not a gain. Therefore:
+
+* Roadmap A9's step (b) - writing the ROWS branch for `q3_k`/`q2_k` - is
+  dropped. There is nothing to transfer: the mapping it would copy does not pay
+  on the kernels that have it.
+* The retire branch of criterion 6 (ROWS is itself a loss above 3%, delete it
+  from the kernels that carry it) missed its threshold by 0.3 points and is
+  NOT opened. Retiring the mapping buys ~2.7% of a verify round inside a
+  feature that is off by default and runs at 0.8x plain decode even when on
+  (`../../mtp.md`), for a change across five kernels and their pipeline
+  wiring. That is churn with a payoff below the cost of being wrong about it.
+  Recorded here rather than registered as a task; if MTP ever becomes the
+  default path, this number is the reason to reopen it.
+* The lever closes as a measured negative. The 235B's MTP return condition
+  stays unreached for the reason it was already reached for - that model has no
+  `nextn` block - and the `q3_k`/`q2_k` ROWS gap stops being a candidate decode
+  lever.
+
+## Why merging rows bought nothing, as the numbers force it
+
+Five rows through one expert matrix mean five reads of that matrix's weights in
+the fallback and one in ROWS, so ROWS should win by whatever the weight traffic
+is worth - unless the repeats are free. They are: at this expert granularity the
+per-expert slices for a round's routed set are small enough that the second to
+fifth row hit cache, so the DRAM traffic the mapping merges away was never
+being paid. What is left is the ROWS kernel's own overhead per round (an
+extra index indirection and `m x` rows read with a token stride), which the
+series prices at 2.7%. Dispatch count is confirmed to be the least of it: the
+fallback issued 5760 more dispatches over a pass and finished 11.9 ms earlier.
+
+The published per-dispatch cost reconciles the two sides of that without any
+new measurement: the 30B skip control puts ~0.47 us of non-kernel cost on a
+dispatch (`../../decode-opts.md`, the `R = 1.02` paragraph), so the 5760
+dispatches the mapping removes are worth 2.7 ms over a 12-round pass, while the
+verify stage itself moved 0.86 ms per round x 12 = 10.3 ms the other way. Merging
+avoids 2.7 ms of enqueue and saves traffic that was in fact being served from
+cache, and pays 10.3 ms for the ROWS kernel's own index indirection. That is the whole
+2.68%, and it is why the sign is stable across 13 of 14 pairs: the two arms'
+byte streams are identical by construction, so only the kernel shape differs.
+
+Two consequences beyond this lever, both about instruments rather than kernels:
+
+* `3m` versus `3` dispatches is not a cost on this machine at these sizes, so
+  dispatch-count reductions are not a shortcut to decode time here, and
+  previous reasoning that treated a lower dispatch census as progress should
+  keep its timing evidence separate from its census evidence.
+* The e2E rate of the MTP section is a weak meter because the section is capped
+  at ~69 tokens by `new_session_mtp(spec_prompt.len() + 64 + k + 1)`
+  (crates/allpaka-cli/src/bench.rs:639, :682): pairs 7 and 8 swing the
+  speculative rate by -10% while their verify stage stays flat to 0.7%. Any
+  future MTP A/B either prices the stage it changes or raises that ceiling
+  first; this one did the former.
+
+## Where this question should have stopped earlier
+
+`docs/mtp.md:90-92`, committed 2026-08-28 with the MTP feature (`0dfce0d`),
+already said it: `ROWS-батчинг экспертов диспатчи режет, но время не двигает`.
+Roadmap A9 nevertheless opened this lever as "found by reading the code, not by
+measuring" and offered step (b) as new work, without reading the line the repo
+had been carrying for four weeks. The grep is cheaper than the 75 minutes the
+series took, and this is the second time in this goal that a lever was priced
+after being written down as already priced. What the series still buys is the
+difference between an unsourced remark and a result: the old line said "does not
+move the time", which is neither a number nor a sign, and the measurement says
+it costs 2.68% with 13 of 14 pairs on one side - a sign that could only have
+come from running it, and the thing that decides whether the existing mapping
+gets retired or left alone.
+
+## Limits of transfer
+
+This prices the mapping on q4_k/q5_k/q6_k experts. The 235B's experts are
+q2_k/q3_k, whose unpack chain is 1.86-2.01x the q4_k one, so a merged row would
+save relatively more unpacking there - which is the one argument for the branch
+this series cannot answer. No local model can: the 235B has no `nextn` block, so
+`encode_verify_tokens` never runs on it, and the only nextn model here keeps
+its experts above q3_k. If the branch is ever revisited, the honest route is a
+q3_k re-quantisation of this model's experts to make the case testable, not the
+kernel written first. Given 2.7% against the mapping on the kernels that carry
+it, that experiment is not worth its own cost now.
+
+## Reproduce
+
+    cargo build --release
+    python3 docs/benchmarks/2026-09-25-mtp-rows-ablation/drive.py --pairs 14
+    python3 docs/benchmarks/2026-09-25-mtp-rows-ablation/analyze.py <the printed out dir>
+
+`ALLPAKA_NO_EXPERT_ROWS=1` is an ablation switch for this comparison, not a
+lever; it is recorded as such in `docs/decode-opts.md`.
+
+## What carries forward as a check
+
+Two things shipped with this ablation, neither of which is a kernel: the verify
+stage's `dispatched` tally now follows the branch that ran (the fix is what let
+criterion 3 see 813 against 1293 at all; before it both arms printed 1293), and
+the bench report writes the MTP section's two rates into the report JSON as
+`mtp-speculative` / `mtp-plain` with the round and GPU phases attached, so a
+paired A/B reads them at full float instead of parsing stdout.
+
+The standing regression check for the tally is criterion 3 of this analysis, not
+a new test: one pair is enough. `python3 drive.py --pairs 1` and then
+`python3 analyze.py <out>` must print `1 of 1 pairs admitted` - which requires
+the census gap to be a positive multiple of `3 (m-1)` per MoE layer with
+`norows` larger, and the two arms to emit the same stream and the same
+acceptance. If the tally ever reverts to the fixed `4 + 3m`, criterion 3 fails
+the pair instead of the series silently losing its only arm discriminator. Two
+minutes of GPU time; run it after touching `encode_verify_tokens`.

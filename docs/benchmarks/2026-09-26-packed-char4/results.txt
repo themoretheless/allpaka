@@ -1,0 +1,173 @@
+B4 RESULT - the in-tree `packed_char4` qs loads: null at |<=1.7 %|, shipped form kept
+=====================================================================================
+
+Artifact for [`preregistration.txt`](preregistration.txt). It closes row B4 of the
+2026-09-26 era audit of `docs/decode-opts.md`'s 2026-09-12 dead-end block - the last
+class-B item whose evidence was a live default-build kernel path priced on a
+last-level-cache-resident meter. Campaign ran 2026-09-26 03:19-03:31 UTC; 12 processes,
+10 admitted, 4 shared round-pairs, 9.1 min of benchmark wall time.
+
+VERDICT
+-------
+
+**Null. The vectorized (`packed_char4`) loads stay, and the row's wording changes from
+"micro noise, kept, no regress expected" to "measured on the streamed instrument: no
+effect above +-1.7 %".**
+
+The decision rule needed `scalar` to beat `packed` by >3 % on the median meter-ratio of
+*both* q8_0 rows, with a consistent sign in >=4 shared rounds. It did not: the
+pre-registered estimator reads -1.03 % and -0.81 % (i.e. `packed` ahead, under the bar),
+and the sign is positive in 1 of 4 and 2 of 4 rounds. The paired absolute estimator -
+the right one here, for the reason given in the last section - reads **-0.63 %** on the
+wide row and **+0.37 %** on the GLM row, so the two rows disagree in sign with every
+within-round |delta| at or under 1.68 %. The pre-registration's tiebreak applies: where
+the rows disagree, the verdict follows the wide row (GLM's shared down and the dense
+models' rows dispatch at that shape), which reads +0.37 %, three of four rounds
+positive, still 8x under the bar.
+
+1. What the question actually was
+---------------------------------
+
+The acceptance note in the tree read "micro noise vs scalar (~509 vs ~518 GB/s); kept
+(matches `matvec_q8_0` style, no regress expected)". Its real open question was not the
+size of the old number but its *kind*: at 34 B per Q8_0 block, packing 32 quants into 8
+alignment-1 `packed_char4` loads cuts memory *ops* 4x while moving identical bytes.
+Whether that can matter at all depends on whether the stage is latency-bound or
+bandwidth-bound - and the LL-small working sets that priced it in 2026-09-12 could not
+distinguish those, because a cache-resident stage is latency-bound by construction.
+
+Answer, measured: **bandwidth-bound, at the wall.** Both arms and both q8_0 rows in the
+shipped cell (feed 8, plain) - 20 readings over the 10 admitted processes on a ~384 MiB
+streamed working set - lie between 498.8 and 509.2 GB/s, a 2.1 % envelope containing
+both arms; widened to all four cells it is 488.3-509.2 GB/s, 4.2 %, and the whole of the
+extra is the fused cells' known swiglu cost, which both arms pay identically. A stage
+pinned at the byte ceiling has no op-issue slack for a load-width change to convert into,
+which is why the effect is where the byte-pipe argument predicts it should be, at zero.
+The
+old "~509 vs ~518" gap is inside that envelope: it was never a 1.8 % delta, it was two
+readings of the same wall.
+
+2. Arms, and why both were built in the copy
+--------------------------------------------
+
+Two binaries of one source snapshot, not an env knob (`packed_char4` is compiled into
+the shipped kernel, so there is nothing to switch at runtime).
+
+  packed  `matvec_q8_0`'s and `matvec_q8_0_mv`'s `packed_char4` qs loads, as shipped
+          sha256 4fb5ef9c1330cc1704ba53915109b46bceaa4fba46984fdc2c1afefd8a983885
+  scalar  the same two sites byte-addressed (8 x `float4` from four scalar loads), all
+          other bytes of the tree identical
+          sha256 254a2d2120fe108367509b1e0772f11668390dc8e8fd5a6be4aa1cbba33be790
+
+Amendment over the pre-registration (recorded in it, 03:18Z, before the first counted
+round): the `packed` arm is *also* a build of the /private/tmp/allpaka-b4 snapshot -
+made by copying the live `metal.rs` over the revert and rebuilding - rather than the
+binary pinned at 02:30Z by the NR0 campaign. Both arms then come from one tree with
+`diff -rq crates` clean apart from the two revert sites, so nothing the concurrently
+edited working tree did after 02:30Z can enter the comparison. `ALLPAKA_Q8_NR0=2` is
+pinned in the driver for both arms (B2, closed 02:18).
+
+Head `dcdc131d`, 95 dirty files. HEAD is *not* the baseline here: it predates the q8_0_mv
+work that B4 is about, so the comparison is against the live tree, as the
+pre-registration required.
+
+3. The correctness gate caught a wrong arm
+------------------------------------------
+
+Before any timing round: `cargo test -p allpaka-backend q8_0` in the copy. The first
+revert read `device const uchar* qb = blk + 2;` and `q8_0_matches_cpu_reference` went
+red on element zero - gpu 7.993707 vs cpu -3.144671 - because `packed_char4`'s
+components are *signed* int8, so byte-addressing the same memory as uchar shifts every
+negative quant by +256. Fixed to `(device const char*)`; after that the copy's whole
+10-test `gpu_parity` suite passes, including `q8_0_matches_cpu_reference` (the tile
+site) and `indexed_matvec_matches_cpu_reference` (the `_mv` site). No timing round ran
+against the numerically wrong build. Had this lever been priced without the gate, the
+"scalar is 4x wrong" arm would have been measured as a giant win for `packed`.
+
+4. Numbers
+----------
+
+Shipped cell (`contig x/shared`, feed=8), absolute GB/s best-of-window, per process:
+
+  round  packed row  packed meter | scalar row  scalar meter | load (before/after, both arms)
+  r1      507.2      495.8        | 505.8       499.8        | 2.7/2.2, 2.2/7.4
+  r2      503.2      497.3        | 506.6       499.1        | 3.9/2.8, 4.9/3.9
+  r3      505.9      480.9        | 506.2       458.1        | 2.8/2.5, 2.5/3.7
+  r4      508.6      494.6        | 505.0       429.6  VETO load 3.7/11.2
+  r5      506.3      492.5        | 501.5       487.5  VETO load 5.0/9.1
+  r6      505.4      493.3        | 509.2       498.8        | 3.4/3.3, 4.2/3.4
+
+Medians over the 10 admitted processes, absolute GB/s:
+
+  cell                     shape            packed   scalar
+  feed=1 plain             q8_0             500.0    500.2
+  feed=1 plain             q8_0 glm down    498.7    498.9
+  feed=8 plain             q8_0             505.4    502.1
+  feed=8 plain             q8_0 glm down    506.1    506.4
+  feed=1 fused             q8_0             495.7    495.6
+  feed=1 fused             q8_0 glm down    493.4    491.7
+  feed=8 fused             q8_0             498.9    497.7
+  feed=8 fused             q8_0 glm down    499.8    498.1
+  (meter)                  q6_k down        475.5    474.9   feed=1 plain
+  (meter)                  q6_k down        494.0    499.0   feed=8 plain
+  (meter)                  q6_k down        359.3    359.3   feed=1 fused
+  (meter)                  q6_k down        355.5    356.5   feed=8 fused
+
+Within-round paired absolute deltas, scalar vs packed, shipped and two control cells:
+
+  feed=8 plain  q8_0            r1 -1.68  r2 -0.28  r3 -0.99  r6 +1.06   median -0.63%  1/4 positive
+  feed=8 plain  q8_0 glm down   r1 -0.28  r2 +0.68  r3 +0.06  r6 +0.75   median +0.37%  3/4 positive
+  feed=1 plain  q8_0            r1 -0.58  r2 +0.26  r3 -0.64  r6 +0.36   median -0.16%  2/4 positive
+  feed=1 plain  q8_0 glm down   r1 -0.26  r2 +0.10  r3 -0.10  r6 +0.28   median -0.00%  2/4 positive
+  feed=8 fused  q8_0            r1 -1.35  r2 +0.87  r3 -1.50  r6 +0.54   median -0.41%  2/4 positive
+  feed=8 fused  q8_0 glm down   r1 -0.80  r2 +0.22  r3 -0.80  r6 +0.82   median -0.29%  2/4 positive
+
+Gates: 10 of 12 admitted, both vetoes load-only (11.2 and 9.1 after the process, over
+the 8.0 veto); no spread veto in the whole series (max best/med 1.0118 against a 1.05
+gate); no meter veto (meter reference 495.8 GB/s, the admitted processes' meters
+458.1-499.8, all above the 85 % band). Launch waited for load 5.0 and re-queued between
+processes (two 100 s waits, one 40 s). Raw per-process logs are the `Q8P-<arm>-r<n>.log.txt`
+files here, along with `records.jsonl`, `provenance.json` and `meter-ref.json`.
+
+5. Method finding: a meter is only a normalizer if it is the *quieter* channel
+------------------------------------------------------------------------------
+
+The pre-registered estimator divides each q8_0 row by the same process's `q6_k down`
+meter, on the standing rule that two processes minutes apart cannot be compared on
+absolute rates. Here that rule costs more than it buys. Across the admitted processes
+the shipped-cell row varies by sd 1.5-1.8 GB/s (spread 0.7-1.7 %), while the *meter*
+varies by sd 5.9-20.6 GB/s (spread 3.3-8.4 %) - r3's scalar process meter fell to 458.1
+and r4's to 429.6 while that process's q8_0 row stayed at 506.2 and 505.0, i.e. dead on
+the wall. Dividing a pinned quantity by a wandering one manufactures the very variance
+it was meant to cancel: the ratio estimator's headline for `scalar` (-1.03 %, 1/4
+rounds positive) is mostly r3's and r1's meter, not the kernel's.
+
+That is not an argument to drop the meter - it is the thing that catches a
+whole-machine slowdown, and gates 2-4 need it. It is an argument to check *which* of the
+two channels is tighter before normalizing, and to publish the paired absolute deltas
+next to the ratio verdict whenever the measured row is at a byte-pipe wall. Had this
+campaign run on ratios alone, the sign of a 1 % effect on a null lever would have been
+reported as a fact about `packed_char4`.
+
+6. What is not claimed
+----------------------
+
+- Not an e2E claim. A +-1 % micro effect on Q8_0 converts to tokens through Q8_0's share
+  of a model's per-token bytes, and nothing here is above the instrument's own 1.7 %
+  paired envelope, so there is nothing to carry.
+- Not a claim about the *tile* path's real workload: `matvec_q8_0` runs at prefill, and
+  the pre-registered cells are the indexed decode shapes. The tile site was reverted and
+  correctness-gated with the `_mv` site, and its row is the `[4096,1408]`-class one, but a
+  prefill-side conclusion is out of scope.
+- Not a claim about other formats' load width: `q2_k`'s word loads and `q5_0`'s ushort
+  pairs are separate code with separate evidence.
+- Not a general "load count never matters" result - the same repo already has the
+  counter-case. In `q3_k`, changing the block-row width by padding to 112 measured
+  **-4.6 %** (docs/decode-opts.md's per-block budget line), and that stage is not at the
+  byte wall. The claim here is narrower and depends on this measurement: *at the wall*,
+  as both q8_0 arms demonstrably were in every cell, op count has no slack to convert.
+- n = 4 shared round-pairs, the pre-registration's minimum, reached only because both
+  vetoed processes were `scalar` arms in r4/r5. A null with four pairs and a 1.7 %
+  envelope bounds the effect at roughly 2x the largest observed swing; it does not
+  resolve a 1 % difference in either direction, and no future decision in this repo should
+  cite this artifact for one.

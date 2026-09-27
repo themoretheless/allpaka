@@ -1,0 +1,400 @@
+diff --git a/crates/allpaka-backend/src/gpu/cuda/mod.rs b/crates/allpaka-backend/src/gpu/cuda/mod.rs
+index abe86ce..38a02f8 100644
+--- a/crates/allpaka-backend/src/gpu/cuda/mod.rs
++++ b/crates/allpaka-backend/src/gpu/cuda/mod.rs
+@@ -106,6 +106,21 @@ pub fn gpu_time_stats() -> (u64, u64) {
+     )
+ }
+ 
++/// `(errored command buffers, first error)`. CUDA has no command-buffer
++/// object to carry a verdict: a failed launch or sync shows up in that call's
++/// return code, which the call sites already check and decline on. Kept at
++/// zero so cross-backend callers print the same line, not so a CUDA failure
++/// is considered covered by it.
++pub fn cb_error_stats() -> (u64, Option<String>) {
++    (0, None)
++}
++
++/// CUDA copies weights into device memory rather than mapping the file over
++/// them, so there is no host mapping for the device to disagree about.
++pub fn check_windows() -> (usize, Option<String>) {
++    (0, None)
++}
++
+ pub struct MatvecReq<'a> {
+     pub ty: GgmlType,
+     pub w: &'a [u8],
+diff --git a/crates/allpaka-backend/src/gpu/metal.rs b/crates/allpaka-backend/src/gpu/metal.rs
+index 1353019..5276253 100644
+--- a/crates/allpaka-backend/src/gpu/metal.rs
++++ b/crates/allpaka-backend/src/gpu/metal.rs
+@@ -42,6 +42,12 @@ static WAIT_NS: AtomicU64 = AtomicU64::new(0);
+ /// whether decode is bound by kernels or by getting work to them.
+ static GPU_BUSY_NS: AtomicU64 = AtomicU64::new(0);
+ static SCHED_NS: AtomicU64 = AtomicU64::new(0);
++/// Command buffers the driver reported as failed. Every other counter here
++/// - waits, dispatches, declines, residency - stays silent when the GPU
++/// refuses to run an encoding, so this is the only one that can tell a dead
++/// run from a fast one.
++static CB_ERRORS: AtomicU64 = AtomicU64::new(0);
++static CB_ERROR_FIRST: Mutex<Option<String>> = Mutex::new(None);
+ 
+ /// `(gpu_busy_ns, sched_ns)` since process start.
+ pub fn gpu_time_stats() -> (u64, u64) {
+@@ -154,6 +160,159 @@ fn note_gpu_times(cmd: &metal::CommandBufferRef) {
+             SCHED_NS.fetch_add(((gs - ks) * 1e9) as u64, Ordering::Relaxed);
+         }
+     }
++    note_cb_error(cmd);
++}
++
++/// Count the driver's verdict on a finished buffer. An aborted or
++/// out-of-memory command buffer leaves the reused output arena holding the
++/// previous dispatch's values, so a read-back of it looks correct; only this
++/// says the work never ran.
++fn note_cb_error(cmd: &metal::CommandBufferRef) {
++    use objc::{msg_send, sel, sel_impl};
++    let err: *mut objc::runtime::Object = unsafe { msg_send![cmd, error] };
++    if err.is_null() {
++        return;
++    }
++    let code: i64 = unsafe { msg_send![err, code] };
++    let domain: *mut objc::runtime::Object = unsafe { msg_send![err, domain] };
++    let desc: *mut objc::runtime::Object = unsafe { msg_send![err, localizedDescription] };
++    record_cb_error(format!(
++        "{}: {} (code {code})",
++        ns_to_str(domain),
++        ns_to_str(desc)
++    ));
++}
++
++/// Account for one failed buffer: every one is counted, the first is kept for
++/// the caller that reports the run, and only the first few are logged, since a
++/// run that fails does so on every dispatch.
++fn record_cb_error(detail: String) {
++    let seen = CB_ERRORS.fetch_add(1, Ordering::Relaxed);
++    if seen < 3 {
++        eprintln!("allpaka: GPU command buffer failed: {detail}");
++    }
++    if let Ok(mut first) = CB_ERROR_FIRST.lock() {
++        if first.is_none() {
++            *first = Some(detail);
++        }
++    }
++}
++
++fn ns_to_str(ns: *mut objc::runtime::Object) -> String {
++    use objc::{msg_send, sel, sel_impl};
++    if ns.is_null() {
++        return String::from("(nil)");
++    }
++    let utf: *const std::os::raw::c_char = unsafe { msg_send![ns, UTF8String] };
++    if utf.is_null() {
++        return String::from("(nil)");
++    }
++    unsafe { std::ffi::CStr::from_ptr(utf) }.to_string_lossy().into_owned()
++}
++
++/// `(errored command buffers, first error)` since process start. A run whose
++/// count moves produced GPU work the driver refused to execute; the logits it
++/// printed came from a buffer, not from the kernels.
++pub fn cb_error_stats() -> (u64, Option<String>) {
++    (
++        CB_ERRORS.load(Ordering::Relaxed),
++        CB_ERROR_FIRST.lock().ok().and_then(|g| g.clone()),
++    )
++}
++
++/// Sample every attached weight window through the GPU and compare each byte
++/// with what the host reads at the same address. The command-buffer verdict
++/// says the driver refused a mapping; this asks whether one it accepted
++/// resolves to the bytes it was built from. `WINDOW_THREADS * WINDOW_SAMPLES`
++/// reads per window, so the check is a statement about whole windows: a single
++/// wrong page inside a 4 GiB window escapes it with probability 1 - 256/262144.
++pub fn check_windows() -> (usize, Option<String>) {
++    const WINDOW_THREADS: usize = 32;
++    const WINDOW_SAMPLES: u32 = 8;
++    const PAGE: usize = 16384;
++    let Some(Some(cell)) = GPU.get() else {
++        return (0, Some("no device".to_string()));
++    };
++    let mut gpu = match cell.lock() {
++        Ok(g) => g,
++        Err(_) => return (0, Some("gpu mutex poisoned".to_string())),
++    };
++    let nwin = gpu.chunks.iter().filter(|c| c.len / PAGE > 0).count();
++    if nwin == 0 {
++        return (0, Some("no windows are attached".to_string()));
++    }
++    let Some(state) = gpu.pipeline("window_check", 1, 1).map(|s| s.to_owned()) else {
++        return (0, Some("window_check pipeline is missing".to_string()));
++    };
++    let out = gpu
++        .device
++        .new_buffer((nwin * WINDOW_THREADS * 4) as u64, MTLResourceOptions::StorageModeShared);
++    let mut ci = 0usize;
++    objc::rc::autoreleasepool(|| {
++        let cmd = gpu.queue.new_command_buffer();
++        let enc =
++            cmd.compute_command_encoder_with_dispatch_type(metal::MTLDispatchType::Concurrent);
++        enc.set_compute_pipeline_state(&state);
++        enc.set_buffer(1, Some(&out), 0);
++        for ch in gpu.chunks.iter() {
++            let npages = (ch.len / PAGE) as u32;
++            if npages == 0 {
++                continue;
++            }
++            let base = (ci * WINDOW_THREADS) as u32;
++            ci += 1;
++            enc.set_buffer(0, Some(&ch.buf), 0);
++            enc.set_bytes(2, 4, &npages as *const u32 as *const _);
++            enc.set_bytes(3, 4, &base as *const u32 as *const _);
++            enc.dispatch_threads(
++                metal::MTLSize::new(WINDOW_THREADS as u64, 1, 1),
++                metal::MTLSize::new(WINDOW_THREADS as u64, 1, 1),
++            );
++        }
++        enc.end_encoding();
++        cmd.commit();
++        cmd.wait_until_completed();
++        note_gpu_times(cmd);
++    });
++    let mut got = vec![0u32; nwin * WINDOW_THREADS];
++    unsafe {
++        std::ptr::copy_nonoverlapping(out.contents() as *const u32, got.as_mut_ptr(), got.len());
++    }
++    let mut samples = 0usize;
++    let mut slot = 0usize;
++    for (w, ch) in gpu.chunks.iter().enumerate() {
++        let npages = (ch.len / PAGE) as u32;
++        if npages == 0 {
++            continue;
++        }
++        for t in 0..WINDOW_THREADS {
++            let mut expect = 0u32;
++            for sm in 0..WINDOW_SAMPLES {
++                let page = sm
++                    .wrapping_mul(2654435761)
++                    .wrapping_add((t as u32).wrapping_mul(40503))
++                    % npages;
++                expect = expect.wrapping_add(
++                    unsafe { *((ch.start + page as usize * PAGE) as *const u8) } as u32,
++                );
++            }
++            samples += 1;
++            let read = got[slot * WINDOW_THREADS + t];
++            if read != expect {
++                return (
++                    samples,
++                    Some(format!(
++                        "window {w} ({} GiB at {:#x}) thread {t}: the GPU read {read}, the host \
++                         read {expect} at the same addresses",
++                        ch.len / (1 << 30),
++                        ch.start
++                    )),
++                );
++            }
++        }
++        slot += 1;
++    }
++    (samples, None)
+ }
+ 
+ /// `(calls, dispatches, encode_ns, wait_ns)` since process start.
+@@ -7322,6 +7481,31 @@ kernel void route_patch_shared_w(
+     const float g = gate_logits[token];
+     hit_w[token * stride + p.n_used] = 1.0f / (1.0f + exp(-g));
+ }
++
++#define WINDOW_SAMPLES 8u
++
++// Sample a weight window the way the GPU sees it: one byte every few pages,
++// summed, so the host can compare a whole window's worth of reads against its
++// own view of the same addresses. The kernel is bound to the window's own
++// bytesNoCopy buffer and never sees a host pointer, so a mismatch means the
++// device's page tables resolve that buffer to something other than the bytes
++// it was built from. The index arithmetic must match WINDOW_* in Rust.
++kernel void window_check(
++    device const uchar* src [[buffer(0)]],
++    device uint* out [[buffer(1)]],
++    constant uint& npages [[buffer(2)]],
++    constant uint& base [[buffer(3)]],
++    uint tid [[thread_position_in_grid]])
++{
++    uint sum = 0u;
++    for (uint s = 0u; s < WINDOW_SAMPLES; ++s) {
++        uint page = (s * 2654435761u + tid * 40503u) % npages;
++        // 64-bit on purpose: a 32 GiB window has 2M pages, and page << 14
++        // overflows uint at 256 KiB of pages, which is 4 GiB of window.
++        sum += (uint)src[(uint64_t)page * 16384ull];
++    }
++    out[base + tid] = sum;
++}
+ "#;
+ 
+ /// One `bytesNoCopy` window over the weight mapping. Chunks overlap by more
+@@ -7571,6 +7755,7 @@ fn init_device() -> Option<Gpu> {
+         "attend_rows256",
+         "attend_mm256",
+         "route_patch_shared_w",
++        "window_check",
+     ] {
+         let f = library
+             .get_function(name, None)
+@@ -8282,6 +8467,7 @@ impl Gpu {
+         be.end_encoding();
+         cmd.commit();
+         cmd.wait_until_completed();
++        note_cb_error(&cmd);
+         let ts = unsafe { std::slice::from_raw_parts(dst.contents() as *const u64, n).to_vec() };
+         let labels = self.cstamp_labels.borrow();
+         let scale = match cal {
+@@ -11912,6 +12098,7 @@ fn encode_verify_tokens(
+                 enc.end_encoding();
+                 cmd.commit();
+                 cmd.wait_until_completed();
++                note_cb_error(cmd);
+                 let yp = gpu.y_arena.contents() as *const f32;
+                 unsafe {
+                     let x0 = std::slice::from_raw_parts(yp.add(x_at), hidden);
+@@ -13456,6 +13643,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
+                     enc.end_encoding();
+                     cmd.commit();
+                     cmd.wait_until_completed();
++                    note_cb_error(cmd);
+                     let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
+                     let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
+                     eprintln!("attn {}: {:.3} ms", $label, (ge - gs) * 1e3);
+@@ -14099,6 +14287,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
+                     enc.end_encoding();
+                     cmd.commit();
+                     cmd.wait_until_completed();
++                    note_cb_error(cmd);
+                     let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
+                     let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
+                     eprintln!("gdn {}: {:.3} ms", $label, (ge - gs) * 1e3);
+@@ -15355,6 +15544,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
+                     enc.end_encoding();
+                     cmd.commit();
+                     cmd.wait_until_completed();
++                    note_cb_error(cmd);
+                     let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
+                     let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
+                     eprintln!("ffn {}: {:.3} ms", $label, (ge - gs) * 1e3);
+@@ -16092,6 +16282,19 @@ pub fn ffn_batch(reqs: &[FfnReq]) -> Option<Vec<Vec<f32>>> {
+ mod tests {
+     use super::{tiles_for, TILES};
+ 
++    #[test]
++    fn failed_command_buffers_are_counted_and_the_first_is_kept() {
++        let before = super::cb_error_stats();
++        super::record_cb_error("MTLCommandBufferErrorDomain: Insufficient Memory (code 8)".into());
++        super::record_cb_error("MTLCommandBufferErrorDomain: Insufficient Memory (code 8)".into());
++        let after = super::cb_error_stats();
++        assert_eq!(after.0 - before.0, 2);
++        // The first detail belongs to whichever failure came first in the
++        // process, which other tests here may also have produced; all that is
++        // owed is that a detail exists once anything has failed.
++        assert!(after.1.is_some());
++    }
++
+     #[test]
+     fn objective_c_block_copy_preserves_capture_and_invocation() {
+         let captured = String::from("metal");
+diff --git a/crates/allpaka-backend/src/gpu/stub.rs b/crates/allpaka-backend/src/gpu/stub.rs
+index 421abef..9a4951f 100644
+--- a/crates/allpaka-backend/src/gpu/stub.rs
++++ b/crates/allpaka-backend/src/gpu/stub.rs
+@@ -38,6 +38,16 @@ pub fn gpu_time_stats() -> (u64, u64) {
+     (0, 0)
+ }
+ 
++/// No GPU here, so no command buffer can have failed.
++pub fn cb_error_stats() -> (u64, Option<String>) {
++    (0, None)
++}
++
++/// Nothing is mapped for a device to read back.
++pub fn check_windows() -> (usize, Option<String>) {
++    (0, None)
++}
++
+ pub struct MatvecReq<'a> {
+     pub ty: GgmlType,
+     pub w: &'a [u8],
+diff --git a/crates/allpaka-cli/src/bench.rs b/crates/allpaka-cli/src/bench.rs
+index 4bbdeb4..f75b8c5 100644
+--- a/crates/allpaka-cli/src/bench.rs
++++ b/crates/allpaka-cli/src/bench.rs
+@@ -369,6 +369,24 @@ pub fn measure_engine(
+     drop(warm);
+     session.truncate(0);
+ 
++    // A mapping the driver refused shows up as a failed command buffer; a
++    // mapping it accepted but resolves to the wrong bytes shows up here, and
++    // nowhere else. One byte per sampled page of every window, read by the GPU
++    // and by the host at the same address.
++    if allpaka_backend::gpu::is_attached() {
++        let (samples, mismatch) = allpaka_backend::gpu::check_windows();
++        let (nwin, _) = allpaka_backend::gpu::residency_status();
++        anyhow::ensure!(
++            mismatch.is_none(),
++            "benchmark invalid: weight read-back disagrees over {nwin} windows: {}",
++            mismatch.unwrap_or_default()
++        );
++        println!("  weight read-back: {samples} samples over {nwin} windows, all matching");
++    }
++    // The warmups below run on the GPU too, and a driver that drops work does
++    // so from the first buffer on, so the count is taken before them: an arm
++    // whose GPU died during warmup must not be read as a clean prefill.
++    let cb_warm = allpaka_backend::gpu::cb_error_stats();
+     let gpu_pre = allpaka_backend::gpu::stats();
+     let clock_pre = allpaka_backend::gpu::gpu_time_stats();
+     allpaka_model::profile::reset();
+@@ -413,6 +431,10 @@ pub fn measure_engine(
+         gpu_pre.3,
+         gpu_prefill.3,
+     );
++    guard_cb_errors("warmup and prefill", cb_warm)?;
++    // Taken before the decode warmups, so a GPU that dies in those is still
++    // inside the window the decode guard compares against.
++    let cb_before = allpaka_backend::gpu::cb_error_stats();
+     let prefill_phases = report_phases("prefill", prefill_secs, prompt.len() - 32);
+ 
+     // Decode from near-empty KV, matching llama-bench tg (n_prompt=0, n_depth=0).
+@@ -479,6 +501,11 @@ pub fn measure_engine(
+         gpu_successes == decode_tokens as u64 && gpu_attempts == gpu_successes && gpu_declines == 0,
+         "benchmark invalid: incomplete GPU coverage (attempts={gpu_attempts}, successes={gpu_successes}, declines={gpu_declines})"
+     );
++    // The coverage gate above is not enough on its own: a command buffer the
++    // driver refused to run still counts as a success here, because the read
++    // back of the reused output arena succeeds. This is the check that says
++    // the GPU actually executed the work it is being timed on.
++    guard_cb_errors("decode", cb_before)?;
+     println!(
+         "  gpu path decode: attempts={gpu_attempts} successes={gpu_successes} declines={gpu_declines}"
+     );
+@@ -942,6 +969,23 @@ fn report_gpu_split(
+ /// GPU actually executed, how much the driver spent scheduling, and how much
+ /// was pure round trip. This is the arbiter between "the kernels are slow"
+ /// and "the kernels are idle" - the two need opposite fixes.
++/// Refuse an arm whose GPU work the driver dropped. A buffer that failed
++/// leaves the arena holding the previous dispatch's values, so throughput,
++/// coverage and even a spot check of the logits can all look healthy while the
++/// kernels ran none of this run's weights - the failure a window-cap cliff
++/// produced (docs/benchmarks/2026-09-25-gpu-window-cost/235b-cliff.txt).
++fn guard_cb_errors(phase: &str, before: (u64, Option<String>)) -> anyhow::Result<()> {
++    let now = allpaka_backend::gpu::cb_error_stats();
++    let failed = now.0 - before.0;
++    anyhow::ensure!(
++        failed == 0,
++        "benchmark invalid: {failed} GPU command buffer(s) failed during {phase}: {}",
++        now.1.or(before.1).unwrap_or_else(|| "no detail".to_string())
++    );
++    println!("  gpu command buffers failed during {phase}: 0");
++    Ok(())
++}
++
+ fn report_gpu_clock(
+     phase: &str,
+     before: (u64, u64),

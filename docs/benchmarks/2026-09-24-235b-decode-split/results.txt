@@ -1,0 +1,302 @@
+235B per-stage decode prices from ALLPAKA_DECODE_SPLIT (task #22)
+=================================================================
+
+2026-09-24 19:53-20:01 UTC. qwen3-235b-a22b-instruct-2507-Q2_K_XL, PP 480,
+TG 64, ALLPAKA_BENCH_SKIP_MTP=1, max-performance, binary built 16:51 local.
+Design and the label->phase mapping are recorded in preregistration.txt.
+
+# 1. The instrument works, and it is not free
+
+  paired        plain ms/token   split ms/token   delta
+  rep 1            42.37            49.02        +6.65  (+15.7%)
+  rep 2            42.37            47.85        +5.48  (+12.9%)
+  rep 3            42.37            58.72        rejected: the split run landed in
+                                                    the degraded window (10.9
+                                                    tok/s); its plain bracket was
+                                                    clean, so the pair is out.
+  All three plain brackets read exactly 42.37 ms/token (23.60 tok/s), the
+  tightest bracket this model has given all day. GPU-executing 41.61-41.66 in
+  plain, 45.67-46.41 in split; scheduling 0.06 -> 0.48 ms/token; host encode
+  1.84 ms/token in both. So the per-stage-boundary encoders cost ~13-16% of the
+  token: use split mode for SHARES and for locating a stage, never for an
+  absolute per-token number.
+
+  Without the knob the decode phase table is useless and says so - in all three
+  plain runs it printed `attention 0.0 (0.0%) / unaccounted 42.3 (100.0%)`. That
+  is the bug this task was about, and the knob is the fix: no rebuild, no new
+  code, and the printed table now reads experts 28.4 (57.9%), qkv 5.2, attention
+  5.2, norm 2.5, router 1.7, other 1.0, unaccounted 5.0 (10.2%).
+
+# 2. Per-label prices, ms/token (two clean reps, and what the byte census said)
+
+  label      rep1     rep2    census row and prediction          ratio
+  gate_up   11.808   11.981   q2_k 2961.0 MiB @258 GB/s = 12.03   0.99
+  down      15.947   16.223   q3_k 1629.4 MiB @222 GB/s =  7.69   2.09
+  qkv        5.127    5.213   \
+  wo         4.379    4.435    > q4_k 3667.5 MiB @472 = 8.14     1.18
+  head       0.996    1.021    q6_k/q5_k head rows, ~1.1        ~0.9
+  router     1.709    1.728    q5_k router 0.20                  8.5
+  resnorm    2.441     ~2.5    not priced by the census          n/a
+  attend     0.686    0.700    attention reads no weight bytes   n/a
+  combine    0.340    0.353    not priced                        n/a
+  swiglu     0.040    0.040    not priced                        n/a
+  argmax     0.000    0.000
+  sum       43.473    ~43.7
+
+  The census rates are the INDEXED ones (slots=8, per_wait=1, the model's own
+  [4096,1536]/[1536,4096] shapes, 384 MiB streamed per format to defeat the
+  last-level cache - gpu_ffnbench.rs:162-240 and q6k-q5o-streamed-rates.txt), so
+  these ratios are not a contiguous-versus-gathered comparison; both sides are
+  the dispatched geometry, the same kernel name, the same feed depth.
+
+# 3. What that says, in order of size
+
+  - The 235B's decode token has TWO expert stages that behave oppositely:
+    q2_k gate/up runs at 0.99 of its own indexed bench rate (nothing left to
+    find there beyond the bytes themselves), while q3_k down runs at 2.09x it.
+    `down` alone is 15.95-16.22 ms of a 42.4 ms token = 37-38% of the token,
+    the single largest line in the model, and the goal's named leftover.
+  - Non-byte stages cost 3.5-3.9 ms/token (resnorm 2.44, router 1.71, attend
+    0.69, combine 0.34, swiglu 0.04) and the census prices them at ~0.2. Router
+    at 8.5x its byte price is per-dispatch latency over 94 layers, not traffic.
+    This is where the skip differential's unexplained 3.6 ms of interaction
+    partly lives - and it is a scheduling/latency target, not a kernel one.
+  - Cross-check against the removal probe: gate_up+down+swiglu+combine = 28.1
+    against the differential's independently bracketed 27.3 ms for the whole
+    experts group, i.e. the two instruments agree to 3% on the total. qkv+wo =
+    9.6 against the removal probe's 7.16, and the differential already showed
+    that a single-group removal under-counts by ~8-9% (non-additivity), so the
+    direction is as expected.
+
+# 4. The open question, and the run that decides it
+
+  A stage boundary bills the stall that DELAYS a stage to the stage itself. If
+  the barrier in front of `down` is what the counter is charging, then the 2.09x
+  is an attribution artifact, not a kernel deficit, and the q3_k chain keeps its
+  previous (smaller) price. Test and thresholds are Amendment-equivalent section
+  "RUN 2" of preregistration.txt: split mode with ALLPAKA_SKIP=barf (ffn-chain
+  barriers) and ALLPAKA_SKIP=bar (every barrier), each pair bracketed by its own
+  split-mode baseline. down <= 10 ms with gate_up+down preserved => attribution;
+  down >= 14 ms with the ffn barriers gone => real kernel time; between is
+  reported unresolved. Corrupted-value bias is stated in the pre-registration
+  because dropping barriers garbage the activations, and garbage routing can move
+  the token cost by itself (differential section 5). Resolved in section 5.
+
+# 5. RUN 2 - is the `down` deficit kernel time or barrier-drain attribution?
+
+  Thresholds were fixed before the data, in preregistration.txt section "RUN 2":
+  down <= 10 ms with gate_up+down preserved => attribution; down >= 14 ms with
+  the ffn-chain barriers gone => real kernel time; 10-14 ms => unresolved.
+
+## 5.1 Admissible pairs (s1): both members sit in the clean split cluster
+
+    pair        baseline           arm                     Δwall   Δexec
+    barf   47.81 ms/tok     47.97 ms/tok (skip=barf)      +0.16   +0.12
+    bar    47.97 ms/tok     48.12 ms/tok (skip=bar)       +0.16   +0.14
+
+    per-label, ms/token (base -> arm):
+      gate_up   11.940 -> 11.859   (barf)    11.918 -> 11.933   (bar)
+      down      15.961 -> 16.057   (barf)    16.019 -> 16.042   (bar)
+      qkv        5.247 ->  5.200             5.195 ->  5.283
+      wo         4.396 ->  4.414             4.427 ->  4.424
+      resnorm    2.542 ->  2.454             2.462 ->  2.456
+      router     1.726 ->  1.725             1.734 ->  1.735
+      attend     0.711 ->  0.708             0.702 ->  0.696
+      combine    0.345 ->  0.346             0.346 ->  0.340
+      swiglu     0.043 ->  0.043             0.039 ->  0.039
+    Dispatch count is byte-identical (84352) and the label sums agree to
+    0.05 ms. Dropping the ffn-chain barriers changes nothing; dropping EVERY
+    barrier changes nothing. The arm is 0.16 ms SLOWER in both cases, which is
+    inside the pair noise.
+
+## 5.2 Rejected: s2, and why the rejection is mechanical
+
+    s2 base(barf) 96.72 ms/tok, s2 barf 71.41   (Δwall -25.31)
+    s2 base(bar)  61.25 ms/tok, s2 bar  55.16   (Δwall  -6.09)
+  Both s2 baselines sit far outside the clean cluster (47.8-48.1), and each arm
+  is FASTER than the baseline that immediately precedes it - the signature of a
+  degrading window, not of a skip, since the driver always runs baseline first.
+  The same Δexec ≈ Δwall agreement as everywhere else (−24.92 vs −25.31, −5.97
+  vs −6.09) says the degradation is inside GPU executing time, so it is the
+  wired/swap mechanism already named in the differential's section 8.5, not a
+  host-side stall. These two pairs are reported and not used. Reps 3-5, each
+  arm bracketed by three baselines, are in flight to replace them
+  (t<N>-base1/barf/base2/bar/base3).
+
+## 5.3 The control that makes the null mean something
+
+  A null from a probe is only a null if the probe can bite. c1-head runs split
+  mode with ALLPAKA_SKIP=head: its `head` label reads 0.000 while every other
+  label sits at the clean value (resnorm 2.450, qkv 5.206, gate_up 11.843,
+  down 16.037). So probe_skip does fire in split mode and the label table does
+  respond to a skip. `bar` therefore really was applied and really cost 0.0 ms.
+
+## 5.4 Verdict, against the pre-registered thresholds
+
+  down is 16.04-16.06 ms/token with the ffn-chain barriers gone and 16.00-16.04
+  with every barrier gone. Both are far above the 14 ms threshold, and
+  gate_up+down stays at 27.9 ± 0.05 ms in all four arms, so nothing was moved
+  between labels instead of removed. The barrier-attribution hypothesis is
+  dead: the q3_k `down` stage costs 2.09x its own indexed, per_wait=1,
+  same-shape micro-bench rate as KERNEL time, at 37% of the token. The ledger's
+  q3_k row carries that blame.
+
+  Corollary, worth having on its own: the intra-token memory_barrier_with_
+  resources fences are free on this path - 1318 dispatches/token, every one of
+  them still ordered, at Δ0.0 ms. The Mac-safety argument against device-wide
+  sync was never about these encoder-level fences.
+
+  Instrument caveat found on the way: the last one or two rows of a label table
+  (argmax always, head once) can read 0.000 without being skipped - the sample
+  buffer is fixed at MAX_SPLIT_SAMPLES = 2048. A 0.000 on a label you did not
+  skip is truncation, not a measurement; the sum/exec residual (1.7-1.8 ms/token
+  in clean split runs) is the place to look for unlabelled time.
+
+## 5.5 Confirmation, fully bracketed (reps 3-5, `/tmp/skip-diff/drive235bar2.sh`)
+
+  Each trial runs base1, barf, base2, bar, base3, so the window is visible
+  inside the trial instead of inferred from the next one.
+
+    trial  base bracket (ms/tok)   barf          bar
+      t3   47.81 - 49.22 (1.41)   49.06         47.81      down 16.077 / 16.064
+      t4   47.66 - 47.97 (0.31)   47.81         47.81      down 15.997 / 16.036
+      t5   (see below)
+
+  t4 is the clean one: its three baselines read down = 16.054, 15.995, 16.063
+  and gate_up = 12.000, 11.877, 11.920, and the two arms land inside that box
+  (barf down 15.997, bar down 16.036; gate_up 11.894 and 11.892) with the whole
+  trial inside 0.31 ms of wall. t3's bracket is 1.41 ms wide and both arms sit at
+  the quiet end of it, so it is reported as consistent rather than as evidence.
+
+  With t4 the barrier result is n=2 independent clean trials plus three
+  baselines each: dropping the ffn-chain barriers or every barrier moves the
+  `down` label by <= 0.04 ms on a stage of 16.0 ms. Section 5.4's verdict stands
+  unchanged, and the pre-registered >= 14 ms branch is the one that fires.
+
+## 5.6 Mid-table control (`qkv`), and the interference question it settles
+
+  The head control is weakened by 5.4's truncation caveat, so RUN 2 got a second
+  one on a label that is never truncated. Two reps, each arm bracketed by a
+  baseline before and after (`k<N>-base1/qkv/base2`):
+
+    rep  bases ms/tok      spread   qkv-skip ms/tok   qkv label  wo label
+    k1   48.44 / 106.56    58.12    37.50              0.000      0.000
+    k2   68.75 / 61.72      7.03    45.00              0.000      0.000
+
+  CONTROL PASSES: the skipped stages read exactly 0.000 in both reps and the
+  expert stages do not absorb their time - k2, whose three runs are all inside
+  one mildly degraded window, moves gate_up by +0.197 ms and down by +0.289 ms
+  while 10.58 ms/token of q2_k attention traffic disappears. k1 is the same
+  story against a wild bracket (its base2 hit 106.56 ms/token, the worst single
+  run seen on this machine): the arm's down is 16.083 against a baseline mean of
+  25.709, i.e. the arm is clean and the baseline is not.
+
+  Two things follow.
+
+  1. `bar` and `barf` really were applied. A skip in this function moves its own
+     label to zero and nothing else, so the barrier null of 5.1 is a measurement
+     and not instrument silence - which matters because the same instrument did
+     go silent once already (the dispatch-counter coverage gap).
+  2. The `down` deficit is not interference from neighbouring stages. Removing
+     a quarter of the token's q2_k traffic leaves it at 16.0 ms. Whatever costs
+     2.09x is inside the down dispatch itself or in how the harness measures it,
+     which is the question 2026-09-24-indexed-feed-scatter now answers with the
+     feed, slot-layout and activation-layout axes.
+
+# 6. Annotation added 2026-09-25 - the 2.09x is now named, and it was not a kernel
+
+  Every `down` price in sections 2-5 of this file was measured under the default
+  that was live then: `ALLPAKA_SWFUSE` folded `silu(gate)*up` into the down
+  activation load. That fold re-applies silu once per output ROW, so the stage
+  this file priced at 15.95-16.22 ms/token was recomputing the same 12 288
+  activations 4096 times per expert.
+
+  The follow-up measurement is
+  [`../2026-09-24-235b-swfuse/results.txt`](../2026-09-24-235b-swfuse/results.txt)
+  sections 3 and 12. Its numbers close this file's open question:
+
+  - the fused q3_k indexed [4096,1536] x8 arm benches at 108.9 GB/s against its
+    plain arm's 222.0, i.e. 0.491x;
+  - the census's plain-rate prediction of 7.69 ms divided by that 0.491 is
+    15.66 ms, against 15.95-16.22 measured here (16.01 in section 3 of the
+    artifact above, the same stage) - 0.3-0.6 ms, two to four clock quanta of
+    0.156 ms on a 16 ms stage. Stated as rates the same closure reads in-situ
+    106.8 GB/s against the bench fused arm's 108.9, i.e. 0.98x;
+  - so section 5.6's point 2 ("whatever costs 2.09x is inside the down dispatch
+    itself or in how the harness measures it") resolves to: neither. The 2.09x
+    was the scheduling policy, and this file's instrument was right.
+
+  What survives of the q3_k price is format, not policy: plain-vs-plain the
+  kernel is 222.0 against q4_k's 468.8 GB/s = 0.474x, i.e. the unpack chain
+  still costs 2.11x per byte, and at the 1.71 GB the model reads that is ~4.5 ms
+  of the current 35.0 ms token rather than 8.3.
+
+  Numbers in this file that are stale by that policy change and must not be
+  quoted as the model's price any more: the 42.3-42.4 ms/token baselines (the
+  shipped binary's is 35.0, see section 12 of the artifact above), the `down`
+  row of every per-stage table, and therefore any share computed off them. The
+  barrier nulls (5.1), the zero-label skip controls (5.6), the gate_up/qkv/wo/
+  head ratios and the dispatch-count census are unaffected - none of them reads
+  the folded stage as its subject.
+
+# 7. Annotation added 2026-09-25 by the full-precision audit (task #26)
+#
+# Prose and the derivation are in
+# [`../2026-09-25-full-precision-audit/results.txt`](../2026-09-25-full-precision-audit/results.txt)
+# section 4 (`audit.py` there regenerates it from this directory's JSONs). No
+# run was re-measured and no verdict in sections 1-6 moves; what moves is the
+# printed precision of the wall numbers, which came from `decode 64 tok in
+# 3.14 s 20.4 tok/s` and so quantize at 0.156 ms/token (seconds) or 0.240
+# (the 1-dp rate).
+#
+#  - Section 1's `All three plain brackets read exactly 42.37 ms/token` reads
+#    42.3435 / 42.2941 / 42.3174 at full precision. `exactly` is the quantum,
+#    not agreement - but 0.0494 ms is still the tightest bracket this model
+#    gave all day (vs 0.1755 ms for the four in-cluster b2 baselines and
+#    1.4750 ms for t3 below), so the sentence survives with that one word cut.
+#  - Section 1's rep-3 rejected split arm is 91.9666 ms/token (10.873517
+#    tok/s), not the 58.72 the table prints; 58.72 is nowhere in r3-split. The
+#    rejection is unaffected and rests on better evidence than quoted: prefill
+#    97.2 tok/s against 206.0 / 195.5 / 199.3 in the plain arms, and its own
+#    GPU-executing 89.750 ms/token against 41.7 / 41.6 / 41.6.
+#  - Section 1's `host encode 1.84 ms/token in both` is wrong in a way worth
+#    having: plain encodes 0.4375 / 0.4531 ms/token, split 1.8438 / 1.8438. The
+#    per-stage encoders add +1.4062 ms/token of HOST time, which is part of the
+#    +5.5-6.6 ms cost this section prices, and `in both` hid it.
+#  - Section 5.1's two `+0.16` s1 deltas are +0.1837 (barf) and +0.1569 (bar),
+#    and its baselines are 47.7413 / 47.9946, i.e. the whole table sits ~0.2 ms
+#    below what was printed. 5.5's t3 is 47.7556-49.2306 (1.4750 ms wide, not
+#    1.41) with arms 49.0951 / 47.7934 - and its `bar` arm is below all three
+#    of its own baselines, which is the degrading-window signature 5.2 used to
+#    reject s2, so t3 is softer evidence than published, not firmer. t4 is
+#    cleaner than published: baselines 47.7342 / 47.9782 / 47.7671 (0.2440 ms),
+#    arms 47.7425 / 47.7699, both under the median baseline; `47.66` is not in
+#    the artifact. t5 was run and never written up (bases 47.6930 / 48.3079 /
+#    47.8433, arms 47.7300 / 47.7379): its bracket is 0.6148 ms wide, so it is
+#    not a clean trial, but against its own median baseline it gives -0.1133 /
+#    -0.1054 ms - the size of s1's positive, the other sign, i.e. inside noise.
+#    5.5's `n=2 independent clean trials` is therefore 3 trials, one of them
+#    strictly clean, and 5.4's verdict - which rests on the per-label `down`
+#    prices, not on the wall - is untouched.
+#  - Section 5.6's numbers reproduce (k1 bases 48.4402 / 106.5885, spread
+#    58.1483, arm 37.5099; k2 68.7593 / 61.7123, spread 7.0470, arm 44.9967);
+#    the control passes at full precision.
+#  - The 5.4 truncation caveat now has a magnitude, and it came from an
+#    instrument this file already wrote and did not read: the JSON's coarse
+#    `.measurements[decode].phases`. On r1-split it prints experts 28.3753 /
+#    qkv 5.2403 / attention 5.2202 / norm 2.4669 / router 1.7094 / other 0.9898
+#    against this file's fine labels 28.135 / 5.127 / 5.065 / 2.441 / 1.709 /
+#    0.996 - i.e. every byte group is higher in the coarse table and the small
+#    ones match, so the sample buffer shaves 0.529 ms/token (1.20%) off the fine
+#    sums rather than zeroing rows. A fine-label price is therefore a LOWER
+#    bound: `down`'s 2.09x over its census price is 2.12x with the shortfall
+#    added back proportionally (2.11x if the experts carry only their own
+#    share). Section 1's printed rep-1 table and its `unaccounted 5.0 (10.2%)`
+#    are confirmed exactly - that table was read at good precision; it is the
+#    fine one that is low. Quote wall-minus-coarse (4.990 ms/token here) for
+#    unlabelled time, not the 1.7-1.8 ms that comes out of the fine sums.
+#  - 5.3's head control is weaker than 5.6's qkv control by more than this file
+#    said: c1 is a degraded-window pair (55.51 / 49.84 ms/token against the
+#    47.7-48.2 clean split cluster), so its coarse experts line moves 34.6280 ->
+#    31.0901 for reasons that have nothing to do with head. The `other 0.000`
+#    that the control needs is still a real skip, and `head` lives in `other`.

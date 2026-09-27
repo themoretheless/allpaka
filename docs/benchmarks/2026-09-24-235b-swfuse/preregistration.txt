@@ -1,0 +1,108 @@
+# Does the q3_k down instrument measure the kernel the model runs? SwiGLU fusion, fixed before the data
+
+Date: 2026-09-24 (local 04:45, 2026-09-25). Written before any swfuse measurement.
+
+## Why this exists
+
+`2026-09-24-235b-decode-split` section 5 priced the in-situ `down` stage at
+15.995-16.063 ms/token for 1.71 GB of q3_k bytes = 107 GB/s, against 221.3 GB/s
+for the same shape in the indexed micro-bench: 2.09x, on 37% of the token. The
+same run priced `gate_up` (q2_k) at 0.99x its own bench rate.
+
+`2026-09-24-indexed-feed-scatter` then excluded every harness axis on that shape:
+feed depth 227.1/221.3 = 1.03x, expert scatter <= 1.02x, per-slot activations
+218.0/221.4 = 0.985x. Barriers and neighbour-stage traffic were excluded in RUN 2
+(Δ0.0 ms over 1318 dispatches; removing 10.58 ms/token of attention left `down`
+unchanged).
+
+One bench/model difference is left, and it is not a parameter - it is a DIFFERENT
+KERNEL:
+
+  - the bench compiles the down pipeline `swiglu = false`
+    (`indexed_matvec_bandwidth_fed`, metal.rs:126-128:
+    `gpu.pipeline_full(kernel, 1, lpr, true, false)`), so it times a plain dot
+    product over one pre-swiglu'd activation vector;
+  - the model builds the MoE down with `swiglu = true` whenever the kernel
+    carries the SWIGLU_X variant (`sw_capable`, metal.rs:10752-10798), and
+    `"matvec_q3_k_mv"` is in that list. Fusion is ON by default
+    (`ALLPAKA_SWFUSE != 0`, decode-opts.md line 12) and drops the standalone
+    swiglu dispatch plus its barrier.
+
+So every q3_k down dispatch in the 235B decode reads raw gate (buffer 1) AND raw
+up (buffer 8) and computes silu(gate)*up per activation element - two activation
+streams and an exp per element instead of one load. The published 221.3 GB/s
+never measured that kernel. This is also the only excluded-so-far mechanism that
+predicts the asymmetry RUN 2 saw: gate_up is not fused at all, so its bench and
+model pipelines agree, and it came out at 0.99x.
+
+Note what fusion bought originally: one dispatch and one `memory_barrier` per MoE
+layer, justified structurally. RUN 2 measured encoder fences at Δ0.0 ms/token over
+the whole token, so that justification is now half gone - which makes the fused
+variant's per-element price a live question rather than a settled one.
+
+## Design
+
+Two phases, same machine, same build, same model
+(`models/qwen3-235b-a22b-instruct-2507-Q2_K_XL.gguf`, PP 480 / TG 64,
+`ALLPAKA_PROFILE=max-performance ALLPAKA_BENCH_SKIP_MTP=1`), one env flip
+(`ALLPAKA_SWFUSE=0` against default ON).
+
+Phase S (attribution, split instrument, `ALLPAKA_DECODE_SPLIT=1`): 3 reps x
+(base, swf0), order AB/BA alternating per rep. Read the per-label ms/token table.
+The treatment changes the wall, so RUN 2's clean-cluster admissibility rule
+cannot be used as a filter here - instead:
+  - the drift control is the set of labels the treatment cannot touch
+    (`resnorm`, `qkv`, `attend`, `wo`, `router`, `head`, `combine`); if they move
+    between arms, the pair is rejected as drift;
+  - the treatment's own pair is `down` + `swiglu` together, because fusion moves
+    work between exactly those two labels. Quoting `down` alone is meaningless.
+
+Phase W (decision, wall only, no split): 10 paired A/B runs, AB/BA alternating,
+ms/token from `decode 64 tok`, SEM and per-pair sign as in the q5_0 gate. The e2e
+number is what ships or does not; Phase S only says why.
+
+## Criteria, fixed now
+
+  G. If `ALLPAKA_SWFUSE=0` cuts the split-mode `down` label by >= 1.5x (16.0 ->
+     <= 10.7 ms/token) and `down`+`swiglu` stays <= the baseline `down`+`swiglu`,
+     the 2.09x was largely a pipeline mismatch inside the instrument. Then the
+     ledger's q3_k denominator is re-measured on the fused kernel (bench gets a
+     swiglu arm), the "q3_k unpack chain" loses its in-situ support as the top
+     lever, and the lever becomes per-format fusion policy (fuse q4_k/q6_k, leave
+     q3_k unfused) - shippable only if Phase W also wins.
+  H. If `down` drops >= 1.5x but `down`+`swiglu` RISES over the baseline sum,
+     fusion is correctly ON: the fused kernel's extra per-element work is real,
+     but cheaper than the standalone dispatch. Negative result for the lever,
+     positive for attribution - and the q3_k down really does cost ~2x its own
+     bytes because of the swiglu it carries, which re-prices the unpack chain.
+  I. If `down` moves < 1.3x either way, the fused variant is not the explanation.
+     The instrument-side search then CLOSES (feed, scatter, x layout, barriers,
+     neighbour interference, dispatch geometry, pipeline variant all excluded),
+     and the only remaining candidate is what only the model provides: a
+     file-backed 82.7 GiB mapping read 9.17 GiB/token across 3 residency windows,
+     against the bench's 0.42 GiB heap region. Next probe is a footprint arm.
+
+Report every run, not the best pair. Quote the drift-control labels with the
+result so the reader can reject the pairs themselves.
+
+## Axis 2, added before that run: the same flip inside the micro-bench
+
+The in-situ A/B says whether fusion costs the token time; it cannot say what the
+fused kernel's own rate is, and the ledger needs a denominator measured on the
+kernel that runs. `gpu::INDEXED_SWIGLU` (new static, same-process reason as the
+two before it) makes `indexed_matvec_bandwidth_fed` compile the down pipeline with
+`SWIGLU_X` on and bind raw up at buffer 8, so
+`gpu_ffnbench::indexed_matvecs_report_effective_bandwidth` gains a third arm axis
+(`ALLPAKA_BENCH_SWFUSES=0,1`) against the identical weight bytes and the same
+process. Numerator is unchanged (weight bytes only), so a fused/plain GB/s ratio
+is directly the fused kernel's own price.
+
+  J. If the fused arm's q3_k down rate is <= 0.75x its plain arm at the same
+     shape, the model-matching denominator goes into the ledger and the 2.09x
+     shrinks accordingly. Kernels that do not carry the variant (q6_k, the 30B
+     rows) are the control: their fused/plain ratio must sit within +-5%.
+  K. If the fused q3_k down rate stays within +-10% of plain, the SWIGLU_X
+     variant costs nothing measurable at 128 threads/threadgroup and 8 slots, so
+     it cannot explain an in-situ 2x either - and any Phase-S movement found
+     in-situ must come from the activation staging the fused path implies, not
+     from the silu math.

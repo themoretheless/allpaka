@@ -1,0 +1,30 @@
+=== run 1 (final tree) ===
+mm q2_k m=32: 28.8 GB/s GPU-clock, 2.81 Tel/s weights-side (63 mats)
+q2_k gate/up   [1536,4096] ×139: 137.6 GB/s best, 123.9 median, 95.7 worst
+q3_k down      [4096,1536] ×139: 86.0 GB/s best, 82.8 median, 72.5 worst
+q8_0 control   [1536,4096] ×63: 205.7 GB/s best, 193.6 median, 186.5 worst
+q2_k one dispatch [213504,4096] 287 MB: 128.0 GB/s best, 122.8 median, 98.8 worst
+q2_k gate/up     x8 [1536,4096]: 135.9 GB/s best, 118.0 median
+q3_k down        x8 [4096,1536]: 120.8 GB/s best, 117.0 median
+q5_k gate/up     x8 [4096,1408]: 162.1 GB/s best, 161.8 median
+q8_0 down        x8 [4096,1408]: 453.5 GB/s best, 448.0 median
+=== run 2 (final tree) ===
+q2_k gate/up   [1536,4096] ×139: 136.7 GB/s best, 125.3 median, 111.6 worst
+mm q2_k m=32: 0.3 GB/s GPU-clock, 0.03 Tel/s weights-side (63 mats)
+q3_k down      [4096,1536] ×139: 83.9 GB/s best, 81.7 median, 77.5 worst
+q8_0 control   [1536,4096] ×63: 199.6 GB/s best, 181.5 median, 172.9 worst
+q2_k one dispatch [213504,4096] 287 MB: 131.3 GB/s best, 124.8 median, 90.4 worst
+q2_k gate/up     x8 [1536,4096]: 160.2 GB/s best, 154.1 median
+q3_k down        x8 [4096,1536]: 138.8 GB/s best, 134.8 median
+q5_k gate/up     x8 [4096,1408]: 185.6 GB/s best, 181.5 median
+q8_0 down        x8 [4096,1408]: 476.2 GB/s best, 474.1 median
+=== run 3 (final tree) ===
+mm q2_k m=32: 0.4 GB/s GPU-clock, 0.04 Tel/s weights-side (63 mats)
+q2_k gate/up   [1536,4096] ×139: 117.8 GB/s best, 116.8 median, 91.0 worst
+q3_k down      [4096,1536] ×139: 83.7 GB/s best, 80.9 median, 72.4 worst
+q8_0 control   [1536,4096] ×63: 197.7 GB/s best, 190.7 median, 184.8 worst
+q2_k one dispatch [213504,4096] 287 MB: 145.0 GB/s best, 130.5 median, 108.5 worst
+q2_k gate/up     x8 [1536,4096]: 140.3 GB/s best, 131.4 median
+q3_k down        x8 [4096,1536]: 140.5 GB/s best, 133.3 median
+q5_k gate/up     x8 [4096,1408]: 201.5 GB/s best, 193.6 median
+q8_0 down        x8 [4096,1408]: 476.1 GB/s best, 419.7 median

@@ -1,0 +1,173 @@
+# A ratio reproduces when the window's LEVEL is stationary, not when it is quiet
+
+Task #25's pre-flight, run 2026-09-25 04:51-04:58 local (00:51-00:58 UTC) by
+[`preflight.py`](preflight.py). Three attempts, all three rejected by their own
+gates - and the rejection is the interesting part, because
+[`harness-rejected.txt`](harness-rejected.txt) had just concluded that a fold/plain
+ratio is not regime-robust, and these three processes show it reproducing to under
+two percent at a level 25% below the published meter.
+
+Machine state while it ran: 1-minute load 5.8-7.0 with no single hog (`remoting_me2me_host`
+51%, `WindowServer` 31%, `opener-gui` 31%, three Qoder helpers, Kimi, rider, Cursor,
+a VM), `vm.swapusage` 16 965 of 18 432 MiB used with 1 467 free. That is a desktop in
+use, not an idle machine, and the byte rate is the thing it moves.
+
+## The readings
+
+All values are the best-of-4 printed by
+`gpu_ffnbench::q35_down_shape_priced_fused_and_plain_across_x_layouts` at
+`ALLPAKA_BENCH_FEEDS=1`, x-shared activation layout unless the row says per-slot.
+`level` is the arm's plain GB/s over the published settled-window constant
+(`q4_k` [4096,1536] 468.8, `q5_k` [4096,1536] 344.9, section 8 of
+[`../2026-09-24-235b-swfuse/results.txt`](../2026-09-24-235b-swfuse/results.txt));
+`ratio` is fused/plain within the same process.
+
+    window                load  level q4/q5  q4_k sh/ps  q5_k sh/ps  down sh/ps  gate/up sh/ps  worst arm
+    settled (published)      -   1.00 / 1.00    0.512        0.733        -            -             -
+    22:25Z attempt 1        5.49 0.83 / 0.86    0.545        0.767      0.836/0.845   0.648/0.517    -
+    22:25Z attempt 2        5.55 0.51 / 0.83    0.445        0.719      0.738/0.556   0.738/0.556    -
+    00:51Z attempt 1        6.99 0.75 / 0.80    0.567/0.480  0.772/0.771 0.856/0.851  0.623/0.525  1.140x
+    00:54Z attempt 2        5.76 0.75 / 0.80    0.563/0.477  0.770/0.782 0.874/0.854  0.669/0.544  1.179x
+    00:55Z attempt 3        6.34 0.75 / 0.80    0.553/0.475  0.773/0.768 0.837/0.843  0.640/0.517  1.182x
+    00:57Z attempt 4        4.82 0.75 / 0.80    0.572/0.478  0.771/0.771 0.853/0.846  0.624/0.516  1.915x
+    00:58Z attempt 5        5.19 0.76 / 0.80    0.556/0.485  0.775/0.769 0.862/0.849  0.643/0.519  1.031x
+    00:59Z attempt 6        5.03 0.75 / 0.80    0.572/0.483  0.767/0.778 0.868/0.856  0.631/0.521  1.027x
+    01:01Z attempt 7        4.87 0.74 / 0.81    0.570/0.477  0.770/0.772 0.864/0.856  0.641/0.546  1.295x
+    01:02Z attempt 8        4.27 0.75 / 0.80    0.566/0.466  0.774/0.790 0.869/0.813  0.673/0.520  1.135x
+    01:03Z attempt 9        5.11 0.74 / 0.80    0.570/0.472  0.766/0.769 0.845/0.839  0.617/0.515  1.011x
+    01:04Z attempt 10       6.15 0.76 / 0.80    0.564/0.475  0.761/0.763 0.870/0.847  0.614/0.527  5.591x
+
+`sh` = x-shared activations, `ps` = per-slot, the layout a routed down actually
+dispatches. `level` is the process's plain GB/s over the published constant; the two
+meters do not sit at the same depth, which the 22:25Z pair shows at its extreme - one
+process reading `q4_k` at 0.51x and `q5_k` at 0.83x in the same 13 seconds. `worst arm`
+is the largest of that process's eight four-pass median spreads, which is gate B.
+
+Ten independent processes over thirteen minutes, at a level pinned to 0.74-0.76x and
+0.80-0.81x. Ranges across processes, widest cell first: `q35 down` per-slot 0.813-0.856
+(5.3%), `q4_k` per-slot 0.466-0.485 (4.1%), `q5_k` per-slot 0.763-0.790 (3.5%), `q4_k`
+shared 0.553-0.572 (3.4%), `q35 down` shared 0.845-0.874 (3.4%), `q5_k` shared
+0.761-0.775 (1.8%). The same three quantities in the 22:25Z pair moved 34% between two
+processes - and those two processes disagreed about the level too, 0.83x against 0.51x.
+
+The load average is not what separates the two states either: attempts 4-9 ran at load
+4.27-5.19, inside the ceiling the wall runs use, and read the same 0.75x as attempt 1 at
+6.99. Whatever holds this machine 25% down on the byte pipe, `vm.loadavg` does not see it.
+
+So the law that `harness-rejected.txt` recorded is incomplete, and this is the
+correction: **what a ratio needs is a stationary level, not a quiet one.** The
+repeater test in `run-pairs.sh` (the `plain2` arm) was already built on that
+principle for wall rates; gate A of the pre-flight (meters within 3% of published)
+tests a different question - whether the machine is in the state the published
+constants describe - and this window says that question is not the same as
+"will these two processes agree".
+
+Gate B is not redundant with C either, and these rows show why: 8 of the 10 processes
+had at least one arm whose own four-pass median spread exceeded 1.03x, peaking at
+5.591x, while the ratios taken from those same arms' best-of-4 stayed inside a 5%
+band. That is the caution this adds to its own finding: **best-of-4 is a maximum, and
+a maximum is the statistic interference moves least.** A window can therefore look
+ratio-reproducible on the surviving statistic while its median pass is badly
+disturbed, which is exactly what a 5.591x internal spread sitting next to an
+0.847 down-ratio means. The repeatability claimed above is a statement about maxima
+of four, not about the passes in between.
+
+
+
+## What the level does to a ratio is not monotone, so it cannot be corrected
+
+`q4_k`'s x-shared ratio is 0.512 at 1.00x, 0.545-0.567 at 0.75-0.83x, and 0.445 at
+0.51x - it rises as the machine slows and then falls off. `q5_k`'s is 0.733 at 1.00x
+against 0.770-0.773 at 0.80x (a +5.5% bias on the very value the 35B's band was built
+from) but 0.719 in the one process that read it at 0.83x - so even two processes at
+nearly the same level disagree by 6.7% on that row, which is why the claim above is
+that stationarity BOUNDS a ratio's repeatability rather than guaranteeing it. There
+is no curve to interpolate and no correction to apply; a depressed window gives a
+different number, and only the absolute meter gate says whether it is the number
+being published about. That is why gate A stays.
+
+The mechanism is visible in which arm moves: at 0.75x the `q5_k` plain arm reads
+276.0 against its published 344.9 (-20.0%) while the fused arm reads 213.0 against
+252.8 (-15.7%). The fold's extra work is partly free when the machine is the bottleneck.
+
+## What this window would have said, had it been admissible, and why it still matters
+
+The 35B's own down geometry [2048,512] reads a per-slot fold/plain ratio averaging
+0.845 across ten processes (0.813-0.856), against its format's meter shape at
+0.773 (0.763-0.790) - i.e. the fold is ~9% *cheaper* at the narrow shape than at the
+shape the pre-registration borrowed (0.733). Put through the pre-registered formula
+`saving = t_plain x (1/r - 1)` with `t_plain = 203.5 MiB / 345 GB/s = 0.62 ms`:
+
+    at r = 0.845 (this window, applied to a settled-window t_plain)  0.113 ms/token
+    at r = 0.845, t_plain recomputed at this window's own 276 GB/s   0.142 ms/token
+    at r = 0.733 (the borrowed settled ratio)                        0.23 ms/token  = the band's low end
+
+Two consequences, neither of which needs the window to be admissible:
+
+1. The band's *low* end was the honest one and the +6.5% high end came from the
+   0.491 `q3_k` ratio, which is a different format's ALU load. A shape-corrected
+   prediction sits at 0.113-0.142 ms/token.
+2. 0.113-0.142 ms/token is **below what the 10-pair wall harness resolves** (that
+   instrument's own SEM on a settled window is 0.083-0.240 ms/token). This is the
+   number the four admitted pairs of run1 actually printed: mean 0.1195, SEM 0.1566.
+   The pilot's 0.548 from the same binary in a worse window is the outlier.
+
+So the pre-flight is no longer telling the wall run what to expect in a way that
+changes its DoD - ten admitted pairs are still what decides whether this model's
+published decode row moves - but it does say what "below the instrument" will mean
+if that is the verdict: a ~1% fold benefit on a model where the fold touches 8.1%
+of the decode bytes, not the 2.3-6.5% the band advertised.
+
+## DoD for this finding
+
+Admissible only as an instrument statement about ratio repeatability across
+processes at a fixed level, from the six rows above; the fold cost of the 35B is
+NOT a result here and stays 0.23-0.64 ms/token in the pre-registration until either
+a gate-A-passing pre-flight or the ten wall pairs say otherwise. To promote it,
+one settled window (`q4_k` plain within 3% of 468.8) of the same 15 s harness,
+two processes, which would price the shape correction with no bias term at all.
+
+
+## Amendment 2026-09-25T23:24Z - the run1 repro command printed "0/10" until the analyzer learned that two capture eras exist
+
+Prompted by re-reading the tools for dead instruments: `python3 analyze.py
+../../../.airbug-bench/q35-postflip-run1` - the command this file's own number
+depends on - printed no per-pair rows and `admitted on pair + census + repeater
+gates: 0/10`, which reads as "all ten pairs failed their gates" and is instead
+"ten pairs could not be opened". `q35-postflip-run1` has `plain` and `fused`
+arms only; the `plain2` repeater is written by the current
+[`run-pairs.sh`](run-pairs.sh) (`run-pairs.sh:54-55`) and was added after that
+capture. `analyze.py` skipped a pair silently when any of its three files was
+missing.
+
+Fixed in the tool, not in the record: the repeater gate is applied only when the
+capture contains repeater arms, and a pair that cannot be opened now names the
+missing arm. With that, run1 reproduces the number quoted above exactly, through the
+interface `analyze.py` documents in its own docstring ("Point the OUT directory at
+the run"):
+
+    python3 analyze.py ../../../.airbug-bench/q35-postflip-run1
+      pairs found: 10 [1..10]  (no plain2 repeater in this capture)
+      admitted on pair + census (no repeater arm) gates: 4/10 pairs read   # pairs 1, 2, 3, 6
+      delta fused-plain = mean +0.1195 ms/token, SEM 0.1566, median +0.2487,
+        signs 3/4 positive (fused slower)
+      pair spread -0.3455..+0.3260; |mean|/SEM = 0.8
+
+The pilot capture goes through the same path and prints its single pair
+(+0.5479 ms/token), which is the outlier named above.
+
+Two things the reproduction makes explicit that the prose had only implied:
+
+- Gate C, the absolute prefill band, missed on all ten run1 pairs - every row
+  reads `band MISS`. So no run1 number, including the +0.1195, may be quoted as
+  an absolute-level claim; only the within-pair delta survives, and its own
+  |mean|/SEM of 0.8 says the window cannot resolve it either way. This is why
+  task #25 stays open.
+- The `allpaka/llama` ratio block at the end is ungated by design: it takes every
+  readable pair, and on run1 that is all ten, including the three pairs whose
+  plain arm ran 1.4-2.5x slower than the admitted ones. Its median there is 1.315
+  (range 0.544-1.380). The published parity row is the 2026-09-12 paired matrix in
+  [`../qwen35-35b-m4-max-pending.md`](../qwen35-35b-m4-max-pending.md) - the 1.35x
+  decode ratio - and 1.315 must not be read as its replacement without the gates
+  and without a llama arm that has been checked against its own history, which is
+  the exact mistake that file records at its line 79.

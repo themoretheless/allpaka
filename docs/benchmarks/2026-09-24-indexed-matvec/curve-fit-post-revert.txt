@@ -1,0 +1,42 @@
+# Curve fit on the reverted (unparameterised) q3_k tree - regenerated 2026-09-24
+
+The README cited a file with this name for the claim that reverting the `q3_k`
+NR0 parameterisation put its per-block cost `B` back to 463-464 against
+`q4_k`'s 293. No such file existed (and `.gitignore` has `*.log`, so the name it
+was cited under could not have been tracked anyway). This is that measurement
+redone on the current tree, which carries the same revert.
+
+Regime: one process, six formats, nb = 4/6/8/12/16 (q8_0: 32..128), 12 streamed
+sets, feed=32, load average ~10-14 with another agent session building. Under
+that load the meter itself is degraded - `q4_k`'s `B` reads 369 here against 293
+in the quiet series - so the ABSOLUTE ps values below are not comparable to the
+463/293 pair the old sentence quoted, and the two are not the same quantity:
+
+    ratio to q4_k's B    this run      the quiet series
+    q3_k                 730 / 369 = 1.98   463 / 293 = 1.58
+    q5_k                 605 / 369 = 1.64   (NR0=4 shipped: 1.54 at its own shape)
+    q2_k at nb=8         270 / 369 = 0.73
+
+`A` (per-row cost) stays ~0 for every format except q2_k (1.8 ns/row), which is
+the result that section was making: there is nothing to recover per row, and
+`q3_k`'s deficit is per block. Note that the single-shape ratio measured the same
+day at `[4096,1536]` x8 was 1.76 for q3_k against 1.32 for its no-arithmetic
+probe - a fit extrapolated to nb->0 and a ratio measured at nb=6 are different
+numbers, and this file's 1.98 should not be quoted as if it were the 1.76.
+
+Reproduce: `cargo test -p allpaka-backend --test gpu_ffnbench -- --ignored
+--nocapture --test-threads=1 indexed_matvec_curve`
+
+running 1 test
+--- indexed curve, n_out=4096 x8, region 1122 MB ---
+q2_k    nb=4    147 GB/s  447 Gweight/s 2.24 ps/w (res +24%)  nb=6    124 GB/s  378 Gweight/s 2.64 ps/w (res -17%)  nb=8    187 GB/s  568 Gweight/s 1.76 ps/w (res +9%)  nb=12   178 GB/s  542 Gweight/s 1.84 ps/w (res -12%)  nb=16   238 GB/s  725 Gweight/s 1.38 ps/w (res +8%)
+       A=1.8 ns/row  B=270 ps/row/block  (1.05 ps/weight at the block cost alone)
+q3_k    nb=4    194 GB/s  451 Gweight/s 2.22 ps/w (res -3%)  nb=6    175 GB/s  408 Gweight/s 2.45 ps/w (res -2%)  nb=8    182 GB/s  423 Gweight/s 2.37 ps/w (res +6%)  nb=12   161 GB/s  374 Gweight/s 2.67 ps/w (res -2%)  nb=16   161 GB/s  374 Gweight/s 2.67 ps/w (res +0%)
+       A=-0.7 ns/row  B=730 ps/row/block  (2.85 ps/weight at the block cost alone)
+q4_k    nb=4    338 GB/s  600 Gweight/s 1.67 ps/w (res +1%)  nb=6    339 GB/s  602 Gweight/s 1.66 ps/w (res -4%)  nb=8    370 GB/s  658 Gweight/s 1.52 ps/w (res +3%)  nb=12   371 GB/s  659 Gweight/s 1.52 ps/w (res +0%)  nb=16   374 GB/s  664 Gweight/s 1.51 ps/w (res -0%)
+       A=0.2 ns/row  B=369 ps/row/block  (1.44 ps/weight at the block cost alone)
+q5_k    nb=4    224 GB/s  325 Gweight/s 3.07 ps/w (res +14%)  nb=6    194 GB/s  282 Gweight/s 3.54 ps/w (res -12%)  nb=8    241 GB/s  351 Gweight/s 2.85 ps/w (res +3%)  nb=12   250 GB/s  363 Gweight/s 2.76 ps/w (res -0%)  nb=16   261 GB/s  380 Gweight/s 2.63 ps/w (res +1%)
+       A=1.2 ns/row  B=605 ps/row/block  (2.36 ps/weight at the block cost alone)
+q8_0    nb=32   420 GB/s  395 Gweight/s 2.53 ps/w (res -2%)  nb=48   435 GB/s  409 Gweight/s 2.44 ps/w (res -1%)  nb=64   451 GB/s  424 Gweight/s 2.36 ps/w (res +2%)  nb=96   447 GB/s  421 Gweight/s 2.38 ps/w (res +0%)  nb=128  446 GB/s  420 Gweight/s 2.38 ps/w (res -0%)
+       A=0.1 ns/row  B=75 ps/row/block  (2.34 ps/weight at the block cost alone)
+ok

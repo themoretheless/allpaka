@@ -1,0 +1,23 @@
+# q5_k NR0 wide-shape A/B, GLM ffn_down width [5120,14080] nb=55, q4_k as in-run meter
+# run: ALLPAKA_Q5_NR0=$n cargo test -p allpaka-backend --test gpu_ffnbench q5_wide_shape_ratio -- --ignored --nocapture --test-threads=1
+# arms alternate 4,2,4,2 so drift shows up as a pattern, not a winner
+=== ALLPAKA_Q5_NR0=4 ===
+--- wide ratio, QK [5120,14080] nb=55 x8 x2, region 756 MB ---
+q4_k   487 GB/s  295.6 ps/row/block
+q5_k   406 GB/s  434.0 ps/row/block
+q5/q4 per-block = 1.468
+=== ALLPAKA_Q5_NR0=2 ===
+--- wide ratio, QK [5120,14080] nb=55 x8 x2, region 756 MB ---
+q4_k   485 GB/s  296.9 ps/row/block
+q5_k   304 GB/s  578.8 ps/row/block
+q5/q4 per-block = 1.950
+=== ALLPAKA_Q5_NR0=4 ===
+--- wide ratio, QK [5120,14080] nb=55 x8 x2, region 756 MB ---
+q4_k   395 GB/s  364.3 ps/row/block
+q5_k   391 GB/s  450.2 ps/row/block
+q5/q4 per-block = 1.236
+=== ALLPAKA_Q5_NR0=2 ===
+--- wide ratio, QK [5120,14080] nb=55 x8 x2, region 756 MB ---
+q4_k   412 GB/s  349.4 ps/row/block
+q5_k   303 GB/s  581.6 ps/row/block
+q5/q4 per-block = 1.665

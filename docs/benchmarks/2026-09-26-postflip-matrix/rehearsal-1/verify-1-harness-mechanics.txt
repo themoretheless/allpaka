@@ -1,0 +1,35 @@
+Rehearsal 1 - harness mechanics only, NOT a result.
+
+    date      2026-09-26 20:02 local (16:02Z)
+    shape     PP=64 TG=8 REPEATS=1  (deliberately small; not the pre-registered shape)
+    model     models/qwen3-0.6b-Q8_0.gguf  (general.architecture = qwen3)
+    binary    target/release/allpaka from 1cc7a27
+    harness   scripts/bench-compare.sh, unchanged
+
+What it proves: the harness runs end to end with the release binary and the
+installed llama-bench, the instrument gate passes (`fast_path.declines == 0`,
+attempts == successes == TG, prefill context_tokens == 0), and the per-repeat
+artifacts land where `wait-then-run.sh` expects them.
+
+Single-sample numbers at this shape, recorded so nobody re-reads them as a row:
+
+    prefill  allpaka 2467.93  llama 6063.72  -> 0.41x llama
+    decode   allpaka  376.76  llama  283.82  -> 1.33x llama
+
+The prefill side is the reason this rehearsal is worth keeping. A 64-token
+prefill is far too short to price a prefill - fixed setup and first-touch page
+faults are a large share of 64 tokens - so 0.41x is not a claim. But it is big
+enough that the real run at PP=480 must report prefill per repeat, not just the
+median, before anything in this file is quoted. The pre-registered DoD already
+requires that series.
+
+Resolved the same evening in ../pp-sweep-1/diagnostic-1-prefill-shape.txt:
+PP=64 re-measured three times gives 3969 (not 2468), and the ratio climbs to
+0.97x by PP=1024, so 0.41x was fixed cost plus the low tail of one contended
+sample. That sweep also found a real long-context regression at PP=4096, which
+this rehearsal could not see, and an instrument defect: the fused-prefill phase
+table mis-attributes FFN vs attention at every PP.
+
+Machine state at rehearsal time: `vm.loadavg` 1-minute 14.36 (a Homebrew-project
+cargo build was live). That is exactly the condition the launch gate exists to
+refuse, which is why this rehearsal was run outside it, on purpose, for mechanics.

@@ -1,0 +1,150 @@
+# Q5_0 gets a llama-structure `_mv` kernel: ~1.9x on GLM's expert downs
+
+## What and why
+
+`allpaka inspect` says GLM-4.5-Air streams ~6.1 GiB per token. Its residency
+dump (`allpaka bench`, the only trusted source for type shares) shows 24 Q5_0
+tensors holding 11.34 GiB - expert down projections, 8-of-128 fan-out, so
+~0.71 GiB per token = ~12% of the bytes a token reads. Those 12% were served by
+`matvec_q5_0`: block-per-lane, 32 lanes over a 44-block row (two passes for
+1.4 passes of work), and a fully scalar inner loop - 32 byte-addressed nibble
+extractions per block. It has no `_mv` twin, unlike every K-quant and Q8_0.
+
+Measured on the dispatch that path actually takes, `[4096,1408]` x8, the same
+run's Q8_0 line for the same shape: Q5_0 133 GB/s against Q8_0's 477 - and
+Q5_0 carries 35% fewer bytes per weight, so per weight it was ~2.3x worse than
+Q8_0 and ~4x worse than Q4_K.
+
+## The kernel
+
+`matvec_q5_0_mv`, on `matvec_q8_0_mv`'s geometry: 32 lanes serve NR0 = 32/LPR
+rows (16 lanes/row), eight blocks in flight (`ix`) x four lane-slices of eight
+elements (`il`), block activations loaded once and reused across the rows. The
+Q5_0 unpack is elementwise uchar4 work: lanes 0/1 take the low nibbles of the
+block's 16 qs bytes (elements 0-15), lanes 2/3 the high nibbles (16-31), each
+lane OR-ing in its own bit of the 4-byte qh as the 5th bit - a vector shift by
+`uchar4(0,1,2,3)`, two ops per four elements. A 22-byte block is only
+2-aligned, so the quants load as four ushorts and pair into two uints in
+registers.
+
+Knob `ALLPAKA_Q5_0_MV=0` restores the scalar kernel. Routed through both
+`resolve` (indexed MoE) and the general matmul kernel map, which previously
+hardcoded `matvec_q5_0`; multi-row tiles still fall back to the plain kernel.
+
+## Measurement
+
+`gpu_glm_mvbench`, `[4096,1408]` x8 indexed, burn + best-of-5 (added to
+`bench_indexed` in this change - it previously took one cold ~10 ms window and
+the same config read 474, 187 and 389 GB/s a minute apart). Two interleaved
+pairs, Q8_0's line at the same shape as the in-run meter:
+
+    arm             q5_0 GB/s   q8_0 meter    ratio to meter
+    scalar (MV=0)   132.3        432.5         0.306
+    _mv     (MV=1)  183.2        382.6         0.479
+    scalar (MV=0)    66.6        323.8         0.206
+    _mv     (MV=1)  163.4        317.2         0.515
+
+The port is 1.57x and 2.50x on the raw numbers, 1.6-2.5x normalized to the
+meter; mean ratio 0.26 -> 0.50, i.e. ~1.9x. Run-to-run spread is large (the
+scalar arm alone read 67 and 132) because the machine was at load 8-30 with
+another agent session pinned at 100% - the direction is far outside that, the
+magnitude is not settled.
+
+## Non-indexed shapes: the routing change is safe, and bigger than expected
+
+The general matmul map was moved too, so Q5_0 dense projections now reach a
+kernel written for llama's 16-lane geometry. If that assumption were wrong for
+short or narrow rows, this is where it would show. Two interleaved reps,
+`bench_shape` (burn + best-of-5), GB/s best:
+
+| shape | scalar | `_mv` | ratio |
+| --- | --- | --- | --- |
+| `[4096,1408]` down | 95.8, 109.4 | 194.5, 327.8 | 2.0-3.0x |
+| `[1408,4096]` wide | 82.0, 99.8 | 307.5, 278.0 | 2.8-3.7x |
+| `[256,512]` short row | 50.6, 41.4 | 47.9, 58.8 | 0.94-1.4x, flat |
+| indexed `[4096,1408]` x8 | 68.3, 72.5 | 203.1, 199.2 | 2.8-2.9x |
+
+Nothing regresses - the only non-win is the 256x512 shape, where both kernels
+are 41-59 GB/s and the difference is inside its own spread. The indexed arm came
+out at ~2.8x here against the ~1.9x normalized figure above; both are far too
+large for the meter's noise to manufacture, and the honest summary is that the
+port is worth 2x-plus on Q5_0, with the exact multiple depending on how contended
+the minute is.
+
+## Seven interleaved end-to-end pairs: point estimate matches, noise does not
+
+GLM-4.5-Air, `PP=480 TG=64`, `SKIP_MTP=1`, `max-performance`, A/B alternated so
+drift is common-mode, decode tok/s:
+
+    pair   scalar (MV=0)   _mv (MV=1)    delta
+    1      20.3            24.0          +18.2%
+    2      18.6            19.6           +5.4%
+    3      18.9            18.4           -2.6%
+    4      35.7            41.2          +15.4%
+    5      34.6            37.4           +8.1%
+    6      28.1            19.9          -29.2%
+    7      15.2            20.5          +34.9%
+
+Mean paired delta **+7.2%**, median **+8.1%** - against a prediction of +6-7%
+made before the run, from bytes and rates alone. The spread is +-20% per pair
+(absolute rates swung 15.2 to 41.2 tok/s across the session at load 15-25, with
+another agent session building throughout), so the standard error on the mean is
+~7.6% and t ~ 0.95: **the e2e does not establish the effect**, and resolving a 7%
+shift at this per-pair noise would need on the order of 30 pairs on a machine
+that stays under load 5. The direction and magnitude agree with the micro result;
+the test as run cannot refute it either.
+
+The one pair that argues against the port (pair 6, -29.2%) has no mechanism
+behind it: the `_mv` kernel does strictly less work per byte on a shape measured
+2-3x faster in the same session, and pair 6's scalar arm (28.1) is itself an
+outlier above the pairs around it. It is recorded, not explained away.
+
+## Predicted end-to-end effect
+
+0.71 GiB of 6.1 per token at 133 against 175 GB/s: q5_0's share of decode time
+falls from ~28% to ~23%, so **+6-7% on GLM-Air decode**. That is above this
+machine's +-2-4% e2e noise, unlike every share-arithmetic case earlier in this
+directory, so it is worth an interleaved A/B - which needs a quiet machine, and
+is the remaining gate before this stops being a micro-justified default.
+
+## Correctness
+
+Q5_0 had no parity test at all before this change. `q5_0_matches_cpu_reference`
+(m=1 through the matvec, m=8 through the tile fallback) and a Q5_0 arm in
+`indexed_matvec_matches_cpu_reference` now cover it, and both are
+mutation-sensitive: shifting the fifth bit to position 3 instead of 4 fails
+them. That coverage is what found the real bug in the first version - the
+per-lane qs/qh pointers were hoisted out of the block loop, so every block
+after the first read block `ix`'s weights against block `ix+8k`'s activations
+(gpu -0.05 against cpu 0.89 on row 0).
+
+## Why the coverage mattered more than the kernel
+
+The first two "green" runs of this suite were vacuous: `attach()` returns false
+both when there is no Metal device and when the embedded MSL fails to compile,
+and the tests read that as SKIP. An uncompilable kernel - and later a kernel no
+test reached at all - therefore passed 10/10 twice. `gpu::msl_compile_failed()`
+now exists and all twelve test attach sites assert it is false before skipping.
+
+## Repro
+
+```sh
+cd "$(git rev-parse --show-toplevel)"
+for i in 1 2 3; do for arm in 0 1; do
+  printf "MV=%s " $arm
+  env ALLPAKA_Q5_0_MV=$arm cargo test -p allpaka-backend --test gpu_glm_mvbench \
+    -- --ignored --nocapture | grep -E "idx down|q5_0"
+done; done
+```
+
+RESOLVED 2026-09-24 by [../2026-09-24-q5-0-mv-e2e/paired-32.txt](../2026-09-24-q5-0-mv-e2e/paired-32.txt):
+the ~30-pair gate above was run. Clean-band decode **+16.05%** (SEM 1.59, 15/15 pairs positive,
+trimmed +15.95%) at 39.67 -> 45.95 tok/s, prefill flat as the negative control, default ON kept.
+That is ~2.3x the +6-7% pre-registered here, and the gap is this file's input ratio, not the
+byte-share model: the "+6-7%" divides by 175/133 = 1.32, a single interleaved pair's raw
+numbers, while the same Measurement section's normalized indexed figure is ~1.9x (and 2.8x in
+the shape table). Rerunning the same arithmetic at R=1.9 gives +15.3% and at R=2.8 gives
++22.0%; the measured +16.05% inverts to R=1.98. Take the ratio at the geometry the model
+dispatches (indexed for MoE), not at the nearest pair. The gate itself
+also needed correcting: a 1-minute load under 5 did not keep runs clean (15 of 30 usable pairs
+still printed below this model's historical decode band); the throughput band is the instrument.

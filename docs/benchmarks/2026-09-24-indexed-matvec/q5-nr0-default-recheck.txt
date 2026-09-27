@@ -1,0 +1,24 @@
+# Re-check of the SHIPPED default (no ALLPAKA_Q5_NR0 set, so q5_k is at NR0=4) at
+# both published shapes. Commands (each line is one run):
+#   real: ALLPAKA_Q5AB_N_OUT=512 ALLPAKA_Q5AB_N_IN=2048 ALLPAKA_Q5AB_SETS=60 #         ALLPAKA_Q5AB_PER_WAIT=32 cargo test -q -p allpaka-backend --test gpu_ffnbench #           -- --ignored --nocapture --test-threads=1 q5_shape_ratio
+#   wide: same without the three N_OUT/N_IN/SETS/PARALLEL overrides (defaults are
+#         [5120,14080], sets=2, feed=1)
+# Purpose: confirm the flipped default lands where q5-nr0-real-shape-fed32.log put
+# its NR0=4 arm, and record what a loaded machine does to an in-run ratio.
+#
+# real shape. Columns: q4_k's own B (ps/row/block), q5_k/q4_k, q3_k/q4_k.
+# The quiet-window band for this meter is 394-405.
+#   load 11.9 -> q4_k 396.7   q5 1.543   q3 2.012   <- in band, reproduces 1.537-1.544
+#   load 12.7 -> q4_k 417.9   q5 1.623   q3 2.218
+#   load 17.0 -> q4_k 430.9   q5 1.626   q3 2.200
+#   load 15.4 -> q4_k 544.3   q5 1.571   q3 2.138
+#   load 15.4 -> q4_k 492.6   q5 1.699   q3 2.483
+#
+# wide shape, load 6.6, feed=1, q4_k 320.3 (in its own band):
+#   q5_k/q4_k 1.440   q3_k/q4_k 1.663    (quiet-window NR0=4 arms: 1.478, 1.482)
+#
+# Read: the gate on a ratio is the meter's ABSOLUTE value against its recorded
+# band, not its within-run repeat. Normalizing against q4_k inside one process
+# removes the common-mode part of drift only - at load 15 q3_k's ratio moved 27%
+# while q5_k's moved 10%. Runs whose meter is out of band are on the record as
+# load examples, not as measurements.

@@ -1,0 +1,36 @@
+Verify 5 - the corrected guard fired on the real disturbance, on its first live watch
+===============================================================================
+
+Extracted from wait-then-run.log, 2026-09-26 05:44-05:48Z. The first two rows are
+the machine quietly idle; the third is the event change 2 exists for.
+
+05:34:39Z  load  4.26  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:35:39Z  load  3.76  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:36:39Z  load  8.25  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:37:40Z  load  3.96  clean 0/5  busy: 55927 cargo 55929 rustc 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:38:40Z  load  4.59  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+05:39:40Z  load  6.09  clean 0/5  busy: 728 corespotlightd 513 mds_stores 12274 photoanalysisd 676 filecoordinatio
+  ... (9 rows, every one of them clean 0/5 on liveness alone)
+
+1:driver sha256 cbdf45e9c6bfdb31aa59f5d30e110885d912df4d2adef9491f45692e00a7e1bc  (load<5.0, 5 clean samples 60s apart, cap 240min)
+2:05:44:04Z  load  3.42  clean 1/5
+3:05:45:07Z  load  2.94  clean 2/5
+4:05:46:10Z  load  3.32  clean 0/5  busy: mds_stores(513) 48% cpu indexer fleet 62% cpu across 14 pids
+5:05:47:13Z  load  3.66  clean 1/5
+6:05:48:17Z  load  3.28  clean 2/5
+7:05:49:20Z  load  4.43  clean 3/5
+8:05:50:23Z  load  3.07  clean 4/5
+9:05:51:26Z  load  2.32  clean 5/5
+
+What the burst looked like: mds_stores measured at 48% of a core and the indexer
+class at 62% across 14 live worker pids, while vm.loadavg read 3.32 - under the
+load ceiling, so a load-only gate would have launched into it. The settle counter
+went 2/5 -> 0/5 on that single sample and rebuilt from 1/5 two minutes later.
+
+This is the same shape as the corespotlightd-at-153% episode that half-depressed the
+pair campaign's rounds, caught before a process started instead of after. The
+campaign that launched at 05:48Z therefore began from a window the OLD guard could
+neither reach nor describe.
+
+Consequence for the record: change 2 is now demonstrated in both directions - it
+clears an idle machine (verify 4) and it refuses a busy one (this row).

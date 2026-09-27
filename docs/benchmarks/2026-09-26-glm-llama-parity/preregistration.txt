@@ -1,0 +1,175 @@
+GLM-4.5-Air decode parity vs llama.cpp on the current build - pre-registration (2026-09-26 03:52Z)
+
+Written before the priming round, before the thermometer calibration, and before any
+counted pair exists. Implements the debt that docs/benchmarks/allpaka-vs-llama-metal-status.md
+states for gap 1, on the protocol that docs/benchmarks/2026-09-24-glm-parity-remeasure/
+pre-registered and then parked without a single usable pair.
+
+Question
+--------
+
+`allpaka-vs-llama-metal-status.md:23` carries GLM-4.5-Air Q4_K_M decode at **0.86x**
+(allpaka tg32 36.9/38.9/39.0 against llama tg32 45.46 +- 0.21, build 5266f24da/10809,
+2026-09-12 cool matrix). That allpaka arm predates `matvec_q5_0_mv`, which
+2026-09-24-q5-0-mv-e2e/paired-32.txt measured at **+16.05 %** decode on this exact model
+(15/15 pairs, SEM 1.59). The status doc itself says 0.86 x 1.16 is ~parity and that
+"multiplying a ratio across a build change is arithmetic, not measurement". This run
+replaces the arithmetic with a measurement: one paired campaign, both engines, current
+build, same command.
+
+Arm under test
+--------------
+
+`target/release/allpaka`, sha256 recorded by the driver at run time (7b8ec67aa72c4266...
+at the time of writing), built 2026-09-26 07:39 local from HEAD `dcdc131d` plus ~95 dirty
+files. HEAD is **not** the incumbent: the whole 09-24/25/26 decode arc is uncommitted, so
+the dirty tree is the thing whose parity is in question. The binary is copied into the run
+directory before the first round, because this is a shared worktree and another session can
+rebuild `target/release/allpaka` mid-run.
+
+Baseline arm: homebrew `llama-bench`, build b29c606e2 (10964) - the same llama build the
+2026-09-21, -24 and -25 paired campaigns ran against, so a moved ratio is attributable to
+allpaka alone. The driver reads `build_commit`/`build_number` from every llama JSON row and
+stops if the build moves mid-run.
+
+Design
+------
+
+One cell, `pp=480 tg=32`, chosen because the row being replaced is that cell and because
+both arms have published anchors there, which is what makes a depressed-machine detector
+possible at all. A second, longer-generation cell was considered and dropped: it doubles
+the process count (each process pays a 67.96 GiB model load), has no external anchor for
+either arm, and answers a question gap 1 does not ask - long-context attention is task #31.
+
+Per round: one invocation of the in-repo paired driver
+
+    allpaka airbug models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf \
+      --pp 480 --tg 32 --repeats 2 --warmup 0 --cooldown-ms 1500 \
+      --threshold 3.0 --allpaka RUN/allpaka --out RUN/roundK
+
+`--repeats 2` is what keeps the arm order from being the experiment: airbug runs pair 1
+allpaka-first and pair 2 llama-first, so each round contributes one AB pair and one BA pair
+and campaign-level drift cannot be handed to one engine. 6 rounds = 12 counted pairs (6 AB,
+6 BA), plus one discarded priming round before them. The priming round exists because the
+first process to touch a 68 GiB mapping pays the disk fault-in, and that penalty lands on
+an arm, not on a treatment.
+
+Every number is read from the JSON each engine writes at full float - allpaka's
+`measurements[].summary.median`, llama's `avg_ts`/`samples_ts` - never from a stdout print
+(task #26's rule; the stdout seconds field quantises at 2000/TG ms, which is 62 ms/token
+here, larger than the effect being tested).
+
+Gates (all of them only ever *remove* pairs; the removal count is published)
+---------------------------------------------------------------------------
+
+A1. Completeness. Both decode numbers present and positive, and allpaka's own decode
+    fast path reports `attempts == successes == 32` with `declines = 0`. airbug enforces
+    this and dies rather than recording it, so a pair that fails A1 produces no line.
+A2. The GPU actually ran. From allpaka's per-process log: `% outside the GPU` during decode
+    <= 5, and the gpu-clock `executing` ms >= 50 % of the waited ms. A run with seconds
+    waited and milliseconds executing is a dead arm, and a dead arm prints a believable
+    fast number (2026-09-25-gpu-window-cost).
+A3. Thermometer, re-centred. A pair whose allpaka prefill absolute sits below 0.85 x the
+    campaign's own calibration median is disturbed regardless of its load reading. The
+    2026-09-24 criterion 7 band (320 tok/s floor, history 336-374) was calibrated on the
+    pre-NR0-sweep build, and five of the six rows it keyed on have since been re-measured
+    or re-defaulted, so re-centring it is a correction of record, not of method. Procedure:
+    four allpaka-only processes at load < 5 before the counted rounds, band = 0.85 x their
+    median; the old floor is published next to the new one, and if the calibration median
+    lands inside 320-374 the old floor simply stays.
+A4. Arm bands, from each arm's own history (criterion 2, unchanged): llama decode in
+    [35, 60] tok/s around the 45.46 anchor, allpaka decode >= 30 tok/s (39.0 pre-port,
+    45.95-46.5 post-port). Divergence beyond ~1.3x from an arm's anchor is an instrument
+    fault, not a result.
+A5. Load. The 1-minute load average is sampled every 5 s by the driver for the whole
+    campaign and attributed to each arm by that arm's own file-mtime window. A pair whose
+    max sampled load in either arm's window reaches 8.0 is disturbed. The launch gate
+    (load < 5 before a round) is a permission to attempt, not an admission test - the
+    parked 2026-09-24 attempt pairs passed it and read a third of band.
+A6. GPU co-tenant. `top` is snapshotted at round start and mid-round. A round whose
+    snapshot shows `remoting_me2me_host` above 25 % CPU or any `fvid-*` process alive is
+    disturbed: on this machine those held the streamed byte meters at 0.72-0.78x of
+    published for hours while load average sat at 6.5 and refused to separate a fast arm
+    from a slow one (2026-09-25-instrument-co-tenant). A6 is a weak, instantaneous
+    detector; A3 and A4 are the load-bearing ones.
+
+Stop rule (criterion 9, unchanged): if fewer than 3 of the first 6 counted pairs admit, the
+run is abandoned and the parity question stays open rather than being answered on disturbed
+pairs. Reason: an allpaka-vs-allpaka ratio measured on disturbed pairs moved the same q5_0
+knob from +16.05 % to +24.95 %, and a cross-engine ratio has no knob-off control to catch
+that.
+
+Amendment, 2026-09-26 04:02Z - still before the priming round and before any counted pair
+----------------------------------------------------------------------------------------
+
+Two things the plumbing test showed, both recorded here rather than acted on silently.
+
+A7 is a covariate, not a gate. The sampler additionally records `vm.swapusage`, the top
+summary block (load, CPU%, PhysMem, swapins/swapouts, disk read) and the instantaneous
+per-process CPU of the busiest six processes, every 60 s, and the analyzer prints the max
+swapped GiB inside each pair's window. It gates nothing, because the machine is already at
+~9.0 GiB swapped of a 10 GiB file with 126 G used of 128 G at campaign start - the exact
+state the parked 2026-09-24 attempt died in, so a threshold invented now would either veto
+the whole run or be tuned to admit it. The load-bearing protection stays A3 and A4: the two
+arms' absolutes against their own histories, which is what caught that attempt (allpaka
+16.00/14.20 against a ~46 anchor). What A7 buys is the ability to say, after the fact,
+whether an admitted pair's window was quiet.
+
+The sampler is a measured perturbation of about its own cost: `top -l 2` takes 1.8 s and
+reports itself at ~8 % of a core, once a minute, so it is in the same window as the arms it
+monitors. A single-sample `top -l 1` was tried first and is useless here - its %CPU is a
+since-boot average, which printed 0.0 for processes the co-tenant artifact caught at 40-88 %.
+
+One uncounted calibration process ran in a scratch directory before this amendment (03:56Z,
+load 1.75): allpaka pp480 prefill 373.89, tg32 decode 46.12 tok/s, 26368 decode dispatches,
+0 % outside the GPU, 678 ms executing of 685 ms waited, fast path 32/32 with 0 declines. Both
+absolutes sit inside their published clean bands (prefill history 336-374, post-port decode
+45.95-46.5), which is the evidence that this window can carry the run at all - and it is why
+the thermometer re-centring of A3 is a correction of record rather than of method: on this
+build the old 320 floor still works, and the calibration rounds will say so four more times.
+
+Statistic and verdict
+---------------------
+
+Primary: the median of the 12 per-pair ratios `allpaka_decode / llama_decode` over admitted
+pairs, with the mean percentage, SEM, the count of pairs above parity, and the AB and BA
+halves reported separately (a parity or win claim requires the halves to agree in sign -
+criterion 1). Secondary: the admitted pairs' absolute medians per arm, so a reader can see
+which arm moved and whether the campaign ran in a believable population at all.
+
+Certification, stated as an interval unless the instrument earns better: a distance from
+parity is certified to +-3 % only if the campaign's own cross-pair spread (max-min of
+admitted ratios, and the gap between the AB and BA halves) is below the published
+identical-code null floor of 8.28 pp (2026-09-25-dcomb-ab control series). Otherwise the
+verdict is the interval, exactly as the DCOMB row had to be published as `0.873...0.921`
+rather than a certified level. The 17.56 pp null floor from 2026-09-25-normflag-policy is
+the pessimistic bookend and gets quoted if the spread lands near it.
+
+Wording (criterion 6): median ratio in 0.95-1.05 -> the status row is restated as parity,
+not 0.86x. Above 1.05 -> a win, with the SEM and the admitted-pair count, and only if A5
+admits no bias direction (llama.cpp puts part of its graph on 12 CPU threads while allpaka's
+decode is a GPU byte-pipe, so background load flatters the allpaka ratio - no win claim may
+rest on a pair whose sampled load exceeded 5). Below 0.95 -> the 0.86x row is re-dated to
+this build and the gap stays open with its dispatch-count and bubble explanations intact.
+
+Scale and cost
+--------------
+
+7 rounds x 2 pairs, 3 model-loading processes per pair, ~2-4 min per pair => 40-80 minutes
+plus queueing on the load gate. No cargo build or test run is permitted while the campaign
+is live; the analyzer is written before the campaign starts and run only after it ends.
+
+What is not claimed
+-------------------
+
+Not a claim about the 235B or the 30B rows: those have their own paired artifacts. Not a
+prefill claim: the incumbent's GLM prefill variance is +-107 on 255 tok/s, a factor-of-two
+instrument, so prefill here is a thermometer and nothing else. Not a token-stream equality
+claim: llama-bench generates its own tokens, so MoE routing differs between the arms by
+construction - the pair is same-model, same-pp, same-tg, same-depth, not same-route. Not a
+claim about the 0.86x row's own protocol beyond the ratio: the 2026-09-12 matrix's llama arm
+ran at the default depth (~480-512) while the parked 2026-09-24 driver passed `-d 1` to its
+decode test, i.e. a shallower KV than the allpaka arm it compared against; this run pairs
+`-p 0 -n 32 -d 480` against allpaka's pp480-then-32, so any difference from the old row is
+attributable to the allpaka build and to llama 10809->10964, and the depth correction is
+recorded as a third, unquantified difference rather than silently absorbed.

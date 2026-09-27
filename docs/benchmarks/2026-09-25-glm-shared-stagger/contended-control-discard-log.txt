@@ -1,0 +1,9 @@
+{"started": "2026-09-25T21:05:31Z", "binary_sha256": "6a4418fa1f0592977b17f0940d4138d0153bed9e6e5c2d68863fc1ce7f622988", "git_head": "8a16214", "tree": "dirty by design; the ablated variable is ALLPAKA_SHARED_STAGGER", "model": "models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf", "pp_tg": [480, 320], "arms": {"plain": {}, "stagged": {"ALLPAKA_SHARED_STAGGER": "1"}, "null": {"ALLPAKA_SHARED_STAGGER": "0"}}, "top_cpu_at_launch": ["  PID  %CPU COMM", " 1063  18.0 pCloud Drive", "76956  16.1 Qoder", "27409  12.4 Python", "  681   8.8 ContinuityCaptureAgent", " 1685   6.7 Kimi Helper (Renderer)", "95638   5.5 DesktopServicesHelper", " 2518   5.1 rider", "  596   4.6 com.apple.DriverKit-AppleBCMWLAN"]}
+priming run: 39.434145481863965 tok/s, census at 11.59s (not a result)
+control pair 1 AB null: 39.13349534522139 tok/s, 0% outside GPU, load 9.58, census 12.05s
+control pair 1 AB plain: 19.27048159372423 tok/s, 1% outside GPU, load 37.5, census 10.35s
+control pair 2 BA plain: 27.15027768924765 tok/s, 0% outside GPU, load 18.73, census 10.83s
+control pair 2 BA null: 30.27221437274057 tok/s, 0% outside GPU, load 17.0, census 10.62s
+control pair 3 AB null: 33.44204479919836 tok/s, 0% outside GPU, load 8.49, census 10.57s
+control pair 3 AB plain: 36.597974127719816 tok/s, 0% outside GPU, load 4.43, census 10.35s
+control pair 4 BA plain: 37.532819593255184 tok/s, 0% outside GPU, load 3.93, census 10.39s

@@ -1,0 +1,44 @@
+airbug: traces and logs -> http://localhost:4318
+prewarmed 82.7 GiB of weights in 13.3s
+metal: Apple M4 Max attached, 82.7 GiB of weights shared with the GPU in 3 windows (maxBufferLength 32.0 GiB)
+engine bench: qwen3-235b-a22b-instruct-2507-Q2_K_XL (94 layers, qwen3moe, MoE)
+  capabilities:
+    model: arch=qwen3moe layers=94 moe=true
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: max-performance
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=3 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=471 bytes=0.19 GiB matmul-kernel=yes
+      Q2K: tensors=188 bytes=46.27 GiB matmul-kernel=yes
+      Q3K: tensors=79 bytes=25.46 GiB matmul-kernel=yes
+      Q4K: tensors=366 bytes=9.84 GiB matmul-kernel=yes
+      Q5K: tensors=16 bytes=0.18 GiB matmul-kernel=yes
+      Q6K: tensors=11 bytes=0.73 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=198
+  prefill   480 tok in   2.34 s     205.2 tok/s
+  gpu during prefill: 2 waits, 941 dispatches, encode 1 ms, wait 2335 ms of 2339 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 2335 ms, scheduling 1 ms, round trips + idle 0 ms (of 2335 ms waited)
+  prefill phases, ms/token:
+    attention              0.0  ( 0.0%)
+    embed                  0.0  ( 0.0%)
+    ffn (experts)          0.0  ( 0.0%)
+    router                 0.0  ( 0.0%)
+    unaccounted            4.9  (99.9%)
+  decode     64 tok in   2.72 s      23.6 tok/s
+  gpu path decode: attempts=64 successes=64 declines=0
+  gpu during decode: 64 waits, 84352 dispatches, encode 28 ms, wait 2684 ms of 2717 ms total (0% outside the GPU)
+  gpu clock during decode: executing 2672 ms, scheduling 6 ms, round trips + idle 6 ms (of 2684 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted           42.5  (100.0%)
+  context at end: 65 tokens (attention cost grows with this)
+  benchmark report: docs/benchmarks/2026-09-24-235b-skip-differential/b3-r2-baseline-before-attend.json
+airbug bench run: target/allpaka-bench/airbug-1790279170640148000-57088

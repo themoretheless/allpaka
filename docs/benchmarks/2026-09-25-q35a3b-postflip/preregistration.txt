@@ -1,0 +1,225 @@
+# Pre-registration: Qwen3.6-35B-A3B decode on the post-flip binary
+
+Task #25. Blocked on a quiet window since 2026-09-24 21:41 (an unrelated debug
+binary held two cores at 200% and the indexed meter read 0.25x of published -
+see [`../2026-09-25-narrow-shape-axes/results.txt`](../2026-09-25-narrow-shape-axes/results.txt)
+for the instrument evidence that a contended window cannot answer a shape or a
+rate question). Everything below is computed on CPU from artifacts already in
+the repo; the run itself is the only thing waiting.
+
+## Question and DoD
+
+What does `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` decode at on the shipped binary
+(`ALLPAKA_SWFUSE` unset = no fold), and what did it decode at under the policy
+that was live until 2026-09-24 (`ALLPAKA_SWFUSE=1` = fold the SwiGLU into the
+down activation loads)? Verdict: a paired ms/token delta with its SEM and sign
+count, plus the resulting change to this model's published llama ratio - or an
+explicit "below the instrument" line with the SEM that establishes that.
+
+## Why this model is in scope at all (git-dated regime provenance)
+
+    8e257ad 2026-09-10 feat(decode): q5/q8 matvec_mv, default SWFUSE, MEGA 256, ...
+    421b51c 2026-09-10 feat(decode): MEGA gated shared, default ATTN_MV, Q5 SWIGLU fuse
+
+The fold has been in the binary since 2026-09-10 and was default-ON from that
+day until 2026-09-24. Every published row for this model predates the flip and
+therefore measured the FUSED regime:
+
+  - [`../2026-09-12-matrix/matrix.txt`](../2026-09-12-matrix/matrix.txt) - the
+    paired run behind the 1.35x llama decode ratio quoted in
+    [`../qwen35-35b-m4-max-pending.md`](../qwen35-35b-m4-max-pending.md);
+  - [`../qwen36-35b-warm-20260912-173625.txt`](../qwen36-35b-warm-20260912-173625.txt) -
+    101.8 decode tok/s (9.82 ms/token) and the 725-dispatch-per-token census.
+
+So unlike qwen3-30b (q6_k down, never in `sw_capable`, a true no-op control) and
+unlike GLM-4.5-Air (q5_0 down, priced at 0.865 and measured at -0.231 ms/token, the
+-0.31 having been a print rounding - section 14 of that artifact),
+this model has a fused-capable down at 8.1% of its decode bytes and has never
+been measured without the fold.
+
+## Byte ledger (recomputed 2026-09-25, `scripts/gguf-bytes-per-token.py`)
+
+Rates are the one-window streamed set from
+[`../2026-09-24-per-token-byte-census/time-ledger.txt`](../2026-09-24-per-token-byte-census/time-ledger.txt)
+section 2 (q8_0 499.7, q4_k 475.8, q5_k 345.0, q6_k 460.6):
+
+    q8_0    attention      1041.2 MiB   41.6%
+    q6_k    head            397.9 MiB   15.9%   (never fused)
+    q4_k    routed gate/up  360.0 MiB   14.4%   (i=0/1, not a fold site)
+    q5_k    routed down     203.5 MiB    8.1%   <- the only fold site here
+    q8_0    shared expert   127.5 MiB    5.1%
+    f32     router           80.3 MiB    3.2%
+    q6_k    routed down      19.7 MiB    0.8%   (never fused)
+
+    rated 5.56 ms/token of weight time; the model's warm wall is 9.82 ms/token.
+
+## Prediction, stated as a band because the shape is unpriced
+
+Folding costs `t_plain x (1/r - 1)`, where `r` is the fused/plain byte-rate
+ratio for that format at the dispatched geometry. For `q5_k` routed down:
+`t_plain = 203.5 MiB / 345 GB/s = 0.62 ms`.
+
+  - at the measured q5_k ratio 0.733 ([4096,1536],
+    [`../2026-09-24-235b-swfuse/results.txt`](../2026-09-24-235b-swfuse/results.txt)
+    section 3) the saving is 0.23 ms/token = +2.3% tok/s;
+  - the model's real down shape is [2048,512], which has NO measured ratio; the
+    measured ratios across formats and geometries span 0.491-0.874, and the
+    0.491 end would put the saving at 0.64 ms/token = +6.5%.
+
+Band: +0.23 to +0.64 ms/token, +2.3% to +6.5% decode. Phase W's paired wall
+harness resolved 7.7 ms at SEM 0.24 in ten pairs, so a 0.23 ms effect is at the
+edge of what that instrument sees and a 0.64 ms effect is comfortably inside it.
+The band straddles the noise floor, which is exactly why this is a run to be
+done rather than a number to be settled by arithmetic.
+
+One part of that borrow is already bounded by existing data, and it is the
+layout part rather than the shape part: every fused rate in the ladder was
+measured with the slots SHARING one activation block (`INDEXED_X_PER_SLOT =
+false`, correct for gate/up), while a routed down gives each slot its own. For
+q3_k at [4096,1536] that difference is ~2% - the x-shared bench fused arm reads
+108.9 GB/s against the model's own per-slot fused `down` stage at 106.8, the
+0.98 closure in section 3 of the swfuse artifact. What stays unpriced is the
+shape: two blocks per row instead of six.
+
+A 2x2 harness for exactly that question exists as of 2026-09-25:
+`cargo test --release -p allpaka-backend --test gpu_ffnbench -- q35_down_shape
+--ignored --nocapture` with `ALLPAKA_BENCH_FEEDS=1`
+(`gpu_ffnbench.rs::q35_down_shape_priced_fused_and_plain_across_x_layouts`).
+Run it BEFORE the wall pairs - it is 40 s, it gates on its own meters (x-shared
+plain must read within 3% of 468.8 / 344.9), and if it says the per-slot fold
+ratio is not 0.733 the band above collapses to a point and the wall run's
+expected effect is known in advance instead of chased.
+ATTEMPTED 2026-09-25 22:25 UTC, twice; both attempts rejected by that gate, and the
+quantity it was built for did not reproduce - per-slot fold ratio 0.845 then 0.556
+across two processes of the same harness 90 s apart, with the control shape moving the
+same way (0.759 then 0.557). See [`harness-rejected.txt`](harness-rejected.txt). The
+band above therefore stays a band: the wall pairs are the only admissible route to it,
+and a future pre-flight run needs two agreeing harness processes plus the meter gate,
+not one.
+
+Note the direction of the shape risk: the fold's extra ALU scales as
+`n_out x n_in` and so do the bytes it sits on, so the ratio is geometry-weak at
+fixed format - the [4096,1536] -> [2048,512] extrapolation is the one unverified
+step, and it is why the middle of the band is the honest expectation.
+
+## Harness (nothing to build; commands verbatim from the model's bench slot doc)
+
+    ALLPAKA_BENCH_SKIP_MTP=1 ALLPAKA_BENCH_PP=480 ALLPAKA_BENCH_TG=32 \
+      target/release/allpaka bench --engine models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+
+paired as in `scripts/glm-ab-stagger.sh`, arms `unset` vs `ALLPAKA_SWFUSE=1`
+(the shipped default takes the fast arm now; `=1` recreates the policy that was
+default-ON from 2026-09-10 to 2026-09-24, which is what every published row for
+this model measured), AB/BA alternating, >= 10 pairs.
+
+Precision, fixed 2026-09-25 against the 235B's own artifacts (sections 13 and 14 of
+[`../2026-09-24-235b-swfuse/results.txt`](../2026-09-24-235b-swfuse/results.txt)):
+take ms/token from `.measurements[decode].summary.median` in the JSON written by
+`ALLPAKA_BENCH_REPORT` (a float, e.g. `28.63956474255374`). If only stdout survives,
+use its `tok/s` column and never its seconds column - that print carries two
+precisions, and the seconds field at TG=32 steps at 0.3125 ms/token, 1.4x the low end
+of the band this run exists to test, while its tok/s column steps near 0.01. Recomputing
+section 7's ten pairs from their JSONs moved the headline by only 0.014 ms (a 7 ms
+effect is insensitive to a 0.156 ms step), but the same recompute on the shipped-instrument
+cross-model pairs changed a published figure: GLM's fold cost is 0.231 ms/token, not the
+-0.31 the print showed twice, and a 30B pair whose arms print identical 6.72 ms/token
+actually differs by 0.0344. This model's band starts at 0.23, so it is squarely in the
+regime where the read matters.
+
+10 pairs, not 5, because the pair is this instrument's only error bar: every 235B
+run reports one whole-stream rate (`samples_tok_s` has 1 element, p10 == p90 == the
+median), so there is no within-run spread to quote and precision is bought purely by
+pair count - ten AB/BA pairs there gave SEM 0.083-0.240 ms/token on a settled
+window. "Below the instrument" is an acceptable verdict only once all ten are in
+with their signs reported per pair.
+
+Admission gates, fixed now. (1) Pair-level prefill agreement: admit a pair only if
+|prefill(A)/prefill(B) - 1| <= 1%, and print that ratio beside the decode delta. The
+30B no-op control is what prices this: its gated rep reads 0.0344 ms/token of phantom
+while its ungated sibling, whose arms' prefill differed by 18.4%, reads 0.5403 - more
+than twice this model's whole predicted band. Do not drift-correct, discard: applying
+that pair's own prefill ratio as a correction flips its -0.54 into +0.66. (2) The
+run's own dispatch census must show the two arms differ (the 235B reads 1397 vs 1318 per token, and the GLM pair reproduced its
+published census 824 vs 778 exactly). Equal dispatch counts means the fold arm
+did not engage on this model's geometry and the pair measures nothing. Second
+gate: prefill inside its published band (1412-1449 tok/s); the 235B's rejected
+rep 3 was caught by prefill halving while the decode signs inverted.
+
+Report the delta in ms/token against the model's own GPU clock, and only then
+convert to tok/s. If both gates pass and |delta| < 1 SEM, publish the neutral
+result and leave the 1.35x row labelled as the fused-regime figure it is.
+
+## Amendment 1, fixed before the run (2026-09-25 00:30 UTC)
+
+Two departures from the protocol above, both written down before any pair of the
+real series ran, on the evidence of one pilot pair (`harness-pilot.txt`):
+
+1. **A llama arm joins each pair.** The question in the DoD ends at "the
+   resulting change to this model's published llama ratio", and that ratio
+   (1.35x) was measured in the fused regime on 2026-09-12. Restating it needs a
+   llama number from the same window, not arithmetic across two - this repo has
+   already withdrawn a 4.8x/3.9x column for exactly that mistake
+   ([../qwen35-35b-m4-max-pending.md](../qwen35-35b-m4-max-pending.md), "Why the
+   ratio column was withdrawn"). One `llama-bench -p 0 -n 32 -d 1 -r 1` per
+   pair, placed between the two allpaka arms so any drift hits both equally.
+2. **The absolute prefill band is reported, not applied as a rejection.** Gate 3
+   asks prefill to sit in 1412-1449 tok/s. The pilot reads 1246-1251, i.e. 0.87
+   of the band, while the two arms agree to 0.40% - a uniform desktop tax on the
+   window, which is not what that gate was written for (its stated purpose is
+   catching the 235B's rep 3, where prefill *halved* between arms while the
+   decode signs inverted). The pair-level 1% gate and the dispatch-census gate
+   are what protect a paired delta, and both are applied. A pair that fails
+   either is discarded; the band miss is printed per pair so the reader can see
+   the window's absolute level rather than have it hidden by a rejection.
+
+The pilot pair, kept as the harness check rather than as data
+(`harness-pilot.txt`): plain 10.2227981875 ms/token against fused
+10.7707174375 (+0.5479192500), prefill 1245.8704844125095/1250.8834625054667
+(ratio 1.004024), dispatch census 24384 vs 23200 for 32 tokens. The census is the proof that the
+`=1` arm really recreates the old policy: 23200/32 = 725 per token, the exact
+figure the 2026-09-12 warm artifact prints for the then-default-ON build. The
+delta direction is the same as the 235B's (folding costs), and its size lands in
+the upper half of the 0.23-0.64 ms band predicted from the `q5_k` rate ratio.
+
+## Amendment 3, fixed before the pre-flight (2026-09-25 04:41 local, 00:41 UTC-less-8)
+
+The pre-flight requirement the band section states in prose - two agreeing
+harness processes plus the meter gate, not one - is now code:
+[`preflight.py`](preflight.py). It runs
+`gpu_ffnbench::q35_down_shape_priced_fused_and_plain_across_x_layouts` from the
+already-built test binary, invoked directly so that the 16 h-stuck
+`cargo test --no-run` belonging to another session cannot put a target-dir lock
+between the probe and the window it is trying to catch. It probes when the
+1-minute load average is <= 7.0 - deliberately above the 5.0 that tasks #10 and
+#15 used as a wall-run ceiling, because this is a 15 s self-rejecting probe rather
+than a 50 min run, and because the two rejected attempts of 2026-09-25 happened at
+loads 5.49 and 5.55, which prices `load < 5` as insufficient for a ratio anyway.
+What decides an attempt is not the load number but gates A-C:
+
+  - (A) both x-shared plain meters land within 3% of published - `q4_k`
+    [4096,1536] 468.8 and `q5_k` [4096,1536] 344.9,
+  - (B) all sixteen arm spreads are <= 1.03x,
+  - (C) two A/B-passing attempts agree on all eight fold/plain ratios (4 shapes
+    x 2 activation layouts) within 5%.
+
+Gate C is the one that carries the weight: it is exactly the test the 22:25 UTC
+pair would have failed, and A+B alone would have admitted both of them.
+
+Every attempt's full stdout is kept as `attempt-N.txt`, which is the other thing
+[`harness-rejected.txt`](harness-rejected.txt) asks for: its own attempt 2
+survived only as grep-filtered lines, so nothing beyond three-decimal ratios
+could be recovered from a run that had already been rejected. On a C-pass the
+script prints the collapsed band - the mean per-slot fold ratio at [2048,512],
+the same-format control ratio at [4096,1536] as the window's own temperature, and
+`0.62 ms x (1/r - 1)` - and only then hands the window to `run-pairs.sh`.
+
+Sanity check before trusting the gate: pointed at the archived
+[`harness-attempt-1.txt`](harness-attempt-1.txt) it reproduces that attempt's
+rejection verbatim - meters 0.83x and 0.86x of published, worst spread 1.036x,
+down per-slot 0.845 against the control's 0.759. The code and the human read of
+the same log agree, so a PASS from here is this protocol's verdict, not a new
+instrument's.
+
+If the script times out without a C-pass, that is itself the result to publish:
+the band stays 0.23-0.64 ms/token, the shape question stays open, and the wall
+pairs remain the only admissible route to either.

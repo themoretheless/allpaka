@@ -1,0 +1,219 @@
+{
+  "schema": 1,
+  "id": "1789228309922837000-98306",
+  "status": "complete",
+  "environment": {
+    "arch": "aarch64",
+    "os": "macos"
+  },
+  "provenance": {
+    "allpaka_bin": "/Users/themoretheless/Documents/Sources/allpaka/allpaka/target/release/allpaka",
+    "cooldown_ms": "500",
+    "llama_bench": "llama-bench",
+    "model": "/Users/themoretheless/Documents/Sources/allpaka/models/qwen3-0.6b-Q8_0.gguf",
+    "model_sha256": "meta:804753632:1786987865:59599759",
+    "pp": "128",
+    "repeats": "3",
+    "tg": "32",
+    "warmup": "1"
+  },
+  "cases": [
+    {
+      "id": "prefill",
+      "contract": {
+        "limitations": "llama-bench generates its own token stream; MoE routing is not identical",
+        "model": "/Users/themoretheless/Documents/Sources/allpaka/models/qwen3-0.6b-Q8_0.gguf",
+        "workload": "pp128"
+      },
+      "metrics": [
+        {
+          "id": "tok_s",
+          "unit": "tok/s",
+          "scope": "engine throughput; independent process",
+          "phase": "measurement",
+          "statistic": "individual process",
+          "direction": "higher"
+        }
+      ]
+    },
+    {
+      "id": "decode",
+      "contract": {
+        "limitations": "KV cache type must match (f16); verify against allpaka capability report",
+        "model": "/Users/themoretheless/Documents/Sources/allpaka/models/qwen3-0.6b-Q8_0.gguf",
+        "workload": "tg32@pp128"
+      },
+      "metrics": [
+        {
+          "id": "tok_s",
+          "unit": "tok/s",
+          "scope": "engine throughput; independent process",
+          "phase": "measurement",
+          "statistic": "individual process",
+          "direction": "higher"
+        }
+      ]
+    }
+  ],
+  "observations": [
+    {
+      "case": "prefill",
+      "metric": "tok_s",
+      "variant": "candidate",
+      "process": 0,
+      "pair": 1,
+      "sequence": 0,
+      "value": "4488.2226932674275",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "decode",
+      "metric": "tok_s",
+      "variant": "candidate",
+      "process": 0,
+      "pair": 1,
+      "sequence": 0,
+      "value": "389.0431681448341",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "prefill",
+      "metric": "tok_s",
+      "variant": "baseline",
+      "process": 1,
+      "pair": 1,
+      "sequence": 0,
+      "value": "8521.73",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "decode",
+      "metric": "tok_s",
+      "variant": "baseline",
+      "process": 1,
+      "pair": 1,
+      "sequence": 0,
+      "value": "344.666",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "prefill",
+      "metric": "tok_s",
+      "variant": "candidate",
+      "process": 2,
+      "pair": 2,
+      "sequence": 0,
+      "value": "4363.778930277552",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "decode",
+      "metric": "tok_s",
+      "variant": "candidate",
+      "process": 2,
+      "pair": 2,
+      "sequence": 0,
+      "value": "391.64770153468623",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "prefill",
+      "metric": "tok_s",
+      "variant": "baseline",
+      "process": 3,
+      "pair": 2,
+      "sequence": 0,
+      "value": "8564.95",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "decode",
+      "metric": "tok_s",
+      "variant": "baseline",
+      "process": 3,
+      "pair": 2,
+      "sequence": 0,
+      "value": "336.69",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "prefill",
+      "metric": "tok_s",
+      "variant": "candidate",
+      "process": 4,
+      "pair": 3,
+      "sequence": 0,
+      "value": "2590.18209688394",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "decode",
+      "metric": "tok_s",
+      "variant": "candidate",
+      "process": 4,
+      "pair": 3,
+      "sequence": 0,
+      "value": "361.56234342655705",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "prefill",
+      "metric": "tok_s",
+      "variant": "baseline",
+      "process": 5,
+      "pair": 3,
+      "sequence": 0,
+      "value": "8067.18",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    },
+    {
+      "case": "decode",
+      "metric": "tok_s",
+      "variant": "baseline",
+      "process": 5,
+      "pair": 3,
+      "sequence": 0,
+      "value": "342.679",
+      "operations": 1,
+      "availability": {
+        "state": "available"
+      }
+    }
+  ],
+  "notes": [
+    "Candidate=allpaka, baseline=llama-bench. Sequential AB/BA pairs; tok/s higher is better. llama-bench owns its token stream so MoE routing is not identical. Warmup pairs discarded; ALLPAKA_BENCH_SKIP_MTP=1."
+  ]
+}

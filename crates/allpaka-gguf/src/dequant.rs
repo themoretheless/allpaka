@@ -74,6 +74,16 @@ pub fn dequant(ty: GgmlType, data: &[u8], elements: usize) -> Result<Vec<f32>> {
                 dequant_q6_k_block(block, &mut out);
             }
         }
+        GgmlType::MlxQ4 => {
+            for block in data.chunks_exact(36) {
+                dequant_mlx_q4_block(block, &mut out);
+            }
+        }
+        GgmlType::MlxQ8 => {
+            for block in data.chunks_exact(68) {
+                dequant_mlx_q8_block(block, &mut out);
+            }
+        }
         GgmlType::Other(id) => bail!("ggml type id {id} is not supported"),
     }
     Ok(out)
@@ -112,6 +122,42 @@ pub fn f16_to_f32(h: u16) -> f32 {
         (e, f) => (sign << 31) | ((e + 127 - 15) << 23) | (f << 13),
     };
     f32::from_bits(bits)
+}
+
+/// bfloat16 to single. Its 8-bit mantissa is a prefix of the single one, so
+/// widening is a shift; no subnormal handling needed because bfloat16 shares
+/// the exponent range of single.
+pub fn bf16_to_f32(h: u16) -> f32 {
+    f32::from_bits((h as u32) << 16)
+}
+
+/// MLX affine 4-bit group quant: eight little-endian nibble words, then a
+/// bfloat16 scale and bias for the group. Element `w * 8 + k` of the group is
+/// the `k`th nibble of word `w`, low nibble first, and `x = q * scale + bias`.
+///
+/// The nibble order and the affine form are not a reading of MLX's source -
+/// they are what `mx.dequantize` produces on a published checkpoint, which is
+/// pinned by `tests/mlx_layout.rs` in allpaka-mlx.
+fn dequant_mlx_q4_block(block: &[u8], out: &mut Vec<f32>) {
+    let scale = bf16_to_f32(u16::from_le_bytes([block[32], block[33]]));
+    let bias = bf16_to_f32(u16::from_le_bytes([block[34], block[35]]));
+    for w in 0..8 {
+        let word = u32::from_le_bytes(block[w * 4..w * 4 + 4].try_into().unwrap());
+        for k in 0..8 {
+            let q = ((word >> (4 * k)) & 0xf) as f32;
+            out.push(q * scale + bias);
+        }
+    }
+}
+
+/// MLX affine 8-bit group quant: 64 unsigned payload bytes, then the same
+/// scale/bias pair. `x = q * scale + bias`.
+fn dequant_mlx_q8_block(block: &[u8], out: &mut Vec<f32>) {
+    let scale = bf16_to_f32(u16::from_le_bytes([block[64], block[65]]));
+    let bias = bf16_to_f32(u16::from_le_bytes([block[66], block[67]]));
+    for &q in &block[..64] {
+        out.push(q as f32 * scale + bias);
+    }
 }
 
 /// Q8_0: an f16 scale followed by 32 signed bytes. `x = d * q`.

@@ -1,0 +1,54 @@
+# Pre-registration: does the 30B replicate the 235B's in-situ / streamed rate gap?
+# Registered 2026-09-24T19:12Z, before any 30B differential arm was timed.
+#
+# Why this model. The 235B differential (../2026-09-24-235b-skip-differential/)
+# gave, in its one in-band repetition, S(experts) = 27.1 ms/token against a
+# streamed-rate prediction of 20.6, and S(qkv) = 9.2 against 8.4 - i.e. the
+# expert group costs ~1.32x what the micro-bench says and the attention
+# projections about 1.09x. One clean repetition on an 83 GiB model that has
+# already been shown to be cache-fragile is not enough to decide which of two
+# very different stories is true:
+#   (A) uniform in-situ inflation - every matvec runs slower inside a model than
+#       in the streamed bench, so the byte model needs a utilisation factor and
+#       every prize computed from it scales;
+#   (B) K-quant-specific inflation - q2_k/q3_k expert kernels are the slow ones,
+#       the byte model holds for everything else, and the target narrows to
+#       those kernels.
+# qwen3-30b-a3b Q4_K_M discriminates because it is a different format mix (q4_k +
+# q6_k + f32, no q2_k/q3_k at all), a different dispatch count, 17.3 GiB instead
+# of 82.7 GiB (so no cache story), and it loads in seconds.
+#
+# Arms, exactly as pre-registered for the 235B: baseline (no skip), experts, qkv,
+# head, router, attend, all=qkv,attend,experts,router,head. pp480 + tg64, one
+# process per arm, ALLPAKA_PROFILE=max-performance ALLPAKA_BENCH_SKIP_MTP=1,
+# order rotated by 3 per repetition, 20 s between arms, three repetitions.
+#
+# Predictions P(g), from scripts/gguf-bytes-per-token.py for this file divided
+# by the streamed rates measured at this model's own dispatched shapes
+# (q4_k [768,2048] 386.7 GB/s, q6_k [2048,768] 363.9 - correction #10):
+#   experts   2.88 ms   q4_k gate/up 1.76 + q4_k down 0.44 + q6_k down 0.68
+#   qkv       1.34 ms   q4_k attention 1.28 + q6_k attention 0.06
+#   head      0.70 ms   q6_k out
+#   router    ~0.1  ms   f32, no measured rate - a floor
+#   attend   ~0.0  ms   no weights
+#   all       4.92 ms + attention compute + norms
+# Wall for the ledger is 7.27 ms/token (137.5 tok/s, 2026-09-21 paired), so the
+# unaccounted block here is 2.35 ms - small in absolute terms, which is exactly
+# why it is usable as a control: under (A) R lands ~1.3-1.4 on both groups,
+# under (B) R lands ~1.0 and the 235B's 1.32 is a K-quant property.
+#
+# Band gate. This model's own history spans 2.4x: 136.2-138.2 tok/s decode and
+# 1441 tok/s prefill on 2026-09-21 (../2026-09-21-metal/qwen3-30b/), against
+# 56.7 tok/s and 403.6 tok/s prefill in today's dispatch-census arm on the same
+# file with no overrides. A repetition is usable only if its baseline lands in
+# 134-140 tok/s (7.14-7.46 ms/token) with prefill >= 1300 tok/s; if every
+# baseline is near 57 instead, that is itself the finding to report first - it
+# would mean either a regression between 2026-09-21 and today or that the
+# census-window numbers were never comparable to the 09-21 ones, and the 30B row
+# of the time ledger (which uses 137.5) has to be re-derived. Do not compute R
+# before resolving which baseline is real.
+#
+# Also recorded per arm, because the 235B run could not separate them: whether
+# the head/router/attend arms are intrinsically contaminated (they slowed the
+# 235B down by 11-38 ms/token and its prefill too, in a window that later
+# acquired a named I/O source) or were simply contended.

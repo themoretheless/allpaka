@@ -1,0 +1,19 @@
+{
+  "preregistration": "/Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-26-packed-char4/preregistration.txt",
+  "method_from": "/Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-25-nr0-indexed-remeasure/drive-nr0.py",
+  "head": "dcdc131dd0dcea44ce1387843514758abb4729d1",
+  "tree_dirty_files": 95,
+  "packed_sha256": "4fb5ef9c1330cc1704ba53915109b46bceaa4fba46984fdc2c1afefd8a983885",
+  "scalar_sha256": "254a2d2120fe108367509b1e0772f11668390dc8e8fd5a6be4aa1cbba33be790",
+  "shapes": [
+    "q8_0",
+    "q8_0 glm down"
+  ],
+  "meter": "q6_k down",
+  "gates": {
+    "load_veto": 8.0,
+    "launch_load": 5.0,
+    "meter_band": 0.85,
+    "spread_gate": 1.05
+  }
+}

@@ -1,0 +1,107 @@
+# Indexed-rate regime results: feed depth, expert scatter, per-slot activations
+
+Run 2026-09-24/25 against `preregistration.txt` (criteria A, B, C, D for axes 1-2;
+E, F for axis 3, added before the axis-3 run). Two processes, both
+`cargo test --release -p allpaka-backend --test gpu_ffnbench --
+indexed_matvecs_report_effective_bandwidth --nocapture`, Apple M4 Max, 15 shapes,
+slots=8, 4 passes, axes interleaved inside the shape loop.
+
+Raw logs: `rates.txt` (feeds 1,8,64 x scatters 0,1) and `rates-xslot.txt`
+(feeds 1,64 x scatters 0,1 x x-shared/x-per-slot).
+
+NOTE on `rates.txt`: lines of the form `label [no,ni] sets=N: NN.N GB/s best, ...`
+are a legacy print block that had become mis-indexed after the arm loop was
+introduced - each of those lines repeats a DIFFERENT shape's numbers. The block
+has since been deleted from the harness. Only the `| feed=` arm lines in both
+files are valid, and they are what every number below comes from.
+
+## 1. The axis 1-2 grid (GB/s, best-of-4)
+
+Ratios are against feed=1 of the SAME arm, so drift is common-mode.
+
+| shape (n_out,n_in) | sets | contig f1 | scatter f1 | scatter/contig | f8/f1 | f64/f1 |
+|---|---|---|---|---|---|---|
+| q2_k gate/up (1536,4096) | 25 | 257.9 | 260.2 | 1.009 | 1.053 | 1.058 |
+| q3_k down (4096,1536) | 19 | 221.3 | 221.9 | 1.003 | 1.023 | 1.026 |
+| q4_k (4096,1536) | 15 | 472.2 | 477.1 | 1.010 | 1.118 | 1.129 |
+| q5_k (4096,1536) | 12 | 345.0 | 346.2 | 1.003 | 1.026 | 1.027 |
+| q8_0 (4096,1536) | 8 | 495.1 | 495.5 | 1.001 | 1.018 | 1.017 |
+| q2_k control (4096,1536) | 25 | 138.6 | 138.9 | 1.002 | 1.006 | 1.006 |
+| q4_k control (1536,4096) | 15 | 468.5 | 476.8 | 1.018 | 1.230 | 1.257 |
+| q6_k down (4096,1536) | 10 | 470.4 | 473.6 | 1.007 | 1.058 | 1.060 |
+| q6_k gate/up (1536,4096) | 10 | 459.5 | 463.6 | 1.009 | 1.060 | 1.064 |
+| q5_0 down (4096,1536) | 12 | 395.1 | 395.9 | 1.002 | 1.007 | 1.007 |
+| q5_0 glm down (4096,1408) | 13 | 382.4 | 382.7 | 1.001 | 1.008 | 1.008 |
+| q4_k 30b gate/up (768,2048) | 57 | 386.4 | 394.0 | 1.020 | 1.162 | 1.151 |
+| q6_k 30b down (2048,768) | 40 | 363.2 | 365.6 | 1.007 | 1.047 | 1.044 |
+| q4_k glm gate/up (1408,4096) | 16 | 464.8 | 473.4 | 1.018 | 1.238 | 1.265 |
+| q8_0 glm down (4096,1408) | 9 | 493.4 | 494.9 | 1.003 | 1.027 | 1.027 |
+
+## 2. Axis 3, per-slot activations (x/shared against x/slot, best-of-4)
+
+| shape | contig x/shared | contig x/slot | loss | scatter x/shared | scatter x/slot | loss |
+|---|---|---|---|---|---|---|
+| q3_k down | 221.4 | 218.0 | 0.985 | 212.9 | 208.4 | 0.979 |
+| q2_k gate/up | 257.3 | 256.5 | 0.997 | 259.1 | 258.0 | 0.996 |
+| q4_k | 465.3 | 465.2 | 1.000 | 468.6 | 469.2 | 1.001 |
+| q5_k | 330.6 | 318.3 | 0.963 | 307.4 | 296.6 | 0.965 |
+| q8_0 | 487.0 | 488.2 | 1.002 | 491.2 | 490.2 | 0.998 |
+| q5_0 down | 313.3 | 304.5 | 0.972 | 298.5 | 294.1 | 0.985 |
+| q6_k down | 463.1 | 459.0 | 0.991 | 457.5 | 449.7 | 0.983 |
+
+Largest x-per-slot loss anywhere in the grid: 3.7% (q5_k). q3_k down: 1.5%.
+
+## 3. Criteria verdicts
+
+  A (feed lifts q3_k down >= 1.6x) - FAILS, at 1.026x. The published q3_k down
+  denominator is not a per_wait=1 regime artefact.
+  B (scatter cuts q3_k >= 1.6x but q2_k <= 1.2x) - FAILS, at 1.003x against
+  1.009x. Consecutive-slot addressing is not what makes the in-situ down slow.
+  C (scatter cuts both formats within +-15%) - FIRES. Every scatter ratio in the
+  grid is between 1.001 and 1.020, and scatter is routinely slightly FASTER than
+  contiguous (q2_k control, q4_k, q4_k glm). Address layout costs the indexed
+  matvec nothing measurable on this machine, so the deficit is not an addressing
+  effect and stays a kernel claim.
+  D (every feed x scatter ratio within +-15%) - FIRES for the two 235B rows
+  (1.026 and 1.058). It does NOT hold across the whole grid, and the exception is
+  informative: feed gains of 1.13-1.27x appear on all four q4_k rows (1.129,
+  1.257, 1.151, 1.265) and at most 1.064x on any other format. That is not the
+  rows-per-dispatch boundary the repo documents (`metal.rs:79-90`, "32k+-row grids
+  hide the stall by themselves"): q4_k's 32 768-row row gains 1.129x while q2_k's
+  12 288-row row gains 1.058x. It tracks absolute speed instead - q4_k is the
+  fastest format in the table (459-533 GB/s at feed=1), so a fixed per-round cost
+  is the largest fraction of its window, and feeding removes that fraction.
+  Consequence: the feed axis measures the harness's per-round fixed cost, not the
+  kernel, and at 221 GB/s the q3_k down shape is far enough from the ceiling that
+  the effect is 2.6%.
+  E (q3_k loses >= 1.5x from x per slot while q2_k loses <= 1.1x) - FAILS: 0.985x
+  against 0.997x.
+  F (both formats lose within +-15%) - FIRES. Shared-versus-per-slot activations
+  are not the asymmetry either.
+
+## 4. What this closes, and what it does not
+
+Closed: the ledger's per-token time table needs no regime correction. Rebuilding
+it on fed rates (the consequence criterion A would have forced) is not warranted,
+and no denominator in `time-ledger.txt` moves by more than the noise already
+attached to it. The scatter and activation-layout levers are dead as levers:
+there is nothing in the indexed harness's addressing or x staging that costs the
+q3_k down real time.
+
+Not closed: all three axes were run against the bench's own pipeline, and reading
+the model's pipeline construction afterwards shows the bench and the model do not
+time the same kernel for a fused-capable down projection. The bench compiles the
+indexed down with `swiglu = false` (`indexed_matvec_bandwidth_fed`,
+metal.rs:126-128); the model compiles it with `swiglu = true` for every kernel in
+`sw_capable` (metal.rs:10752-10798), and `matvec_q3_k_mv` is in that list, so the
+q3_k down dispatches in the 235B decode read raw gate AND raw up and apply
+silu(gate)*up per activation element. That is the one difference in the pair that
+was never measured, and it predicts exactly the asymmetry RUN 2 found (gate_up,
+which is never fused, priced at 0.99x; down at 2.09x). It also settles the
+dispatch-geometry question that was the last open harness candidate:
+`id_grid_kernel` (metal.rs:9473-9475) covers q4_k/q5_0/q8_0 only, so bench and
+model both send `matvec_q3_k_mv` through `dispatch_mv(n_out * slots)` at
+`mv_tg()` = 128 - the grids are identical and geometry is excluded without a run.
+
+The fused-variant test is registered separately, before its data, in
+`../2026-09-24-235b-swfuse/preregistration.txt` (criteria G, H, I).

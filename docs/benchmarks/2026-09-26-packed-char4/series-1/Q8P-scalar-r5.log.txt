@@ -1,0 +1,38 @@
+
+running 1 test
+metal: Apple M4 Max attached, 0.4 GiB of weights shared with the GPU
+--- indexed x8, 384/420 MB streamed per format ---
+q2_k gate/up   [1536,4096] sets=25 contig  x/shared plain  | feed=1 257.4 best 257.3 med 1.00x 784 GW/s | feed=8 270.0 best 269.8 med 1.05x 823 GW/s
+q2_k gate/up   [1536,4096] sets=25 contig  x/shared fused  | feed=1 166.9 best 166.2 med 1.00x 509 GW/s | feed=8 172.6 best 169.5 med 1.03x 526 GW/s
+q3_k down      [4096,1536] sets=19 contig  x/shared plain  | feed=1 220.5 best 219.7 med 1.00x 513 GW/s | feed=8 226.8 best 223.2 med 1.03x 528 GW/s
+q3_k down      [4096,1536] sets=19 contig  x/shared fused  | feed=1 108.6 best 108.5 med 1.00x 253 GW/s | feed=8 107.5 best 107.3 med 0.99x 250 GW/s
+q4_k           [4096,1536] sets=15 contig  x/shared plain  | feed=1 474.2 best 473.2 med 1.00x 843 GW/s | feed=8 527.7 best 526.8 med 1.11x 938 GW/s
+q4_k           [4096,1536] sets=15 contig  x/shared fused  | feed=1 236.6 best 236.2 med 1.00x 421 GW/s | feed=8 236.6 best 235.8 med 1.00x 421 GW/s
+q5_k           [4096,1536] sets=12 contig  x/shared plain  | feed=1 343.9 best 343.4 med 1.00x 500 GW/s | feed=8 351.8 best 351.2 med 1.02x 512 GW/s
+q5_k           [4096,1536] sets=12 contig  x/shared fused  | feed=1 252.5 best 251.5 med 1.00x 367 GW/s | feed=8 253.2 best 251.5 med 1.00x 368 GW/s
+q8_0           [4096,1536] sets=8 contig  x/shared plain  | feed=1 496.8 best 495.3 med 1.00x 468 GW/s | feed=8 500.0 best 499.6 med 1.01x 471 GW/s
+q8_0           [4096,1536] sets=8 contig  x/shared fused  | feed=1 492.1 best 491.5 med 1.00x 463 GW/s | feed=8 492.3 best 491.9 med 1.00x 463 GW/s
+q2_k control   [4096,1536] sets=25 contig  x/shared plain  | feed=1 138.5 best 138.4 med 1.00x 422 GW/s | feed=8 138.9 best 138.9 med 1.00x 423 GW/s
+q2_k control   [4096,1536] sets=25 contig  x/shared fused  | feed=1 118.8 best 118.7 med 1.00x 362 GW/s | feed=8 120.6 best 120.5 med 1.01x 367 GW/s
+q4_k control   [1536,4096] sets=15 contig  x/shared plain  | feed=1 467.7 best 467.0 med 1.00x 831 GW/s | feed=8 574.1 best 574.1 med 1.23x 1021 GW/s
+q4_k control   [1536,4096] sets=15 contig  x/shared fused  | feed=1 259.5 best 257.8 med 1.00x 461 GW/s | feed=8 264.8 best 262.6 med 1.02x 471 GW/s
+q6_k down      [4096,1536] sets=10 contig  x/shared plain  | feed=1 472.8 best 472.2 med 1.00x 576 GW/s | feed=8 487.5 best 486.9 med 1.03x 594 GW/s
+q6_k down      [4096,1536] sets=10 contig  x/shared fused  | feed=1 359.5 best 359.1 med 1.00x 438 GW/s | feed=8 354.4 best 352.7 med 0.99x 432 GW/s
+q6_k gate/up   [1536,4096] sets=10 contig  x/shared plain  | feed=1 459.1 best 457.3 med 1.00x 560 GW/s | feed=8 476.1 best 475.3 med 1.04x 580 GW/s
+q6_k gate/up   [1536,4096] sets=10 contig  x/shared fused  | feed=1 359.8 best 358.9 med 1.00x 439 GW/s | feed=8 353.2 best 352.1 med 0.98x 431 GW/s
+q5_0 down      [4096,1536] sets=12 contig  x/shared plain  | feed=1 396.1 best 391.2 med 1.00x 576 GW/s | feed=8 394.0 best 392.8 med 0.99x 573 GW/s
+q5_0 down      [4096,1536] sets=12 contig  x/shared fused  | feed=1 347.7 best 346.9 med 1.00x 506 GW/s | feed=8 347.1 best 341.4 med 1.00x 505 GW/s
+q5_0 glm down  [4096,1408] sets=13 contig  x/shared plain  | feed=1 380.5 best 377.3 med 1.00x 553 GW/s | feed=8 384.0 best 378.7 med 1.01x 559 GW/s
+q5_0 glm down  [4096,1408] sets=13 contig  x/shared fused  | feed=1 329.9 best 321.9 med 1.00x 480 GW/s | feed=8 330.0 best 317.6 med 1.00x 480 GW/s
+q4_k 30b gate/up [768,2048] sets=57 contig  x/shared plain  | feed=1 386.4 best 383.0 med 1.00x 687 GW/s | feed=8 449.0 best 442.0 med 1.16x 798 GW/s
+q4_k 30b gate/up [768,2048] sets=57 contig  x/shared fused  | feed=1 218.8 best 215.5 med 1.00x 389 GW/s | feed=8 232.5 best 232.2 med 1.06x 413 GW/s
+q6_k 30b down  [2048,768] sets=40 contig  x/shared plain  | feed=1 361.8 best 360.6 med 1.00x 441 GW/s | feed=8 379.5 best 378.9 med 1.05x 463 GW/s
+q6_k 30b down  [2048,768] sets=40 contig  x/shared fused  | feed=1 317.4 best 315.9 med 1.00x 387 GW/s | feed=8 319.0 best 318.0 med 1.00x 389 GW/s
+q4_k glm gate/up [1408,4096] sets=16 contig  x/shared plain  | feed=1 464.3 best 463.8 med 1.00x 825 GW/s | feed=8 572.9 best 572.3 med 1.23x 1018 GW/s
+q4_k glm gate/up [1408,4096] sets=16 contig  x/shared fused  | feed=1 254.9 best 253.7 med 1.00x 453 GW/s | feed=8 264.6 best 263.3 med 1.04x 470 GW/s
+q8_0 glm down  [4096,1408] sets=9 contig  x/shared plain  | feed=1 495.6 best 494.3 med 1.00x 466 GW/s | feed=8 501.5 best 501.2 med 1.01x 472 GW/s
+q8_0 glm down  [4096,1408] sets=9 contig  x/shared fused  | feed=1 489.7 best 489.2 med 1.00x 461 GW/s | feed=8 494.3 best 494.1 med 1.01x 465 GW/s
+test indexed_matvecs_report_effective_bandwidth ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 45.25s
+

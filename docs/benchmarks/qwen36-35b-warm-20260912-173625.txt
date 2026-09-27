@@ -1,0 +1,53 @@
+model=/Users/themoretheless/Documents/Sources/allpaka/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+=== qwen36 warm 1 ===
+      F32: tensors=361 bytes=0.10 GiB matmul-kernel=yes
+      Q4K: tensors=80 bytes=11.25 GiB matmul-kernel=yes
+      Q5K: tensors=37 bytes=6.36 GiB matmul-kernel=yes
+      Q6K: tensors=4 bytes=1.00 GiB matmul-kernel=yes
+      Q8_0: tensors=251 bytes=1.89 GiB matmul-kernel=yes
+    overrides:
+  prefill   480 tok in   0.89 s     540.9 tok/s
+  gpu during prefill: 2 waits, 461 dispatches, encode 1 ms, wait 884 ms of 887 ms total (0% outside the GPU)
+  decode     32 tok in   0.80 s      40.1 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 23200 dispatches, encode 14 ms, wait 728 ms of 798 ms total (7% outside the GPU)
+=== qwen36 warm 2 ===
+      F32: tensors=361 bytes=0.10 GiB matmul-kernel=yes
+      Q4K: tensors=80 bytes=11.25 GiB matmul-kernel=yes
+      Q5K: tensors=37 bytes=6.36 GiB matmul-kernel=yes
+      Q6K: tensors=4 bytes=1.00 GiB matmul-kernel=yes
+      Q8_0: tensors=251 bytes=1.89 GiB matmul-kernel=yes
+    overrides:
+  prefill   480 tok in   0.33 s    1435.1 tok/s
+  gpu during prefill: 2 waits, 461 dispatches, encode 1 ms, wait 331 ms of 334 ms total (1% outside the GPU)
+  decode     32 tok in   0.33 s      97.9 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 23200 dispatches, encode 11 ms, wait 313 ms of 327 ms total (1% outside the GPU)
+=== qwen36 warm 3 ===
+      F32: tensors=361 bytes=0.10 GiB matmul-kernel=yes
+      Q4K: tensors=80 bytes=11.25 GiB matmul-kernel=yes
+      Q5K: tensors=37 bytes=6.36 GiB matmul-kernel=yes
+      Q6K: tensors=4 bytes=1.00 GiB matmul-kernel=yes
+      Q8_0: tensors=251 bytes=1.89 GiB matmul-kernel=yes
+    overrides:
+  prefill   480 tok in   0.33 s    1443.1 tok/s
+  gpu during prefill: 2 waits, 461 dispatches, encode 1 ms, wait 329 ms of 333 ms total (1% outside the GPU)
+  decode     32 tok in   0.31 s     101.8 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 23200 dispatches, encode 11 ms, wait 300 ms of 314 ms total (1% outside the GPU)
+==== llama warm ====
+ggml_metal_device_init: simdgroup matrix mul. = true
+ggml_metal_device_init: has unified memory    = true
+ggml_metal_device_init: has bfloat            = true
+ggml_metal_device_init: has tensor            = false
+ggml_metal_device_init: use residency sets    = true
+ggml_metal_device_init: use shared buffers    = true
+ggml_metal_device_init: recommendedMaxWorkingSetSize  = 115448.73 MB
+load_backend: loaded MTL backend from /opt/homebrew/Cellar/ggml/0.23.0/libexec/libggml-metal.so
+load_backend: loaded CPU backend from /opt/homebrew/Cellar/ggml/0.23.0/libexec/libggml-cpu-apple_m4.so
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen35moe 35B.A3B Q4_K - Medium |  20.60 GiB |    34.66 B | BLAS,MTL   |      12 |           pp480 |       301.47 ± 22.06 |
+| qwen35moe 35B.A3B Q4_K - Medium |  20.60 GiB |    34.66 B | BLAS,MTL   |      12 |            tg32 |         26.38 ± 0.48 |
+
+build: 5266f24da (10809)

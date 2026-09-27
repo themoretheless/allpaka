@@ -1,0 +1,504 @@
+# The window cap has a correctness cliff: the 235B reads uniform logits from 14 windows on
+
+Measured 2026-09-25T03:01-03:26Z on the M4 Max, incidentally to the timing
+question in `preregistration.txt`, and much more important than it.
+`ALLPAKA_GPU_WINDOW_GIB` is documented in the source as a harmless test hook ("to
+exercise multi-window mapping on small regions"), and on this machine setting it
+to 8 GiB on the 235B silently produces a wrong model rather than a slow one.
+
+## What was run
+
+`allpaka bench --engine models/qwen3-235b-a22b-instruct-2507-Q2_K_XL.gguf` with
+`ALLPAKA_BENCH_PP=64 ALLPAKA_BENCH_TG=8 ALLPAKA_BENCH_SKIP_MTP=1`, one process
+per cap, page cache warm after the first load, nothing else varied. The
+observable is `prefill argmax=` from the bench's own stdout plus the reported
+greedy continuation; `bench.rs` picks the argmax with
+`enumerate().max_by(f64::total_cmp)`, which returns the **last** equally-maximal
+element, so an argmax of exactly `vocab_size - 1 = 151935` is the signature of a
+logit vector with no unique maximum (all tied, or all NaN) rather than of a
+merely odd token.
+
+| cap (GiB) | windows (observed) | mapped span (GiB) | prefill argmax | verdict |
+|---|---|---|---|---|
+| 32 (default) | 3 | 86.7 | 291 | correct |
+| 24 | 4 | 88.7 | 291 | correct |
+| 16 | 6 | 92.7 | 291 | correct |
+| 12 | 9 | 98.7 | 291 | correct |
+| 10 | 11 | 102.7 | 291 | correct |
+| 8 | 14 | 108.7 | **151935** | **wrong** |
+| 6 | 21 | 122.7 | **151935** | **wrong** |
+| 4 | 41 | 162.7 | **151935** | **wrong** |
+
+`mapped span` is the sum of the window lengths the source computes (`add_mapping`,
+metal.rs:8696-8726: `step = cap - CHUNK_OVERLAP` with `CHUNK_OVERLAP = 2 GiB`,
+last window short); the predicted window count matches the observed census in the
+log for all eight caps, so the column is arithmetic on validated code rather than
+an assumption.
+
+Repetition: cap 8 was run three times independently before the bisect was written
+(processes at 03:01, 03:05, 03:08, 03:11Z) and the default mapping three times,
+with `prefill argmax=151935` in every cap-8 process and `prefill argmax=291` in
+every default process. The continuation matched the same pattern every time: 48
+decoded inputs of `[2207, 0, 0, 0, ...]` at cap 8 against
+`[624, 785, 2311, 374, ...]` at the default, same model fingerprint
+`1f80e8f58272a294` in both.
+
+## What it is not
+
+* **Not a path change.** The GPU counters recorded the identical kernel sequence
+  on both sides of the cliff: 941 dispatches for the prefill and 1397 per decode
+  token (11176 for 8 tokens) at caps 10, 8, 6 and 4. Nothing fell back, nothing
+  was skipped.
+* **Not a CPU fallback.** Every one of the eleven processes reported
+  `residency: windows=N set=true`, `attached=true`, and
+  `gpu path decode: attempts=successes, declines=0`, which is the condition
+  `bench.rs:476-484` refuses to report a run without. The wrong numbers came off
+  the GPU, from the kernels, at full claimed coverage.
+* **Not window count as such.** The 20.6 GiB model maps through 20 overlapping
+  windows at the 2 GiB cap and is fine: identical census semantics, `declines=0`,
+  and a 160-token greedy continuation byte-identical to its one-window arm
+  (`220 220 16 220 220 16 ...`, fingerprint `2b9ce9d4034d44c1`).
+* **Not contention or a co-tenant.** A wrong-token stream is not what the
+  bandwidth effect in `../2026-09-25-instrument-co-tenant/README.md` does; that
+  one moves timing at constant output. This moves output at a constant timing
+  signature, and it reproduces across four separate processes.
+* **Not a claim about published numbers.** Every 235B measurement in this repo
+  ran on the default 32 GiB ceiling - three windows, comfortably inside the
+  correct side of the table - so nothing previously published is in question. The
+  consequence is prospective: the knob is reachable by anyone setting the
+  environment variable, and the failure is silent.
+
+## The shape of the boundary
+
+Two variables move together across the table and these runs separate them only
+partly. The cliff sits between 11 and 14 windows on an 82.7 GiB mapping, i.e.
+between a 102.7 and a 108.7 GiB mapped span; the same-cap experiment on smaller
+mappings does not reproduce it, so neither "many windows" nor "a large file" is
+sufficient on its own. The distinguishing test run with this finding is a
+46.6 GiB mapping at a 3 GiB cap, whose mapped span is ~138 GiB (above the 235B's
+broken 108.7) with 44% fewer unique bytes: if it breaks, the variable is the
+overlapped virtual span handed to Metal, and the source comment "extra windows
+cost nothing; they alias pages" is wrong in a way that has nothing to do with
+time; if it holds, the trigger needs the large mapping as well and any guard has
+to be written in terms of both.
+
+The mechanism inside the driver is not identified here. The source already records
+one other instance of exactly this failure mode at the opposite end of the same
+code path: "a buffer AT the limit (80.6 GiB here) comes back non-nil yet reads
+wrong - the 235B produced garbage logits until its mapping was split into windows
+this size" (metal.rs:8671-8676). What this table adds is that splitting too far
+reintroduces the same silent-wrong-read on the same file, so the safe region is a
+band and not a direction, and that `newBufferWithBytesNoCopy` handing back a
+usable pointer is not evidence that its bytes are the requested ones.
+
+## Consequences adopted
+
+1. `docs/decode-opts.md`'s instrument row for `ALLPAKA_GPU_WINDOW_GIB` says what
+   it is unsafe for, with this table, instead of leaving the knob described as a
+   neutral test hook.
+2. The claim in the code comment ("Extra windows cost nothing; they alias pages")
+   is amended to name the measured band; see the roadmap entry.
+3. A correctness guard for `add_mapping` - read a sample of bytes back through
+   each window and compare against the mmap before declaring the model attached -
+   is the obvious fix and is *not* done here, because it changes the load path in
+   a file another session is editing, and because the work in flight in this
+   directory is throughput. It is recorded as the next step for this finding.
+4. The timing half of the window question stays where amendment 2 left it: behind
+   the co-tenant gate, unmeasured, with the correctness half now answered by this
+   file rather than by assumption.
+
+## Reproduce
+
+```sh
+ROOT=$PWD
+M=$ROOT/models/qwen3-235b-a22b-instruct-2507-Q2_K_XL.gguf
+for gib in 32 24 16 12 10 8 6 4; do
+  ALLPAKA_GPU_WINDOW_GIB=$gib ALLPAKA_BENCH_PP=64 ALLPAKA_BENCH_TG=8 \
+  ALLPAKA_BENCH_SKIP_MTP=1 $ROOT/target/release/allpaka bench --engine $M \
+    | grep -E "in [0-9]+ windows|prefill argmax|gpu during (pre|de)code"
+done
+```
+
+The correct side of the table is the shipped configuration; only the loop's last
+three iterations are wrong, and they exit 0.
+
+## Amendment 2026-09-25T19:20Z: the wrong logits never reached the GPU, and mapped span is the only variable left standing
+
+Two changes to this file. The first retracts a claim; the second closes the
+question the "Shape of the boundary" section left open. Both come from counters
+that were already in the logs the first version quoted - I printed the dispatch
+counts and did not read the clock lines next to them.
+
+### 1. "The wrong numbers came off the GPU" is false
+
+`note_gpu_times` (cited by symbol: metal.rs is being edited by another session
+and its line numbers move under this file) sums, over every completed command
+buffer with a non-zero start timestamp, `GPUEndTime - GPUStartTime` into
+`executing` and `GPUStartTime - kernelStartTime` into `scheduling`. Every broken
+arm, on both models, reads the same way:
+
+| model | cap (GiB) | windows | mapped span (GiB) | argmax | executing (ms) | scheduling (ms) |
+|---|---|---|---|---|---|---|
+| 235B (82.7) | 32 | 3 | 86.7 | 291 | 3409 | 0 |
+| 235B | 24 | 4 | 88.7 | 291 | 3217 | 0 |
+| 235B | 16 | 6 | 92.7 | 291 | 2811 | 0 |
+| 235B | 12 | 9 | 98.7 | 291 | 2845 | 0 |
+| 235B | 10 | 11 | 102.7 | 291 | 2900 | 0 |
+| 235B | 9 | 12 | 104.7 | 291 | 1345 | 0 |
+| 235B | 8 | 14 | 108.7 | 151935 | **1** | **16840** |
+| 235B | 6 | 21 | 122.7 | 151935 | **0** | **3235** |
+| 235B | 4 | 41 | 162.7 | 151935 | **1** | **5212** |
+| GLM (46.6+21.4) | 32 | 3 | 70.0 | 261 | 511 | 4 |
+| GLM | 8 | 12 | 88.0 | 261 | 473 | 3 |
+| GLM | 6 | 17 | 98.0 | 261 | 454 | 4 |
+| GLM | 5 | 22 | 108.0 | 151551 | **2** | **3283** |
+| GLM | 4 | 33 | 132.0 | 151551 | **2** | **4347** |
+| GLM | 3 | 65 | 194.0 | 151551 | **2** | **7540** |
+
+So the buffers do complete and do carry timestamps, but the GPU spent 0-2 ms
+executing work that needs seconds, and 3.2-16.8 s between the driver picking the
+first kernel up and the GPU starting it. The correct arms are the exact inverse
+(454-3409 ms executing, 0-4 ms scheduling). Whatever produced the uniform logits,
+it was not a kernel computing a wrong value: the logits buffer was never written,
+and an all-zero vector is the other half of the `argmax = vocab_size - 1`
+signature this file already explains.
+
+That makes the second "What it is not" bullet ("Not a CPU fallback ... The wrong
+numbers came off the GPU, from the kernels, at full claimed coverage") wrong in
+its conclusion. `residency: set=true`, `declines=0` and `attempts == successes`
+prove only that the CPU path was not taken. They say nothing about whether the
+GPU executed what was recorded as executed, which is precisely why the run exits
+0 with a dead model.
+
+The tell, which generalizes past this bug: cap 6 and cap 8 report 141.1 and
+300.2 tok/s decode on the 235B against 11.2 tok/s at cap 32, i.e. 13-27x the
+work rate of an identical 11176-dispatch sequence, from 0-4 ms of executed GPU
+time where the five correct arms record 703-913 ms. No byte arithmetic is
+needed to reject those two rates: the same eight tokens at the same dispatch
+count cannot cost 100x less GPU execution and go faster. **An arm several times
+faster than every same-shape arm, with a near-zero `executing` column, is not a
+fast arm - it is an arm where nothing ran.** Same rule as the dead-load rule for probe
+kernels, applied to whole runs: ask what the ceiling cannot be.
+
+### 2. The boundary is one absolute number on total mapped span
+
+The five GLM rows above are the discriminator this file queued, run at 19:19-19:20Z
+(the first three at 03:28-03:30Z), and both pre-registered calls held: cap 8
+predicted correct, cap 3 predicted broken. GLM at cap 6 and cap 4 were added to
+bracket it from the second model, and their predicted window counts came out
+exact before the runs (12+5=17, 23+10=33).
+
+* **Window count is excluded.** 17 windows correct here against 14 broken on the
+  235B, and 20 windows correct on the 35B at a 2 GiB cap. More windows can be
+  fine while fewer are not.
+* **File size / unique bytes are excluded.** The 68.0 GiB GLM breaks at 33
+  windows while the 82.7 GiB 235B is fine at 11.
+* **Total mapped virtual span separates every arm**: correct at 20.6, 39.6, 70.0,
+  86.7, 87.9, 88.7, 92.7, 97.9, 98.7, 102.7, 104.7 GiB; broken at 108.0, 108.7,
+  122.7, 130.0, 162.7, 194.0 GiB. A single threshold `T` in (104.67, 107.96] GiB
+  - i.e. (112.4, 115.9] GB - explains every observation on three models with no
+  exceptions and no per-model adjustment.
+* **Overlap bytes are excluded** as the variable: the GLM at cap 6 carries 32.2
+  GiB of aliased overlap and is correct, while the 235B at cap 8 carries 27.9 and
+  is broken. Overlap is what makes span grow, but it is not itself the limit.
+
+All seventeen arms, their exact window counts and spans, and the three failed
+separability tests are computed by `span-model.py` in this directory (output
+`span-model.txt`), which re-derives the census from the source's own arithmetic -
+`WINDOW_CAP`, `CHUNK_OVERLAP`, `step = max_buf - CHUNK_OVERLAP` - from the byte
+sizes of the three model files. Its predicted window count matches the printed
+census in all seventeen rows, which is what licenses calling span a measured
+variable rather than a fitted one.
+
+GLM at cap 5 was then run as the next pre-registered prediction: the span model
+says 15 + 7 = 22 windows and 108.0 GiB mapped, which is above every correct point
+and below every broken one, so it is a prediction of *broken* that no window-count
+model can make (22 is fewer than the 33 that broke and more than the 17 that were
+fine). Both halves held: the census printed 22 windows and the arm read
+`prefill argmax=151551` with 2 ms executing against 3283 ms scheduling. The
+bracket is now `T` in (102.7, 108.0] GiB - fourteen configurations, three models,
+window counts 1-65, one threshold, no exceptions. 235B at cap 9 (span 104.7) was
+run as the matching point from the other model at 19:28Z and came out correct:
+`prefill argmax=291`, 12 windows exactly as predicted, 1345 ms executing against
+0 ms scheduling.
+
+`T` is a property of this driver and machine, not of allpaka, so the fix is not a
+number: a clamp computed from `T` would be wrong on a Mac with a different GPU
+VA budget or a different macOS. What the number buys is a prediction to test a
+guard against, and two runs localize it further - 235B at cap 9 (span 104.7) and GLM at cap 5 (span
+108.0), both inside the then-current bracket. Both have now been run and both
+landed on the predicted side, tightening `T` to (104.67, 107.96].
+
+Raw logs and report JSONs for the fourteen clock-measured arms are archived under
+`raw/`
+(`235b-cap*-log.txt`, `glm-*-log.txt`, the two `*-driver.txt` transcripts, and the
+run scripts); `.airbug-bench/` is git-ignored, so this directory is the evidence.
+
+### Why it is silent, in code
+
+grep over the current metal.rs: 21 `wait_until_completed` call sites, and the
+only `error` token in the file outside `msl_compile_failed` and the
+`error: &mut err` argument of the bytesNoCopy selector signature is
+`impl std::error::Error for DecodeDecline`. No completed command buffer's
+`error` property is ever read. An aborted buffer is therefore indistinguishable
+from a successful one in this codebase, and every counter the bench prints
+(dispatches, attempts, successes, declines) is recorded on the CPU side at
+encode time, so all of them stay correct while the GPU does nothing.
+
+### DoD for this finding, rewritten
+
+1. Read `error` after each wait; count non-nil errors; surface a
+   `gpu::command_buffer_error()` alongside `gpu::msl_compile_failed()` and make
+   `bench.rs`'s refuse-to-report gate (`bench.rs:476-484`) fire on it. That
+   single check turns this class of silent wrong-model run into a red one.
+2. Read-back verification in `add_mapping`: sample bytes through each window and
+   compare against the mmap before declaring the model attached, since
+   `newBufferWithBytesNoCopy` returning non-nil is already known (metal.rs's own
+   comment, and now this table) not to mean the bytes are the requested ones.
+3. Regression check per the repo rule: a test that goes red when the guard is
+   removed, driven by the 235B at cap 8 or the GLM at cap 4 - the second is
+   preferred, since GLM is 68 GiB and the check then costs 30 s instead of 3 min.
+4. The timing half of the window question is unchanged: still behind the
+   co-tenant gate, still unmeasured. Nothing in this amendment prices a window
+   count; it establishes only that below `T` there is nothing to time.
+
+## Amendment 3 (2026-09-25T19:40Z): the trigger is the residency set, and the driver does announce it
+
+Amendment 2 ended with span as "the only variable left standing" and the
+mechanism unidentified. A standalone probe now identifies it, and the answer is
+not a property of the model files at all.
+
+### The instrument
+
+`raw/window-probe.swift` (compiled with `swiftc -O`, no allpaka code involved)
+re-implements `add_mapping`'s arithmetic - cap-sized windows stepping by
+`cap - overlap` - over any file, hands each window to
+`newBufferWithBytesNoCopy`, optionally reproduces `ensure_residency`
+(metal.rs:8756-8788: one `MTLResidencySet` on the queue, `addAllocation` per
+window, `commit`, `requestResidency`), then dispatches one page-stride checksum
+per window and compares it with the same 65536 bytes summed on the host from the
+mmap. It reports declines, `commandBuffer.error`, and per-window mismatches.
+Its window census matches the allpaka census for the same file and cap (20
+windows for the 35B at cap 2, as measured at 02:36Z), so it is the same mapping.
+
+| arm | unique bytes | allocations | span (GiB) | residency | outcome |
+|---|---|---|---|---|---|
+| A | 35B, 1 copy, cap 2 | 20 | 39.6 | off | clean |
+| B | 35B, 3 copies, cap 2 | 60 | 118.8 | off | clean |
+| C | 35B, 1 copy, cap 2 | 20 | 39.6 | on | clean |
+| D | 35B, 3 copies, cap 2 | 60 | 118.8 | **on** | **code 8 Insufficient Memory** |
+| E | 27B, 2 copies, cap 2 | 30 | 88.0 | on | clean |
+| F | 27B, 4 copies, cap 2 | 60 | 117.3 | on | **code 8 Insufficient Memory** |
+| G | 27B, 4 copies, cap 2 | 60 | 117.3 | off | clean |
+
+F/G are the same binary, file, cap and copy count with one flag apart, so the
+comparison is single-variable: **117 GiB of overlapping no-copy mappings is
+harmless until each of them is added to a residency set**, and at that point the
+command buffer aborts with
+
+```
+commandBuffer.error: MTLCommandBufferErrorDomain code 8: Insufficient Memory
+                    (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+```
+
+Three things follow.
+
+1. **Span is confirmed as the axis, and unique bytes are dead.** The 27B
+   (15.3 GiB, and one allpaka maps by default without trouble) reproduces the
+   failure at four copies. Nothing about the cliff needed a big model; it needed
+   a big *sum of window lengths*, which is exactly the quantity all seventeen
+   arms separated on. The probe brackets the same threshold less tightly -
+   clean at 88.0, failing at 117.3 - which is consistent with allpaka's
+   (104.67, 107.96] and was not the point of the probe.
+2. **The driver announces it.** Every broken allpaka arm could have been caught
+   by reading one property of a buffer the code already waits on. The silence is
+   self-inflicted, so DoD item 1 of this file stands as the cheap fix, and it is
+   now known to work rather than hoped to work.
+3. **A read-back guard must not reuse its output region.** D and F report
+   `windows reading wrong 0`: the checksums live in one buffer allocated before
+   the copies, and when copy 4's command buffer aborts it leaves copy 3's
+   correct values in place. An aborted buffer therefore *passes* a spot check
+   that reads a reused buffer - the exact shape of the trap in this repo's
+   "a green test can mean the GPU never ran" rule, one level down.
+
+### Why this is now a lever, not just a bug
+
+If the budget is spent by `size + overlap x (windows - 1)`, then `CHUNK_OVERLAP`
+(metal.rs:8531, 2 GiB) is the term that buys the failure: its only job is to
+keep a tensor that straddles a window boundary inside one window, and it pays
+2 GiB of residency charge per window to do it. Recomputing the 235B's layouts
+with a 0.25 GiB overlap:
+
+| cap (GiB) | windows, overlap 2 | charge, overlap 2 | windows, overlap 0.25 | charge, overlap 0.25 |
+|---|---|---|---|---|
+| 8 | 14 | 108.7 (broken) | 11 | 85.2 |
+| 6 | 21 | 122.7 (broken) | 15 | 86.2 |
+| 4 | 41 | 162.7 (broken) | 22 | 87.9 |
+| 3 | 81 | 242.7 | 30 | 89.9 |
+| 2 | 82 | 163.7 | 48 | 94.4 |
+
+Every cap in the broken half of the table moves inside the measured band, and
+the cap stops being a cliff - which is what would let a model larger than the
+window map at all, the case the knob exists for. The overlap then has to be
+chosen from the model rather than as a constant: the largest tensor size in the
+file, checked at load, is the honest value - and if it exceeds the overlap the
+mapping must say so instead of reading zeros.
+
+That is a design direction with a prediction attached, not a result: the probe
+can test "charge tracks span at fixed overlap" in seconds, but the claim that a
+0.25 GiB overlap keeps a straddling tensor correct is an allpaka-side change and
+needs the real kernels over it. It is recorded here, in the artifact directory,
+and not implemented: metal.rs and its test files are modified and uncommitted by
+another session right now, and per this repo's one-change-per-PR rule a load-path
+change of this size does not belong on top of someone else's in-flight diff.
+
+## Amendment 4 (2026-09-25T19:43Z): the overlap idea, measured - it does not pay, and the shipped ceiling is 98.7 GiB
+
+Amendment 3's design direction was tested against the two numbers that decide it
+before being written down anywhere else. Both came out against it.
+
+**1. The overlap has a measured floor, and it is not 0.25 GiB.** A window starts
+every `step = cap - overlap` and runs `cap` long, so a tensor at an arbitrary
+offset lies wholly inside some window only if `size(tensor) <= overlap` - allpaka
+indexes through one `(chunk, offset)` pair, so a straddling tensor reads across
+the boundary. `max-tensor.py` (output `max-tensor.txt`, GGUF metadata only, no
+GPU) gives the largest tensor per model:
+
+| model | largest tensor | which |
+|---|---|---|
+| 235B Q2_K_XL | 0.475 GiB | `output.weight` [4096, 151936] q6_k |
+| GLM-4.5-Air | 0.730 GiB | `blk.N.ffn_down_exps.weight` [1408, 4096, 128] q8_0 |
+| Qwen3.6-35B | 0.503 GiB | `token_embd.weight` [2048, 248320] q8_0 |
+
+So 0.25 GiB is below the floor on all three: the 0.25-overlap column of
+amendment 3's table is arithmetic on an impossible configuration, and this file
+does not carry it forward as a proposal. A *computed* overlap - max tensor size,
+rounded - is the only sound version, which for the local fleet means 0.75 GiB.
+
+**2. Even the sound version buys almost nothing on the shipped path.** The
+charge is `size + overlap x (windows - 1)`, and at the default 32 GiB cap there
+are only three windows, so the term the overlap controls is small. Largest model
+that still maps under `T`, and the three fleet models' charges:
+
+| overlap (GiB) | largest mappable at cap 32, `T`=104.67 | 235B charge | GLM charge |
+|---|---|---|---|
+| 2.0 (shipped) | 98.7 GiB | 86.7 | 70.0 |
+| 1.0 | 101.7 GiB | 84.7 | 69.0 |
+| 0.75 | 102.4 GiB | 84.2 | 68.7 |
+
+A load-path change to the window layout would move the machine's model-size
+ceiling by 3.7% and change nothing for any model actually in the fleet. Verdict:
+**not a lever; dropped.** It is only strong when many windows are needed, which
+today means the narrow-cap test hook - the thing nobody needs.
+
+**3. The number worth publishing instead is the ceiling.** Under the lower end of
+the measured band, `T` = 104.67 GiB, the shipped configuration tops out at
+**98.7 GiB of weights at the default cap** - the 235B is at 84% of that. So the
+cliff is reachable without touching any environment variable: a model ~16 GiB
+bigger than anything in the fleet, mapped exactly the way allpaka maps today,
+would print `windows=4 set=true`, `declines=0`, and a dead GPU. That is what
+makes the error read of amendment 3 a load-path requirement rather than a
+hygiene item, and it is the number to quote if anyone asks how much headroom the
+weight mapping has.
+
+## Correction (2026-09-25T19:44Z): "Consequences adopted" 1 and 2 were not done
+
+Items 1 and 2 of the consequences list above are written as if the documentation
+and the source comment had been updated. They have not been, and the file was
+published without checking that. Verified against the tree at 19:44Z:
+
+* `docs/decode-opts.md` still describes `ALLPAKA_GPU_WINDOW_GIB` as having "no
+  measurement at all" (item 3 of its open-knob list). That sentence is another
+  session's uncommitted text, added in the same working-tree pass as the
+  instrument sections, so editing it now would fold my change into someone
+  else's commit. The replacement, ready to apply when that file is clean: the
+  knob is measured for correctness and unmeasured for time, it silently produces
+  a dead GPU above ~105 GiB of mapped window span with residency on, and
+  `235b-cliff.txt` in this directory is the evidence.
+* The `add_mapping` comment at metal.rs:8680-8682 still reads "Extra windows cost
+  nothing; they alias pages" - the claim this file falsifies. metal.rs is
+  modified and uncommitted by another session, so the comment edit is pending for
+  the same reason, and item 3's read-back guard with it.
+* Item 4 is accurate: the timing half was never claimed as done.
+
+Nothing in this directory is committed at the time of writing; it is a working
+artifact set, and the roadmap has no window-cliff line yet either.
+
+
+================================================================================
+Amendment, 2026-09-25 20:10 UTC - DoD item 1 is closed in code; T survived a
+loaded machine
+================================================================================
+
+The guard DoD item 1 asked for ("read the command buffer's own error after
+each wait, and make the bench refuse the run on it") is implemented and
+verified, on a detached HEAD worktree because the files it touches are dirty
+in this tree. Artifact:
+../../2026-09-25-dead-gpu-guard/README.md - code, both-direction verification,
+and the exact message.
+
+What it adds to this investigation, beyond closing the item:
+
+1. The cliff arms are now refused, not observed. `ALLPAKA_GPU_WINDOW_GIB=8` and
+   `=6` on the 235B exit 1 with "2 GPU command buffer(s) failed during warmup
+   and prefill: MTLCommandBufferErrorDomain: Insufficient Memory
+   (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory) (code 8)", and a
+   refused arm writes no report JSON at all. Caps 32, 12 and 10 print
+   "gpu command buffers failed during warmup and prefill: 0" and exit 0. The
+   error text matches what the Swift probe read at 19:40Z, from inside the
+   engine this time.
+
+2. Two dropped buffers are enough to kill a run. The refused arms count 2
+   failures against a 941-dispatch prefill, and their clock line reads
+   "executing 0 ms, scheduling 31662 ms" while cap 12's identical dispatch
+   sequence reads "executing 1993 ms, scheduling 0 ms". Whatever the driver
+   does after the second failure, it does not report it per buffer, so a
+   counter that only ever reached 2 still separates the two kinds of run.
+
+3. T is not memory pressure. The boundary here was first measured at 19:20Z at
+   84% free RAM. Re-measured at 20:05-20:08Z with `vm_stat` reporting 0-2 GiB
+   free and another session holding ~76 GiB: cap 10 (102.67 GiB of mapped span)
+   clean, cap 8 (108.67 GiB) refused. That brackets T as (102.67, 108.67],
+   which contains the published (104.67, 107.96] - so the interval stands
+   uncorrected, and the new information is that it did not move when host RAM
+   did. A device-side mapping budget behaves like this; a pressure-induced
+   failure would have moved the boundary down as free RAM went.
+
+Still open from this file's DoD: the read-back guard (one word per mapped
+page, fail if any page is unreadable). The error read proves the driver said
+no; it does not prove that a yes came with a correct mapping.
+
+
+================================================================================
+Amendment, 2026-09-25 20:37 UTC - DoD item 2 (the read-back guard) is closed
+too; the guard's first accusation was its own bug
+================================================================================
+
+`gpu::check_windows()` now exists: a kernel bound to each window's own
+bytesNoCopy buffer reads one byte per sampled page, 32 threads x 8 samples per
+window, and the host recomputes the same addresses through its own mapping and
+compares per-thread sums. The bench calls it right after attach, before any
+warmup, and refuses the run on a mismatch. Artifact, including the mutation
+test that proves the comparison has teeth:
+../../2026-09-25-dead-gpu-guard/README.md.
+
+3. Both guards agree on the cliff arm, and the read-back fires first. At cap 8
+   the refusal lands on the read-back's own command buffer: two `code 8` lines
+   and then "window 0 (8 GiB at 0x7000000000) thread 0: the GPU read 0, the
+   host read 965", before any token is timed. So the first GPU work in the
+   process is already dropped, and the failing mode stays *refusal returning
+   zeros* rather than *wrong bytes*. A silent mis-mapping remains unobserved;
+   that is now what this check is for, rather than the cliff.
+
+4. What the guard's first run taught is worth keeping next to the finding
+   itself. Its first target was the shipped configuration, cap 32, and it
+   reported a detailed mismatch there - `the GPU read 941, the host read 726`.
+   That was `page * 16384u` overflowing uint32 in MSL: a 32 GiB window has 2M
+   pages, and 262144 pages is 4 GiB, so every offset above that wrapped inside
+   the window. A 0.6B model had passed the same build, because its window is
+   too small to overflow. Fixing the width made cap 32 match. Two rules come
+   out of this: a self-check's first run belongs on an arm known good, and a
+   confident accusation against such an arm is evidence about the check first.
+   The same overflow would have been a real bug in any future kernel that
+   indexes a window with 32-bit arithmetic - the windows here are up to
+   32 GiB, so the ceiling is 256 KiB of pages.

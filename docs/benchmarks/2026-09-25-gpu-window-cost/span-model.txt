@@ -1,0 +1,27 @@
+arm           size GiB  span GiB  span GB pred_w obs_w overlap GB  verdict
+235B cap32       82.67     86.67    93.06      3     3       4.29  correct  ok
+235B cap24       82.67     88.67    95.21      4     4       6.44  correct  ok
+235B cap16       82.67     92.67    99.51      6     6      10.74  correct  ok
+235B cap12       82.67     98.67   105.95      9     9      17.18  correct  ok
+235B cap10       82.67    102.67   110.24     11    11      21.47  correct  ok
+235B cap9        82.67    104.67   112.39     12    12      23.62  correct  ok
+235B cap8        82.67    108.67   116.68     14    14      27.92  BROKEN   ok
+235B cap6        82.67    122.67   131.72     21    21      42.95  BROKEN   ok
+235B cap4        82.67    162.67   174.67     41    41      85.90  BROKEN   ok
+GLM cap32        67.96     69.96    75.12      3     3       2.15  correct  ok
+GLM cap8         67.96     87.96    94.45     12    12      21.47  correct  ok
+GLM cap6         67.96     97.96   105.19     17    17      32.21  correct  ok
+GLM cap5         67.96    107.96   115.93     22    22      42.95  BROKEN   ok
+GLM cap4         67.96    129.96   139.55     33    33      66.57  BROKEN   ok
+GLM cap3         67.96    193.96   208.27     65    65     135.29  BROKEN   ok
+35B cap2         20.61     39.61    42.54     20    20      20.40  correct  ok
+35B cap32        20.61     20.61    22.13      1     1       0.00  correct  ok
+
+Does a single threshold on each candidate separate the two groups?
+  mapped span   max(correct)=  104.67  min(broken)=  107.96  separates  (GiB)
+  window count  max(correct)=   20.00  min(broken)=   14.00  DOES NOT SEPARATE  (windows)
+                  counter-examples: [17.0, 20.0] correct at or above the lowest broken value
+  unique bytes  max(correct)=   82.67  min(broken)=   67.96  DOES NOT SEPARATE  (GiB)
+                  counter-examples: [67.96, 67.96, 67.96, 82.67, 82.67, 82.67, 82.67, 82.67, 82.67] correct at or above the lowest broken value
+  overlap bytes max(correct)=   30.00  min(broken)=   26.00  DOES NOT SEPARATE  (GiB)
+                  counter-examples: [30.0] correct at or above the lowest broken value

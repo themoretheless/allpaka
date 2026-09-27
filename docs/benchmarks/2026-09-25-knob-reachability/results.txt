@@ -1,0 +1,94 @@
+# knob reachability scan. First capture 2026-09-25T22:04Z; this is the re-run at
+#   22:26Z after a fix to the scan's own read idiom (see the amendment below).
+# Repo revision dcdc131. crates/allpaka-backend/src/gpu/metal.rs additionally
+#   carries another session's uncommitted WIP plus this session's comment split:
+#   1558 insertions(+), 234 deletions(-). No build, no GPU: this is a source parse.
+# commands (run from this directory):
+#   python3 reachability.py            - this file's body
+#   python3 reachability.py --selfcheck - mutation check on the matcher
+#
+# Amendment 2026-09-25T22:26Z - the scan had the blind spot it was written to
+# find. READ_IDIOM matched double-quoted names only, so
+#   scripts/test-studio.py's os.environ.get('ALLPAKA_TEST_NATIVE_VAULT') was
+# invisible to it, and that name was filed in the 22:04 capture as "docs name it,
+# code never reads it". Both quote styles and os.environ.get/getenv now count:
+# read sites 142 -> 144 (ALLPAKA_TEST_NATIVE_VAULT, ALLPAKA_TEST_BINARY), and the
+# docs-only set loses ALLPAKA_TEST_NATIVE_VAULT. README.md carries the mutation
+# check (8 cases) and the demonstration that the pre-fix matcher fails 2 of them.
+#
+# Three members of the docs-only set are glob/brace-list stems in prose, not
+# stale knob rows, labelled here by hand rather than by the tool: ALLPAKA_Q comes
+# from `ALLPAKA_Q{2,4,5,8}_NR0`, ALLPAKA_BENCH_ from `ALLPAKA_BENCH_*`, and
+# ALLPAKA_MEGA_ is minted by README.md's own sentence about the rule - the scan's
+# corpus is docs/benchmarks/**/*.md, which contains this artifact. An automatic
+# stem rule was written, run and dropped for that reason: a sentence naming a
+# stem bare (the README has two) un-makes it a stem, so the classification would
+# depend on how this file happens to be worded. See README.md, amendment 22:21Z.
+#
+# "names read in metal.rs, absent from the registry" is now empty: the
+#   ALLPAKA_DCOMB row went into docs/decode-opts.md at 22:09Z. Registration, not
+#   measurement - the row's status is still "listed, still unmeasured".
+# Call-site line numbers past ~16000 shifted +5 since 22:04Z from that comment
+#   split in metal.rs.
+dcomb  env=ALLPAKA_DCOMB  calls=1 at [10917]
+    gated by: down_combine := // is fixed, q4_k at its default). Sweeping ALLPAKA_Q4_NR0=4 // turns this into a hidden % 4 requirement. let down_combine = match down_kernel { Some(k) if dcomb() && shared.is_none() && hidden % 2 == 0 && *n_used <= 32 => { gpu.pipeline_co (tested at [12431])
+dcomb_sw  env=ALLPAKA_DCOMB_SW  calls=3 at [10918, 12229, 16036]
+    gated by: down_combine := // turns this into a hidden % 4 requirement. let down_combine = match down_kernel { Some(k) if dcomb() && shared.is_none() && hidden % 2 == 0 && *n_used <= 32 => { gpu.pipeline_combine(k, lanes_per_row(mats[2].ty, *expert_ffn), dcomb_sw())  (tested at [12431])
+mega_debug  env=ALLPAKA_MEGA_DEBUG  calls=4 at [9159, 11164, 12506, 12517]
+    gated by: if any_mega && mega_debug() {
+    gated by: if mega_debug() {
+    gated by: serial := .iter() .any(|l| matches!(&l.ffn, FfnRefs::Moe { mega: Some(_), .. })); let serial = crate::runtime::get().decode_serial || any_mega; if any_mega && mega_debug() { eprintln!( "mega: encode path n_tg={} serial={} layers={}", (tested at [11226])
+mv_id_grid  env=ALLPAKA_MV_ID  calls=4 at [8842, 9075, 9098, 9508]
+    gated by: idg := } else { name }; let idg = indexed && mv_id_grid() && id_grid_kernel(name); let key = ( name, (tested at [8849])
+rfuse  env=ALLPAKA_RFUSE  calls=1 at [11910]
+    gated by: moe_plain := // `ALLPAKA_RFUSE=1` enables; kept off under default `normflag` // (max-performance): fused path loses ~20–27% decode on GLM / 30B. let moe_plain = !refs.normflag && (rmt() || rfuse()) && matches!(&refs.ffn, FfnRefs::Moe { .. }); if !moe_pl (tested at [11985])
+rmt  env=ALLPAKA_RMT  calls=2 at [11910, 11993]
+    gated by: if moe_plain {
+    gated by: moe_plain := // `ALLPAKA_RFUSE=1` enables; kept off under default `normflag` // (max-performance): fused path loses ~20–27% decode on GLM / 30B. let moe_plain = !refs.normflag && (rmt() || rfuse()) && matches!(&refs.ffn, FfnRefs::Moe { .. }); if !moe_pl (tested at [11985])
+    gated by: moe_plain := let moe_plain = !refs.normflag && (rmt() || rfuse()) && matches!(&refs.ffn, FfnRefs::Moe { .. });
+    gated by: mt := // `ALLPAKA_RFUSE=1`: the single-threadgroup // original. Not under normflag: that path orders // the norm by spin-flag. let mt = rmt(); enc.set_compute_pipeline_state(if mt { &resnorm_router_mt_state (tested at [11994, 12028])
+rtopk_fused  env=ALLPAKA_RTOPK  calls=1 at [12042]
+    gated by: if moe_plain {
+    gated by: moe_plain := let moe_plain = !refs.normflag && (rmt() || rfuse()) && matches!(&refs.ffn, FfnRefs::Moe { .. });
+shared_stagger  env=ALLPAKA_SHARED_STAGGER  calls=1 at [12202]
+    gated by: stagger := // gate/up. Stagger (GLM): defer them past the barrier so they // overlap the expert Q8 down instead of fighting the routed // Q4 pass for bandwidth. let stagger = shared.is_some() && shared_stagger() && down_tail.is_none(); if let Some((sm (tested at [12286, 12360])
+attend_mm  env=ALLPAKA_ATTN_MM  calls=2 at [14656, 14849]
+cfuse  env=ALLPAKA_CFUSE  calls=1 at [12436]
+gpu_counters  env=ALLPAKA_GPU_COUNTERS  calls=1 at [9276]
+gufuse  env=ALLPAKA_DECODE_GUFUSE  calls=1 at [10893]
+mm_k64  env=ALLPAKA_MM_K64  calls=3 at [9564, 16203, 16221]
+mm_ll  env=ALLPAKA_MM_LL  calls=3 at [9563, 16203, 16220]
+mmid_k64  env=ALLPAKA_MMID_K64  calls=1 at [16221]
+no_barrier  env=ALLPAKA_NO_BARRIER,ALLPAKA_SERIAL  calls=27 at [14573, 14589, 14632, 14671, 14684, 14704, 14711, 14823]
+no_stage_barrier  env=ALLPAKA_NO_STAGE_BARRIER  calls=4 at [16842, 16859, 16894, 16913]
+q2_mv  env=ALLPAKA_Q2_MV  calls=2 at [9384, 15955]
+q3_mv  env=ALLPAKA_Q3_MV  calls=2 at [9417, 15713]
+q4_mv  env=ALLPAKA_Q4_MV  calls=2 at [9420, 15807]
+q4_nr0  env=ALLPAKA_Q4_NR0  calls=2 at [9421, 17371]
+q5_0_mv  env=ALLPAKA_Q5_0_MV  calls=2 at [9432, 15872]
+q5_mv  env=ALLPAKA_Q5_MV  calls=2 at [9423, 15840]
+q5_nr0  env=ALLPAKA_Q5_NR0  calls=2 at [9424, 17372]
+q6_mv  env=ALLPAKA_Q6_MV  calls=2 at [9426, 15823]
+q8_mv  env=ALLPAKA_Q8_MV  calls=2 at [9429, 15856]
+q8_nr0  env=ALLPAKA_Q8_NR0  calls=2 at [9430, 17374]
+shared_tail  env=ALLPAKA_SHARED_TAIL  calls=1 at [10931]
+
+8 of 28 accessors sit behind at least one gate word on their call path; 4 behind a RuntimePolicy field (directly or through a local).
+policy-gated: mega_debug, rfuse, rmt, rtopk_fused; ungated: attend_mm, cfuse, dcomb, dcomb_sw, gpu_counters, gufuse, mm_k64, mm_ll, mmid_k64, mv_id_grid, no_barrier, no_stage_barrier, q2_mv, q3_mv, q4_mv, q4_nr0, q5_0_mv, q5_mv, q5_nr0, q6_mv, q8_mv, q8_nr0, shared_stagger, shared_tail
+
+registry (docs/*.md): 83 names; benchmark records add 7 more; code read sites: 144 (58 in gpu/metal.rs)
+
+named in docs, never read by any code:
+  ALLPAKA_BENCH_: absent from code entirely
+  ALLPAKA_LOCAL_API_KEY: code mentions it in prose only
+  ALLPAKA_MEGA: absent from code entirely
+  ALLPAKA_MEGA_: absent from code entirely
+  ALLPAKA_MEGA_TG: code mentions it in prose only
+  ALLPAKA_Q: code mentions it in prose only
+  ALLPAKA_Q3_NR0: absent from code entirely
+
+names read in metal.rs, absent from the registry:
+  none
+
+names read in elsewhere, absent from the registry:
+  ALLPAKA_AIRBUG, ALLPAKA_AIRBUG_HASH, ALLPAKA_BENCH_BASELINE, ALLPAKA_BENCH_BETWEEN_MS, ALLPAKA_BENCH_FEEDS, ALLPAKA_BENCH_LADDER_ONLY, ALLPAKA_BENCH_REPS, ALLPAKA_BENCH_REVERSE, ALLPAKA_BENCH_TOLERANCE_PERCENT, ALLPAKA_BIN, ALLPAKA_CPU_ATTN, ALLPAKA_CUDA_DEFAULT_STREAM, ALLPAKA_CUDA_PDL, ALLPAKA_DUMP_HIDDEN, ALLPAKA_FA_INLINE, ALLPAKA_FA_KV_FLOOR, ALLPAKA_FUSE_LOG, ALLPAKA_GGML, ALLPAKA_GGML_DECODE, ALLPAKA_GGML_DIR, ALLPAKA_GGML_GEMM, ALLPAKA_GGML_MMVQ, ALLPAKA_GIT_COMMIT, ALLPAKA_GPU_EMBED, ALLPAKA_GREEDY_CHAIN, ALLPAKA_GU_N8, ALLPAKA_GU_Q8, ALLPAKA_HYBRID_REPLAY, ALLPAKA_K5120, ALLPAKA_K5120_GU, ALLPAKA_K8192, ALLPAKA_L2_PERSIST, ALLPAKA_L2_STREAM_W, ALLPAKA_MMQ, ALLPAKA_MMVQ_ROWS, ALLPAKA_NATIVE_ATTEND, ALLPAKA_NO_ARGMAX, ALLPAKA_NO_FA, ALLPAKA_NO_FA_GRAPH, ALLPAKA_NO_TOKENBUF, ALLPAKA_NWARPS, ALLPAKA_OUT_N4, ALLPAKA_PF_GRAPH, ALLPAKA_PHASES, ALLPAKA_PLAIN_DEBUG, ALLPAKA_PREFILL_CHUNK, ALLPAKA_PREFILL_DUAL, ALLPAKA_PREFUSE, ALLPAKA_Q6_F32, ALLPAKA_Q6_K25600, ALLPAKA_Q8, ALLPAKA_QKV_SPLIT, ALLPAKA_RAG_AUTO_MAINTENANCE, ALLPAKA_RAG_AUTO_MAINTENANCE_APPLY, ALLPAKA_RAG_AUTO_MAINTENANCE_SECS, ALLPAKA_RAG_BACKEND, ALLPAKA_RAG_NOTES_DIR, ALLPAKA_RAG_TOOLS, ALLPAKA_SKIP_HOST_ROPE, ALLPAKA_TRACE, ALLPAKA_WO_FA_Q8

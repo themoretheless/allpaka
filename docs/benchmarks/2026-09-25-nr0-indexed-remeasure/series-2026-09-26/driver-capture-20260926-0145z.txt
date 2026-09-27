@@ -1,0 +1,36 @@
+pinned gpu_ffnbench sha256 b4579c48f9c3a2d1  head dcdc131d  dirty files 93
+Q4 NR0=1 r1 ok  load 1.9/2.0 52s  ratio[0,plain,feed8]=0.7540
+Q4 NR0=2 r1 ok  load 2.0/2.0 43s  ratio[0,plain,feed8]=1.0745
+Q4 NR0=4 r1 ok  load 2.0/5.2 43s  ratio[0,plain,feed8]=0.9806
+Q4 NR0=2 r2 VETO spread veto on q4_k control (483.6/458.1) load 4.5/3.0 49s
+Q4 NR0=4 r2 ok  load 3.0/2.7 46s  ratio[0,plain,feed8]=0.8562
+Q4 NR0=1 r2 ok  load 2.7/2.5 41s  ratio[0,plain,feed8]=0.7392
+Q4 NR0=4 r3 ok  load 2.5/2.5 46s  ratio[0,plain,feed8]=0.9638
+Q4 NR0=1 r3 VETO spread veto on q4_k (372.7/313.8) load 2.5/5.0 35s
+Q4 NR0=2 r3 ok  load 5.0/3.4 38s  ratio[0,plain,feed8]=1.0663
+Q4 NR0=1 r4 VETO spread veto on q4_k (362.4/341.8) load 3.4/2.3 52s
+Q4 NR0=2 r4 VETO spread veto on q4_k (487.8/460.4) load 2.3/2.2 48s
+Q4 NR0=4 r4 VETO spread veto on q4_k 30b gate/up (339.5/321.4) load 2.2/2.5 46s
+Q4 NR0=2 r5 ok  load 2.5/4.3 47s  ratio[0,plain,feed8]=1.0054
+Q4 NR0=4 r5 ok  load 4.3/3.2 47s  ratio[0,plain,feed8]=0.8620
+Q4 NR0=1 r5 VETO spread veto on q4_k (309.4/292.7) load 3.2/1.9 53s
+Q8 NR0=1 r1 ok  load 1.9/2.2 48s  ratio[0,plain,feed8]=1.0622
+Q8 NR0=2 r1 ok  load 2.2/2.6 47s  ratio[0,plain,feed8]=1.1136
+Q8 NR0=4 r1 ok  load 2.6/2.6 48s  ratio[0,plain,feed8]=1.1182
+Q8 NR0=2 r2 ok  load 2.6/2.5 48s  ratio[0,plain,feed8]=1.1120
+Q8 NR0=4 r2 ok  load 2.5/2.9 47s  ratio[0,plain,feed8]=1.1309
+Q8 NR0=1 r2 ok  load 2.9/3.0 48s  ratio[0,plain,feed8]=1.0983
+Q8 NR0=4 r3 ok  load 3.0/2.9 48s  ratio[0,plain,feed8]=1.1476
+Q8 NR0=1 r3 ok  load 2.9/2.4 48s  ratio[0,plain,feed8]=1.0869
+Q8 NR0=2 r3 ok  load 2.4/4.0 48s  ratio[0,plain,feed8]=1.1001
+Q8 NR0=1 r4 ok  load 4.0/3.6 48s  ratio[0,plain,feed8]=1.0805
+Q8 NR0=2 r4 ok  load 3.6/3.2 47s  ratio[0,plain,feed8]=1.0725
+Q8 NR0=4 r4 ok  load 3.2/3.3 46s  ratio[0,plain,feed8]=1.1142
+Q8 NR0=2 r5 ok  load 3.3/3.0 47s  ratio[0,plain,feed8]=1.1172
+Q8 NR0=4 r5 ok  load 3.0/2.8 48s  ratio[0,plain,feed8]=1.1210
+Q8 NR0=1 r5 ok  load 2.8/2.4 48s  ratio[0,plain,feed8]=1.0474
+24/30 processes admitted
+  Q4 vs NR0=2: hold  q4_k: -29.98% (0/1 rounds)  q4_k control: -15.50% (0/1 rounds)  q4_k 30b gate/up: -13.87% (0/1 rounds)  q4_k glm gate/up: -16.29% (0/1 rounds)
+  Q4 vs NR0=2: hold  q4_k: -14.39% (0/3 rounds)  q4_k control: -13.48% (0/3 rounds)  q4_k 30b gate/up: -18.91% (0/3 rounds)  q4_k glm gate/up: -10.98% (0/3 rounds)
+  Q8 vs NR0=2: hold  q8_0: -2.83% (1/5 rounds)  q8_0 glm down: -1.66% (2/5 rounds)
+  Q8 vs NR0=2: hold  q8_0: +0.81% (5/5 rounds)  q8_0 glm down: +0.50% (3/5 rounds)

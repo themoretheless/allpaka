@@ -1,0 +1,27 @@
+# NR0 A/B at the real expert-down shape with the instrument fixed (feed=32).
+# Same command as feed-depth-real-shape.log with ALLPAKA_Q5_NR0 set per arm.
+=== NR0=4 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=32, region 330 MB ---
+q4_k   365 GB/s  394.6 ps/row/block  vs q4_k 1.000
+q5_k   290 GB/s  607.1 ps/row/block  vs q4_k 1.539
+q3_k   144 GB/s  764.4 ps/row/block  vs q4_k 1.937
+=== NR0=2 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=32, region 330 MB ---
+q4_k   362 GB/s  397.9 ps/row/block  vs q4_k 1.000
+q5_k   251 GB/s  702.1 ps/row/block  vs q4_k 1.764
+q3_k   141 GB/s  779.1 ps/row/block  vs q4_k 1.958
+=== NR0=4 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=32, region 330 MB ---
+q4_k   355 GB/s  405.1 ps/row/block  vs q4_k 1.000
+q5_k   283 GB/s  622.7 ps/row/block  vs q4_k 1.537
+q3_k   140 GB/s  784.3 ps/row/block  vs q4_k 1.936
+=== NR0=2 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=32, region 330 MB ---
+q4_k   359 GB/s  401.1 ps/row/block  vs q4_k 1.000
+q5_k   248 GB/s  709.9 ps/row/block  vs q4_k 1.770
+q3_k   140 GB/s  786.2 ps/row/block  vs q4_k 1.960
+=== NR0=4 ===
+--- shape ratio, QK [512,2048] nb=8 x8 x60 feed=32, region 330 MB ---
+q4_k   355 GB/s  405.1 ps/row/block  vs q4_k 1.000
+q5_k   281 GB/s  625.6 ps/row/block  vs q4_k 1.544
+q3_k   139 GB/s  789.0 ps/row/block  vs q4_k 1.948

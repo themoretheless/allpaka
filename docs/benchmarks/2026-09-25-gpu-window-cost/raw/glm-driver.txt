@@ -1,0 +1,3 @@
+glm cap default 03:28:36 exit 0 attached, 46.6 GiB of weights shared with the GPU in 2 windows (maxBufferLength 32.0 GiB) residency: windows=3 set=true prefill argmax=261 gpu during prefill: 3 waits, 461 dispatches
+glm cap 3 03:30:36 exit 0 attached, 46.6 GiB of weights shared with the GPU in 45 windows (maxBufferLength 3.0 GiB) residency: windows=65 set=true prefill argmax=151551 gpu during prefill: 3 waits, 461 dispatches
+glm cap 8 03:30:51 exit 0 attached, 46.6 GiB of weights shared with the GPU in 8 windows (maxBufferLength 8.0 GiB) residency: windows=12 set=true prefill argmax=261 gpu during prefill: 3 waits, 461 dispatches

@@ -1,0 +1,31 @@
+14 of 14 pairs admitted by criteria 2 and 3
+criterion 4 (diagnostic, no longer a veto): 7 of 14 pairs have the plain control inside 2%
+
+  pair ord   verify ms rows  norows  ratio   spec tok/s rows  norows  ratio   plain   load
+     1  AB        34.978   34.154   0.9765     53.8866   55.2263   1.0249  * 95.3/90.2  7.0/6.3
+     2  BA        35.268   34.131   0.9678     54.2195   55.6491   1.0264    94.8/95.2  5.3/5.6
+     3  AB        35.126   34.057   0.9696     54.6625   56.1115   1.0265  * 94.4/90.4  5.1/7.9
+     4  BA        34.939   33.759   0.9662     55.5614   57.2871   1.0311  * 94.7/92.8  9.6/6.7
+     5  AB        34.674   35.602   1.0268     55.7673   55.2934   0.9915    94.6/95.0  7.7/5.6
+     6  BA        35.112   33.952   0.9670     51.7605   55.4768   1.0718  * 91.0/94.3  4.9/5.3
+     7  AB        34.900   34.245   0.9812     49.3754   48.6162   0.9846  * 71.2/95.5  9.7/7.6
+     8  BA        34.739   33.833   0.9739     53.9232   48.8173   0.9053    92.9/93.5  5.5/5.8
+     9  AB        34.700   33.743   0.9724     55.2878   57.5384   1.0407    94.7/95.7  10.6/8.8
+    10  BA        35.884   33.964   0.9465     54.4797   57.1182   1.0484  * 93.0/95.0  8.1/8.9
+    11  AB        34.902   34.142   0.9782     55.7455   57.0494   1.0234    94.8/94.2  6.6/7.2
+    12  BA        34.970   34.267   0.9799     54.6340   56.0783   1.0264    95.6/95.3  6.1/6.5
+    13  AB        34.990   34.167   0.9765     55.5476   56.7563   1.0218    95.6/95.1  6.9/7.3
+    14  BA        34.732   33.619   0.9679     56.2572   57.5566   1.0231  * 95.3/91.6  7.2/6.8
+  (* = the plain control moved more than 2% inside the pair)
+
+primary  5' verify-stage ms, norows/rows: median 0.9732, mean -2.50% SEM 0.46 n 14, 1/14 above 1 (the fallback costs more ms, ie ROWS wins)
+secondary 5 e2E speculative rate, norows/rows (all admitted): median 1.0256, mean +1.76% SEM 1.03 n 14, 11/14 above 1 (the fallback is faster)
+secondary 5 e2E speculative rate, norows/rows (criterion-4 clean): median 1.0234, mean +0.51% SEM 1.75 n 7, 5/7 above 1 (the fallback is faster)
+  verify AB: n 7, median 0.9765, 1 of 7 above 1
+  verify BA: n 7, median 0.9678, 0 of 7 above 1
+  e2E AB: n 7, median 1.0234, 5 of 7 above 1
+  e2E BA: n 7, median 1.0264, 6 of 7 above 1
+
+ROWS worth -2.68% by the verify stage, -2.50% by the e2E rate (positive favours ROWS)
+  6': inside +/-3% on at least one reading: the mapping is e2E-neutral where it
+     exists, so the q3_k/q2_k branch is not worth writing; publish negative.

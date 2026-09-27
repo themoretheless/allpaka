@@ -1,0 +1,42 @@
+airbug: traces and logs -> http://localhost:4318
+autotune cache applied: profile=max-performance objective=134.2 tok/s (/Users/themoretheless/.cache/allpaka/autotune.json)
+prewarmed 17.3 GiB of weights in 0.7s
+metal: Apple M4 Max attached, 17.3 GiB of weights shared with the GPU
+engine bench: qwen3-30b-a3b-Q4_K_M (48 layers, qwen3moe, MoE)
+  capabilities:
+    model: arch=qwen3moe layers=48 moe=true
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: max-performance
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=1 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=241 bytes=0.05 GiB matmul-kernel=yes
+      Q4K: tensors=289 bytes=13.28 GiB matmul-kernel=yes
+      Q6K: tensors=49 bytes=3.95 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=319
+  prefill   480 tok in   0.33 s    1435.0 tok/s
+  gpu during prefill: 2 waits, 481 dispatches, encode 1 ms, wait 332 ms of 334 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 332 ms, scheduling 0 ms, round trips + idle 0 ms (of 332 ms waited)
+  prefill phases, ms/token:
+    embed                  0.0  ( 0.2%)
+    attention              0.0  ( 0.2%)
+    ffn (experts)          0.0  ( 0.1%)
+    router                 0.0  ( 0.0%)
+    unaccounted            0.7  (99.5%)
+  decode     32 tok in   0.23 s     137.5 tok/s
+  gpu path decode: attempts=32 successes=32 declines=0
+  gpu during decode: 32 waits, 21568 dispatches, encode 8 ms, wait 223 ms of 233 ms total (1% outside the GPU)
+  gpu clock during decode: executing 218 ms, scheduling 2 ms, round trips + idle 3 ms (of 223 ms waited)
+  decode phases, ms/token:
+    attention              0.0  ( 0.0%)
+    unaccounted            7.3  (100.0%)
+  context at end: 33 tokens (attention cost grows with this)
+  benchmark report: /Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-09-21-metal/qwen3-30b/allpaka-3.json
+airbug bench run: No such file or directory (os error 2)

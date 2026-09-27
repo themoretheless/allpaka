@@ -1,0 +1,166 @@
+Pre-registration for the GLM-4.5-Air parity re-measure, written 2026-09-24T16:56 local,
+before any pair of the run was read.
+
+Why this run exists
+-------------------
+docs/benchmarks/allpaka-vs-llama-metal-status.md carries GLM decode at 0.86x, from
+2026-09-12-matrix/ (allpaka tg32 36.9/38.9/39.0 against llama tg32 45.46 +- 0.21, build
+5266f24da (10809)). That allpaka arm predates the `matvec_q5_0_mv` merge, which
+2026-09-24-q5-0-mv-e2e/paired-32.txt measures at +16.05% clean-band decode on this exact
+model - and the same session's post-port allpaka runs print 45.95 tok/s at tg64. 0.86 x 1.16
+is ~1.0, so the published row is a stale reading of a moved lever, not a settled gap. The
+status doc says this in words; this file is where the numbers get measured instead.
+
+Design
+------
+Paired, fresh process per arm, pp480/tg32 for both engines, AB/BA alternating by pair
+(odd pairs allpaka first, even pairs llama first), two llama processes per pair (its -p and
+-n phases are separate tests), one allpaka process per pair. Gate: 1-minute load average
+< 5 before every process. One warmup pair discarded. Target: 20 usable pairs.
+
+Pre-registered criteria (fixed here, not after seeing data)
+-----------------------------------------------------------
+1. Primary statistic: median of the per-pair ratio allpaka_decode / llama_decode over
+   usable pairs. Secondary: the same median split by run order (AB vs BA); a parity or win
+   claim requires the two halves to agree in sign, because a one-sided order effect means
+   the ratio is tracking position, not engines.
+2. Arm validity (invariant 5 in docs/roadmap.md - a ratio is only as valid as both arms).
+   Each arm is checked against its own history on this model and machine before it is
+   allowed into the ratio:
+     - llama decode anchor 45.46 +- 0.21 (2026-09-12-matrix, build 10809). A pair whose
+       llama arm prints < 35 or > 60 is not usable: 4.3x and 3.0x below-anchor llama arms
+       already killed two published ratios this month (D5).
+     - allpaka decode anchor: 39.0 pre-port, 45.95 post-port at tg64 (paired-32.txt) and
+       39.67 with the knob off. A pair whose allpaka arm prints < 30 is not usable.
+   Divergence beyond ~1.3x from an arm's own anchor is an instrument fault, not a result.
+3. Band, not gate, decides usability. paired-32.txt established that a 1-minute load under
+   5 does not by itself keep a run clean (15 of 30 usable pairs under the gate still
+   printed far below the model's band), so criterion 2 overrides criterion of the gate: a
+   pair that passed the gate and fails the band is reported as disturbed, not averaged in.
+4. Prefill is reported separately and is NOT part of the decode claim. The incumbent's own
+   GLM prefill variance is +-107 on 255 tok/s (same artifact), which is a factor-of-two
+   instrument; only a paired decode claim survives it.
+5. Direction of bias to expect, and how it is handled: llama-bench's graph runs part of
+   the work on 12 CPU threads, allpaka's decode is GPU byte-pipe bound, so background CPU
+   load penalizes the llama arm more than the allpaka arm. Under load > 5 the ratio is
+   biased toward allpaka. Therefore no "allpaka is faster" claim may be made from pairs
+   whose gate load exceeded 5, and any such pairs are counted and named in the artifact.
+6. Kill/accept wording: if the usable-pair median ratio lands in 0.95-1.05 the status-doc
+   row is restated as parity, not 0.86x. If it lands above 1.05 it is a win with the CI. If
+   below 0.95 the 0.86x row stays but is re-dated to the post-port build, and the remaining
+   gap stays open with its dispatch-count and bubble explanations intact.
+
+Command
+-------
+python3 drive.py with PAIRS=20 WARM=1 (driver beside this file in the run directory; raw
+per-process stdout/JSON kept per pair).
+
+Amendment, 2026-09-24T17:03 local - still before any usable pair of this run was read
+--------------------------------------------------------------------------------------------
+The warmup pair and pair 2 came back unusable: allpaka decode 16.00 and 14.20 tok/s, llama
+decode 19.34 and 26.37, with the 1-minute load average at 4.72 and 4.93 - inside the gate.
+Both engines were slowed by the same factor of ~2.5-3, allpaka's fast path reported 32/32
+GPU successes with 0 declines, and swap was at 8.86 of 9.2 GB. So the disturbance is not
+the knob, not the engine, and not visible in vm.loadavg.
+
+Two changes follow, plus a stop rule:
+
+7. In-run thermometer, replacing trust in the load gate: the allpaka process's own prefill
+   absolute is used as the machine's thermometer, because it is tight and history-backed
+   (336-374 tok/s in the clean band of paired-32.txt, 369 in the 2026-09-12 cool matrix).
+   A pair whose allpaka prefill prints below 320 tok/s is disturbed regardless of its load
+   reading, and is excluded from the primary statistic. This is a same-window instrument and
+   needs no history of the other engine.
+8. 60 s pause between processes within a pair, so a burst that destroys one arm has a
+   chance to clear before the other is timed. This does not make the pair valid; 7 decides.
+9. Stop rule: if fewer than 3 of the first 12 pairs pass 7 and 2, this run is abandoned and
+   the parity question is left open rather than answered on disturbed pairs. The reason is
+   in paired-32.txt: an allpaka-vs-allpaka ratio measured on disturbed pairs shifted the
+   same knob from +16.05% to +24.95%, and a cross-engine ratio has no knob-off control to
+   catch that.
+
+Evidence for 7, from paired-32.txt's own 30 usable pairs (appendix there): disturbance is
+not a monotone session drift and not tracked by the load average - the worst chunk (pairs
+9-14, better arm 25.0 tok/s) sat at median load 3.83 while the least disturbed window had
+median load 2.36. A gate on load cannot see what actually moves these numbers.
+
+Amendment, 2026-09-25T01:04 local - still before any usable pair of this run has been read
+-----
+[Correction, 2026-09-25T02:03Z: the heading above is mislabeled in both parts. This
+amendment was written at 01:04Z, which is 05:04 local, so "01:04 local" is wrong by four
+hours. The label is left in place rather than edited away, and the same warning applies
+to the two headings above it (16:56 and 17:03 local on 2026-09-24, unverified): every
+file in this directory carries an mtime of 05:03-05:04 local because a bulk write
+touched all four at once, so mtime is not usable as provenance for these files and no
+timestamp here can be cross-checked against the filesystem.]
+--------------------------------------------------------------------------------------------
+The Command section above said `python3 drive.py` and the driver was not in the repo: it
+lived in /tmp/glm-parity/, which is not an artifact and does not survive a restart. It is
+committed beside this file now, with three changes, none of which touches a criterion:
+
+  - every number is read from the JSON each engine writes (allpaka's
+    `measurements[].summary.median`, llama's `avg_ts`) instead of scraped from the tok/s
+    print, which is task #26's rule and the one this run's own stdout precision would have
+    broken at tg32;
+  - `build_commit`/`build_number` of the llama binary are recorded, because criterion 2
+    anchors the llama arm on build 5266f24da (10809) and the installed binary has moved to
+    b29c606e2 (10964) since - a ratio change must be attributable to allpaka, to llama, or
+    split, and cannot be silently credited to the port;
+  - the allpaka binary is copied into the run directory before the first pair, since this
+    is a shared worktree and another session can rebuild target/release/allpaka mid-run.
+
+`analyze.py` beside it implements criteria 1, 2, 5, 7 and 9 as written - including
+criterion 5's accounting, which reports how many admitted pairs sat above the load-5 gate,
+so that a ratio landing above 1.0 can be checked for the bias direction before anyone
+calls it a win. Defaults now match the protocol: WARM=1, 60 s between processes
+(criterion 8), load gate 5.0 as a permission to attempt rather than an admission test.
+
+Amendment 2026-09-25T23:27Z - criterion 5's hot count could not have been anything but zero,
+found by reading the driver that writes the field it tests
+
+The paragraph above promises that `analyze.py` "reports how many admitted pairs sat above
+the load-5 gate". It reports a number, and that number was pinned at zero by the capture,
+not by the machine. `drive.py` called `wait_quiet(args.load_max)` before each arm and put
+*that* reading - the load that had already been found below the ceiling, since the gate
+returns None and drops the pair otherwise - through `loadmax = max(loadmax, l)`. Every
+`loadmax` a surviving pair could therefore carry is below 5.0 by construction, and
+`hot = [r for r in good if r["loadmax"] >= GATE]` is the empty set for any capture the old
+driver wrote. Criterion 5's own text calls the load gate "a permission to attempt rather
+than an admission test", which is right; the variable that was supposed to express the
+difference was reading only the permitted moment.
+
+Two changes, both in the tools, neither touching a published number (there is none: this
+task has one parked attempt, `parked-attempt-20260924.txt`, and no run directory survives
+in `.airbug-bench/`, so no parity claim in the docs rests on the vacuous count):
+
+* `drive.py` now also reads the load *after* each arm and folds it into `loadmax`, while
+  the pre-arm maximum goes to a new `loadpre_max` field so a capture says which of the two
+  readings it stores. A burst that starts inside an arm is the case the pre-arm reading
+  cannot see; a 1-minute average is still a lagging indicator next to a 90-second process,
+  which is the finding of `../2026-09-25-instrument-co-tenant/README.md` and the reason
+  criterion 7's in-run prefill thermometer stays the real gate here.
+* `analyze.py` names the vacuity instead of reporting a clean zero: when no row of the
+  capture carries `loadpre_max`, the line reads
+  `of those, gate load >= 5   0 (vacuous: this capture stores pre-arm load readings only)`.
+
+Checked by feeding the analyzer two synthetic captures in a temporary directory, since a
+silent instrument must be shown to be able to speak: four rows with `loadmax` 4.70 and no
+`loadpre_max` print the vacuity note; adding one row with `loadmax` 6.20 and the field
+present removes the note and counts `1`. Both captures exit 0, and the second still lists
+the hot pair among the admitted rows - that is criterion 5 as written, which counts and
+names rather than drops.
+
+What this changes for the next run: nothing in the criteria, and one thing in what the
+report can assert. Until a capture carries post-arm readings, its `gate load >= 5   0`
+must not be read as "no admitted pair ran in a burst", only as "no pair was seen to be
+busy at the instant before its own process started".
+
+Correction (2026-09-26, after the re-measure ran and closed the question). Line 33
+of this file put two different geometries in one band: 39.0 is a pp480/**tg32** print
+from the 2026-09-12 cool matrix, while 45.95 is paired-32's pp480/**tg64** post-port
+absolute, which that artifact itself says is not comparable to tg32 reads. So "39.0
+pre-port, 45.95 post-port at tg64" is not one anchor for a tg32 arm, and a floor
+built from it can make a healthy run look 2x low. The paired answer on the current
+build is [../2026-09-26-glm-llama-parity/results.txt](../2026-09-26-glm-llama-parity/results.txt):
+1.0446x over all counted pairs, published as parity rather than as a win.
+

@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "generated_at_unix_ms": 1790364051416,
+    "git_commit": "3ef9d9ce79d9",
+    "model": "/Users/themoretheless/Documents/Sources/allpaka/models/GLM-4.5-Air-Q4_K_M-00001-of-00002.gguf",
+    "model_fingerprint": "8b1893cf1b9d2bb1",
+    "device": "metal",
+    "runtime_profile": "auto",
+    "resolved_overrides": {
+      "ALLPAKA_BENCH_PP": "64",
+      "ALLPAKA_BENCH_REPORT": "/Users/themoretheless/Documents/Sources/allpaka/.airbug-bench/glm-window-cliff/glm-4-report.json",
+      "ALLPAKA_BENCH_SKIP_MTP": "1",
+      "ALLPAKA_BENCH_TG": "8",
+      "ALLPAKA_GPU_WINDOW_GIB": "4",
+      "ALLPAKA_PROFILE": "auto"
+    }
+  },
+  "measurements": [
+    {
+      "name": "prefill",
+      "tokens": 64,
+      "context_tokens": 0,
+      "input_tokens": [
+        23473,
+        24206,
+        24939,
+        25672,
+        26405,
+        27138,
+        27871,
+        28604,
+        29337,
+        70,
+        803,
+        1536,
+        2269,
+        3002,
+        3735,
+        4468,
+        5201,
+        5934,
+        6667,
+        7400,
+        8133,
+        8866,
+        9599,
+        10332,
+        11065,
+        11798,
+        12531,
+        13264,
+        13997,
+        14730,
+        15463,
+        16196,
+        16929,
+        17662,
+        18395,
+        19128,
+        19861,
+        20594,
+        21327,
+        22060,
+        22793,
+        23526,
+        24259,
+        24992,
+        25725,
+        26458,
+        27191,
+        27924,
+        28657,
+        29390,
+        123,
+        856,
+        1589,
+        2322,
+        3055,
+        3788,
+        4521,
+        5254,
+        5987,
+        6720,
+        7453,
+        8186,
+        8919,
+        9652
+      ],
+      "samples_tok_s": [
+        14.718768039115126
+      ],
+      "summary": {
+        "median": 14.718768039115126,
+        "p10": 14.718768039115126,
+        "p90": 14.718768039115126,
+        "min": 14.718768039115126,
+        "max": 14.718768039115126
+      },
+      "fast_path": {
+        "attempts": 0,
+        "successes": 0,
+        "declines": 0
+      },
+      "phases": [
+        {
+          "name": "ffn (experts)",
+          "milliseconds": 0.545711,
+          "calls": 46
+        },
+        {
+          "name": "attention",
+          "milliseconds": 0.422004,
+          "calls": 46
+        },
+        {
+          "name": "embed",
+          "milliseconds": 0.148584,
+          "calls": 1
+        },
+        {
+          "name": "router",
+          "milliseconds": 0.010088,
+          "calls": 46
+        }
+      ],
+      "peak_memory_bytes": null,
+      "kv_bytes_per_token": null
+    },
+    {
+      "name": "decode",
+      "tokens": 8,
+      "context_tokens": 1,
+      "input_tokens": [
+        63752,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "samples_tok_s": [
+        28.98332824615541
+      ],
+      "summary": {
+        "median": 28.98332824615541,
+        "p10": 28.98332824615541,
+        "p90": 28.98332824615541,
+        "min": 28.98332824615541,
+        "max": 28.98332824615541
+      },
+      "fast_path": {
+        "attempts": 8,
+        "successes": 8,
+        "declines": 0
+      },
+      "phases": [
+        {
+          "name": "attention",
+          "milliseconds": 0.000582,
+          "calls": 7
+        }
+      ],
+      "peak_memory_bytes": null,
+      "kv_bytes_per_token": null
+    }
+  ]
+}

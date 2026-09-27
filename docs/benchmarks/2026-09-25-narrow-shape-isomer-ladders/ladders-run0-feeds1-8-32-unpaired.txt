@@ -1,0 +1,72 @@
+
+running 1 test
+metal: Apple M4 Max attached, 0.4 GiB of weights shared with the GPU
+--- isomer ladders x8, region 408 MB, feeds [1, 8, 32], 6 passes ---
+
+### ladder 0: 3072 blocks/dispatch (3 MB per dispatch for q4_k)
+q4_k  [ 768,1024] nb=4  rows=6144  sets=64 | feed=1   178.7 best  114.6 med 0.729m | feed=8   271.0 best  220.1 med 0.596m | feed=32  279.8 best  241.8 med 0.583m
+q6_k  [ 768,1024] nb=4  rows=6144  sets=64 | feed=1   186.7 best  174.3 med 0.761m | feed=8   297.2 best  279.8 med 0.654m | feed=32  314.6 best  298.5 med 0.655m
+q8_0  [ 768,1024] nb=32 rows=6144  sets=61 | feed=1   245.3 best  226.3 med 1.000m | feed=8   454.5 best  423.8 med 1.000m | feed=32  480.0 best  447.0 med 1.000m
+q4_k  [1024, 768] nb=3  rows=8192  sets=64 | feed=1   151.1 best  130.2 med 0.645m | feed=8   229.9 best  222.6 med 0.504m | feed=32  238.7 best  233.0 med 0.493m
+q6_k  [1024, 768] nb=3  rows=8192  sets=64 | feed=1   176.0 best  167.0 med 0.752m | feed=8   255.0 best  253.1 med 0.559m | feed=32  269.3 best  266.2 med 0.556m
+q8_0  [1024, 768] nb=24 rows=8192  sets=61 | feed=1   234.2 best  228.8 med 1.000m | feed=8   456.3 best  452.7 med 1.000m | feed=32  484.4 best  466.8 med 1.000m
+q4_k  [1536, 512] nb=2  rows=12288 sets=64 | feed=1   148.4 best  139.2 med 0.634m | feed=8   222.8 best  211.9 med 0.499m | feed=32  235.4 best  211.7 med 0.496m
+q6_k  [1536, 512] nb=2  rows=12288 sets=64 | feed=1   184.9 best  152.3 med 0.790m | feed=8   287.6 best  247.5 med 0.645m | feed=32  305.7 best  256.5 med 0.644m
+q8_0  [1536, 512] nb=16 rows=12288 sets=61 | feed=1   234.0 best  195.5 med 1.000m | feed=8   446.2 best  406.4 med 1.000m | feed=32  474.9 best  431.6 med 1.000m
+
+### ladder 1: 6144 blocks/dispatch (6 MB per dispatch for q4_k)
+q4_k  [ 768,2048] nb=8  rows=6144  sets=57 | feed=1   248.4 best  232.6 med 0.787m | feed=8   360.3 best  319.7 med 0.659m | feed=32  370.5 best  324.7 med 0.657m
+q6_k  [ 768,2048] nb=8  rows=6144  sets=40 | feed=1   257.1 best  233.6 med 0.815m | feed=8   372.2 best  310.7 med 0.681m | feed=32  384.0 best  313.6 med 0.681m
+q8_0  [ 768,2048] nb=64 rows=6144  sets=31 | feed=1   315.5 best  286.1 med 1.000m | feed=8   546.9 best  503.3 med 1.000m | feed=32  563.8 best  522.2 med 1.000m
+q4_k  [1024,1536] nb=6  rows=8192  sets=57 | feed=1   227.0 best  197.3 med 0.747m | feed=8   335.4 best  259.2 med 0.614m | feed=32  346.4 best  279.2 med 0.611m
+q6_k  [1024,1536] nb=6  rows=8192  sets=40 | feed=1   256.5 best  222.1 med 0.844m | feed=8   377.7 best  298.4 med 0.692m | feed=32  389.1 best  310.7 med 0.686m
+q8_0  [1024,1536] nb=48 rows=8192  sets=31 | feed=1   304.1 best  277.7 med 1.000m | feed=8   545.8 best  490.1 med 1.000m | feed=32  567.2 best  508.5 med 1.000m
+q4_k  [1536,1024] nb=4  rows=12288 sets=57 | feed=1   230.6 best  199.5 med 0.776m | feed=8   351.9 best  311.7 med 0.652m | feed=32  368.1 best  343.6 med 0.631m
+q6_k  [1536,1024] nb=4  rows=12288 sets=40 | feed=1   257.1 best  254.6 med 0.865m | feed=8   370.2 best  342.4 med 0.686m | feed=32  387.8 best  334.6 med 0.665m
+q8_0  [1536,1024] nb=32 rows=12288 sets=31 | feed=1   297.1 best  279.7 med 1.000m | feed=8   539.8 best  475.1 med 1.000m | feed=32  583.5 best  474.9 med 1.000m
+q4_k  [2048, 768] nb=3  rows=16384 sets=57 | feed=1   214.5 best  143.0 med 0.719m | feed=8   283.8 best  210.3 med 0.513m | feed=32  295.2 best  216.2 med 0.513m
+q6_k  [2048, 768] nb=3  rows=16384 sets=40 | feed=1   231.2 best  168.6 med 0.775m | feed=8   305.5 best  227.5 med 0.552m | feed=32  312.1 best  235.5 med 0.543m
+q8_0  [2048, 768] nb=24 rows=16384 sets=31 | feed=1   298.2 best  264.6 med 1.000m | feed=8   553.1 best  450.6 med 1.000m | feed=32  575.0 best  479.5 med 1.000m
+
+### ladder 2: 12288 blocks/dispatch (13 MB per dispatch for q4_k)
+q4_k  [ 768,4096] nb=16 rows=6144  sets=29 | feed=1   310.8 best  252.0 med 0.890m | feed=8   419.2 best  296.5 med 0.794m | feed=32  435.1 best  284.8 med 0.748m
+q6_k  [ 768,4096] nb=16 rows=6144  sets=20 | feed=1   312.0 best  229.5 med 0.894m | feed=8   413.8 best  255.6 med 0.783m | feed=32  428.3 best  246.0 med 0.736m
+q8_0  [ 768,4096] nb=128 rows=6144  sets=16 | feed=1   349.1 best  285.8 med 1.000m | feed=8   528.1 best  434.7 med 1.000m | feed=32  581.8 best  449.5 med 1.000m
+q4_k  [1024,3072] nb=12 rows=8192  sets=29 | feed=1   295.8 best  192.0 med 0.868m | feed=8   421.1 best  223.5 med 0.808m | feed=32  442.2 best  195.6 med 0.758m
+q6_k  [1024,3072] nb=12 rows=8192  sets=20 | feed=1   311.7 best  170.4 med 0.914m | feed=8   398.6 best  197.5 med 0.765m | feed=32  413.2 best  185.3 med 0.708m
+q8_0  [1024,3072] nb=96 rows=8192  sets=16 | feed=1   341.0 best  238.2 med 1.000m | feed=8   521.0 best  335.4 med 1.000m | feed=32  583.4 best  329.0 med 1.000m
+q4_k  [1536,2048] nb=8  rows=12288 sets=29 | feed=1   306.0 best  175.8 med 0.856m | feed=8   431.7 best  256.8 med 0.798m | feed=32  444.7 best  238.4 med 0.741m
+q6_k  [1536,2048] nb=8  rows=12288 sets=20 | feed=1   315.5 best  182.7 med 0.883m | feed=8   426.7 best  208.0 med 0.789m | feed=32  442.3 best  190.1 med 0.737m
+q8_0  [1536,2048] nb=64 rows=12288 sets=16 | feed=1   357.5 best  256.4 med 1.000m | feed=8   541.1 best  385.8 med 1.000m | feed=32  600.4 best  394.3 med 1.000m
+q4_k  [2048,1536] nb=6  rows=16384 sets=29 | feed=1   290.1 best  146.8 med 0.814m | feed=8   397.7 best  174.9 med 0.719m | feed=32  411.9 best  160.0 med 0.689m
+q6_k  [2048,1536] nb=6  rows=16384 sets=20 | feed=1   312.4 best  146.7 med 0.877m | feed=8   422.7 best  196.5 med 0.764m | feed=32  436.0 best  175.9 med 0.730m
+q8_0  [2048,1536] nb=48 rows=16384 sets=16 | feed=1   356.3 best  237.9 med 1.000m | feed=8   553.2 best  379.7 med 1.000m | feed=32  597.5 best  407.3 med 1.000m
+q4_k  [3072,1024] nb=4  rows=24576 sets=29 | feed=1   298.2 best  158.0 med 0.871m | feed=8   417.0 best  200.6 med 0.752m | feed=32  429.5 best  164.5 med 0.684m
+q6_k  [3072,1024] nb=4  rows=24576 sets=20 | feed=1   306.2 best  138.4 med 0.895m | feed=8   416.7 best  178.4 med 0.751m | feed=32  424.1 best  160.6 med 0.675m
+q8_0  [3072,1024] nb=32 rows=24576 sets=16 | feed=1   342.3 best  223.1 med 1.000m | feed=8   554.7 best  313.3 med 1.000m | feed=32  628.1 best  313.1 med 1.000m
+q4_k  [4096, 768] nb=3  rows=32768 sets=29 | feed=1   274.8 best  113.1 med 0.768m | feed=8   323.8 best  160.1 med 0.577m | feed=32  334.0 best  144.2 med 0.541m
+q6_k  [4096, 768] nb=3  rows=32768 sets=20 | feed=1   275.4 best  124.8 med 0.770m | feed=8   334.1 best  154.5 med 0.595m | feed=32  345.5 best  167.1 med 0.559m
+q8_0  [4096, 768] nb=24 rows=32768 sets=16 | feed=1   357.6 best  256.0 med 1.000m | feed=8   561.1 best  314.7 med 1.000m | feed=32  617.6 best  267.0 med 1.000m
+
+### ladder 3: 24576 blocks/dispatch (27 MB per dispatch for q4_k)
+q4_k  [1536,4096] nb=16 rows=12288 sets=15 | feed=1   356.8 best  139.5 med 0.942m | feed=8   478.2 best  156.9 med 1.225m | feed=32  490.1 best  118.3 med 1.260m
+q6_k  [1536,4096] nb=16 rows=12288 sets=10 | feed=1   357.3 best  111.8 med 0.943m | feed=8   395.0 best  134.0 med 1.012m | feed=32  407.1 best  116.4 med 1.047m
+q8_0  [1536,4096] nb=128 rows=12288 sets=8  | feed=1   378.7 best  176.3 med 1.000m | feed=8   390.5 best  192.8 med 1.000m | feed=32  389.0 best  170.6 med 1.000m
+q4_k  [2048,3072] nb=12 rows=16384 sets=15 | feed=1   350.4 best  106.8 med 0.923m | feed=8   471.5 best  131.6 med 1.184m | feed=32  485.5 best  115.3 med 1.213m
+q6_k  [2048,3072] nb=12 rows=16384 sets=10 | feed=1   351.6 best  108.1 med 0.926m | feed=8   404.5 best  129.4 med 1.016m | feed=32  404.1 best  122.6 med 1.009m
+q8_0  [2048,3072] nb=96 rows=16384 sets=8  | feed=1   379.6 best  222.2 med 1.000m | feed=8   398.3 best  232.1 med 1.000m | feed=32  400.4 best  204.3 med 1.000m
+q4_k  [3072,2048] nb=8  rows=24576 sets=15 | feed=1   333.5 best  113.5 med 0.863m | feed=8   440.4 best  152.0 med 1.094m | feed=32  451.3 best  122.4 med 1.120m
+q6_k  [3072,2048] nb=8  rows=24576 sets=10 | feed=1   320.9 best  105.4 med 0.831m | feed=8   374.7 best  135.0 med 0.931m | feed=32  379.7 best  119.5 med 0.942m
+q8_0  [3072,2048] nb=64 rows=24576 sets=8  | feed=1   386.4 best  195.7 med 1.000m | feed=8   402.4 best  218.4 med 1.000m | feed=32  403.0 best  236.6 med 1.000m
+q4_k  [4096,1536] nb=6  rows=32768 sets=15 | feed=1   340.3 best   79.8 med 0.880m | feed=8   422.9 best  102.9 med 1.040m | feed=32  441.0 best  101.8 med 1.071m
+q6_k  [4096,1536] nb=6  rows=32768 sets=10 | feed=1   335.0 best  103.5 med 0.866m | feed=8   403.3 best  132.6 med 0.992m | feed=32  405.4 best  108.4 med 0.984m
+q8_0  [4096,1536] nb=48 rows=32768 sets=8  | feed=1   386.6 best  191.4 med 1.000m | feed=8   406.5 best  213.3 med 1.000m | feed=32  411.8 best  165.0 med 1.000m
+q4_k  [6144,1024] nb=4  rows=49152 sets=15 | feed=1   345.0 best   86.3 med 0.978m | feed=8   448.0 best  125.4 med 1.194m | feed=32  455.7 best  113.7 med 1.143m
+q6_k  [6144,1024] nb=4  rows=49152 sets=10 | feed=1   323.4 best  105.9 med 0.916m | feed=8   381.6 best  138.6 med 1.017m | feed=32  375.6 best  112.9 med 0.942m
+q8_0  [6144,1024] nb=32 rows=49152 sets=8  | feed=1   352.9 best  233.8 med 1.000m | feed=8   375.2 best  242.7 med 1.000m | feed=32  398.7 best  182.5 med 1.000m
+q4_k  [8192, 768] nb=3  rows=65536 sets=15 | feed=1   309.8 best   51.7 med 0.826m | feed=8   348.4 best   81.7 med 0.883m | feed=32  353.6 best   81.0 med 0.916m
+q6_k  [8192, 768] nb=3  rows=65536 sets=10 | feed=1   304.7 best  101.4 med 0.812m | feed=8   343.0 best  112.0 med 0.869m | feed=32  339.2 best  105.4 med 0.879m
+q8_0  [8192, 768] nb=24 rows=65536 sets=8  | feed=1   375.1 best  226.4 med 1.000m | feed=8   394.8 best  239.2 med 1.000m | feed=32  386.0 best  208.3 med 1.000m
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 333.65s
+

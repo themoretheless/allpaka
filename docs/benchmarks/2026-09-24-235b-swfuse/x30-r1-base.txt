@@ -1,0 +1,58 @@
+airbug: traces and logs -> http://localhost:4318
+prewarmed 17.3 GiB of weights in 23.4s
+metal: Apple M4 Max attached, 17.3 GiB of weights shared with the GPU
+engine bench: qwen3-30b-a3b-Q4_K_M (48 layers, qwen3moe, MoE)
+  capabilities:
+    model: arch=qwen3moe layers=48 moe=true
+    model-support: Supported (Qwen dense, MoE, and hybrid GDN kernels are implemented)
+    profile: max-performance
+    gpu: backend=metal attached=true
+    weights: gpu-resident=true
+    residency: windows=1 set=true
+    encoders: concurrent, resource-barriers=enabled
+    kv: page-aligned-f16, checked-at-session-runtime
+    prefill: gpu-counters-enabled
+    decode: checked-whole-token-fast-path
+    tensor-types:
+      F32: tensors=241 bytes=0.05 GiB matmul-kernel=yes
+      Q4K: tensors=289 bytes=13.28 GiB matmul-kernel=yes
+      Q6K: tensors=49 bytes=3.95 GiB matmul-kernel=yes
+    overrides:
+      none
+  prefill argmax=319
+  prefill   480 tok in   0.32 s    1488.5 tok/s
+  gpu during prefill: 2 waits, 481 dispatches, encode 1 ms, wait 321 ms of 322 ms total (0% outside the GPU)
+  gpu clock during prefill: executing 320 ms, scheduling 0 ms, round trips + idle 0 ms (of 321 ms waited)
+  prefill phases, ms/token:
+    embed                  0.0  ( 0.2%)
+    attention              0.0  ( 0.2%)
+    ffn (experts)          0.0  ( 0.1%)
+    router                 0.0  ( 0.0%)
+    unaccounted            0.7  (99.5%)
+decode profile, ms/token (GPU counters, one submit):
+  resnorm     0.742 (11.1%)
+  qkv         1.144 (17.1%)
+  attend      0.334 ( 5.0%)
+  wo          0.729 (10.9%)
+  router      0.629 ( 9.4%)
+  gate_up     1.763 (26.4%)
+  swiglu      0.116 ( 1.7%)
+  down        1.221 (18.3%)
+  combine     0.000 ( 0.0%)
+  head        0.000 ( 0.0%)
+  argmax      0.000 ( 0.0%)
+  decode     64 tok in   0.68 s      94.4 tok/s
+  gpu path decode: attempts=64 successes=64 declines=0
+  gpu during decode: 64 waits, 43136 dispatches, encode 131 ms, wait 534 ms of 678 ms total (2% outside the GPU)
+  gpu clock during decode: executing 519 ms, scheduling 6 ms, round trips + idle 9 ms (of 534 ms waited)
+  decode phases, ms/token:
+    experts                3.1  (29.5%)
+    qkv                    1.1  (10.6%)
+    attention              1.1  (10.3%)
+    norm                   0.7  ( 7.0%)
+    router                 0.6  ( 5.8%)
+    other                  0.2  ( 1.7%)
+    unaccounted            3.7  (35.0%)
+  context at end: 65 tokens (attention cost grows with this)
+  benchmark report: docs/benchmarks/2026-09-24-235b-swfuse/x30-r1-base.json
+airbug bench run: target/allpaka-bench/airbug-1790283927148041000-4207

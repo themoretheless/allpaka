@@ -1,0 +1,70 @@
+# Mutation evidence for the indexed `_mv` row-count guard
+
+The guard: `mv_indexed_kernel` lets an INDEXED (routed-expert) dispatch use a
+llama-structure `_mv` kernel only when `n_out % NR0 == 0`, where
+`NR0 = 32 / lanes_per_row(ty, n_in)`. A SIMD group covers NR0 consecutive rows
+and the indexed form resolves one expert slot per group, so a group whose rows
+straddle a slot boundary keeps slot A's weight pointer while indexing slot B's
+rows - wrong numbers, no crash. `docs/decode-opts.md` cites this file for the
+claim that the guard is checked by something that can actually fail.
+
+Two checks back it:
+
+* `gpu::metal::tests::indexed_mv_routing_respects_rows_per_simd_group` - the
+  routing decision itself, at every `ALLPAKA_Q4/Q5/Q8_NR0` arm.
+* `gpu_parity::indexed_matvec_matches_cpu_reference` - the resulting numbers,
+  Q2K..Q8_0 through `gpu::indexed_matvec_rows`, which routes the way decode
+  does.
+
+## The mutation
+
+`if n_out % (32 / lpr) == 0 {` in `mv_indexed_kernel` replaced by
+`if true || n_out % (32 / lpr) == 0 {` - i.e. the guard present in name, always
+taking the fast path. Everything else unchanged.
+
+```
+$ cargo test -p allpaka-backend --test gpu_parity -- --test-threads=1
+thread 'indexed_matvec_matches_cpu_reference' panicked at crates/allpaka-backend/tests/gpu_parity.rs:364:21:
+Q3K n_out=5 expert 0 slot 1 row 0: gpu 2.4060137 vs cpu 0.96270525
+test result: FAILED. 0 passed; 1 failed; ...
+
+$ env ALLPAKA_Q2_MV=1 ALLPAKA_Q2_NR0=4 cargo test -p allpaka-backend --test gpu_parity -- --test-threads=1 indexed_matvec
+thread 'indexed_matvec_matches_cpu_reference' panicked at crates/allpaka-backend/tests/gpu_parity.rs:364:21:
+Q2K n_out=6 expert 0 slot 1 row 0: gpu 0.26005566 vs cpu -2.0029268
+test result: FAILED. 0 passed; 1 failed; ...
+```
+
+Both fail at the first arm where `n_out` is not a multiple of that kernel's NR0
+(q3_k NR0=2 with n_out=5; q2_k NR0=4 with n_out=6), and the wrong value is a
+plausible finite number rather than NaN - which is the point: without the guard
+this is silent numerical corruption, not a crash. Restoring the line makes the
+suite 10/10 again.
+
+## Two traps this test walked into first, both worth not repeating
+
+1. **A naive synthetic indexed batch cannot fail.** The first version routed
+   experts at contiguous ids (`0, 1, 2`) with one shared `x` row. A straddling
+   group then reads slot A's weights at rows past `n_out` - which, in a
+   contiguous pack, are exactly slot B's first rows - and against a shared input
+   row that computes the correct answer by accident. The test passed with the
+   guard deleted. It now routes at non-adjacent, out-of-order ids
+   (`[4, 0, 3]`) over a six-expert pack and pre-fills the output with NaN, so a
+   wrong slot and an unwritten row both show up.
+2. **Staging the ids in the y arena needs 16-byte padding.** Three slots put
+   the output at offset 12 bytes, and every indexed kernel writes `y` as
+   `float4`. The same shape then passed five runs and failed five runs with the
+   guard correctly in place, which reads like flakiness and is not: it is
+   undefined alignment. `gpu::indexed_matvec_rows` now rounds the id region up
+   to a float4 (`id_pad`). Real decode never sees this, because its arena rows
+   are 256-aligned.
+
+## Repro
+
+```sh
+cd "$(git rev-parse --show-toplevel)"
+# baseline
+cargo test -p allpaka-backend --test gpu_parity -- --test-threads=1
+# mutate mv_indexed_kernel's divisibility test to `if true || ...`, rerun,
+# then restore. Also worth: env ALLPAKA_Q2_MV=1 ALLPAKA_Q2_NR0=4 for the
+# q2_k arm, and ALLPAKA_Q5_NR0=2/4 for the arm the shipped default uses.
+```

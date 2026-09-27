@@ -1,0 +1,109 @@
+# Pre-registration: re-measure ALLPAKA_Q4_NR0 (and Q8_NR0) in the indexed geometry
+
+Written 2026-09-25 21:40 UTC, before any counted round exists. Nothing here has
+been run: the GPU is held by the GLM `SHARED_STAGGER` series and the rule for
+this repo is no compiling while a benchmark runs, so this file is the whole
+deliverable of its sitting.
+
+## Why this is a question at all
+
+`docs/decode-opts.md` keeps `Q4_NR0` at 2 because "Q4=4 regresses the wide
+shapes" - a 2026-09-12 microbench number, from the era the same file later
+disowns ("the same kernels read 178 against 306 GB/s minutes apart") and in the
+geometry it later disowns (flat single-column, not the indexed ×8 a MoE decode
+issues). The sibling arm of the same knob family, `Q5_NR0`, was re-measured
+after that correction and **flipped to 4**. `q4_k` is the largest per-token byte
+share of every model in this repo's ledger (GLM 8.57 GiB/token, 30B 1.79), so
+this is the highest-value unexamined default the file carries.
+
+`Q8_NR0` gets the same harness with a stated lower prior: `q8_0` is byte-bound,
+so a rows-per-SIMD-group change has little per-block ALU cost to reclaim, and
+its recorded justification ("best at 2, ~513 GB/s") is a figure from the
+discredited meter.
+
+## Instrument
+
+`crates/allpaka-backend/tests/gpu_ffnbench.rs::indexed_matvecs_report_effective_bandwidth`
+- already post-correction: ~1 s burn per format before any window is timed,
+  windows sized to ~150 ms, formats interleaved inside a pass, ≥384 MiB streamed
+  per format so the working set is DRAM rather than last-level cache, and feed
+  depth swept (per-commit batching, the thing that flipped a published negative
+  into a shipped default once already).
+
+Run:
+
+```
+ALLPAKA_Q4_NR0=$n ALLPAKA_BENCH_FEEDS=1,8 ALLPAKA_BENCH_SWFUSES=0,1 \
+  cargo test -q --release -p allpaka-backend --test gpu_ffnbench -- \
+  --ignored --nocapture
+```
+
+## Arms and order
+
+- Series Q4: `ALLPAKA_Q4_NR0` ∈ {1, 2, 4}, 2 = the default under test.
+- Series Q8: `ALLPAKA_Q8_NR0` ∈ {1, 2, 4}. One knob at a time; the other is left
+  unset so it takes its own default.
+- Every arm is its own process (all three knobs are `OnceLock` reads), so the
+  rotation is across processes: order within round *r* is the arm list rotated
+  by *r*, five rounds ⇒ 15 processes per series.
+- Nothing else in the environment changes between processes; the driver records
+  `git rev-parse HEAD`, `git status --porcelain` for the tree, and the sha256 of
+  the test binary in a provenance line, and refuses to mix two binaries in one
+  series.
+
+## Primary metric, and the control that makes it a ratio
+
+Per process, for each of the four `q4_k` rows the test prints (`q4_k`,
+`q4_k control`, `q4_k 30b gate/up`, `q4_k glm gate/up`), the statistic is
+
+    ratio(shape, feed, fuse) = best_GBps(q4_k row) / best_GBps(q6_k down row)
+
+`q6_k` is the meter because the Q4 knob cannot touch it (and it is wide,
+27.3% of the 30B's decode bytes, so it is a shape this model family really
+dispatches). The Q8 series uses `q6_k` for its `q8_0` rows the same way, and its
+own `ALLPAKA_Q8_NR0` is what varies there.
+
+Ratios are taken from the test's own stdout at full float; GB/s is printed to
+0.1, which is 3+ digits on these rates, so no print-precision quantisation
+applies here (that trap is for ms/token fields).
+
+## Gates on the instrument, applied before a round is counted
+
+1. `gpu::msl_compile_failed()` must be false - the test already asserts it, and
+   the assertion message is the reason it is an assert rather than a skip.
+2. Absolute meter band: the first round of the series establishes
+   `best_GBps(q6_k down, feed=8)`; a later process whose meter is more than 15%
+   below that value is discarded, not averaged. This is the
+   "gate the meter's absolute value, not only the within-run repeat" rule, and
+   the discard count is published.
+3. Null check: within one arm, the four passes of the test's own interleaved
+   loop must agree to ≤5% on the q4_k/q6_k ratio. A round wider than that is a
+   contended round.
+4. The driver records `vm.loadavg` before and after every process and marks a
+   process whose load crossed 8.0 at either end as vetoed (same thresholds as
+   `docs/benchmarks/2026-09-25-glm-shared-stagger/drive.py`, which earned them).
+
+## Decision rule
+
+Flip the default only if, after gates 1-4, some arm beats NR0=2 by **>3% on the
+median of the per-round q4_k ratios in at least three of the four q4_k shapes,
+with the same sign in at least four of five rounds**. Anything narrower is
+published as a negative with the same table, because the e2e share it would buy
+is smaller than the band anyway: at 3% of a kernel that carries a model's
+largest byte share, the predicted tok/s movement is a few percent at most, and
+that is exactly the size class this repo has twice measured into non-existence.
+
+If an arm does pass, it does not ship until:
+- `gpu_parity::indexed_matvec_matches_cpu_reference` is green at that arm (the
+  `n_out % NR0` guard for the indexed path is unit-tested at every arm already,
+  but parity is the correctness half of the flip), and
+- one paired e2E A/B on the model whose shape dominates (`ALLPAKA_Q4_NR0` is
+  read for `Q4K` matvecs only, so the test model is qwen3-30b), with the stagger
+  driver's control/null arm to price the noise band.
+
+## What is *not* claimed here
+
+The 2026-09-12 verdicts are not being called wrong - they are being called
+unevidenced for the geometry that decides them. It is entirely possible NR0=2
+wins in the indexed shape too; the point of pre-registering is that the answer
+has to come from an instrument whose repeatability this file can state.

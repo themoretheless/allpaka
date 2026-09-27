@@ -1,0 +1,95 @@
+# Pre-registration: is the shipped default of the down+combine fold right? (ALLPAKA_DCOMB)
+
+Written 2026-09-25T23:06Z, before any counted pair. `ALLPAKA_DCOMB` is the knob the
+knob-reachability scan found being read by the shipped decoder and named by no
+document (`../2026-09-25-knob-reachability/README.md`, Finding 2):
+`fn dcomb()` is `map_or(true, |v| v != "0")`, so the fold is **ON by default**, and
+the only number ever attached to it is a source comment claiming ~0.3 ms/token on
+a Qwen3-30B-class model. The registry row in `docs/decode-opts.md` says
+"registered, still unmeasured". This run measures it.
+
+## What the knob does, and what the two arms differ by
+
+With the fold ON, the decode down projection and the MoE combine step go out in one
+dispatch through the COMBINE function constant, and `if down_combine.is_some()`
+skips the `bar_c(&enc, b'f')` barrier that otherwise separates them. The gates
+observed by hand at `dcdc131`: down kernel must be `matvec_q4_k_mv` or
+`matvec_q6_k_mv`, `shared.is_none()`, `hidden % 2 == 0`, `n_used <= 32`.
+
+* `plain` - env unset, i.e. the shipped behaviour (fold ON).
+* `unfold` - `ALLPAKA_DCOMB=0`, the challenge arm.
+* `null` - `ALLPAKA_DCOMB=1`, which `dcomb()` reads identically to unset, so the
+  control series is a true zero-effect pair measured with the same instrument.
+
+Model `models/qwen3-30b-a3b-Q4_K_M.gguf` (18.6 GiB), PP=3072, TG=320,
+`ALLPAKA_BENCH_SKIP_MTP=1`, `ALLPAKA_PROFILE=max-performance`. Chosen because it is
+the only local model whose shape passes all four gates: GLM-4.5-Air and the 35B have
+a shared expert, and the 235B's experts are q2_k.
+
+## The structural witness comes first
+
+The barrier the fold skips is 24 dispatches per token on this model. That is an
+exact, load-independent integer, so criterion 4 below is the check that the two arms
+are an A/B of this knob at all, and it was seen once before this file was written:
+an uncounted probe at 23:04Z (PP=512, TG=64, one run per arm, no alternation, not a
+result) printed 43136 dispatches with the env unset against 44672 with
+`ALLPAKA_DCOMB=0` - 1536/64 tokens = 24 per token - and 136.8 against 120.2 tok/s.
+That wall gap is 13.8 %, far outside anything this design considers credible for 24
+skipped dispatches (~40 us each, ~1 ms/token on a 7.3 ms/token baseline), and the
+probe has every defect a counted series is built to remove: one process per arm, no
+alternation, 64 tokens, and the slower arm ran second on a warmer page cache. It is
+recorded as the reason to run the series, not as its answer.
+
+## Instrument
+
+`drive.py` here is a copy of
+[`../2026-09-25-glm-shared-stagger/drive.py`](../2026-09-25-glm-shared-stagger/drive.py)
+with MODEL, PP/TG, the arm table and the series arm names changed, and nothing else.
+It therefore carries that driver's fixes as of 22:45Z, including the process-wide
+rate pool the drift veto needs (the stagger run had it declared but never populated -
+see the 22:47Z amendment in `../2026-09-25-glm-shared-stagger/preregistration.txt`).
+Unchanged: uncounted priming run, AB/BA alternation, 25 s cooldown, `LOAD_VETO=8.0`
+over the four load readings of a pair, `DRIFT_VETO=0.85` against the running median,
+`LAUNCH_LOAD=5.0` before the priming run, per-arm GPU counters (waits, dispatches,
+encode ms, wait ms, total ms), seconds to the residency census line, and the rule
+that a pair whose greedy continuations differ is not an ablation. `analyze.py`
+applies the three drop rules from the file contents rather than trusting captured
+flags. Launch (from the clean HEAD worktree, so nothing of this session's WIP is in
+the binary):
+
+    cd /tmp/allpaka-head && env -u ALLPAKA_DCOMB -u ALLPAKA_SHARED_STAGGER \
+      python3 docs/benchmarks/2026-09-25-dcomb-ab/drive.py --real 14 --control 6 \
+      --out .airbug-bench/dcomb-run1
+
+## Criteria
+
+1. Both arms of every counted pair report `declines=0` and `attempts == successes`,
+   and identical greedy continuations.
+2. The control series (`null` vs `plain`) sets the band, as in the stagger design:
+   if the admissible control pairs' half-spread is at or above 3 %, this run reports
+   the interval it excludes and the knob stays "registered, unmeasured at this
+   granularity on this machine while a session is live".
+3. Primary statistic: median of the `unfold/plain` decode tok/s ratios over 14 pairs,
+   with SEM and the sign count, from the full-precision report medians.
+4. Structural: every counted pair must show 24 more dispatches per token in the
+   `unfold` arm. A pair that shows 0 does not exercise the fold and is excluded from
+   the ratio pool as a non-ablation - named, not silently dropped.
+5. Decision. The default is ON, so a win for `unfold` means the shipped default is
+   wrong and flipping it becomes the next task; a win for `plain` beyond the band
+   confirms the default and replaces the code comment's ~0.3 ms/token with this
+   run's number; anything inside the band keeps the default and records the knob as
+   measured-neutral with its interval.
+
+## Prior, stated before any counted pair
+
+Fold ON wins by 0.5-2 % on wall. The mechanism is real but small: 24 host-side
+dispatch decisions per token on a path that is byte-pipe limited, where the bytes do
+not change. The probe's 13.8 % is read as an instrument artifact of a 64-token
+single-run pair for the reasons listed above, and if a counted series reproduces
+anything near it the first thing to suspect is the instrument, not the fold.
+
+## Limits of transfer
+
+qwen3-30b-a3b-Q4_K_M only, for the gates named at the top. No model on this machine
+with a shared expert or with q2_k/q3_k experts can build the fold, so this is not a
+fleet-wide verdict, and the registry row must keep saying so.
