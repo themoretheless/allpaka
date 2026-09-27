@@ -1,0 +1,68 @@
+Diagnostic 1 - why the rehearsal's prefill ratio read 0.41x, and what is left over.
+
+    date      2026-09-26 20:14-20:16 local (16:14-16:16Z)
+    model     models/qwen3-0.6b-Q8_0.gguf  (arch qwen3, 28 layers, dense)
+    binary    target/release/allpaka from 1cc7a27
+    harness   scripts/bench-compare.sh, unchanged, TG=8 REPEATS=3
+    shape     PP swept 64 / 256 / 1024 / 4096
+    state     machine load 1-minute 8.5-10.4 across the whole sweep, and a
+              sibling cargo build live the entire time. This is exactly the
+              condition the launch gate in ../wait-then-run.sh exists to
+              refuse, so these rows are indicative of SHAPE only. Both arms
+              suffered, so a ratio is more portable than either throughput.
+
+## The 0.41x was an instrument artifact, on three separate counts
+
+1. Single sample. The rehearsal's 2467.93 tok/s was one sample at load 14.36.
+   Re-measuring the same shape three times here gives 2309 / 3969 / 4017 -
+   the rehearsal caught the low end of its own distribution. Median 3969, not
+   2468.
+2. PP=64 is a fixed-cost shape. The log partitions 28 ms of wall into 12 ms of
+   CPU encode and 14 ms waited, for 281 dispatches over 28 layers. llama does
+   the whole 64-token prefill in 10.5 ms, so allpaka's CPU encode ALONE is
+   more than llama's entire answer at this shape.
+3. The ratio moves with PP, which a kernel gap would not do:
+
+    PP      allpaka med   llama med   ratio   allpaka dispatches/waits
+    64          3969        6127      0.64x  281 / 29   (1 chunk)
+    256         7734       10255      0.75x  281 / 29   (1 chunk)
+    1024        8782        8972      0.97x  562 / 58   (2 chunks of 512)
+    4096        5468        7326      0.74x  2248 / 232 (8 chunks of 512)
+
+   At PP=1024 the GPU clock says executing 101 ms inside a 125 ms wall, while
+   llama's whole 1024-token prefill takes 114 ms. allpaka's GPU is ahead of
+   llama's end-to-end there; the wall is what loses, and it loses by 3%.
+
+`docs/moe-prefill.md` already documents allpaka prefill at or above llama
+parity on MoE (qwen35moe 1412 vs 1305 = 108%; qwen3-30b +6.8%; GLM at
+parity), and it records 0.6B Q8_0 prefill at 9179 tok/s. 2468 was never a
+throughput claim; it was 64 tokens of setup.
+
+## What IS left over: a long-context prefill regression at PP=4096
+
+This one is not fixed cost and does not go away with a bigger PP.
+
+    PP=1024 -> PP=4096 is 4x the tokens.
+      allpaka wall  125 -> 749 ms   = 6.0x
+      llama   wall  114 -> 559 ms   = 4.9x
+
+Attention is quadratic so both must exceed 4x, but allpaka exceeds it by
+22% more than llama does. The GPU accounts for it, not the CPU: executing
+725 ms of a 786 ms wall (92%), whereas at PP=1024 executing was 101 of
+125 ms (81%). Consistent with a longer per-chunk fixed cost too - allpaka
+runs n_batch 512 (8 chunks) where llama-bench runs 2048 (2 chunks).
+
+Not certified: the same window at load <5 must re-run PP=1024 and PP=4096
+before this is quoted as a gap, and the two arms' spreads at 4096 are wide
+(allpaka 5213-6320, llama 6376-7559).
+
+## Instrument defect found on the way: fused-prefill phase attribution
+
+The `prefill phases` breakdown reports `ffn (experts)` at 86-91% at every PP
+from 64 to 4096, and `attention` falling from 1.5% to 0.5%. Attention's FLOPs
+grow ~400x across that sweep, so those percentages cannot be a GPU
+attribution of the fused chunk - they are CPU-side spans, and in the fused
+path the work is inside one command buffer. Do not use the phase table to
+attribute fused-prefill time between FFN and attention; `ALLPAKA_FFN_TIME` /
+`ALLPAKA_PF_SPLIT` (which serialise, and so inflate) are the only per-stage
+timings that mean anything there, per moe-prefill.md's own caveat.

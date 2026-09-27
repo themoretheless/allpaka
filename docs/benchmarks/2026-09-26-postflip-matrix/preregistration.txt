@@ -1,0 +1,173 @@
+# Pre-registration: post-flip llama matrix across architectures
+
+## Question
+
+With the SwiGLU fold shipped as opt-IN (`425da7a`, 2026-09-26), where does allpaka
+sit against llama.cpp per model, and does the 35B's published llama ratio still
+hold now that the rows quoted in
+[`../qwen35-35b-m4-max-pending.md`](../qwen35-35b-m4-max-pending.md) measured the
+fused regime?
+
+Verdict: a per-model prefill and decode tok/s pair with the ratio, plus the
+per-repeat ratio series so a median that hides a drifting pair is visible.
+
+## Provenance of the regime being measured
+
+    425da7a 2026-09-26 feat(decode): make the SwiGLU fold opt-IN
+
+Both decode-pipeline builders now read `ALLPAKA_SWFUSE` as opt-IN
+(`is_ok_and(|v| v == "1")`), so an unset environment means the unfolded arm: one
+standalone swiglu dispatch plus a barrier per fusable FFN layer. The fold is
+still reachable as `ALLPAKA_SWFUSE=1`. The flip's own measurement is
+[`../2026-09-24-235b-swfuse/results.txt`](../2026-09-24-235b-swfuse/results.txt):
+-7.708 +/- 0.239 ms/token on the 235B's q3_k down (10/10 paired signs), exactly
+nothing on the 30B, flat inside GLM's own drift band, 0.99x on q8_0.
+
+Instrument: `./target/release/allpaka` built from `1cc7a27` (sha256 recorded by
+the runner), llama.cpp 0.4.1 / ggml 0.24.0 from Homebrew, `llama-bench` on PATH.
+Machine: Mac16,5, 16 logical CPUs, 128 GiB unified, AC power.
+
+## Models in tier 1, by architecture
+
+| model | `general.architecture` | why it is here |
+| --- | --- | --- |
+| `qwen3-0.6b-Q8_0.gguf` | `qwen3` | dense + q8_0, the format where fusion measured free |
+| `qwen3-30b-a3b-Q4_K_M.gguf` | `qwen3moe` | the MoE the artifact says is unaffected by the flip |
+| `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf` | `qwen35moe` | the model whose published row predates the flip |
+
+## Excluded, and why (decided before any number)
+
+- `Qwen3.8-27B-UD-Q4_K_M.gguf` - `general.architecture` is `qwen35`, a string
+  that appears in no requirements or capability branch in `allpaka-model` or
+  `allpaka-gguf`. It would decline, `scripts/bench-compare.sh` gates
+  `fast_path.declines == 0`, and `set -e` would abort the matrix mid-run. This is
+  a support gap, not a bench result; it gets its own note instead of a row.
+- `GLM-4.5-Air-Q4_K_M` (68 GiB split) and `qwen3-235b-a22b-Q2_K_XL` (82.7 GiB) -
+  both are runnable (`glm4moe` is `Experimental`, `qwen3moe` is `Supported`), so
+  this exclusion is cost alone: 15 full model loads each at REPEATS=5. The 235B
+  is where the fold's cost lives and it is already priced with paired signs in
+  the 2026-09-24 artifact, so re-measuring it here adds load time, not evidence.
+  Tier 2 only if the quiet window outlives tier 1.
+- `gemma-4-26B-A4B-it-UD-Q4_K_M.gguf` - `general.architecture` is `gemma4`, and
+  `config.rs::capability` returns `ModelSupport::Unsupported` for it:
+  "head_dim=512 attention kernels are not implemented". No llama ratio is
+  possible for this model on this binary, so it is not a row anywhere, tier 1 or
+  tier 2.
+
+## Arms and shape
+
+PP=480, TG=32, REPEATS=5, per repeat: allpaka, then llama prefill, then llama
+decode (`scripts/bench-compare.sh`, unchanged). C-token KV at f16, `ngl 99`.
+
+Fixed arm order is a known hazard in this repo: a thermal ramp across a repeat
+biases whichever engine runs last. Mitigation here is the per-repeat series, not
+a claim that order was randomised - the series and the sign count are the
+deliverable, and a monotone drift across repeats will show in them.
+
+## Gates
+
+Instrument gate (the harness's own, `scripts/bench-compare.sh`): prefill reports
+480 tokens at `context_tokens == 0`; decode reports 32 tokens at
+`context_tokens == 1` with `fast_path.attempts == successes == 32` and
+`declines == 0`. Its known limit is that it proves the work happened, not that
+the machine was free - a depressed run passes every one of those assertions.
+
+Launch gate (`wait-then-run.sh`): no live `cargo`/`rustc`/`llama-bench`, no
+foreign `allpaka` bench process, no indexer daemon holding CPU this instant, and
+1-minute `vm.loadavg` < 5.0 for 5 consecutive samples 60 s apart. Cap 180 min; if
+the cap expires nothing is measured and the campaign does not exist.
+
+## DoD
+
+- per model: median prefill and decode tok/s for both engines, both ratios, and
+  the per-repeat ratio series with the count of repeats favouring each engine.
+- one line saying whether the 35B decode ratio moved against its 2026-09-12
+  fused-regime row, or whether the move is below what 5 repeats can resolve.
+- an explicit "below the instrument" line wherever the spread across repeats is
+  larger than the delta being reported.
+
+## Not claimed
+
+No GPU model on this machine measures the fold itself here - tier 1 runs the
+shipped default only, and the fold arm stays priced by the 2026-09-24 artifact.
+Ratios are warm-window numbers for this host and this llama.cpp build; they are
+not a claim about other Macs or a newer ggml.
+
+## Amendment 1 - appended 2026-09-26 20:32 local, AFTER `series-1` launched
+
+The run is already live against the shape above, so nothing preceding this line
+is edited. This amendment is what `series-1`'s prefill ratios must be read with.
+
+`pp-sweep-1/diagnostic-1-prefill-shape.txt` measured the qwen3 PP response on the
+0.6B in this hour's contended window: prefill ratio 0.64x at PP=64, 0.75x at
+PP=256, 0.97x at PP=1024. The prefill ratio is therefore dominated by fixed
+per-chunk cost at short PP, and PP=480 - the registered shape - sits inside that
+ramp for the dense 0.6B, not on top of the plateau.
+
+Consequence, binding on how `series-1` may be quoted:
+
+- A `series-1` prefill ratio near 0.8x on qwen3-0.6b-Q8_0 is the registered
+  shape's fixed-cost floor, not a prefill verdict. Do not report it as "prefill
+  is Nx slower than llama" without the PP curve beside it.
+- `series-1` remains valid for what it was registered to test - the decode ratio
+  against the 2026-09-12 fused-regime row, post-flip - and decode is not
+  affected by this, since TG is per-token and the gate shape is not
+  setup-dominated.
+- Owed, outside this campaign: the MoE tier-1 models at PP=1024, and a
+  quiet-window re-run of PP=1024/PP=4096 on the 0.6B to certify the separate
+  long-context regression the sweep found (allpaka's prefill time grows 6.0x
+  from PP=1024 to PP=4096 where llama's grows 4.9x, GPU-executing 725 ms of a
+  786 ms wall). That regression is a different question from the SWFUSE flip
+  and must not be merged into this campaign's conclusion either way.
+
+## Amendment 2 - appended 2026-09-26 21:20 local, after Amendment 1, before any ladder number
+
+Two things closed, one question opened.
+
+Closed: the bigger-chunk lever. `pf-obuf-dense-1/chunk-1.txt` measures
+`ALLPAKA_PREFILL_CHUNK` 2048 against 512 and finds +1.6% median at pp4096 with
+GPU `executing` unmoved. Default 512 stands.
+
+Closed: the two-point fit. The same run tried to split the long-context deficit
+into a per-token term and a per-key attention term from pp1024 + pp4096. Its
+pp1024 `executing` scattered 109-186 ms at one shape, and the two admissible
+choices for that row produced opposite conclusions (attention slope 1.65x worse
+than llama, versus equal to llama). Recorded as NOT IDENTIFIED.
+
+Opened, and this is what the ladder is registered to answer: after the dense
+one-buffer fix (PR #6), is the residual prefill deficit a **bad quadratic term**
+or a **bad per-token cost**?
+
+Shape: qwen3-0.6b-Q8_0, PP in {256, 512, 1024, 2048, 4096, 8192}, 5 repeats,
+both arms inside every repeat, arm order alternating by repeat parity. Gate: the
+`wait-then-run.sh` semantics (load < 5.0, 5 consecutive clean samples at 60 s),
+chained behind `series-1` so the two never share a window.
+Artifact: `pf-obuf-dense-1/scaling-1/ladder-1.txt`.
+
+Model fitted per arm, on wall cost per token:
+
+    cost/token = A + B * (L / 2)
+
+A = the linear/weights term (what a token costs at zero context), B = the cost
+of one extra key in the KV (what attention pays as context grows).
+
+Decision rule, fixed before the first row is read:
+- Report B_allpaka / B_llama and A_allpaka / A_llama with a paired-repeat
+  bootstrap SE.
+- Call it **quadratic** if B ratio > 1.2 with non-overlapping SEs. The target is
+  then the `attend_mm` kernel (8 query rows per threadgroup, so K/V re-streams
+  once per 8 rows).
+- Call it **linear** if A ratio > 1.1 with the B ratio inside 1.2. The target is
+  then the tile matmul path, and long context is NOT a separate problem.
+- Anything else is **undetermined**: do not optimise either term, say so, and
+  owe more repeats.
+- The fit must predict the measured pp2048 ratio from the pp256 + pp8192 ends.
+  If it does not, the model is wrong and neither verdict is reported.
+
+Prior expectation, recorded so a later reader can see it was written before the
+data: a one-row-per-point smoke of the same script gave 0.962x at pp256 and
+0.976x at pp8192. If the full ladder reproduces a flat-to-improving ratio with
+context, Amendment 1's "long-context regression" is dead, the goal's second
+component is really the first one, and the 6.0x-vs-4.9x growth difference was
+the pre-fix commit storm plus contention. One row per point is not evidence; it
+is why this ladder is worth a window.
