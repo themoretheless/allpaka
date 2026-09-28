@@ -1,44 +1,171 @@
-<!doctype html><html><head><meta charset="utf-8">
+<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>allpaka chat</title>
 <style>
-  :root { color-scheme: light; }
-  html, body { background: #f4f5f7; color: #1c1c1c; }
-  body { font-family: ui-sans-serif, system-ui; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
-  #log { display: flex; flex-direction: column; gap: .6rem; margin-bottom: 1rem; }
-  .msg { padding: .6rem .9rem; border-radius: .7rem; white-space: pre-wrap; line-height: 1.4; }
-  .user { background: #3b82f6; color: white; align-self: flex-end; max-width: 85%; }
-  .bot  { background: rgba(127,127,127,.15); align-self: flex-start; max-width: 85%; }
-  .meta { opacity: .5; font-size: .75rem; align-self: flex-start; }
-  .thinking { opacity: .55; font-style: italic; }
-  form { display: flex; gap: .5rem; }
-  input, select { background: #fff; color: #1c1c1c; }
-  input { flex: 1; padding: .6rem .8rem; border-radius: .6rem; border: 1px solid #c8cdd4; font-size: 1rem; }
-  button { padding: .6rem 1.1rem; border-radius: .6rem; border: none; background: #3b82f6; color: white; font-size: 1rem; }
-  button:disabled { opacity: .5; }
-  h1 { font-size: 1.1rem; color: #333; }
-  details { opacity: .6; font-size: .85rem; }
-  #stats { display: flex; align-items: center; gap: .8rem; font-size: .78rem;
-           color: #444; margin-bottom: 1rem; flex-wrap: wrap; }
-  #ctxbar { width: 160px; height: 6px; border-radius: 3px;
-            background: rgba(127,127,127,.25); overflow: hidden; }
-  #ctxfill { height: 100%; width: 0%; background: #3b82f6; transition: width .3s; }
-  .launch { display: flex; flex-wrap: wrap; gap: .6rem; align-items: flex-end;
-            margin-bottom: 1rem; font-size: .85rem; }
-  .launch label { display: flex; flex-direction: column; gap: .2rem; color: #333; }
-  .launch input, .launch select { padding: .35rem .5rem; border-radius: .4rem;
-            border: 1px solid #c8cdd4; font-size: .9rem; background: #fff; color: #1c1c1c; }
-  .launch select { max-width: 100%; }
-  #launch-status { color: #444; align-self: center; }
-  .res { margin: 0 0 1rem; padding: .8rem; background: #fff; border: 1px solid #e2e4e8; border-radius: .7rem; }
-  .res h2 { font-size: .9rem; margin: 0 0 .45rem; color: #222; font-weight: 600; }
-  .meters { display: flex; flex-wrap: wrap; gap: .35rem .9rem; font-size: .78rem; color: #222; margin-bottom: .55rem; }
-  .meters b { font-weight: 600; }
-  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .55rem; }
+  /* Та же «песочная» палитра и моторика, что в студии: harena — песок,
+     светлая тема — страница блокнота, тёмная — кожаный переплёт. */
+  :root {
+    color-scheme: light;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-serif: Georgia, "Times New Roman", serif;
+    --ease-arena: cubic-bezier(0.22, 1, 0.36, 1);
+    --transition-fast: 140ms var(--ease-arena);
+    --transition-normal: 260ms var(--ease-arena);
+    --bg: #f7f2e5; --surface: #fffdf3; --inset: #ede4cf;
+    --text: #2b2419; --muted: #8d8170; --secondary: #5f5747;
+    --line: #e4dac3; --strong-line: #d2c5a4;
+    --accent: #9c6a13; --accent-on: #fffdf3; --accent-hover: #83570d;
+    --user-bg: #f3ead2; --selected: #ecdfc0;
+    --arena-red: #b5452c; --arena-green: #4f7a3d; --arena-teal: #2f7a70;
+    --radius-sm: 8px; --radius-lg: 16px; --radius-xl: 22px;
+    --shadow-sm: 0 1px 2px rgba(74, 58, 30, 0.05);
+    --shadow-md: 0 4px 16px rgba(74, 58, 30, 0.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --bg: #17130e; --surface: #1f1a13; --inset: #231d15;
+      --text: #eae0c8; --muted: #a4937a; --secondary: #b3a488;
+      --line: #3a3126; --strong-line: #4a3f2e;
+      --accent: #dfa83e; --accent-on: #1a1409; --accent-hover: #eebb5c;
+      --user-bg: #2c2317; --selected: #33291a;
+      --arena-red: #e0735e; --arena-green: #8fc97e; --arena-teal: #5fb8a8;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+      --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--text); }
+  body {
+    font-family: var(--font-sans);
+    max-width: 780px; margin: 0 auto; padding: 1.6rem 1.2rem 0;
+    min-height: 100dvh; display: flex; flex-direction: column;
+  }
+  ::selection { background: var(--selected); color: var(--text); }
+  h1 {
+    font-family: var(--font-serif); font-size: 1.3rem; font-weight: 600;
+    display: flex; align-items: center; gap: 0.6rem; margin: 0 0 1.1rem;
+  }
+  /* Фирменный знак-«колонна»: три вертикали разной высоты */
+  .mark { display: inline-flex; align-items: flex-end; gap: 3px; height: 20px; }
+  .mark i { display: block; width: 4px; border-radius: 2px; background: var(--accent);
+            animation: pillarGrow 620ms var(--ease-arena) backwards; }
+  .mark i:nth-child(1) { height: 56%; animation-delay: 60ms; }
+  .mark i:nth-child(2) { height: 100%; animation-delay: 140ms; }
+  .mark i:nth-child(3) { height: 74%; animation-delay: 220ms; }
+  @keyframes pillarGrow {
+    from { transform: scaleY(0); transform-origin: bottom; opacity: 0; }
+    to { transform: scaleY(1); transform-origin: bottom; opacity: 1; }
+  }
+  #stats {
+    display: flex; align-items: center; gap: 0.8rem; font-size: 0.78rem;
+    color: var(--secondary); margin-bottom: 1rem; flex-wrap: wrap;
+  }
+  #ctxbar { width: 160px; height: 6px; border-radius: 3px; background: var(--inset); overflow: hidden; }
+  #ctxfill { height: 100%; width: 0%; background: var(--accent); border-radius: 3px; transition: width 0.3s var(--ease-arena); }
+  .launch { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: flex-end; margin-bottom: 1rem; }
+  .launch label {
+    display: flex; flex-direction: column; gap: 0.25rem; color: var(--secondary);
+    font-size: 0.68rem; letter-spacing: 0.6px; text-transform: uppercase;
+  }
+  .launch input, .launch select {
+    padding: 0.4rem 0.55rem; border-radius: var(--radius-sm);
+    border: 1px solid var(--line); font-size: 0.85rem;
+    background: var(--surface); color: var(--text); max-width: 100%;
+    font-family: inherit;
+  }
+  .launch input:focus, .launch select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #launch-status { color: var(--muted); align-self: center; font-size: 0.78rem; }
+  button {
+    padding: 0.55rem 1.1rem; border-radius: 999px; border: 1px solid var(--accent);
+    background: var(--accent); color: var(--accent-on); font-size: 0.9rem;
+    font-family: inherit; cursor: pointer;
+    transition: background-color var(--transition-fast),
+                border-color var(--transition-fast),
+                transform var(--transition-fast);
+  }
+  button:hover { background: var(--accent-hover); border-color: var(--accent-hover); transform: translateY(-1px); }
+  button:active { transform: translateY(0); }
+  button:disabled { opacity: 0.5; cursor: wait; transform: none; }
+  .res {
+    margin: 0 0 1.2rem; padding: 0.9rem 1rem; background: var(--surface);
+    border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm);
+  }
+  .res h2 { font-family: var(--font-serif); font-size: 0.95rem; margin: 0 0 0.5rem; color: var(--text); font-weight: 600; }
+  .meters { display: flex; flex-wrap: wrap; gap: 0.35rem 0.9rem; font-size: 0.76rem; color: var(--secondary); margin-bottom: 0.6rem; }
+  .meters b { font-weight: 600; color: var(--text); }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.6rem; }
   .charts figure { margin: 0; }
-  .charts figcaption { font-size: .72rem; color: #444; margin-bottom: .15rem; }
-  .charts canvas { width: 100%; height: 76px; background: #f7f8fa; border-radius: .35rem; display: block; }
+  .charts figcaption { font-size: 0.68rem; color: var(--muted); margin-bottom: 0.2rem; letter-spacing: 0.3px; }
+  .charts canvas { width: 100%; height: 76px; background: var(--inset); border-radius: var(--radius-sm); display: block; }
+  #log { display: flex; flex-direction: column; gap: 0.9rem; margin-bottom: 1.2rem; flex: 1; }
+  .msg {
+    padding: 0.65rem 0.95rem; border-radius: var(--radius-lg);
+    line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere;
+    animation: messageIn 420ms var(--ease-arena) backwards;
+  }
+  .msg.user {
+    background: var(--user-bg); border: 1px solid var(--strong-line);
+    align-self: flex-end; max-width: 85%; border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-sm);
+  }
+  .msg.bot { align-self: flex-start; max-width: 100%; padding-left: 0; padding-right: 0; }
+  .msg.thinking { opacity: 0.55; font-style: italic; }
+  .meta { opacity: 0.75; font-size: 0.72rem; align-self: flex-start; color: var(--muted); }
+  details { font-size: 0.85rem; color: var(--secondary); }
+  details summary { cursor: pointer; }
+  details > div { background: var(--inset); border-radius: var(--radius-sm); padding: 0.5rem 0.7rem; margin-top: 0.3rem; white-space: pre-wrap; }
+  @keyframes messageIn {
+    from { opacity: 0; transform: translateY(10px); filter: blur(3px); }
+    to { opacity: 1; transform: translateY(0); filter: blur(0); }
+  }
+  /* Курсор стрима и точки ожидания — как в студии */
+  .stream-caret {
+    display: inline-block; width: 2px; height: 1em; margin-left: 2px;
+    vertical-align: text-bottom; border-radius: 1px; background: var(--accent);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 55%, transparent);
+    animation: caretBlink 650ms steps(1, end) infinite;
+  }
+  @keyframes caretBlink { 0%, 46% { opacity: 1; } 47%, 92% { opacity: 0.1; } 93%, 100% { opacity: 1; } }
+  .typing { display: inline-flex; align-items: center; gap: 5px; padding: 0.15rem 0; }
+  .typing-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+               animation: typingBounce 1.15s var(--ease-arena) infinite; }
+  .typing-dot:nth-child(2) { animation-delay: 0.16s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.32s; }
+  @keyframes typingBounce {
+    0%, 55%, 100% { transform: translateY(0); opacity: 0.45; }
+    28% { transform: translateY(-5px); opacity: 1; }
+  }
+  form {
+    display: flex; gap: 0.6rem; position: sticky; bottom: 0; background: var(--bg);
+    padding: 0.9rem 0 1.2rem; border-top: 1px solid var(--line); margin-top: auto;
+  }
+  form input {
+    flex: 1; padding: 0.7rem 0.95rem; border-radius: 999px;
+    border: 1px solid var(--strong-line); background: var(--surface); color: var(--text);
+    font-size: 0.95rem; font-family: inherit; box-shadow: var(--shadow-sm);
+    transition: border-color var(--transition-fast),
+                box-shadow var(--transition-normal),
+                transform var(--transition-normal);
+  }
+  form input:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: var(--shadow-md), 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+    transform: translateY(-1px);
+  }
+  form input::placeholder { color: var(--muted); }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+    .stream-caret { animation: none; opacity: 1; }
+    .typing-dot { animation: none; opacity: 0.7; }
+  }
 </style></head><body>
-<h1>allpaka · собственный движок · чат</h1>
+<h1><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>allpaka · собственный движок · чат</h1>
 <div id="stats">
   <span id="s-model">…</span>
   <span>контекст: <span id="s-ctx">0 / 0</span></span>
@@ -78,6 +205,7 @@
 <form id="f"><input id="q" placeholder="Спросите что-нибудь..." autofocus autocomplete="off">
 <button id="send">→</button></form>
 <script>
+const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
 const log = document.getElementById('log');
 const history = [];
 const saved = JSON.parse(localStorage.getItem('allpaka-params') || '{}');
@@ -162,6 +290,16 @@ function add(cls, text) {
   d.scrollIntoView();
   return d;
 }
+function dots() {
+  const box = document.createElement('div');
+  box.className = 'typing';
+  for (let i = 0; i < 3; i++) {
+    const d = document.createElement('span');
+    d.className = 'typing-dot';
+    box.appendChild(d);
+  }
+  return box;
+}
 let aborter = null;
 document.getElementById('f').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -175,7 +313,14 @@ document.getElementById('f').addEventListener('submit', async (e) => {
   btn.textContent = '⏹';
   add('user', text);
   history.push({role: 'user', content: text});
-  const busy = add('bot', '…');
+  const busy = add('bot', '');
+  const waiting = dots();
+  busy.appendChild(waiting);
+  // Курсор живёт одним узлом: textContent ниже его затирает, поэтому после
+  // каждой перерисовки он возвращается на место — в конец набираемого текста.
+  const caret = document.createElement('span');
+  caret.className = 'stream-caret';
+  const show = t => { busy.textContent = t; busy.append(caret); };
   const meta = document.createElement('div');
   meta.className = 'meta';
   meta.textContent = 'думаю…';
@@ -227,12 +372,12 @@ document.getElementById('f').addEventListener('submit', async (e) => {
         if (m) { think = m[1].trim(); reply = reply.slice(m[0].length); }
         if (reply) {
           busy.classList.remove('thinking');
-          busy.textContent = reply;
+          show(reply);
         } else if (think) {
           busy.classList.add('thinking');
-          busy.textContent = '💭 ' + (think.length > 600 ? '…' + think.slice(-600) : think);
+          show('💭 ' + (think.length > 600 ? '…' + think.slice(-600) : think));
         } else {
-          busy.textContent = '…';
+          busy.replaceChildren(waiting);
         }
         const secs = (performance.now() - t0) / 1000;
         const tps = tokens > 0 ? (tokens / secs).toFixed(1) : '?';
@@ -294,7 +439,7 @@ function draw(id, values, color, scale) {
   const c = canvas.getContext('2d');
   const w = canvas.width, h = canvas.height;
   c.clearRect(0, 0, w, h);
-  c.strokeStyle = '#e2e4e8';
+  c.strokeStyle = css('--line');
   c.beginPath();
   c.moveTo(0, h - 1);
   c.lineTo(w, h - 1);
@@ -327,10 +472,10 @@ async function paintResources() {
       + `<span><b>decode</b> ${Number(s.decode_tok_s).toFixed(1)} tok/s</span>`
       + `<span><b>prefill</b> ${Number(s.prefill_tok_s).toFixed(1)} tok/s</span>`
       + `<span>${ctx}</span>`;
-    draw('c-vram', s.vram, '#3b82f6', s.gpu_total_mib || 0);
-    draw('c-util', s.util, '#16a34a', 100);
-    draw('c-rss', s.rss, '#d97706', 0);
-    draw('c-tok', s.tok_s, '#7c3aed', 0);
+    draw('c-vram', s.vram, css('--accent'), s.gpu_total_mib || 0);
+    draw('c-util', s.util, css('--arena-green'), 100);
+    draw('c-rss', s.rss, css('--arena-red'), 0);
+    draw('c-tok', s.tok_s, css('--arena-teal'), 0);
   } catch (_) {}
 }
 paintResources();

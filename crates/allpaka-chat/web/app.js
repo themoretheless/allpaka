@@ -365,7 +365,7 @@ async function refreshFolderCounts(){
   for(const [f,n] of results)folderCounts[f]=n;
   updateFolderOptions();
 }
-function resetChat() {$('context-statistics-title').textContent=contextHeadline(null);$('context-statistics-body').replaceChildren();$('usage').textContent='';$('compact-summary').textContent='Контекст ещё не сжат.';$('branch-origin').hidden=true;active=null;current=null;lastMessages='';messageCache=[];lastPlan='';$('plan-add').hidden=true;$('messages').innerHTML=welcome;$('title').textContent='Новый разговор';$('error').hidden=true;$('notice').hidden=true;$('queue').replaceChildren();$('plan').replaceChildren(node('li','План появится во время работы','muted'));$('history-folder').value='active';renderStatus('idle');listChats().catch(fail);refreshFolderCounts().catch(()=>{});bindSuggestions();}
+function resetChat() {$('context-statistics-title').textContent=contextHeadline(null);$('context-statistics-body').replaceChildren();$('usage').textContent='';$('compact-summary').textContent='Контекст ещё не сжат.';$('branch-origin').hidden=true;active=null;current=null;lastMessages='';messageCache=[];lastPlan='';pendingSend=null;pendingRev++;$('plan-add').hidden=true;$('messages').innerHTML=welcome;$('title').textContent='Новый разговор';$('error').hidden=true;$('notice').hidden=true;$('queue').replaceChildren();$('plan').replaceChildren(node('li','План появится во время работы','muted'));$('history-folder').value='active';renderStatus('idle');listChats().catch(fail);refreshFolderCounts().catch(()=>{});bindSuggestions();}
 function bindSuggestions() {document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>{$('prompt').value=b.dataset.prompt;$('mode').value=b.dataset.mode;modeHelp();$('prompt').focus();});}
 function renderStatus(status) {
   $('manage-chat').disabled=!active;const archived=!!(current&&current.folder&&current.folder!=='active');$('send').disabled=archived;$('resume').disabled=archived;
@@ -373,7 +373,7 @@ function renderStatus(status) {
   $('send').textContent=running?'В очередь ↑':'Отправить ↑';$('send').title=archived?'Восстановите разговор из архива или корзины':'Отправить сообщение';$('steer').hidden=!running;$('send-now').hidden=!running;$('stop').hidden=!running;$('resume').hidden=!['paused','error'].includes(status);
 }
 async function openChat(id) {
-  active=id;lastMessages='';messageCache=[];const s=await api('sessions/'+id);if(active!==id)return;
+  active=id;lastMessages='';messageCache=[];pendingSend=null;pendingRev++;const s=await api('sessions/'+id);if(active!==id)return;
   $('verbosity').value=s.settings.verbosity||'normal';$('auto-compact').checked=s.settings.auto_compact??true;$('compact-threshold').value=s.settings.compact_threshold??24000;current=s;$('history-folder').value=s.folder||'active';$('project').value=s.settings.project_id;$('provider').value=s.settings.provider;$('model').value=s.settings.model;$('mode').value=s.settings.mode;$('steps').value=s.settings.max_steps;$('output-tokens').value=s.settings.max_output_tokens??8192;$('writes').checked=s.settings.allow_writes;$('json-mode').checked=!!s.settings.json_mode;applySwarm(s.settings.swarm);
   savePrefs();
   renderModelInfo();renderContext();modeHelp();render(s);await listChats();
@@ -430,6 +430,17 @@ function aggStatsSpan(add,del,cls){
   s.append(node('span',`+${add}`,'agg-add'),node('span',` −${del}`,'agg-del'));
   return s;
 }
+// Курсор стрима встаёт в конец последнего абзаца: мерцает ровно там, где
+// появляется новый текст, а не на новой строке под блоком. Внутри списка
+// садится в последний пункт, под блоком кода — на свою строку.
+function withStreamCaret(box){
+  const caret=node('span',undefined,'stream-caret');
+  let tail=box.lastElementChild;
+  if(tail&&tail.classList&&tail.classList.contains('text-block'))tail=tail.lastElementChild;
+  if(tail&&(tail.tagName==='UL'||tail.tagName==='OL'))tail=tail.lastElementChild;
+  if(tail&&tail.tagName==='SECTION')tail=null;
+  (tail||box).append(caret);
+}
 function renderSingleMessage(s,m,index,openKey,detailState){
   const div=node('article',undefined,'message '+m.role);
   const header=node('div',m.role==='user'?'ВЫ':m.role==='tool'?'ИНСТРУМЕНТ':'ALLPAKA','role');
@@ -460,7 +471,25 @@ function renderSingleMessage(s,m,index,openKey,detailState){
     details.append(summary);
     if(typeof result?.diff==='string'){const {diff,...info}=result;details.append(node('pre',JSON.stringify(info,null,2)));if(diff)details.append(StudioContent.render('```diff\n'+diff+'\n```'));}else details.append(StudioContent.render(m.content));
     div.append(details);
-  }else{div.append(StudioContent.render(m.content||((m.tool_calls||[]).length?'Вызовы инструментов':m.truncated?'Лимит достигнут до текстового ответа. Увеличьте лимит ответа и продолжите.':s.status==='running'?'…':'Ответ не получен.')));}
+  }else{
+    // Пока идёт генерация последнего ответа, в конце текста мерцает курсор,
+    // а до первого токена на его месте подпрыгивают три точки.
+    const streaming=s.status==='running'&&m.role==='assistant'&&index===s.messages.length-1;
+    const placeholder=(m.tool_calls||[]).length?'Вызовы инструментов':m.truncated?'Лимит достигнут до текстового ответа. Увеличьте лимит ответа и продолжите.':streaming?'':'Ответ не получен.';
+    const box=StudioContent.render(m.content||placeholder);
+    div.append(box);
+    if(streaming){
+      if(m.content)withStreamCaret(box);
+      else{
+        const typing=node('div',undefined,'typing');
+        typing.setAttribute('role','status');
+        for(let d=0;d<3;d++)typing.append(node('span',undefined,'typing-dot'));
+        // Текст — только для скринридера: точки ничего не сообщают вслух.
+        typing.append(node('span','Ответ формируется…','sr-only'));
+        div.append(typing);
+      }
+    }
+  }
   if((m.swarm||[]).length){
     const reports=node('details',undefined,'swarm-reports');
     const reportsKey=openKey();
@@ -508,6 +537,24 @@ function renderSingleMessage(s,m,index,openKey,detailState){
 // conversation. Entries are indexed by message index; a group stores the same
 // unit at each of its members.
 let messageCache = [],cacheStatus = '';
+// Оптимистичный рендер отправки: воркер добавляет сообщение пользователя в
+// историю уже после отправки квитанции, поэтому опрос сразу после POST иногда
+// застаёт старое состояние. Черновик держится локально, пока сервер не
+// подтвердит сообщение тем же текстом.
+let pendingSend = null, pendingRev = 0;
+function echoedUser(s,text){
+  for(const m of s.messages.slice(-4))if(m.role==='user'&&m.content===text)return true;
+  return false;
+}
+// Анимация входа проигрывается один раз на сообщение: опрос каждые 650 мс
+// пересобирает растущий ответ, и без этой отметки он бы мигал при каждом
+// обновлении. При смене разговора отметки сбрасываются.
+let seenSession = '', seenIndexes = new Set();
+function firstSight(s,index){
+  if(s.id!==seenSession){seenSession=s.id;seenIndexes=new Set();}
+  if(seenIndexes.has(index))return false;
+  seenIndexes.add(index);return true;
+}
 function sameMessage(a,b){return a===b||JSON.stringify(a)===JSON.stringify(b);}
 function buildMessageNodes(s,detailState){
   const nodes=[],previous=messageCache;
@@ -594,6 +641,7 @@ function buildMessageNodes(s,detailState){
           div.classList.add('agg-member');
           wrap.append(div);
         }
+        if(firstSight(s,i))wrap.classList.add('message-enter');
         nodes.push(wrap);keep(i,j,wrap);
         i=j;
         continue;
@@ -604,6 +652,7 @@ function buildMessageNodes(s,detailState){
     let detailIndex=0;
     const openKey=()=>`${i}:${detailIndex++}`;
     const built=renderSingleMessage(s,m,i,openKey,detailState);
+    if(firstSight(s,i))built.classList.add('message-enter');
     nodes.push(built);keep(i,i+1,built);
     i++;
   }
@@ -619,11 +668,21 @@ function render(s) {
   if(s.error){$('error').textContent=s.error;$('error').hidden=false;}else{$('error').hidden=true;}
   const notice=s.folder&&s.folder!=='active'?'Разговор в архиве или корзине. Откройте «Разговор» → «Восстановить», чтобы продолжить.':s.notice;
   $('notice').textContent=notice||'';$('notice').hidden=!notice;
-  const serialized=JSON.stringify([s.messages,s.status]);
+  const serialized=JSON.stringify([s.messages,s.status])+'|'+pendingRev;
   if(serialized!==lastMessages){
     const pane=$('messages'),atBottom=pane.scrollHeight-pane.scrollTop-pane.clientHeight<120;
     const detailState=new Map([...pane.querySelectorAll('details[data-open-key]')].map(d=>[d.dataset.openKey,d.open]));
-    const built=buildMessageNodes(s,detailState);
+    let built=buildMessageNodes(s,detailState);
+    // Неподтверждённая отправка живёт одним узлом в конце транскрипта: сервер
+    // ещё не добавил сообщение, но пользователь уже должен его видеть.
+    if(pendingSend&&!echoedUser(s,pendingSend.text)){
+      const ghost=renderSingleMessage(s,{role:'user',content:pendingSend.text,images:pendingSend.images},s.messages.length,()=>'0:0',new Map());
+      ghost.classList.add('pending-send');
+      // Ветвиться от неподтверждённого сообщения нельзя — кнопки убираем,
+      // а не прячем: они не должны попасть ни в разметку, ни в фокус.
+      ghost.querySelector('.message-actions')?.remove();
+      built.push(ghost);
+    }else if(pendingSend){pendingSend=null;pendingRev++;}
     // Swapping only the units that were rebuilt keeps the scroll position and
     // every open `<details>` of the untouched messages.
     if(pane.children.length!==built.length)pane.replaceChildren(...built);
@@ -717,7 +776,16 @@ async function control(kind, actionText) {
     if(kind==='steer'&&draftImages.length)throw new Error('Для изображений используйте Send now или очередь.');
   }
   if(!active){if(!sends)return;active=(await api('sessions',snapshot)).id;savePrefs();}
-  await api(`sessions/${active}/actions`,{kind,text:sends?text:(actionText||''),settings:(sends&&kind!=='steer')||['resume','compact'].includes(kind)?snapshot:undefined,images:sends?draftImages:[]});
+  // Сообщение показываем сразу, не дожидаясь ответа сервера: отклик на клик
+  // важнее подтверждения. Откат — тем же путём, если действие отклонено.
+  const optimistic=kind==='send'||kind==='send_now';
+  if(optimistic){pendingSend={text,images:draftImages.slice()};pendingRev++;poll().catch(()=>{});}
+  try{
+    await api(`sessions/${active}/actions`,{kind,text:sends?text:(actionText||''),settings:(sends&&kind!=='steer')||['resume','compact'].includes(kind)?snapshot:undefined,images:sends?draftImages:[]});
+  }catch(e){
+    if(optimistic){pendingSend=null;pendingRev++;poll().catch(()=>{});}
+    throw e;
+  }
   if(sends){$('prompt').value='';draftImages=[];draftTexts=[];renderAttachments();}
   await poll();await listChats();
 }
