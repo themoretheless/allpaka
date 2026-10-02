@@ -1122,6 +1122,13 @@ setInterval(async()=>{
     $('model-chip').textContent=(model?`${providerName($('provider').value)} · ${model}`:'Выбрать модель')+' ⌄';
   }
   setInterval(syncShell,600);syncShell();
+  const PRESETS={fast:['brief',4096,6],normal:['normal',8192,12],deep:['detailed',16384,24]};
+  $('presets').querySelectorAll('button').forEach(b=>b.onclick=()=>{
+    const [v,t,s]=PRESETS[b.dataset.preset];
+    $('verbosity').value=v;$('output-tokens').value=t;$('steps').value=s;
+    for(const id of ['verbosity','output-tokens','steps'])$(id).dispatchEvent(new Event('change'));
+    savePrefs();notify('Пресет: '+b.textContent);
+  });
   $('rail-new').onclick=()=>$('new-chat').click();
   $('rail-connections').onclick=()=>$('connections').click();
   $('rail-history').onclick=()=>document.body.classList.toggle('nav-collapsed');

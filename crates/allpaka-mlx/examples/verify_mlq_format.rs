@@ -6,7 +6,7 @@
 //!
 //! Usage: cargo run -p allpaka-mlx --example verify_mlx_format -- <checkpoint_dir>
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -37,7 +37,6 @@ fn main() -> anyhow::Result<()> {
     }
     
     // Dequantize sample q4 blocks
-    let mut out = Vec::with_capacity(64);
     let mut q4_count = 0;
     for t in mlx.tensors() {
         if t.bytes < 36 { continue; }

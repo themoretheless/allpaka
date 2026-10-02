@@ -2020,7 +2020,7 @@ header .eyebrow { display: none; }
 @media (max-width: 700px) {
   body, body.nav-collapsed { grid-template-columns: minmax(0, 1fr); }
   .rail { display: none; }
-  .pop-body, .model-pop .pop-body { width: calc(100vw - 32px); }
+  .pop-body, .model-pop .pop-body { position: fixed; left: 16px; right: 16px; bottom: 150px; width: auto; max-height: 60dvh; overflow-y: auto; }
   .context-panel.open { width: 100%; }
 }
 .pop-body label { flex-direction: row; text-align: left; font-size: 13px; }
