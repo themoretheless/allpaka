@@ -122,7 +122,9 @@
           </select>
           <details class="pop model-pop" id="model-pop">
             <summary id="model-chip" title="Модель">Модель ⌄</summary>
-            <div class="pop-body toolbar">  
+            <div class="pop-body toolbar">
+    <input id="model-search" type="search" placeholder="Найти модель…" aria-label="Поиск модели" autocomplete="off">
+    <div id="model-list" role="listbox" aria-label="Модели провайдера"></div>  
     <label>Модель<select id="provider"></select></label>
     <label class="model-field">Model ID<input id="model" list="models" placeholder="Выберите или введите model ID" autocomplete="off"><datalist id="models"></datalist></label>
     <button id="load-models" title="Загрузить модели провайдера">Обновить</button>
