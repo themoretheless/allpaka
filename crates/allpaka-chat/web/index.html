@@ -10,6 +10,13 @@
 </head>
 <body>
 
+<nav class="rail" aria-label="Навигация">
+  <a class="rail-mark" href="/" aria-label="allpaka">a</a>
+  <button id="rail-new" class="rail-btn" aria-label="Новый чат" title="Новый чат">＋</button>
+  <button id="rail-history" class="rail-btn" aria-label="История" title="История">◷</button>
+  <button id="rail-connections" class="rail-btn rail-bottom" aria-label="Подключения" title="Подключения">◈</button>
+</nav>
+
 <aside class="sidebar">
   <a class="brand" href="/">a<span>allpaka</span><small>STUDIO</small></a>
 
@@ -59,20 +66,19 @@
       <h1 id="title">Новый разговор</h1>
     </div>
     <div class="header-actions">
-      <button id="theme-toggle" type="button" aria-label="Включить светлую тему" title="Включить светлую тему">☀</button>
       <button id="context-toggle">Контекст</button>
       <span id="status" class="badge">Готов</span>
-      <button id="compact" title="Сжать историю для следующих запросов; оригинал сохранится">Компакт</button>
-      <button id="manage-chat" title="Переименование, архив и корзина">Разговор</button>
-      <button id="export" title="Скачать разговор">Экспорт ↓</button>
+      <details class="menu" id="header-menu">
+        <summary aria-label="Меню разговора" title="Меню разговора">⋯</summary>
+        <div class="menu-list">
+          <button id="manage-chat" title="Переименование, архив и корзина">Разговор…</button>
+          <button id="compact" title="Сжать историю для следующих запросов; оригинал сохранится">Сжать историю</button>
+          <button id="export" title="Скачать разговор">Экспорт</button>
+          <button id="theme-toggle" type="button" aria-label="Включить светлую тему" title="Включить светлую тему">☀ Тема</button>
+        </div>
+      </details>
     </div>
   </header>
-
-  <div class="toolbar">
-    <label>Модель<select id="provider"></select></label>
-    <label class="model-field">Model ID<input id="model" list="models" placeholder="Выберите или введите model ID" autocomplete="off"><datalist id="models"></datalist></label>
-    <button id="load-models" title="Загрузить модели провайдера">Обновить</button>
-  </div>
 
   <div id="model-info" class="muted" hidden></div>
   <div id="branch-origin" hidden></div>
@@ -106,13 +112,45 @@
       <div id="command-menu" hidden></div>
       <div class="composer-bottom">
         <div class="compose-options">
-          <select id="mode" aria-label="Режим">
+          <div class="seg" id="mode-seg" role="group" aria-label="Режим"></div>
+          <select id="mode" aria-label="Режим" class="sr-only-select">
             <option value="chat">◌ Chat</option>
             <option value="plan">☷ Plan</option>
             <option value="auto">↗ Auto</option>
             <option value="goal">◎ Goal</option>
             <option value="swarm">⇶ Swarm</option>
           </select>
+          <details class="pop model-pop" id="model-pop">
+            <summary id="model-chip" title="Модель">Модель ⌄</summary>
+            <div class="pop-body toolbar">  
+    <label>Модель<select id="provider"></select></label>
+    <label class="model-field">Model ID<input id="model" list="models" placeholder="Выберите или введите model ID" autocomplete="off"><datalist id="models"></datalist></label>
+    <button id="load-models" title="Загрузить модели провайдера">Обновить</button>
+  </div>
+          </details>
+          <details class="pop params-pop" id="params-pop">
+            <summary title="Параметры ответа">Параметры</summary>
+            <div class="pop-body">
+        <label>Ответ<select id="verbosity" title="Подробность ответа модели">
+          <option value="brief">Кратко</option>
+          <option value="normal" selected>Обычно</option>
+          <option value="detailed">Подробно</option>
+          <option value="maximum">Максимально</option>
+        </select></label>
+        <label>Анализ<select id="analysis-display" title="Только отображение; не влияет на расход токенов">
+          <option value="hidden">Скрыт</option>
+          <option value="collapsed" selected>Свёрнут</option>
+          <option value="expanded">Раскрыт</option>
+        </select></label>
+        
+        <label title="JSON-режим DeepSeek (deepseek-chat)"><input type="checkbox" id="json-mode"> JSON</label>
+        <label title="Максимум выходных токенов на запрос; допустимое значение зависит от модели">Токены <input id="output-tokens" type="number" value="8192" min="256" max="393216" step="256"></label>
+        <label>Шаги <input id="steps" type="number" value="12" min="1" max="50"></label>
+        <button id="layout-convert" type="button" title="Преобразовать раскладку в поле (RU ↔ EN)">⇄</button>
+        <button id="layout-toggle" type="button" title="Авто-исправление раскладки при вводе">Авто-раскладка</button>
+      </div>
+          </details>
+          <label id="writes-label" hidden><input type="checkbox" id="writes"> Запись</label>
           <label class="attach" title="Изображения и текстовые файлы">＋ Файл<input id="files" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.json,.csv,.rs,.py,.js,.ts,.html,.css,.toml,.yaml,.yml,.log,.xml,.sql,.sh,.cs,.go,.java,.c,.cpp,.h"></label>
           <button id="stop" hidden>■ Стоп</button>
           <button id="resume" hidden>Продолжить</button>
@@ -125,31 +163,8 @@
       </div>
     </div>
 
-    <div class="composer-foot">
-      <div class="composer-foot-left">
-        <label>Ответ<select id="verbosity" title="Подробность ответа модели">
-          <option value="brief">Кратко</option>
-          <option value="normal" selected>Обычно</option>
-          <option value="detailed">Подробно</option>
-          <option value="maximum">Максимально</option>
-        </select></label>
-        <label>Анализ<select id="analysis-display" title="Только отображение; не влияет на расход токенов">
-          <option value="hidden">Скрыт</option>
-          <option value="collapsed" selected>Свёрнут</option>
-          <option value="expanded">Раскрыт</option>
-        </select></label>
-        <span id="mode-help">Chat · чтение контекста и ответы</span>
-      </div>
-      <div class="composer-foot-right">
-        <label id="writes-label" hidden><input type="checkbox" id="writes"> Запись</label>
-        <label title="JSON-режим DeepSeek (deepseek-chat)"><input type="checkbox" id="json-mode"> JSON</label>
-        <label title="Максимум выходных токенов на запрос; допустимое значение зависит от модели">Токены <input id="output-tokens" type="number" value="8192" min="256" max="393216" step="256"></label>
-        <label>Шаги <input id="steps" type="number" value="12" min="1" max="50"></label>
-        <button id="layout-convert" type="button" title="Преобразовать раскладку в поле (RU ↔ EN)">⇄</button>
-        <button id="layout-toggle" type="button" title="Авто-исправление раскладки при вводе">Авто-раскладка</button>
-        <span class="composer-hint">⌘ Enter</span>
-      </div>
-    </div>
+    <div class="composer-foot"><span id="mode-help">Chat · чтение контекста и ответы</span>
+        <span class="composer-hint">⌘ Enter</span></div>
 
     <details id="swarm-config" hidden>
       <summary>Swarm · участники, волны и синтез</summary>

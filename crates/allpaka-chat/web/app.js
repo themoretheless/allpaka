@@ -1107,3 +1107,26 @@ setInterval(async()=>{
   pluginStatusPolling=true;
   try{await renderPlugins();}catch{}finally{pluginStatusPolling=false;}
 },1500);
+
+/* ===== Редизайн: рейл, сегменты режима, чип модели, поповеры ===== */
+(function redesignShell(){
+  const modeSel=$('mode'),seg=$('mode-seg');
+  [['chat','Chat'],['plan','Plan'],['auto','Auto'],['goal','Goal'],['swarm','Swarm']].forEach(([value,label])=>{
+    const b=node('button',label);b.type='button';b.dataset.mode=value;
+    b.onclick=()=>{modeSel.value=value;modeSel.dispatchEvent(new Event('change'));syncShell();};
+    seg.append(b);
+  });
+  function syncShell(){
+    seg.querySelectorAll('button').forEach(b=>{const on=b.dataset.mode===modeSel.value;b.classList.toggle('on',on);b.setAttribute('aria-pressed',on);});
+    const model=$('model').value.trim();
+    $('model-chip').textContent=(model?`${providerName($('provider').value)} · ${model}`:'Выбрать модель')+' ⌄';
+  }
+  setInterval(syncShell,600);syncShell();
+  $('rail-new').onclick=()=>$('new-chat').click();
+  $('rail-connections').onclick=()=>$('connections').click();
+  $('rail-history').onclick=()=>document.body.classList.toggle('nav-collapsed');
+  const pops=()=>document.querySelectorAll('details.pop[open],details.menu[open]');
+  document.addEventListener('click',e=>pops().forEach(d=>{if(!d.contains(e.target))d.open=false;}));
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')pops().forEach(d=>d.open=false);});
+  document.querySelectorAll('.menu-list button').forEach(b=>b.addEventListener('click',()=>{$('header-menu').open=false;}));
+})();
