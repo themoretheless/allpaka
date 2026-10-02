@@ -1917,3 +1917,112 @@ dialog h2 {
   .badge.running::before { animation: none; }
   .message-actions { opacity: 1; transform: none; }
 }
+
+/* ===== Редизайн: тёплый графит, рейл, одна колонка чата =====
+   Видно только то, что меняется от сообщения к сообщению; остальное — в поповерах. */
+:root[data-theme="dark"] {
+  --text: #ece9e4;
+  --bg: #111010;
+  --line: #2c2a28;
+  --muted: #a9a49c;
+  --accent: #f0b45a;
+  --accent-on: #111010;
+  --accent-hover: #f6c677;
+  --accent-text: #f0b45a;
+  --accent-deep: #f0b45a;
+  --soft: #201f1d;
+  --focus: #f0b45a;
+  --secondary: #b8b3ab;
+  --sidebar: #141312;
+  --brand: #f0b45a;
+  --strong-line: #3a3836;
+  --surface: #1a1918;
+  --selected: #262422;
+  --inset: #161514;
+  --user-bg: #262422;
+  --tool-bg: #161514;
+  --tool-line: #2c2a28;
+  --panel: #161514;
+  --toast: #262422;
+  --diff-hunk: #201f1d;
+}
+
+body { grid-template-columns: 56px 264px minmax(420px, 1fr); }
+body.nav-collapsed { grid-template-columns: 56px 0 minmax(420px, 1fr); }
+body.nav-collapsed .sidebar { display: none; }
+
+.rail {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 14px 0; border-right: 1px solid var(--line); background: var(--bg);
+}
+.rail-mark {
+  width: 32px; height: 32px; margin-bottom: 10px; border-radius: 9px;
+  background: var(--accent); color: var(--accent-on); font-weight: 700;
+  display: flex; align-items: center; justify-content: center; text-decoration: none;
+}
+.rail-btn { width: 44px; height: 44px; padding: 0; border-color: transparent; font-size: 18px; color: var(--muted); }
+.rail-btn:hover { color: var(--text); }
+.rail-bottom { margin-top: auto; }
+.sidebar .brand, .sidebar .history-controls #history-sort { max-width: 100%; }
+.sidebar-bottom #connections, .sidebar-bottom #new-project { display: none; }
+
+/* Контекст — шторка поверх чата, а не постоянная колонка */
+.context-panel { display: none; }
+.context-panel.open {
+  display: block; position: fixed; top: 0; right: 0; bottom: 0; width: 320px;
+  z-index: 40; overflow-y: auto; border-left: 1px solid var(--strong-line);
+  box-shadow: var(--shadow-lg); background: var(--panel); padding: 20px;
+}
+
+/* Шапка: заголовок, статус, одно меню */
+header .eyebrow { display: none; }
+.header-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.menu { position: relative; }
+.menu > summary, .pop > summary {
+  list-style: none; cursor: pointer; user-select: none;
+  border: 1px solid var(--line); border-radius: var(--radius-md);
+  min-height: 44px; padding: 0 12px; display: inline-flex; align-items: center; color: var(--text);
+}
+.menu > summary::-webkit-details-marker, .pop > summary::-webkit-details-marker { display: none; }
+.menu > summary:hover, .pop > summary:hover { background: var(--soft); }
+.menu > summary { border-color: transparent; font-size: 20px; color: var(--muted); }
+.menu-list {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; min-width: 200px;
+  display: flex; flex-direction: column; padding: 6px; gap: 2px;
+  background: var(--surface); border: 1px solid var(--strong-line);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+}
+.menu-list button { text-align: left; border-color: transparent; min-height: 40px; }
+
+/* Композер: режим · модель · параметры · файл */
+.seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); }
+.seg button { border: 0; padding: 7px 11px; border-radius: 8px; color: var(--muted); font-size: 13px; font-weight: 500; }
+.seg button.on { background: var(--line); color: var(--text); }
+.sr-only-select { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.compose-options { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pop { position: relative; }
+.pop > summary { font-size: 13px; min-height: 36px; max-width: 280px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pop-body {
+  position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 30; width: 340px;
+  display: flex; flex-direction: column; gap: 12px; padding: 16px;
+  background: var(--surface); border: 1px solid var(--strong-line);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+}
+.pop-body label { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--secondary); }
+.pop-body .model-field, .pop-body.toolbar label { flex-direction: column; align-items: stretch; }
+.pop-body input[type=number] { width: 90px; }
+.pop-body select, .pop-body input:not([type=checkbox]) { min-height: 36px; }
+.model-pop .pop-body { width: 380px; }
+.composer-foot { justify-content: space-between; color: var(--muted); font-size: 12px; padding: 6px 4px 0; }
+.composer-hint { font-family: var(--font-mono); }
+.toolbar { padding: 16px; }
+
+@media (max-width: 700px) {
+  body, body.nav-collapsed { grid-template-columns: minmax(0, 1fr); }
+  .rail { display: none; }
+  .pop-body, .model-pop .pop-body { position: fixed; left: 16px; right: 16px; bottom: 150px; width: auto; max-height: 60dvh; overflow-y: auto; }
+  .context-panel.open { width: 100%; }
+}
+.pop-body label { flex-direction: row; text-align: left; font-size: 13px; }
+.pop-body.toolbar label { flex-direction: column; align-items: stretch; }
+.pop-body > button { width: 100%; }
