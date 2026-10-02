@@ -939,7 +939,7 @@ async function refreshModels(provider, {selectFirst=false}={}) {
     if ($('provider').value !== selected) return null;
     catalogs.set(selected, v.catalog || []);
     $('models').replaceChildren(...v.models.map(m=>{const o=node('option');o.value=m;return o;}));
-    renderModelInfo();
+    renderModelInfo();renderModelList();
     if (selectFirst && v.models.length && !$('model').value.trim()) {
       $('model').value = v.models[0];
       renderModelInfo();refreshContextModel();
@@ -1122,6 +1122,7 @@ setInterval(async()=>{
     $('model-chip').textContent=(model?`${providerName($('provider').value)} · ${model}`:'Выбрать модель')+' ⌄';
   }
   setInterval(syncShell,600);syncShell();
+  $('model').addEventListener('input',syncShell);$('provider').addEventListener('change',syncShell);
   const PRESETS={fast:['brief',4096,6],normal:['normal',8192,12],deep:['detailed',16384,24]};
   $('presets').querySelectorAll('button').forEach(b=>b.onclick=()=>{
     const [v,t,s]=PRESETS[b.dataset.preset];
@@ -1137,3 +1138,25 @@ setInterval(async()=>{
   document.addEventListener('keydown',e=>{if(e.key==='Escape')pops().forEach(d=>d.open=false);});
   document.querySelectorAll('.menu-list button').forEach(b=>b.addEventListener('click',()=>{$('header-menu').open=false;}));
 })();
+
+/* ===== Палитра модели: поиск по каталогу провайдера ===== */
+function renderModelList(){
+  const list=$('model-list');if(!list)return;
+  const q=$('model-search').value.trim().toLowerCase();
+  const catalog=catalogs.get($('provider').value)||[];
+  const meta=new Map(catalog.map(m=>[m.id,m]));
+  const ids=[...$('models').children].map(o=>o.value).filter(id=>!q||id.toLowerCase().includes(q)||String(meta.get(id)?.name||'').toLowerCase().includes(q));
+  const current=$('model').value.trim();
+  if(!ids.length){list.replaceChildren(node('div',$('models').children.length?'Ничего не найдено':'Нажмите «Обновить список»','muted'));return;}
+  list.replaceChildren(...ids.slice(0,60).map(id=>{
+    const m=meta.get(id);
+    const row=node('button',undefined,'model-item'+(id===current?' on':''));row.type='button';row.setAttribute('role','option');row.setAttribute('aria-selected',id===current);
+    row.append(node('span',id,'model-id'));
+    if(m?.context_length)row.append(node('span',Math.round(Number(m.context_length)/1000)+'k','model-ctx'));
+    row.onclick=()=>{$('model').value=id;$('model').dispatchEvent(new Event('input'));renderModelList();$('model-pop').open=false;};
+    return row;
+  }));
+}
+$('model-search').oninput=renderModelList;
+$('model-pop').addEventListener('toggle',()=>{if($('model-pop').open){renderModelList();$('model-search').focus();}});
+$('provider').addEventListener('change',()=>setTimeout(renderModelList,0));
