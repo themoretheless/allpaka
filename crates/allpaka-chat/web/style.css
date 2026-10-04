@@ -2035,3 +2035,24 @@ header .eyebrow { display: none; }
 .pop-body.toolbar { align-items: stretch; justify-content: flex-start; flex-wrap: nowrap; padding: 16px; }
 .pop-body.toolbar > * { width: 100%; max-width: none; }
 .pop-body.toolbar select, .pop-body.toolbar input { max-width: none; width: 100%; }
+
+/* ===== Минимализм: одно главное действие на экран ===== */
+/* Пустой чат — одна строка вместо заголовка и кнопок */
+.welcome { min-height: 0; flex: 1; display: flex; align-items: flex-end; justify-content: center; padding: 0 24px 24px; background: none; }
+.welcome::before, .welcome::after { content: none; }
+.welcome p { margin: 0; color: var(--muted); font-size: 13px; text-align: center; }
+.welcome kbd { font-family: var(--font-mono); font-size: 12px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 5px; }
+/* Статус показываем только когда что-то происходит */
+.badge.idle { display: none; }
+/* Без декоративных линеек-колонн и подписей-«эйбровов» в боковой панели */
+#messages { background-image: none; }
+.sidebar .eyebrow, .brand small { display: none; }
+/* Один акцент: янтарь — только на отправке и активном состоянии */
+.new-chat { color: var(--text); font-weight: 500; }
+.context-panel .eyebrow { color: var(--muted); }
+/* Подвал композера: одна приглушённая строка */
+.composer-foot { opacity: .8; }
+.composer-hint { display: none; }
+/* Один уровень рамок: поповеры и меню без вложенных рамок */
+.pop-body label, .pop-body .seg { border-color: transparent; }
+#messages:has(> .welcome) { display: flex; flex-direction: column; }
