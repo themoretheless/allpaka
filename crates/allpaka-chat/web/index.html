@@ -67,7 +67,7 @@
     </div>
     <div class="header-actions">
       <button id="context-toggle">Контекст</button>
-      <span id="status" class="badge">Готов</span>
+      <span id="status" class="badge idle">Готов</span>
       <details class="menu" id="header-menu">
         <summary aria-label="Меню разговора" title="Меню разговора">⋯</summary>
         <div class="menu-list">
@@ -85,13 +85,7 @@
 
   <section id="messages" aria-label="Сообщения" aria-live="polite">
     <div class="welcome">
-      <div class="mark" aria-hidden="true"><i></i><i></i><i></i></div>
-      <h2>Один контекст.<br><em>Любая модель.</em></h2>
-      <p>Обсуждайте идеи, составляйте план<br>или поручите агенту работу с проектом.</p>
-      <div class="suggestions">
-        <button data-prompt="Изучи подключённые папки и расскажи, как устроен проект." data-mode="chat">Изучить проект ↗</button>
-        <button data-prompt="Изучи проект и предложи план следующего улучшения. Пока ничего не меняй." data-mode="plan">Составить план ↗</button>
-      </div>
+      <p>Спросите что угодно или введите <kbd>/</kbd> для команд</p>
     </div>
   </section>
 
@@ -167,7 +161,7 @@
     </div>
 
     <div class="composer-foot"><span id="mode-help">Chat · чтение контекста и ответы</span>
-        <span class="composer-hint">⌘ Enter</span></div>
+        <span class="composer-hint">⌘ ↵</span></div>
 
     <details id="swarm-config" hidden>
       <summary>Swarm · участники, волны и синтез</summary>
