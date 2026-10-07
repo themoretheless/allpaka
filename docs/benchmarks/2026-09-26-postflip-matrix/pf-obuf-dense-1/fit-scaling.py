@@ -48,10 +48,32 @@ def fit(xs, ys):
     return my - b * mx, b
 
 
-def main(path, min_reps=3):
+def censor(rows, calib_pp, tol):
+    """Drop repeats whose in-run calibration shape is worse than `tol` over the
+    best repeat of the same run. A pre/post bracket does not save a ladder: the
+    GPU window can move mid-run, so the only contamination evidence that is worth
+    anything is a sample taken inside each repeat. The calib shape is already a
+    ladder point, so this censors on data the run collected anyway."""
+    # cost, not throughput: the stored column is tok/s, where larger is worse.
+    per = {r: 1e6 / rows[(r, calib_pp)]["ap"] for r in sorted({k[0] for k in rows})
+           if (r, calib_pp) in rows}
+    if not per:
+        return rows, []
+    best = min(per.values())
+    keep = [r for r, v in sorted(per.items()) if v <= best * (1 + tol)]
+    dropped = [r for r in per if r not in keep]
+    return {k: v for k, v in rows.items() if k[0] in keep}, dropped
+
+
+def main(path, min_reps=3, calib_pp=None, tol=0.10):
     rows = load(path)
     if not rows:
         sys.exit(f"no rows parsed from {path}")
+    if calib_pp:
+        rows, dropped = censor(rows, calib_pp, tol)
+        kept = sorted({r for (r, _) in rows})
+        print(f"calib censoring on pp{calib_pp} (within {tol * 100:.0f}% of best repeat): "
+              f"kept {kept}, dropped {dropped}")
     pps = sorted({pp for (_, pp) in rows})
     reps = sorted({rep for (rep, _) in rows})
     full = [pp for pp in pps if sum(1 for r in reps if (r, pp) in rows) >= min_reps]
@@ -62,12 +84,33 @@ def main(path, min_reps=3):
 
     print(f"{'pp':>6} {'ap us/tok':>10} {'ll us/tok':>10} {'ratio':>7} {'ap med exec':>12}")
     per = {}
+    cvs = {"ap": [], "ll": []}
     for pp in full:
         vals = {arm: [1e6 / rows[(r, pp)][arm] for r in reps if (r, pp) in rows] for arm in ("ap", "ll")}
         ex = [rows[(r, pp)]["exec"] for r in reps if (r, pp) in rows and rows[(r, pp)]["exec"].isdigit()]
         per[pp] = (statistics.median(vals["ap"]), statistics.median(vals["ll"]))
+        for arm in ("ap", "ll"):
+            if len(vals[arm]) >= 3 and statistics.mean(vals[arm]):
+                cvs[arm].append(statistics.stdev(vals[arm]) / statistics.mean(vals[arm]))
         print(f"{pp:>6} {per[pp][0]:>10.1f} {per[pp][1]:>10.1f} "
               f"{per[pp][1] / per[pp][0]:>7.4f} {statistics.median(ex) if ex else '-':>12}")
+
+    # The ambient gate (load < 5) is a proxy for the thing that actually matters:
+    # whether paired repeats agree. chunk-1.txt showed a pp8192 row drifting 8.7%
+    # monotonically across repeats at load 13 while llama's own pp8192 moved 0.8%
+    # between load 7 and load 21, so the proxy is not sufficient and is not
+    # symmetric between the arms. Certify on measured dispersion instead; a run
+    # that fails this is still printed, but its verdict is provisional by
+    # construction rather than by prose.
+    med_ap, med_ll = statistics.median(cvs["ap"]), statistics.median(cvs["ll"])
+    limit = 0.03
+    ok = med_ap <= limit and med_ll <= limit
+    print(f"\nwithin-cell dispersion (CV over repeats): allpaka {med_ap * 100:.1f}%  "
+          f"llama {med_ll * 100:.1f}%  (limit {limit * 100:.0f}%)")
+    print(f"instrument: {'AGREES - slope fit is usable' if ok else 'DISAGREES - verdict is provisional'}")
+    if not ok:
+        worst = sorted(zip(full, cvs["ap"]), key=lambda kv: -kv[1])[:4]
+        print("  worst allpaka cells (pp, CV%): " + str([(p, round(c * 100, 1)) for p, c in worst]))
     xs = [pp / 2 for pp in full]
 
     out = {}
@@ -111,7 +154,7 @@ def main(path, min_reps=3):
         verdict = "LINEAR - target is the tile matmul path; long context is not a separate problem"
     else:
         verdict = "UNDETERMINED - do not optimise either term"
-    print(f"VERDICT: {verdict}")
+    print(f"VERDICT: {'' if ok else 'PROVISIONAL (instrument disagreed) - '}{verdict}")
 
     # Falsification of the two-term model itself: fit on the ends, test the middle.
     if len(full) >= 3 and full[1] != full[-1]:
@@ -127,4 +170,10 @@ def main(path, min_reps=3):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else 3)
+    args = [a for a in sys.argv[1:]]
+    cp = None
+    for i, a in enumerate(args):
+        if a == "--calib-pp":
+            cp = int(args[i + 1])
+    pos = [a for i, a in enumerate(args) if not a.startswith("--") and args[i - 1] != "--calib-pp"]
+    main(pos[0], int(pos[1]) if len(pos) > 1 else 3, cp)
