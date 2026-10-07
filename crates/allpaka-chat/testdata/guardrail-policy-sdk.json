@@ -1,0 +1,1 @@
+{"kind": "local_guardrail_policy", "schema_version": 1, "policy_sha256": "66a3c51922fabe655cd24004732a7319b90948fed3159d9d1933f4fb25d2aec7", "rules": [{"id": "unicode", "kind": "forbidden_substrings", "value": ["секрет", "line\nnext"]}, {"id": "max", "kind": "max_bytes", "value": 64000}]}

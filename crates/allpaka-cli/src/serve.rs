@@ -552,7 +552,7 @@ fn emit_stream_completion(
 
 /// The chat template families this server can format. Decided by which
 /// special tokens the vocabulary actually contains.
-enum Template {
+pub(crate) enum Template {
     /// `<|im_start|>role\n...<|im_end|>\n` - Qwen and much of the ecosystem.
     /// `force_think` mirrors the GGUF chat template of the thinking Qwen
     /// generations: the assistant turn is primed with a literal `<think>\n`
@@ -581,7 +581,7 @@ enum Template {
 }
 
 impl Template {
-    fn detect(tok: &Tokenizer) -> Result<Self> {
+    pub(crate) fn detect(tok: &Tokenizer) -> Result<Self> {
         if let (Some(im_start), Some(im_end)) =
             (tok.piece_id("<|im_start|>"), tok.piece_id("<|im_end|>"))
         {
@@ -623,7 +623,7 @@ impl Template {
     /// The literal prefix the assistant turn was primed with (`<think>\n`
     /// for the thinking Qwens, empty otherwise). The reply text gets it back
     /// so clients see the complete `<think>...</think>` block.
-    fn think_prefix(&self) -> &'static str {
+    pub(crate) fn think_prefix(&self) -> &'static str {
         match self {
             Template::ChatMl {
                 force_think: true, ..
@@ -634,7 +634,7 @@ impl Template {
 
     /// Format a conversation into token ids, ending where the assistant
     /// starts writing.
-    fn prompt(&self, tok: &Tokenizer, messages: &[(String, String)]) -> Result<Vec<u32>> {
+    pub(crate) fn prompt(&self, tok: &Tokenizer, messages: &[(String, String)]) -> Result<Vec<u32>> {
         let mut ids = Vec::new();
         match self {
             Template::ChatMl {
@@ -712,7 +712,7 @@ impl Template {
     }
 
     /// Tokens that end an assistant turn.
-    fn stop_tokens(&self, tok: &Tokenizer) -> Vec<u32> {
+    pub(crate) fn stop_tokens(&self, tok: &Tokenizer) -> Vec<u32> {
         let mut stops = Vec::new();
         match self {
             Template::ChatMl { im_end, .. } => stops.push(*im_end),
@@ -863,7 +863,7 @@ fn content_parts(content: &Value) -> (String, usize) {
 }
 
 /// Image parts anywhere in the request, across all messages.
-fn image_part_count(raw: &[Value]) -> usize {
+pub(crate) fn image_part_count(raw: &[Value]) -> usize {
     raw.iter().map(|m| content_parts(&m["content"]).1).sum()
 }
 
@@ -873,7 +873,7 @@ fn image_part_count(raw: &[Value]) -> usize {
 /// calls as `<tool_call>{json}</tool_call>` blocks, tool results as user
 /// turns wrapped in `<tool_response>...</tool_response>` (consecutive
 /// results merged into one turn, as the reference chat template does).
-fn render_messages(raw: &[Value], tools: Option<&[Value]>) -> Vec<(String, String)> {
+pub(crate) fn render_messages(raw: &[Value], tools: Option<&[Value]>) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut pending_tool: Vec<String> = Vec::new();
     let flush_tools = |out: &mut Vec<(String, String)>, pending: &mut Vec<String>| {
@@ -947,7 +947,7 @@ fn render_messages(raw: &[Value], tools: Option<&[Value]>) -> Vec<(String, Strin
 /// returned in the OpenAI `tool_calls` shape (arguments re-encoded as a JSON
 /// string). Malformed blocks stay in the content untouched - the client sees
 /// what the model actually wrote instead of a silent drop.
-fn parse_tool_calls(text: &str) -> (String, Vec<Value>) {
+pub(crate) fn parse_tool_calls(text: &str) -> (String, Vec<Value>) {
     let mut content = String::new();
     let mut calls = Vec::new();
     let mut rest = text;
@@ -984,7 +984,7 @@ fn parse_tool_calls(text: &str) -> (String, Vec<Value>) {
 /// The longest prefix of `text` that is safe to stream when tool calls may
 /// follow: everything up to the first (possibly still incomplete) opening
 /// `<tool_call>` tag. A trailing partial match of the tag is held back too.
-fn stream_safe_len(text: &str) -> usize {
+pub(crate) fn stream_safe_len(text: &str) -> usize {
     const TAG: &str = "<tool_call>";
     if let Some(i) = text.find(TAG) {
         return i;
@@ -1648,7 +1648,7 @@ fn max_body_bytes() -> usize {
     max_body_bytes_from(std::env::var("ALLPAKA_MAX_BODY_MIB").ok().as_deref())
 }
 
-fn read_request(stream: &mut TcpStream) -> Result<(String, String)> {
+pub(crate) fn read_request(stream: &mut TcpStream) -> Result<(String, String)> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let header_end;
@@ -1699,7 +1699,7 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-fn respond(stream: &mut TcpStream, status: u16, body: &Value) -> Result<()> {
+pub(crate) fn respond(stream: &mut TcpStream, status: u16, body: &Value) -> Result<()> {
     let text = body.to_string();
     let reason = if status == 200 { "OK" } else { "Error" };
     let response = format!(
@@ -1713,7 +1713,7 @@ fn respond(stream: &mut TcpStream, status: u16, body: &Value) -> Result<()> {
     Ok(())
 }
 
-fn write_sse_headers(stream: &mut TcpStream) -> Result<()> {
+pub(crate) fn write_sse_headers(stream: &mut TcpStream) -> Result<()> {
     stream.write_all(
         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
           Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n\
@@ -1722,7 +1722,7 @@ fn write_sse_headers(stream: &mut TcpStream) -> Result<()> {
     Ok(())
 }
 
-fn write_sse_event(stream: &mut TcpStream, body: &Value) -> Result<()> {
+pub(crate) fn write_sse_event(stream: &mut TcpStream, body: &Value) -> Result<()> {
     stream.write_all(format!("data: {body}\n\n").as_bytes())?;
     stream.flush()?;
     Ok(())

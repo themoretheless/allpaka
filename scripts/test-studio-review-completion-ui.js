@@ -1,0 +1,16 @@
+const assert=require('assert'),fs=require('fs'),vm=require('vm');
+const pending=[];function node(tag,text){return {tag,text,value:'',children:[],append(...x){this.children.push(...x)},replaceChildren(...x){this.children=x},setAttribute(){}};}
+const context={node,Option:function(text,value){return {text,value}},encodeURIComponent,api:(path,body)=>new Promise((resolve,reject)=>pending.push({path,body,resolve,reject}))};vm.createContext(context);const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('function reviewQueueCompletionPanel('),source.indexOf('let reviewQueueEpoch=')),context);
+const queue={id:'q',project_id:'p',version:3,targets:[{trace_id:'t',span_id:1}],assignments:{0:'Reviewer'},completions:{}};
+const annotation={id:'a',author:'Reviewer',span_id:1,deleted:false,comment:'Check saved evidence'};
+(async()=>{let current=true,accepted;const panel=context.reviewQueueCompletionPanel(queue,0,()=>current,q=>accepted=q),[label,version,load,choices,preview,finish,message]=panel.children;
+let task=load.onclick();await load.onclick();assert.equal(pending.length,1);pending[0].resolve({trace_id:'t',version:7,annotations:[annotation,{...annotation,id:'wrong-author',author:'Other'},{...annotation,id:'wrong-span',span_id:2},{...annotation,id:'deleted',deleted:true}]});await task;assert.equal(choices.children.length,1);assert.equal(choices.value,'a');assert.equal(finish.disabled,false);assert.equal(preview.children[1].text,annotation.comment);
+task=finish.onclick();await finish.onclick();assert.equal(pending.length,2);assert.deepEqual(JSON.parse(JSON.stringify(pending[1].body)),{base_version:3,target_index:0,action:'complete',feedback_version:7,annotation_id:'a'});
+pending[1].resolve({...queue,version:4,completions:{0:{reviewer:'Reviewer',feedback_version:8,annotation_id:'a'}}});await task;assert.equal(accepted,undefined);assert.match(message.textContent,/не совпадает/);
+task=finish.onclick();const completed={...queue,version:4,completions:{0:{reviewer:'Reviewer',feedback_version:7,annotation_id:'a'}}};pending[2].resolve(completed);await task;assert.equal(accepted,completed);
+const reopened=context.reviewQueueCompletionPanel(completed,0,()=>current,q=>accepted=q);task=reopened.children[1].onclick();await reopened.children[1].onclick();assert.equal(pending.length,4);assert.equal(pending[3].body.action,'reopen');assert.equal(pending[3].body.base_version,4);pending[3].resolve({...queue,version:5});await task;assert.equal(accepted.version,5);
+task=load.onclick();version.value='2';version.oninput();pending[4].resolve({trace_id:'t',version:9,annotations:[annotation]});await task;assert.equal(finish.disabled,true);assert.equal(choices.children.length,0);
+task=load.onclick();pending[5].resolve({trace_id:'other',version:2,annotations:[annotation]});await task;assert.match(message.textContent,/не совпадает/);assert.equal(finish.disabled,true);
+task=load.onclick();current=false;const old=message.textContent;pending[6].reject(new Error('stale error'));await task;assert.equal(message.textContent,old);
+console.log('PASS completion filters exact reviewer/source/version, captures evidence, rejects substituted and stale receipts, excludes duplicate writes and reopens');
+})().catch(error=>{console.error(error);process.exitCode=1});

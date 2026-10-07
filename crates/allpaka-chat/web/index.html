@@ -45,6 +45,7 @@
     </select>
   </div>
 
+  <label class="history-bookmark-filter"><input id="history-bookmarked" type="checkbox">С закладками</label>
   <div id="sessions-status" class="muted" role="status" hidden></div>
   <nav id="sessions" aria-label="История разговоров"></nav>
   <div id="sessions-more" class="muted" hidden></div>
@@ -203,6 +204,8 @@
     <li class="muted">План появится во время работы</li>
   </ol>
   <button id="plan-add" hidden>＋ Шаг плана</button>
+  <p id="plan-revision" class="muted"></p>
+  <details><summary>Контрольные точки плана</summary><div id="plan-checkpoints"></div></details>
 
   <div class="context-settings">
     <label><span><input id="auto-compact" type="checkbox" checked> Автокомпакт</span></label>
@@ -213,11 +216,278 @@
     </details>
   </div>
 
+  <details><summary>Закладки разговора</summary><div id="conversation-bookmarks"></div></details>
+  <button id="memory-open" type="button">Память проекта</button>
+  <button id="online-rules-open" type="button">Правила оценки</button>
+  <button id="quality-jobs-open" type="button">Модельные оценки</button>
+  <button id="online-jobs-open" type="button">Очередь оценок</button>
+  <button id="callback-summary-open" type="button">Сводка callback-оценок</button>
+  <button id="review-queues-open" type="button">Очереди ручной проверки</button>
+  <button id="evaluation-open" type="button">Наборы примеров и оценки</button>
+  <details id="trace-panel"><summary>Вызовы и расходы</summary>
+    <button id="trace-refresh" type="button">Показать вызовы</button>
+    <label>Состояние вызова<select id="trace-status"><option value="">Все состояния</option><option value="completed">Завершён</option><option value="failed">Ошибка</option><option value="interrupted">Прерван</option><option value="running">Выполняется</option><option value="timeout">Таймаут</option><option value="cancelled">Отменён</option><option value="token_limit">Лимит ответа</option><option value="step_limit">Лимит шагов</option><option value="no_progress">Нет прогресса</option></select></label>
+    <label>Начало периода запуска<input id="trace-since" type="datetime-local"></label>
+    <label>Конец периода запуска<input id="trace-until" type="datetime-local"></label>
+    <p>Период учитывает начало вызова. Даты указаны в местном времени браузера; обе границы включены.</p>
+    <label>Проверки входа и ответа<select id="trace-guardrail"><option value="">Все вызовы</option><option value="any">С проверками</option><option value="failed">С нарушениями</option><option value="blocked">С блокировками</option></select></label>
+    <label>Хеш правил<input id="trace-guardrail-policy" placeholder="Необязательно: SHA-256 правил" maxlength="64"></label>
+    <button id="trace-project" type="button">Все вызовы проекта</button>
+    <button id="trace-bulk" type="button">Выбрать вызовы для экспорта</button>
+    <button id="trace-trash" type="button">Корзина вызовов</button>
+    <details><summary>Проверки текущего чата</summary><label><input id="chat-guardrails-enabled" type="checkbox">Применять сохранённые правила</label><label>Правила входа<input id="chat-guardrails-input" maxlength="64" placeholder="Отпечаток политики входа"></label><label>Правила ответа<input id="chat-guardrails-output" maxlength="64" placeholder="Отпечаток политики ответа"></label><label>При нарушении<select id="chat-guardrails-action"><option value="block">Блокировать</option><option value="observe">Только отмечать</option></select></label><p>Доступно в Chat, Plan, Auto, Goal и Swarm с локальными участниками. Блокировка удерживает ответ до завершения проверки. Правила не удаляют сообщения пользователя из истории.</p></details>
+    <button id="guardrail-policies-open" type="button">Сохранённые правила проверок</button>
+    <button id="trace-summary-open" type="button">Итоги вызовов и расходов</button>
+    <button id="judge-runs-refresh" type="button">Пакетные оценки проекта</button>
+    <div id="trace-results"></div>
+  </details>
+  <details id="background-launcher" hidden><summary>Запустить фоновую команду</summary><p>Команда выполняется в проекте текущего чата. Доступно в Auto/Goal при подключённом инструменте команд.</p><label>Название, необязательно<input id="background-name" maxlength="200"></label><label>Команда<textarea id="background-command" maxlength="16000"></textarea></label><label>Лимит времени, секунд<input id="background-timeout" type="number" min="1" max="86400" value="3600"></label><label>Продолжение после завершения, необязательно<textarea id="background-follow-up" maxlength="16000" placeholder="Например: проверь результат и продолжи задачу"></textarea></label><p>Продолжение может вызвать модель. «Стоп» отзывает его; после перезапуска оно не повторяется.</p><button id="background-start" type="button">Запустить команду</button><div id="background-start-result" role="status"></div></details>
+  <section id="background-tasks" hidden aria-label="Фоновые задачи"></section>
   <div id="usage" class="muted"></div>
 </aside>
 
+<dialog id="online-rules-dialog">
+  <button id="online-rules-close" type="button">Закрыть правила</button>
+  <h2>Правила оценки</h2>
+  <p>Сохраните правило и явно включите его. Модельная проверка запускается только после передачи текста для выбранной трассы.</p>
+  <label>Название правила<input id="online-rule-id" maxlength="100" placeholder="Например: execution-health"></label>
+  <label>Проверять трассы, %<input id="online-rule-rate" type="number" min="0" max="100" step="1" value="100"></label>
+  <label>Тип проверки<select id="online-rule-kind"><option value="trace_health">Успешность шагов</option><option value="model_quality">Качество ответа моделью</option></select></label>
+  <div id="online-rule-model-fields" hidden>
+    <p id="online-rule-model-label"></p>
+    <label>Критерий оценки<textarea id="online-rule-rubric" maxlength="16000" placeholder="Что проверить в ответе и как выставить балл от 0 до 1"></textarea></label>
+    <p>После включения правила переданный текст будет отправляться выбранному провайдеру. Действуют его условия и стоимость запросов.</p>
+  </div>
+  <button id="online-rule-save" type="button">Сохранить версию правила</button>
+  <div id="online-rule-message" role="status"></div>
+  <button id="online-rules-refresh" type="button">Обновить правила</button>
+  <div id="online-rules-body"></div>
+</dialog>
+<dialog id="quality-capture-dialog">
+  <button id="quality-capture-close" type="button">Закрыть передачу текста</button>
+  <h2>Текст для оценки качества</h2>
+  <p>Трасса хранит только сведения о выполнении. Здесь вы явно сохраняете текст отдельно. Выбранные модельные правила могут отправить его настроенному провайдеру для платной проверки.</p>
+  <label>Вопрос<textarea id="quality-capture-input" maxlength="16000"></textarea></label>
+  <label>Ответ<textarea id="quality-capture-output" maxlength="64000"></textarea></label>
+  <label>Эталон, необязательно<textarea id="quality-capture-reference" maxlength="64000"></textarea></label>
+  <button id="quality-capture-save" type="button">Сохранить текст и применить выбранные правила</button>
+  <div id="quality-capture-message" role="status"></div>
+</dialog>
+<dialog id="quality-jobs-dialog">
+  <button id="quality-jobs-close" type="button">Закрыть модельные оценки</button>
+  <h2>Модельные оценки</h2>
+  <p>Модель оценивает явно сохранённый текст. Балл не подтверждает фактическую правильность ответа. Прерванные задания автоматически не повторяются.</p>
+  <button id="quality-jobs-refresh" type="button">Обновить модельные оценки</button>
+  <div id="quality-jobs-body"></div>
+</dialog>
+<dialog id="online-jobs-dialog">
+  <button id="online-jobs-close" type="button">Закрыть очередь</button>
+  <h2>Очередь оценок</h2>
+  <p>Задания выбранных правил выполняются в фоне. Проверка успешности шагов не подтверждает качество ответа.</p>
+  <button id="online-jobs-refresh" type="button">Обновить очередь</button>
+  <div id="online-jobs-body"></div>
+</dialog>
+<dialog id="callback-summary-dialog">
+  <button id="callback-summary-close" type="button">Закрыть сводку</button>
+  <h2>Сводка callback-оценок</h2>
+  <p>Оценки сообщены вашим кодом. Разные версии оценщиков учитываются отдельно; автоматического решения о качестве нет.</p>
+  <label for="callback-summary-since">С даты <input id="callback-summary-since" type="datetime-local"></label>
+  <label for="callback-summary-until">По дату <input id="callback-summary-until" type="datetime-local"></label>
+  <button id="callback-summary-refresh" type="button">Обновить сводку оценок</button>
+  <div id="callback-summary-body"></div>
+</dialog>
+<dialog id="memory-dialog">
+  <button id="memory-close" type="button">Закрыть память</button>
+  <h2>Память проекта</h2>
+  <p>Сохранённые решения доступны агенту через поиск памяти. Просроченные и убранные записи не участвуют в поиске.</p>
+  <label>Область<select id="memory-scope"></select></label>
+  <label>Найти заметку<input id="memory-search" type="search"></label>
+  <label class="memory-removed-label"><input id="memory-show-removed" type="checkbox">Показать убранные</label>
+  <div id="memory-expiry-review"></div>
+  <div id="memory-consolidation-catalog"></div>
+  <div id="memory-list"></div>
+  <button id="memory-new" type="button">Новая заметка</button>
+  <h3>Предложения из разговора</h3>
+  <p>Извлечение отправляет последние 50 текстовых сообщений выбранной истории модели. Проверьте и отредактируйте каждое предложение перед сохранением.</p>
+  <button id="memory-extract" type="button">Извлечь предложения</button>
+  <button id="memory-proposals-refresh" type="button">Открыть сохранённые предложения</button>
+  <p id="memory-proposals-status"></p>
+  <div id="memory-proposals-list"></div>
+  <hr>
+  <label>Название заметки<input id="memory-name" maxlength="200"></label>
+  <label>Решение или полезный факт<textarea id="memory-content" rows="6"></textarea></label>
+  <label>Актуально до (необязательно)<input id="memory-expiry" type="datetime-local"></label>
+  <p id="memory-receipt">Новая заметка</p>
+  <div id="memory-consolidation-origin"></div>
+  <div id="memory-consolidation-compose"></div>
+  <button id="memory-save" type="button">Сохранить заметку</button>
+  <button id="memory-remove" type="button" hidden>Убрать из поиска</button>
+  <button id="memory-export" type="button" hidden>Экспорт заметки</button>
+  <label>Версия заметки<input id="memory-version" type="number" min="1" value="1"></label>
+  <button id="memory-load-version" type="button" disabled>Открыть версию заметки</button>
+</dialog>
+<dialog id="trace-summary-dialog">
+  <button id="trace-summary-close" type="button">Закрыть</button>
+  <h2>Итоги вызовов и расходов</h2>
+  <label>Область сводки<select id="trace-summary-scope"><option value="project">Текущий проект</option><option value="session">Текущий разговор</option></select></label>
+  <label>Состояние трассы<select id="trace-summary-status"><option value="">Все состояния</option><option value="completed">Завершённые</option><option value="failed">Ошибки</option><option value="interrupted">Прерванные</option><option value="running">Выполняются</option><option value="no_progress">Повторяющиеся ошибки</option><option value="goal_incomplete">Цель не завершена</option><option value="token_limit">Лимит ответа</option></select></label>
+  <label>Начало периода<input id="trace-summary-since" type="datetime-local"></label>
+  <label>Конец периода<input id="trace-summary-until" type="datetime-local"></label>
+  <p>Период учитывает начало запуска. Итоги содержат только сообщённые сведения; неизвестная стоимость не считается нулевой.</p>
+  <button id="trace-summary-refresh" type="button">Обновить итоги</button>
+  <button id="trace-summary-export" type="button" disabled>Экспорт сводки</button>
+  <details><summary>Активность по времени</summary>
+    <label>Интервал<select id="trace-series-interval"><option value="900000">15 минут</option><option value="3600000" selected>Час</option><option value="86400000">День</option></select></label>
+    <label>Показатель<select id="trace-series-metric"><option value="traces">Вызовы</option><option value="models">Вызовы моделей</option><option value="errors">Ошибки</option><option value="guardrails">Нарушения проверок</option><option value="input_tokens">Входные токены</option><option value="output_tokens">Выходные токены</option><option value="cache_creation">Токены создания кэша</option><option value="cache_read">Токены чтения кэша</option><option value="cost">Сообщённая стоимость</option></select></label>
+    <label>Валюта стоимости<input id="trace-series-currency" value="USD" maxlength="3" placeholder="USD"></label>
+    <button id="trace-series-load" type="button">Показать график</button>
+    <button id="trace-series-export" type="button" disabled>Экспорт активности JSON</button>
+    <p>Без выбранного периода показаны последние 24 часа. Все показатели вызова относятся к времени его запуска.</p>
+    <div id="trace-series-result" role="status"></div>
+  </details>
+  <div id="trace-summary-result" role="status"></div>
+</dialog>
+<dialog id="evaluation-dialog">
+  <details><summary>Оценки готовых ответов и Python-задач</summary>
+    <label><input id="offline-scores-dataset-only" type="checkbox"> Только выбранный набор, все версии</label>
+    <button id="offline-scores-refresh" type="button">Показать сохранённые оценки</button>
+    <div id="offline-scores-result" role="status"></div>
+    <label>Базовая оценка<input id="offline-score-baseline" readonly></label>
+    <label>Новая оценка<input id="offline-score-candidate" readonly></label>
+    <button id="offline-scores-compare" type="button">Сравнить сохранённые оценки</button>
+    <div id="offline-scores-comparison" role="status"></div>
+  </details>
+  <details><summary>Создать и запустить матрицу</summary>
+    <p>Добавьте текущую конфигурацию проверки для каждого варианта. Первый вариант — базовый. Набор и метрики должны совпадать. Запуск вызывает модели; завершённые эксперименты сохраняются в Studio.</p>
+    <button id="matrix-draft-add" type="button">Добавить текущую конфигурацию</button>
+    <div id="matrix-draft-rows"></div>
+    <button id="matrix-draft-run" type="button">Запустить варианты</button>
+    <button id="matrix-draft-stop" type="button" disabled>Остановить матрицу</button>
+    <div id="matrix-draft-status" role="status"></div>
+    <p>Задание выполняется в Studio и продолжает работу после закрытия страницы. После перезапуска Studio продолжение нужно запросить явно; уже начатые вызовы автоматически не повторяются.</p>
+    <button id="matrix-jobs-show" type="button">Задания матриц проекта</button>
+    <label>Сохранённое задание<input id="matrix-job-id" maxlength="80" placeholder="ID задания"></label>
+    <button id="matrix-job-open" type="button">Открыть задание</button>
+    <div id="matrix-jobs-list"></div>
+    <div id="matrix-job-result" role="status"></div>
+  </details>
+  <details><summary>Сравнение вариантов из отчёта матрицы</summary>
+    <label>Отчёт JSON<input id="evaluation-matrix-import" type="file" accept="application/json,.json"></label>
+    <p>Studio проверяет сохранённые эксперименты и заново сравнивает ответы. Модели не вызываются.</p>
+    <label>Сохранённая матрица<input id="evaluation-matrix-id" maxlength="80" placeholder="Идентификатор матрицы"></label>
+    <button id="evaluation-matrices-show" type="button">Матрицы проекта</button>
+    <div id="evaluation-matrices-list"></div>
+    <button id="evaluation-matrix-open" type="button">Открыть сохранённую матрицу</button>
+    <div id="evaluation-matrix-result" role="status"></div>
+  </details>
+  <details><summary>Оценка моделью по сохранённому плану</summary>
+    <label>Номер плана<input id="judge-plan-id" maxlength="80"></label>
+    <button id="judge-plan-preview" type="button">Проверить план</button>
+    <div id="judge-plan-preview-result"></div>
+    <button id="judge-plan-start" type="button" disabled>Запустить оценку моделью</button>
+    <p id="judge-plan-start-result"></p>
+  </details>
+  <button id="evaluation-close" type="button">Закрыть</button>
+  <h2>Наборы примеров и оценки</h2>
+  <label>Набор<select id="evaluation-dataset"></select></label>
+  <button id="evaluation-new" type="button">Новый набор</button>
+  <button id="evaluation-fork" type="button">Создать вариант версии</button>
+  <p id="evaluation-origin-info"></p>
+  <details><summary>Архив наборов</summary>
+    <p>Архив скрывает набор из рабочего каталога. Сохранённые версии и ссылки экспериментов остаются доступными. Для изменения набора сначала восстановите его.</p>
+    <label>Поиск набора<input id="dataset-lifecycle-search" maxlength="200" placeholder="Название или ID"></label>
+    <button id="dataset-lifecycle-find" type="button">Найти наборы</button>
+    <button id="dataset-active-show" type="button">Действующие наборы</button>
+    <button id="dataset-archive-show" type="button">Архивные наборы</button>
+    <div id="dataset-lifecycle-result"></div>
+  </details>
+  <label>Название<input id="evaluation-name" maxlength="200"></label>
+  <label>Версия<input id="evaluation-version" type="number" min="1" value="1"></label>
+  <button id="evaluation-load" type="button">Загрузить версию</button>
+  <button id="dataset-versions-show" type="button">История версий набора</button>
+  <div id="dataset-versions-result"></div>
+  <details><summary>Сравнение версий набора</summary>
+    <label>Исходная версия<input id="dataset-compare-from" type="number" min="1" max="1000" value="1"></label>
+    <label>Новая версия<input id="dataset-compare-to" type="number" min="1" max="1000" value="2"></label>
+    <button id="dataset-compare-show" type="button">Сравнить версии</button>
+    <div id="dataset-compare-result"></div>
+  </details>
+  <div id="evaluation-samples"></div>
+  <button id="evaluation-add" type="button">Добавить пример</button>
+  <button id="evaluation-save" type="button">Сохранить новую версию</button>
+  <button id="evaluation-export" type="button">Экспорт набора</button>
+  <label>Импорт набора<input id="evaluation-import" type="file" accept="application/json,.json"></label>
+  <hr><h3>Проверка ответов</h3>
+  <p>Запуск использует выбранные в Studio модель и провайдера. Внешние запросы расходуют их токены.</p>
+  <details><summary>Версии заданий</summary>
+  <label>Сохранённое задание<select id="prompt-library"></select></label>
+  <label>Название<input id="prompt-name" maxlength="200"></label>
+  <label>Версия<input id="prompt-version" type="number" min="1" value="1"></label>
+  <button id="prompt-load">Открыть версию</button><button id="prompt-history-open">История версий</button><div id="prompt-history"></div><button id="prompt-new">Новое задание</button><button id="prompt-fork">Создать вариант</button>
+  <label>Формат промпта<select id="prompt-format"><option value="text">Один вопрос по шаблону</option><option value="messages">Примеры диалога и финальный вопрос</option></select></label>
+  <div id="prompt-messages-editor" hidden><p>Добавляйте пары вопрос/ответ перед финальным вопросом. В финальном вопросе используйте {{input}}.</p><div id="prompt-messages-list"></div><button id="prompt-messages-add-pair" type="button">Добавить пример диалога</button></div>
+  <label>Системная инструкция<textarea id="prompt-system">Answer the supplied evaluation sample.</textarea></label>
+  <button id="prompt-save">Сохранить версию</button><p id="prompt-receipt">Проверка использует задание из поля ниже.</p>
+  <details><summary>Предпросмотр промпта для одного вопроса</summary>
+    <label>Вопрос<textarea id="prompt-preview-input" maxlength="65536"></textarea></label>
+    <label>Справочные материалы, разделённые пустой строкой<textarea id="prompt-preview-contexts"></textarea></label>
+    <button id="prompt-preview-show" type="button">Показать сообщения сохранённой версии</button>
+    <div id="prompt-preview-result"></div>
+    <p>Пробный запуск отправит вопрос и контекст выбранной модели и сохранит пример, ответ и журнал вызовов. Оценки вычисляются только для выбранных ниже метрик.</p>
+    <details><summary>Метрики пробного запуска</summary>
+      <label><input id="playground-has-reference" type="checkbox">Есть эталонный ответ</label>
+      <label>Эталонный ответ<textarea id="playground-reference" maxlength="65536"></textarea></label>
+      <label><input id="playground-exact" type="checkbox">Точное совпадение</label>
+      <label><input id="playground-contains" type="checkbox">Содержит эталонный ответ</label>
+      <label><input id="playground-token-f1" type="checkbox">Совпадение слов (F1)</label>
+      <label><input id="playground-bigram-f1" type="checkbox">Сходство соседних символов (F1)</label>
+      <label><input id="playground-json" type="checkbox">Корректный JSON</label>
+      <label><input id="playground-json-equals" type="checkbox">JSON совпадает с эталоном</label>
+      <p>Без метрик сохраняется пробный ответ без оценки качества. Все метрики, кроме проверки корректности JSON, требуют эталонного ответа.</p>
+    </details>
+    <button id="prompt-playground-start" type="button">Запустить один вопрос</button>
+    <div id="prompt-playground-result"></div>
+  </details>
+  </details>
+  <label>Задание<textarea id="evaluation-prompt">{{input}}</textarea></label>
+  <p>{{input}} — вопрос из примера; {{contexts}} — его справочные материалы.</p>
+  <label><input id="evaluation-exact" type="checkbox" checked> Точное совпадение с ожидаемым ответом</label>
+  <label><input id="evaluation-contains" type="checkbox"> Ответ содержит ожидаемый текст</label>
+  <label><input id="evaluation-json" type="checkbox"> Корректный JSON</label>
+  <label><input id="evaluation-json-equals" type="checkbox"> JSON совпадает с эталоном по структуре и значениям</label>
+  <label><input id="evaluation-bigram-f1" type="checkbox"> Сходство соседних символов (F1)</label>
+  <label><input id="evaluation-token-f1" type="checkbox"> Совпадение слов с эталоном (F1)</label>
+  <p>F1 слов учитывает повторения слов; F1 символов — соседние пары символов. Обе метрики сохраняют регистр и пунктуацию. Структурное сравнение JSON игнорирует оформление и порядок ключей.</p>
+  <button id="evaluation-run" type="button">Запустить проверку сохранённой версии</button>
+  <details><summary>Поиск запусков</summary>
+    <label>Статус<select id="evaluation-runs-status"><option value="">Все статусы</option><option value="running">Выполняется</option><option value="completed">Завершён</option><option value="failed">Ошибка</option><option value="cancelled">Отменён</option><option value="interrupted">Прерван</option></select></label>
+    <label>Модель содержит<input id="evaluation-runs-model" maxlength="200"></label>
+    <label>Тип запуска<select id="evaluation-runs-kind"><option value="">Все запуски</option><option value="true">Playground</option><option value="false">Проверки наборов</option></select></label>
+    <label><input id="evaluation-runs-dataset" type="checkbox">Только выбранный набор</label>
+    <label><input id="evaluation-runs-provider" type="checkbox">Только выбранный провайдер</label>
+  </details>
+  <button id="evaluation-refresh" type="button">Найти / обновить запуски</button>
+  <div id="evaluation-runs"></div><div id="evaluation-result"></div>
+  <h3>Сравнение запусков</h3>
+  <label>Исходный<select id="evaluation-baseline"></select></label>
+  <label>Новый<select id="evaluation-candidate"></select></label>
+  <button id="evaluation-compare" type="button">Сравнить</button>
+  <button id="evaluation-comparisons-show" type="button">История сравнений проекта</button>
+  <div id="evaluation-comparisons-list"></div>
+  <label>Сохранённое сравнение <input id="evaluation-comparison-id" placeholder="Идентификатор сравнения" maxlength="80"></label>
+  <button id="evaluation-comparison-open" type="button">Открыть сохранённое сравнение</button>
+  <div id="evaluation-comparison"></div>
+</dialog>
+
 <!-- Connection Dialog -->
 <dialog id="connection-dialog">
+  <details><summary>Диагностика подключения</summary>
+    <label>Провайдер для проверки<select id="doctor-provider"></select></label>
+    <label>Модель для проверки<input id="doctor-model" maxlength="200" placeholder="Необязательно"></label>
+    <p>Проверка использует сохранённое подключение и обращается только к списку моделей. Генерация ответа не проверяется.</p>
+    <button id="doctor-check" type="button">Проверить подключение</button>
+    <div id="doctor-result" role="status"></div>
+  </details>
   <form method="dialog"><button class="close" aria-label="Закрыть">×</button></form>
   <h2>Подключения</h2>
   <p class="muted">Выберите хранение в памяти или системном хранилище. Переменные окружения имеют приоритет при запуске. Удаление здесь не изменяет переменные окружения.</p>
@@ -272,8 +542,28 @@
   <p class="muted">Архив и корзина сохраняют историю. Восстановление не запускает очередь.</p>
 </dialog>
 
+<dialog id="guardrail-policies-dialog"><button id="guardrail-policies-close" type="button">Закрыть</button><h2>Сохранённые правила проверок</h2><p>Правила хранятся на этом компьютере. Просмотр не запускает проверку или модель.</p><details><summary>Создать правила</summary><label>Название правила<input id="policy-rule-id" maxlength="80" placeholder="Например: answer_json"></label><label>Проверка<select id="policy-rule-kind"><option value="max_bytes">Максимальная длина в байтах</option><option value="min_bytes">Минимальная длина в байтах</option><option value="forbidden_substrings">Запрещённые фрагменты</option><option value="required_substrings">Обязательные фрагменты</option><option value="json_valid">Корректный JSON</option></select></label><label>Значение<textarea id="policy-rule-value" placeholder="Число или фрагменты, каждый с новой строки"></textarea></label><p>Фрагменты учитывают регистр. Для JSON значение не требуется.</p><button id="policy-rule-add" type="button">Добавить правило</button><div id="policy-rule-draft"></div><button id="policy-rule-create" type="button" disabled>Сохранить новую политику</button><div id="policy-rule-message" role="status"></div></details><label>Файл правил<input id="guardrail-policy-file" type="file" accept=".json,application/json"></label><div id="guardrail-policy-preview"></div><button id="guardrail-policy-save" type="button" disabled>Сохранить проверенные правила</button><div id="guardrail-policies-result"></div></dialog>
+
 <div id="undo" role="status" hidden></div>
 <div id="toast" role="status" hidden></div>
 
+<dialog id="bookmark-edit-dialog">
+  <h2>Закладка сообщения</h2>
+  <label>Подпись<input id="bookmark-label" maxlength="200"></label>
+  <button id="bookmark-cancel" type="button">Отмена</button>
+  <button id="bookmark-save" type="button">Сохранить закладку</button>
+</dialog>
+<dialog id="review-queues-dialog">
+  <button id="review-queues-close" type="button">Закрыть</button>
+  <h2>Очереди ручной проверки</h2>
+  <p>Очереди выбранного проекта. Имена проверяющих указываются вручную.</p>
+  <label for="review-queues-archive">Раздел <select id="review-queues-archive"><option value="">Все очереди</option><option value="false">Рабочие</option><option value="true">Архив</option></select></label>
+  <label for="review-queues-name">Название очереди <input id="review-queues-name" maxlength="200"></label>
+  <label for="review-queues-status">Состояние <select id="review-queues-status"><option value="">Все</option><option value="pending">Есть незавершённые пункты</option><option value="completed">Все пункты завершены</option><option value="unassigned">Есть пункты без проверяющего</option></select></label>
+  <label for="review-queues-reviewer">Проверяющий (точное имя) <input id="review-queues-reviewer" maxlength="200"></label>
+  <button id="review-queues-refresh" type="button">Обновить очереди</button>
+  <div id="review-queues-list"></div>
+  <div id="review-queue-detail"></div>
+</dialog>
 </body>
 </html>

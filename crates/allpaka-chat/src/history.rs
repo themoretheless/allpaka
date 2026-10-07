@@ -20,19 +20,25 @@ pub struct Search {
     sort: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
+    #[serde(default)]
+    bookmarked: bool,
 }
 pub async fn list(State(app): State<App>, Query(search): Query<Search>) -> ApiResult<Value> {
     if search.q.len() > 1000 {
         return Err(error(StatusCode::BAD_REQUEST, "Search query too long"));
     }
     if search.limit.is_some_and(|l| l > 500) {
-        return Err(error(StatusCode::BAD_REQUEST, "History page limit too large"));
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "History page limit too large",
+        ));
     }
     let query = search.q.to_lowercase();
     let mut rows = Vec::new();
     for (session, _) in app.sessions.lock().unwrap().values() {
         let s = session.lock().unwrap();
-        if s.folder != search.folder
+        if (search.bookmarked && s.bookmarks.is_empty())
+            || s.folder != search.folder
             || search
                 .project
                 .as_ref()
@@ -47,7 +53,15 @@ pub async fn list(State(app): State<App>, Query(search): Query<Search>) -> ApiRe
                 .iter()
                 .find(|m| m.content.to_lowercase().contains(&query))
         };
-        if !query.is_empty() && !s.title.to_lowercase().contains(&query) && matched.is_none() {
+        let bookmark_match = s
+            .bookmarks
+            .iter()
+            .find(|b| b.label.to_lowercase().contains(&query));
+        if !query.is_empty()
+            && !s.title.to_lowercase().contains(&query)
+            && matched.is_none()
+            && bookmark_match.is_none()
+        {
             continue;
         }
         rows.push(json!({
@@ -57,7 +71,8 @@ pub async fn list(State(app): State<App>, Query(search): Query<Search>) -> ApiRe
             "provider": s.settings.provider,
             "project_id": s.settings.project_id,
             "folder": s.folder,
-            "match_preview": matched.map(|m| m.content.chars().take(160).collect::<String>())
+            "bookmarks":s.bookmarks.len(),
+            "match_preview": matched.map(|m| m.content.chars().take(160).collect::<String>()).or_else(||if query.is_empty(){None}else{bookmark_match.map(|b|b.label.clone())})
         }));
     }
     match search.sort.as_deref().unwrap_or("recent") {
@@ -148,6 +163,7 @@ pub async fn import(State(app): State<App>, Json(input): Json<Import>) -> ApiRes
         ));
     }
     validate_messages(&input.session.messages).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    crate::bookmarks::validate(&input.session).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
     if input.session.title.chars().count() > 100 || input.session.title.trim().is_empty() {
         return Err(error(StatusCode::BAD_REQUEST, "Invalid title"));
     }
@@ -166,9 +182,21 @@ pub async fn import(State(app): State<App>, Json(input): Json<Import>) -> ApiRes
     }
     // Imported settings never enable writes or execute queued actions.
     settings.allow_writes = false;
+    settings.guardrails = None;
+    settings.prepared_guardrails = None;
     settings.mode = Mode::Chat;
     settings.max_steps = settings.max_steps.clamp(1, 50);
-    settings.max_output_tokens = settings.max_output_tokens.clamp(256, if settings.provider == "deepseek" && ["deepseek-v4-pro", "deepseek-flash", "deepseek-v4-flash"].contains(&settings.model.as_str()) {393216} else {131072});
+    settings.max_output_tokens = settings.max_output_tokens.clamp(
+        256,
+        if settings.provider == "deepseek"
+            && ["deepseek-v4-pro", "deepseek-flash", "deepseek-v4-flash"]
+                .contains(&settings.model.as_str())
+        {
+            393216
+        } else {
+            131072
+        },
+    );
     settings.compact_threshold = settings.compact_threshold.clamp(4096, 1000000);
     if !app
         .providers
@@ -182,6 +210,7 @@ pub async fn import(State(app): State<App>, Json(input): Json<Import>) -> ApiRes
     let mut session = Session::new(id.clone(), settings);
     session.title = input.session.title;
     session.messages = input.session.messages;
+    session.bookmarks = input.session.bookmarks;
     session.folder = HistoryFolder::Active;
     // Restore original history; imported summaries are not authoritative replacements.
     session.notice = Some(

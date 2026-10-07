@@ -1,0 +1,21 @@
+const assert=require('assert'),fs=require('fs'),vm=require('vm');
+const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),start=source.indexOf('let datasetCompareEpoch='),end=source.indexOf('let selectedDatasetLoadEpoch=',start);
+const pending=[],el=()=>({children:[],replaceChildren(...x){this.children=x}}),panel=el(),elements={project:{value:'p'},'evaluation-dialog':{open:true},'evaluation-dataset':{value:'d'},'dataset-compare-from':{value:1},'dataset-compare-to':{value:2},'dataset-compare-show':{},'dataset-compare-result':panel};
+const context={evaluationDataset:{id:'d'},evaluationProject:'p',URLSearchParams,encodeURIComponent,$:id=>elements[id],node:(tag,text)=>Object.assign(el(),{tag,text}),api:()=>new Promise(resolve=>pending.push(resolve))};vm.createContext(context);vm.runInContext(source.slice(start,end),context);
+const receipt=()=>({id:'d',project_id:'p',from:{version:1,sha256:'a'.repeat(64)},to:{version:2,sha256:'b'.repeat(64)},provider_calls:0,offset:0,limit:100,order:'sample_id_asc',total:101,has_more:true,counts:{added:100,removed:0,changed:1,unchanged:0},changes:[{sample_id:'a',kind:'changed',fields:['input']},...Array.from({length:99},(_,i)=>({sample_id:'b'+String(i).padStart(3,'0'),kind:'added',fields:[]}))],name_changed:false});
+(async()=>{
+ let task=context.compareDatasetVersions();pending.shift()(receipt());await task;assert.match(panel.children[4].text,/вопрос/);
+ const next=panel.children[panel.children.length-1];task=next.onclick();let page=receipt();page.offset=100;page.has_more=false;page.changes=[{sample_id:'z',kind:'added',fields:[]}];pending.shift()(page);await task;assert.match(panel.children[4].text,/Добавлен/);const before=panel.children;await next.onclick();assert.strictEqual(panel.children,before);assert.equal(pending.length,0);
+ task=context.compareDatasetVersions();elements['dataset-compare-to'].value=3;pending.shift()(receipt());await task;assert.strictEqual(panel.children,before);
+ elements['dataset-compare-to'].value=2;task=context.compareDatasetVersions();let bad=receipt();bad.from.sha256='bad';pending.shift()(bad);await task;assert.match(panel.children[0].text,/несовместимое/);
+ task=context.compareDatasetVersions();elements.project.value='foreign';pending.shift()(receipt());await task;assert.match(panel.children[0].text,/несовместимое/);
+ elements.project.value='p';let downloads=[];context.downloadDatasetComparisonCsv=(csv,pin)=>downloads.push({csv,pin});
+ task=context.compareDatasetVersions();pending.shift()(receipt());await task;
+ let download=panel.children.find(row=>row.text==='Скачать все изменения (CSV)');task=download.onclick();assert(download.disabled);await download.onclick();assert.equal(pending.length,1);
+ page=receipt();page.offset=100;page.has_more=false;page.changes=[{sample_id:'z',kind:'added',fields:[]}];pending.shift()(page);await task;assert.equal(downloads.length,1);assert.equal(downloads[0].csv.trim().split('\r\n').length,102);assert.match(downloads[0].csv,/'?a{64}/);assert(!download.disabled);
+ task=download.onclick();page=receipt();page.offset=100;page.has_more=false;page.changes=[{sample_id:'z',kind:'added',fields:[]}];page.to.sha256='c'.repeat(64);pending.shift()(page);await task;assert.equal(downloads.length,1);assert.match(panel.children[panel.children.indexOf(download)+1].textContent,/изменилось/);
+ task=download.onclick();elements['dataset-compare-to'].value=3;pending.shift()(page);await task;assert.equal(downloads.length,1);
+ elements['dataset-compare-to'].value=2;let reviewed=receipt();reviewed.changes[0].sample_id='-formula';task=context.collectDatasetComparisonCsv(reviewed,()=>true);page=receipt();page.offset=100;page.has_more=false;page.changes=[{sample_id:'z',kind:'added',fields:[]}];pending.shift()(page);const csv=await task;assert.match(csv,/"'-formula"/);
+ reviewed=receipt();task=context.collectDatasetComparisonCsv(reviewed,()=>true);page=receipt();page.offset=100;page.has_more=false;page.changes=[{sample_id:'a',kind:'added',fields:[]}];pending.shift()(page);await assert.rejects(task,/порядок/);
+ console.log('PASS comparison renders pinned pages; full CSV export rejects substituted/stale/duplicate pages, duplicate clicks and escapes spreadsheet formulas');
+})().catch(error=>{console.error(error);process.exitCode=1});

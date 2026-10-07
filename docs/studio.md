@@ -398,3 +398,1072 @@ ALLPAKA_TEST_NATIVE_VAULT=1 python3 scripts/test-studio.py
 Предыдущий уже запущенный процесс без этой функции не умеет переносить свой
 ключ в Keychain. После его первого обновления потребуется ввести ключ ещё раз;
 последующие обновления смогут загружать сохранённую запись.
+
+## Поиск кода и исходной беседы
+
+Инструмент `agentgrep` ищет буквальный текст внутри подключённого контекста:
+`{"path":"workspace/src","query":"fn decode","limit":50}`. Результат содержит
+путь, номер строки, фрагмент вокруг совпадения и ближайшее предшествующее
+объявление. Объявление определяется эвристикой, а не синтаксическим анализатором:
+оно не обязательно является окружающей функцией. Поиск доступен и участникам
+Swarm, без разрешения записи.
+
+Скрытые пути, симлинки, бинарные файлы и каталог хранения разговоров исключены.
+Один запрос ограничен 100 совпадениями, 20 000 посещёнными путями, 32 MiB
+прочитанного текста и 8 MiB на файл. Поле `truncated` сообщает об ограничении
+выдачи; `files_skipped` — о пропущенных путях и файлах. Регулярные выражения,
+AST-анализ и сокращение повторных результатов между вызовами пока не реализованы.
+
+Инструмент `conversation_search` ищет буквальный текст в полном оригинальном
+журнале текущего разговора, включая сообщения, исключённые из контекста при
+компактизации: `{"query":"выбранный вариант","limit":20}`. Выдаёт до 50
+совпадений от новых к старым с исходными индексами сообщений, фрагментами вокруг
+совпадения и признаком `compacted`. По умолчанию ищет сообщения пользователя и
+ответы; `include_tools:true` добавляет сохранённые результаты инструментов.
+Приватные поля reasoning и другие разговоры не ищутся. Результаты являются
+историческими данными; актуальность найденных утверждений требует проверки.
+В этой версии инструмент предоставляется обычному агенту, не участникам Swarm.
+
+## Фоновые команды
+
+В Auto/Goal при включённом плагине Shell агент получает инструмент `background`.
+`start` запускает команду в первом корне проекта и сразу возвращает ID:
+`{"action":"start","command":"cargo test","timeout":3600}`.
+`list`, `status`, `output`, `cancel` и `cleanup` управляют задачами только
+текущего разговора. `wait` принимает `task_ids` и `wait_seconds` от 0 до 60:
+ожидает завершения любой указанной задачи по событиям, без опроса таймером.
+Истечение ожидания не останавливает команду. Таймаут самой команды — от 1 до
+86400 секунд. Одновременно разрешено до восьми задач разговора; общий реестр
+ограничен 128 задачами, включая завершённые.
+
+В боковой панели «Фоновые задачи» показаны статусы; можно запросить вывод,
+отменить команду и убрать завершённые записи. API:
+`POST /api/sessions/:id/background` с теми же полями. Chat/Plan не запускают
+команды; из архива и корзины нельзя начинать новые задачи. Управление ранее
+запущенными задачами остаётся доступным. Вывод ограничен 128 KiB на поток;
+остаток дренируется, чтобы переполненный вывод не блокировал процесс.
+
+Задачи этой версии не переживают перезапуск Studio. На Unix отмена и таймаут
+останавливают группу процессов, включая дочерние команды; удаление разговора
+также запрашивает отмену. Windows-ветка использует cmd/taskkill и требует
+отдельной проверки на Windows. Автоматическое пробуждение агента по завершению,
+прогресс-уведомления и ночной режим пока не реализованы.
+
+## Журнал вызовов
+
+В «Вызовы и расходы» можно запросить последние 20 запусков текущего разговора.
+Кнопка «Все вызовы проекта» показывает последние 20 запусков всего выбранного
+проекта, включая пакетные оценки. В шаге оценки «Открыть вызов модели» открывает
+связанную трассу с её длительностью и токенами; переход проверяет совпадение проекта.
+«Пакетные оценки проекта» показывает сохранённые запуски по 20 на страницу,
+готовые примеры и итоговую оценку. Можно открыть результаты и трассу, остановить
+выполняющийся запуск. После перезапуска доступны сохранённые результаты; просмотр
+не запускает модель и не повторяет прерванные проверки.
+Обычный исполнитель сохраняет родительский ход агента и дочерние вызовы модели
+и инструментов: статусы, длительность, сообщённые токены, кэшированные токены и
+стоимость, если провайдер её вернул. Неизвестная стоимость остаётся неизвестной;
+валюта и оценка по тарифам пока не выводятся. Отмена помечает активные вызовы
+`interrupted`. JSON сохраняется атомарно в `<studio-data>/observability/traces`.
+Тексты промптов, reasoning, аргументы/результаты инструментов и API-ключи туда
+не записываются.
+
+`GET /api/observability/traces` принимает `session_id`, `project_id`, `offset`
+и поддерживает чтение отдельной записи через `GET /api/observability/traces/:id`.
+Список принимает
+и `limit` от 1 до 200, возвращает дерево spans, число совпадений и политику
+приватности. Чтение ограничено 10 000 записями/64 MiB за запрос. Каталог нужно
+будет обслуживать будущей политикой retention. Swarm записывает фазы локальных участников, их вызовы модели и инструментов,
+синтез и критика. Ручное сжатие контекста получает отдельный журнал,
+автоматическое — вложенный шаг текущего запуска; каждая попытка модели
+сохраняется отдельно. Удалённый участник пока представлен сводной записью
+отправки: связывание внутренних вызовов на другой машине ещё требуется.
+После аварийного завершения незакрытые записи при следующем запуске помечаются
+прерванными; сохранённые завершённые вызовы не меняются. Неизвестная длительность
+остаётся неизвестной. Время восстановления хранится отдельно (`recovered_ms`). Датасеты, эксперименты, оценки
+и другие оставшиеся возможности перечислены в `observability/opik-parity.md`.
+
+
+## Наборы примеров и оценки
+
+Кнопка «Наборы примеров и оценки» находится в контексте проекта. Редактор
+сохраняет новые неизменяемые версии с SHA-256: вопрос, необязательный ожидаемый
+ответ, справочные материалы и метаданные. Можно загрузить старую версию,
+экспортировать её JSON или импортировать JSON в новый набор. Конфликт версий
+не перезаписывает чужие изменения.
+
+Проверка запускается на явно сохранённой версии набора с выбранными в Studio
+моделью и провайдером. Шаблон использует `{{input}}` и `{{contexts}}`; такие
+последовательности внутри данных не интерпретируются повторно. Метрики: точное
+совпадение, наличие ожидаемого текста и корректный JSON. Запуск не получает
+инструменты записи или команд и использует Chat. Внешние вызовы расходуют
+токены провайдера. Для каждого примера сохраняются результат, статус, оценки,
+длительность и сообщённое usage. Частичные ответы, ошибки и превышение лимитов
+не дают успешной оценки. Запуск можно отменить.
+
+Сравнение требует одинаковых проекта, версии/хэша набора и метрик, полных
+успешных результатов и проверенных оценок. Любое ухудшение отдельного примера
+по любой метрике запрещает положительный вывод, даже при росте среднего.
+Равенство также не считается улучшением. Результат только наблюдательный:
+модель, промпт и конфигурация автоматически не меняются.
+
+API:
+- `GET /api/evaluation/datasets?project_id=default` — каталог.
+- `POST /api/evaluation/datasets` — `{project_id,name,base_version,samples}`;
+  новая версия существующего набора также передаёт `id` и текущий `base_version`.
+- `GET /api/evaluation/datasets/:id/versions/:version` — проверенная версия.
+- `POST /api/evaluation/experiments` — `{dataset_id,dataset_version,settings,
+  prompt_template,metrics,concurrency,item_timeout_secs}`. Имена метрик:
+  `exact_match`, `contains_reference`, `json_valid`.
+- `GET /api/evaluation/experiments?project_id=default` и `GET /api/evaluation/experiments/:id`
+  — каталог и полный результат.
+- `POST /api/evaluation/experiments/:id/cancel` — отмена.
+- `POST /api/evaluation/compare` — `{baseline_id,candidate_id}` и сохраняемая квитанция.
+
+Набор ограничен 2000 примерами/8 MiB и 1000 версиями; один запуск — 200
+примерами, 1–8 одновременными вызовами и 1–600 секундами на пример. Одновременно
+выполняются до четырёх запусков. Вывод примера ограничен 64 KiB; усечение явно
+помечается и запрещает строгую оценку. Каталог запусков ограничен 1000
+записями/128 MiB за запрос. Перезапуск сохраняет наборы и результаты. После жёсткого аварийного завершения
+зависшие запуски и незавершённые примеры получают статус `interrupted`; завершённые
+результаты сохраняются. Прерванный запуск не допускается к положительному сравнению.
+
+Данные находятся в `<studio-data>/evaluation`: в отличие от журнала вызовов,
+здесь намеренно сохраняются введённые вопросы, эталонные ответы, контексты,
+шаблоны заданий и вывод модели. API-ключи в эти записи не включаются.
+LLM-судьи, RAG-метрики, онлайн-оценки, обратная связь и оптимизатор ещё в работе.
+
+
+## Ручные оценки и исправления
+
+В «Вызовы и расходы» откройте сохранённый запуск, затем «Ручные оценки и
+исправления». Оценка относится ко всему запуску или выбранному шагу. Можно
+указать числовой балл, категорию, комментарий и исправленный ответ. Отдельные
+проверяющие сохраняют отдельные оценки; для чисел показывается среднее и число
+оценок, для категорий — количество каждого значения. Имя проверяющего является
+введённой вручную подписью, а не подтверждённым пользователем системы.
+
+Каждая правка создаёт неизменяемую версию с временем сохранения. «История правок»
+показывает старые версии без возможности менять их. Убранные оценки остаются
+в истории и восстанавливаются кнопкой; в текущем среднем они не учитываются.
+Данные можно экспортировать в JSON. При конфликте одновременных изменений
+обновите оценки: чужая правка не перезаписывается автоматически.
+
+`GET /api/observability/traces/:id/feedback` возвращает текущую версию,
+`?version=1` — указанную, `version=0` — исходное пустое состояние.
+`POST` на тот же адрес принимает `{base_version,annotation}`. Аннотация:
+`{id?,span_id?,author,metric?,value?,category?,comment?,correction?,deleted?}`.
+Для нового элемента не передавайте `id`; для изменения используйте сохранённый
+ID. Имя проверяющего и целевой шаг при редактировании не меняются. `metric`
+требует либо конечного числового `value`, либо непустого `category`.
+Несуществующий запуск/шаг отклоняется. Устаревшая версия возвращает 409.
+
+Лимиты: 1000 оценок на запуск, 2000 версий, 1 MiB на снимок; имя проверяющего
+до 200 байт, имя метрики до 100, категория до 200, комментарий до 16000,
+исправление до 65536. Балл ограничен диапазоном от -1000000 до 1000000;
+настраиваемые определения шкал пока отсутствуют.
+
+Хранилище: `<studio-data>/observability/feedback/<trace-id>/<version>.json`.
+Введённые комментарии и исправления намеренно сохраняются отдельно от журнала
+метаданных. Они автоматически не передаются модели и не влияют на попарные
+экспериментальные оценки. Очереди разметки и совместная авторизация ещё требуются.
+
+
+Вложенность в журнале соответствует родителям шагов: запуск → участник → модель
+или инструмент; запуск → синтез/критик → модель. Отмена помечает незавершённые
+шаги `interrupted`, ошибки провайдера — `failed`, исчерпание ответа —
+`token_limit`. Участник, запросивший очередной инструмент при исчерпанном лимите
+шагов, помечается `step_limit`; незавершённый запрос не исполняется. Общий Swarm
+запуск может завершиться с отчётами других участников, даже если отдельный
+участник не ответил: его ошибка остаётся видимой в дереве.
+
+В результатах оценки кнопка «Вызовы проверки» открывает журнал проверки и
+отдельных примеров. Поле `trace_id` в JSON результата связывает его с журналом;
+для списка по API используйте `session_id=experiment-<run-id>`. Старые сохранённые
+результаты без `trace_id` остаются доступными. Расходы записываются на вызовах
+модели; родительские фазы не дублируют токены. Ошибки и отмена не превращают
+частичный результат в успешную оценку. Сам журнал сохраняет только метаданные.
+
+
+## Восстановление после завершения процесса
+
+Studio удерживает системную блокировку `<studio-data>/.studio.lock` до окончания
+работы своего runtime. Второй Studio с тем же каталогом данных отказывается
+запускаться до чтения и восстановления записей. Для независимого сервера нужен
+другой `--data-dir`. Сам файл остаётся на диске: наличие файла не означает, что
+сервер жив, и удалять его для перезапуска не нужно. Блокировку освобождает ОС
+при завершении процесса; обычное завершение явно освобождает её также при
+временно унаследованном дочерним процессом файловом дескрипторе.
+
+При запуске незавершённые журналы и проверки помечаются прерванными. Готовые
+ответы, оценки, usage и длительности закрытых шагов сохраняются; оставшиеся
+примеры получают причину `process_restart`. Частичный запуск не имеет средних
+оценок или допуска к улучшению. `recovered_ms` — время восстановления, не время
+фактического окончания вызова. Для неизвестных длительностей интерфейс показывает
+«длительность неизвестна». Повторный запуск восстановления не меняет закрытые
+записи повторно и не запускает запросы к модели или команды.
+
+Восстановление читает до 10000 журналов/64 MiB и до 1000 проверок/128 MiB.
+Превышение бюджета или повреждённые артефакты являются явной ошибкой запуска;
+содержимое не пропускается молча. Удаление, retention и индексирование большого
+каталога остаются в плане. Автоматическое продолжение частично выполненных
+проверок ещё не реализовано. Системная блокировка проверена на текущем macOS;
+отдельная проверка Windows остаётся необходимой.
+
+### Versioned evaluation prompts
+
+`GET /api/evaluation/prompts?project_id=...` lists latest prompt revisions.
+`POST /api/evaluation/prompts` accepts `{id?, project_id, name, base_version,
+template, system?}`. New prompts use base version 0; updates require the exact
+latest version (409 on conflict). Names are bounded to 200 bytes, template/system
+to 16000 bytes each; templates require `{{input}}`. The default system instruction
+is `Answer the supplied evaluation sample.`. Up to 1000 immutable revisions per
+prompt and 2000 catalog entries are scanned. Each snapshot is integrity checked
+and reads are capped at 64 KiB. `GET /api/evaluation/prompts/:id/versions/:version`
+returns the exact snapshot including SHA-256.
+
+Experiment creation accepts either the existing inline `prompt_template` or
+`prompt_ref: {id, version}`. References must belong to the experiment project;
+zero/missing/tampered versions and ambiguous inline-plus-reference requests fail.
+The complete prompt snapshot is retained in the run, including its system
+instruction. Updating the library never changes an already created run. Comparison
+also verifies the prompt snapshot hash and its agreement with the rendered
+instruction receipt. Studio offers creation, saving revisions, loading an explicit
+old version and copying a task into a new variant. Selected saved versions are
+used as saved; editor changes must be saved before they affect a run. Variants are
+independent prompts with optional `origin: {id, version, sha256}`. Creation verifies
+the parent snapshot in the same project. Updates preserve ancestry and reject
+a change; the origin participates in snapshot integrity hashes and is retained
+in experiment receipts. Existing snapshots without ancestry keep their hashes.
+Studio copies the currently loaded saved version as the source and requires
+saving a new variant before running it. Automatic optimization remains open.
+
+`GET /api/evaluation/prompts/:id/versions?offset=0&limit=50` returns a newest-first
+history page with revision number, name, hash and variant origin. Limit is 1–100,
+offset 0–1000; scans stop after 2000 directory entries and 1000 revisions. Returned
+snapshots are integrity verified, not guessed from filenames. Studio displays
+20 revisions per page and opens the exact selected version. History reads hold
+the in-process writer lock so a save cannot change the list during a page read.
+
+The dependency-free [Python client and CI entry point](observability/evaluation-ci.md)
+run existing pinned evaluations, retain JSON/JUnit evidence and enforce paired
+regression exits. Neither mode promotes settings or bypasses native checks.
+
+### Conversation bookmarks
+
+`POST /api/sessions/:id/bookmarks` accepts `{message_index, label}` and creates or
+renames a bookmark for an existing user/assistant message (zero-based index).
+Maximum 200 bookmarks per conversation; labels are nonempty after trimming and
+at most 200 UTF-8 bytes. Updates preserve the original `created_ms`. Bookmark
+metadata is stored in session history and is never sent as model context.
+`DELETE /api/sessions/:id/bookmarks/:index` removes an annotation idempotently.
+
+Studio offers a message action, bookmark navigation in the Context panel, and a
+history filter for conversations with bookmarks. History search also matches
+bookmark labels; `/api/sessions?bookmarked=true` filters the list. Branching copies
+only bookmarks inside the copied prefix; later changes remain independent.
+Export/import preserves annotations while validating unique targets, roles,
+labels and limits. Old histories lacking the field load with an empty list.
+Bookmarks identify the original transcript; compaction does not move indices.
+
+### Explicit memory notes
+
+`GET/POST /api/memory/notes` lists (`?project_id=...`) or saves explicit memory.
+POST fields: `{id?, project_id, name, base_version, content, removed?, expires_ms?}`.
+Use `global` for common notes; other IDs must identify an existing project.
+Names are at most 200 bytes, nonempty content at most 16000 bytes. Revisions are
+immutable with SHA-256 integrity; stale base versions fail with 409, and scope
+cannot change. `GET /api/memory/notes/:id/versions/:version` reads a pinned version.
+Setting removed true retains history; save another version with false to restore.
+
+`memory_recall` searches latest project and global notes by bounded literal terms,
+returns at most 20 notes (default 5), and excludes removed/expired entries. Query
+is at most 1000 bytes and 20 terms. Files are capped at 64 KiB, catalog scans at
+2000 entries and revisions at 1000 per note. Notes are reference data, not policy.
+No automatic writes/extraction, embeddings, consolidation or conflict resolution
+is implemented yet. Storage is under Studio data `memory/notes`; the user's Codex
+memory folder is separate and is not modified by this capability.
+
+The Context panel's “Память проекта” opens the explicit memory editor. Create a
+new note to choose project/global scope; an existing note's scope is fixed. The
+editor filters names/content, optionally includes removed entries, shows expiry,
+and supports removal/restore and JSON export. Each change uses optimistic revision
+checks. Loading an older revision is read-only; select the current catalog entry
+to edit. Removal/restore acts on saved content, not unsaved editor text. Expiry
+is preserved exactly when its field was not edited, including its millisecond
+precision. Switching scope discards stale catalog responses. Browser verification
+covered two revisions, historical reading, removal/restore, actual restart,
+global expiry/clearing and downloaded JSON equality with the stored snapshot.
+
+Memory recall groups byte-identical content after ranking, so duplicates do not
+consume the unique-result limit. Ranking prefers project scope on equal scores.
+Each result retains pinned source IDs/scopes/names/versions/hashes (up to 16 references)
+and the total matching-source count. Removed/expired/foreign-project sources are
+excluded before grouping. Case and whitespace differences remain distinct;
+this is exact deduplication, not semantic consolidation or contradiction solving.
+No stored note is rewritten by recall.
+
+`POST /api/sessions/:id/memory-proposals` accepts `{settings, message_count}` and
+explicitly asks the selected provider for up to 10 proposed notes. It requires a
+stopped conversation, the same project, Chat mode and writes disabled. It uses
+only text roles user/assistant from the last 50 messages before the given boundary,
+with a 24000-byte serialized source limit; private reasoning, images and tool
+outputs are omitted. The receipt pins source text hash and boundary, model
+settings, usage and trace ID under `memory/proposals`. Strict JSON/content checks
+reject malformed, duplicate or truncated candidates. At most two extractions run
+concurrently, with a 60-second timeout and output budget capped at 4096 tokens.
+
+Extraction never inserts accepted memory notes. The result has `accepted:false`;
+acceptance/review UI and automatic extraction remain open. Provider calls can
+consume tokens and receive the selected conversation text only on explicit API
+invocation. Model filtering of secrets/speculation is prompted, not a proven
+redaction guarantee; review proposed content before manually saving a memory note.
+
+Saved extraction receipts can be reopened with `GET /api/memory/proposals/:id`; reads are bounded to 128 KB and reject missing, mismatched, or escaping paths. Opening a receipt does not write memory.
+
+`GET /api/sessions/:id/memory-proposals` returns proposal metadata for that conversation, excluding note bodies and model settings. The catalog bounds scanning to 1000 JSON files and 16 MiB total, and fails explicitly on malformed receipts rather than silently dropping them.
+
+Memory creation accepts optional `proposal_source: {proposal_id, note_index}`. The referenced proposal must exist in the same project and contain that note index. This provenance participates in the memory hash and persists through edits/removal/restoration; later revisions cannot replace it. Users may edit the proposed text before saving. Existing notes without provenance retain their original hash format.
+
+Proposal provenance validation uses the same 128 KB receipt bound as proposal reads, while memory snapshots retain their separate 64 KiB bound. Regression coverage includes a 70 KB source receipt, oversize rejection, project isolation, edited note provenance, and restart persistence.
+
+The Python SDK exposes `extract_memory(session_id, settings, message_count)` (explicit provider invocation), `memory_proposals(session_id)` and `memory_proposal(proposal_id)` (read-only), and `accept_memory(proposal_id, note_index, name=None, content=None)` (explicit creation of a reviewed note with verified provenance). Accepting again creates another note; there is no implicit deduplication or automatic acceptance.
+
+Extraction serializes borrowed text rows under the conversation lock instead of cloning the whole conversation (including images and reasoning). It rejects oversized individual text before serialization and checks accumulated JSON bytes after each selected row. Bounds apply to JSON-escaped bytes, not just the original text length.
+
+The memory dialog now lists saved proposal receipts for the active conversation and provides an explicit extraction button. Selecting a candidate fills the existing editable note form and fixes its project scope; saving passes verified proposal provenance. Browser qualification with a local streaming provider covered extraction, catalog opening, candidate selection, text editing, saving with verified provenance, and reopening the memory dialog; no browser warnings/errors were recorded.
+
+Studio evaluation controls include structural JSON equality and whitespace-token F1, with readable result labels. Browser checks with a local provider verified selecting and running each metric and displaying F1=1 and JSON equality=0 for the respective fixtures, without console warnings/errors.
+
+В «Наборы примеров и оценки» раздел «Оценка моделью по сохранённому плану»
+принимает номер плана, созданного через SDK/API. «Проверить план» показывает
+критерий, провайдера, модель, число примеров и закреплённую версию набора.
+После проверки можно явно запустить оценку; результаты доступны в списке
+пакетных оценок проекта. Изменение номера плана требует повторной проверки.
+
+В результате завершённого эксперимента с полными ответами доступен раздел
+«Создать план оценки ответов моделью». Выберите готовый критерий (соответствие
+вопросу, правильность по эталону или опора на источники) либо введите свой.
+«Сохранить план оценки» сохраняет исходные ответы и ссылку на эксперимент,
+закрепляет выбранную версию критерия и открывает предпросмотр. Модель для
+оценки берётся из текущего выбора Studio. Сохранение не вызывает провайдера;
+для оценки нужно нажать «Запустить оценку моделью». Неполные ответы не
+предлагаются для этого пути; отсутствие требуемых источников отклоняется
+сервером. Выбор сохранённой версии собственного критерия пока доступен через SDK.
+
+### Повторяющиеся ошибки инструментов
+
+Если три вызова подряд с одинаковыми именем, аргументами и текстом ошибки
+завершаются неудачно, Studio приостанавливает текущий ход. Остальные инструменты
+этого пакета не выполняются, но получают ответы об отмене, чтобы история
+оставалась целостной. Разговор и очередь сохраняются; в трассе ход имеет статус
+`no_progress`, а не `completed`. Можно исправить причину ошибки, уточнить задачу
+или явно продолжить. При продолжении счётчик начинается заново. Успешный вызов,
+другая ошибка/аргументы и новое уточнение сбрасывают счётчик. Это защита от цикла
+одинаковых ошибок, а не определение всей успешности задачи. Успешные повторные
+чтения и незавершённые ожидания фоновых задач не считаются такими ошибками.
+
+### Диагностика подключения провайдера
+
+`POST /api/providers/:id/doctor` с `{"model": "model-id"}` (поле необязательно)
+явно проверяет каталог моделей без генерации ответа. Python SDK:
+`provider_doctor(provider_id, model=None)`. Диагностика проверяет адрес,
+наличие ключа для встроенных облачных провайдеров, код HTTP, формат каталога
+и наличие выбранной модели. Время всей проверки ограничено 10 секундами,
+каталог — 1 MiB / 10 000 моделей; перенаправления не выполняются. Повторяющиеся
+ключи JSON и идентификаторы моделей отклоняются. Отчёт содержит код состояния,
+время, HTTP-код, число моделей и состояние ключа, но не ключ и не ответ сервера.
+Адреса с логином, паролем, query или fragment не проверяются.
+
+Возможные состояния: `ready`, `model_missing`, `missing_key`,
+`credential_store_error`, `invalid_endpoint`, `unreachable`, `timeout`,
+`unauthorized`, `rate_limited`, `redirect_rejected`, `catalog_unavailable`,
+`provider_error`, `invalid_catalog`, `catalog_too_large`, `empty_catalog`.
+`ready` подтверждает доступность каталога, а не генерации: `inference_verified`
+всегда false, `generation_calls` — 0. В окне «Подключения» доступен раздел «Диагностика подключения» с выбором
+провайдера и необязательной моделью. Кнопка «Проверить подключение» показывает
+результат и подсказку по исправлению, число моделей и время ответа. Смена
+провайдера или модели очищает старый результат, устаревшие ответы не отображаются.
+Результат не сохраняется в журнале расходов.
+
+### Сводка сохранённых вызовов и расходов
+
+`GET /api/observability/summary` принимает необязательные `project_id`,
+`session_id`, `since_ms`, `until_ms`. Интервал включительный и фильтрует время
+начала трассы, а не время списания средств. SDK: `trace_summary(...)`.
+Сводка возвращает число трасс по статусам, число model spans и известные
+суммы входных/выходных токенов. Отдельные счётчики показывают вызовы без сведений
+о токенах. Алиасы prompt/input и completion/output не суммируются дважды.
+Родительские и удалённые сводные spans не входят в суммы, чтобы избежать
+повторного счёта. Незавершённые вызовы могут не иметь usage.
+
+Стоимость суммируется раздельно только для валют, явно указанных провайдером
+в `cost_currency` (три заглавные буквы). Без валюты числовое значение не входит
+в денежный итог. Сохраняются число вызовов без стоимости, число значений без
+валюты и до 100 примеров сообщённой стоимости со ссылкой на трассу/span.
+Цены по тарифам не подставляются. Нули в суммах означают отсутствие известных
+значений, а не подтверждённое отсутствие расходов: учитывайте счётчики
+неизвестных значений. Чтение ограничено 10 000 трасс / 64 MiB / 1 MiB на запись;
+превышение или повреждённая запись дают явную ошибку. В «Вызовы и расходы» кнопка «Итоги вызовов и расходов» открывает панель
+с областью проект/текущий разговор, периодом по местному времени, известными
+суммами и неизвестными значениями. Можно открыть исходный вызов из примера
+стоимости и экспортировать JSON со сведениями об области и времени чтения.
+Смена фильтра очищает старый результат; устаревшие ответы не показываются.
+Постоянный платёжный журнал ещё нужен.
+
+### Внешние трассы приложений
+
+`POST /api/observability/external-traces` принимает завершённое дерево метаданных:
+`project_id`, `correlation_id`, `started_ms`, `spans`. Проект должен существовать.
+SDK: `Studio.ingest_trace(project_id, correlation_id, started_ms, spans)`.
+Номера span — индексы массива (1–200 элементов); первый элемент — единственный
+корень, каждый следующий ссылается на более раннего родителя. Поля span:
+`parent_id`, `kind` (`agent`, `model`, `tool`), `name`, `status`
+(`completed`, `failed`, `interrupted`), `started_ms`, `duration_ms` (или null),
+необязательный `usage`. Имена и correlation ID — 1–100 ASCII-символов из букв,
+цифр и `._-:/`; используйте технические идентификаторы, а не текст запроса.
+Известные длительности проверяются на переполнение и вложенность относительно
+родителя. Токены — неотрицательные целые; стоимость — конечное неотрицательное
+число, валюта — три заглавные ASCII-буквы. Разрешены только `input_tokens`,
+`output_tokens`, `cache_read_input_tokens`, `cost`, `cost_currency`.
+Неизвестные поля (включая prompts, outputs и credentials) отклоняются.
+
+Studio создаёт новый неизменяемый `trace-external-*` и возвращает его ID,
+`source=external`, число span и `provider_calls=0`. Вызовы помечены
+`external_agent/model/tool`, а session ID равен `external-<correlation_id>`.
+Это заявленные приложением данные, без независимого подтверждения выполнения.
+GET/list/feedback и дерево вызовов работают с этими трассами; сводка включает
+внешние model spans и отдельно возвращает `external_model_calls`,
+`scope=model_spans`. Стоимость без валюты по-прежнему не суммируется.
+Без ключа каждая отправка создаёт новую трассу: после неоднозначного сетевого
+исхода не повторяйте её автоматически. Необязательный `idempotency_key`
+(1–100 символов того же набора, что correlation ID) позволяет повторить
+исходный запрос: ключ привязан к проекту, одинаковые нормализованные метаданные
+возвращают прежний ID с `deduplicated=true`, изменённые данные возвращают HTTP 409.
+Первый успешный запрос возвращает `deduplicated=false`. Ключ хранится только в
+виде хеша в идентификаторе трассы. Запись эксклюзивна даже при одновременных
+отправках; повтор не увеличивает расход в сводке. SDK принимает
+`ingest_trace(..., idempotency_key="request-42")`; автоматических повторов нет.
+Повторяйте сохранённые исходные метаданные, а не заново выполненную операцию
+с новым временем начала. Потоковое обновление и автоматическое подключение
+сторонних фреймворков остаются в работе.
+
+Python SDK умеет собирать дерево автоматически в контекстных блоках:
+
+```python
+with studio.trace('default', 'request-42', name='pipeline') as trace:
+    with trace.span('retrieval', 'tool'):
+        documents = retrieve()
+    with trace.span('model-v1', 'model') as call:
+        answer, usage = generate(documents)
+        call.set_usage(input_tokens=usage.input_tokens,
+                       output_tokens=usage.output_tokens)
+trace_id = trace.receipt['id']
+```
+
+Время считается по монотонным часам относительно одного времени начала;
+параллельные asyncio-задачи используют отдельные текущие parent ID через
+ContextVar. Перед выходом из trace необходимо дождаться дочерних задач.
+Незавершённые дочерние операции помечаются interrupted; после сохранения
+SDK сообщает об ошибке жизненного цикла. Обычные исключения дают failed,
+отмена asyncio/KeyboardInterrupt/SystemExit — interrupted. Текст исключений,
+аргументы функций, documents и answer не попадают в трассу. `set_usage` принимает
+только разрешённые поля расхода; целые токены ограничены диапазоном u64.
+
+При выходе выполняется один синхронный HTTP-запрос (в том числе при ошибке
+приложения). Успех сохраняется в `trace.receipt`. Ошибка отправки доступна в
+`trace.export_error`; при наличии исходного исключения она не заменяет его.
+При обычном завершении ошибка отправки выбрасывается. `trace.spans` сохраняет
+локальные метаданные для диагностики; повторной отправки автоматически нет.
+Это ручное подключение SDK к операциям приложения; автоматические адаптеры
+фреймворков и неблокирующий экспорт остаются в работе.
+
+Функции можно подключить через `@studio.track('technical-name', kind='tool')`:
+
+```python
+@studio.track('retrieval', 'tool')
+def retrieve_documents(question):
+    return retriever.search(question)
+
+@studio.track('model-v1', 'model')
+async def ask_model(question):
+    return await model.generate(question)
+
+with studio.trace('default', 'request-43'):
+    documents = retrieve_documents(question)
+    answer = await ask_model(question)
+```
+
+Декоратор создаёт span только внутри активной трассы того же экземпляра SDK.
+Вне трассы (или после её закрытия) функция выполняется обычным образом.
+Вложенные декораторы сохраняют parent ID; `async def` завершается после await,
+а отмена и исключения передаются вызывающему коду без изменения. Аргументы,
+возвращаемое значение и текст исключения не читаются для журналирования.
+Генераторы и async-генераторы отклоняются при подключении: используйте явный
+`trace.span(...)` вокруг итерации. Декоратор не извлекает стоимость из ответа
+модели; для usage по-прежнему нужен явный model span с `set_usage`.
+
+### Корзина трасс
+
+`POST /api/observability/traces/:id/remove` скрывает завершённую трассу,
+`POST /api/observability/traces/:id/restore` возвращает её. SDK предоставляет
+`remove_trace(id)` и `restore_trace(id)`. Ответ содержит `trace_id`, `removed`,
+`changed`, `content_preserved=true`; повторное действие безопасно и возвращает
+`changed=false`. Активные трассы или трассы с running span отклоняются.
+
+Удаление сохраняет исходный файл и отзывы, записывая ограниченный маркер в
+`observability/traces/removed`. Обычный список, прямая загрузка, отзывы и сводка
+скрывают удалённую трассу. `GET /api/observability/traces?removed=true` возвращает
+корзину с обычными фильтрами проекта/разговора и пагинацией. Восстановление
+возвращает прежние span ID, даты, токены, стоимость и отзывы. Повторная отправка
+внешней трассы с её прежним idempotency key не снимает удаление: нужно явно
+восстановить запись. Маркеры сохраняются при перезапуске; некорректные маркеры
+и ссылки вне каталога отклоняются. Физическое удаление, автоматическое хранение
+по сроку и интерфейс корзины остаются в работе.
+
+В Studio откройте «Вызовы и расходы» → «Корзина вызовов». Список ограничен
+выбранным проектом, показывает до 20 записей на странице и позволяет восстановить
+вызов. В раскрытом завершённом вызове доступна кнопка «В корзину»; для активных
+вызовов её нет. После действия можно отменить его прямо в карточке. Сводка
+расходов очищается, чтобы прежние итоги не выглядели актуальными; обновите список
+или сводку после изменения. В корзине отзывы не загружаются до восстановления.
+`node scripts/test-studio-trace-trash-ui.js` проверяет действия настоящего
+обработчика с фикстурами API. Проверка в браузере 2026-10-07 подтвердила удаление завершённой внешней
+трассы, её появление в корзине и восстановление. После восстановления
+API вернул исходный отзыв без изменений, а трасса снова вошла в сводку;
+браузер показал сохранённые токены, длительность и оценку 0.75.
+Ошибок и предупреждений в консоли не было.
+
+Сводка `/api/observability/summary` теперь также возвращает `models`: отдельную
+группу для каждого model ID, provider ID и источника `native`/`external`. В каждой группе
+есть число вызовов, статусы, известные токены и их отсутствующие значения,
+стоимость по валютам, число вызовов без стоимости/валюты, известные и неизвестные
+длительности, min/max/P50/P95. Квантили используют nearest rank только среди
+известных длительностей; пустая выборка возвращает null, а известный ноль
+остаётся нулём. Учитываются завершённые, ошибочные и прерванные span с известным
+временем. Это время всего model span, не TTFT или скорость генерации.
+
+Панель «Итоги вызовов и расходов» показывает раскрываемые группы моделей,
+счётчики неизвестных значений и происхождение внешних данных. JSON-экспорт
+содержит те же группы. Новые native model spans сохраняют `provider_id` из настроек вызова: чат, Swarm, эксперименты, сжатие, модельные оценки и извлечение памяти. Старые span без поля остаются в группе с `provider_id=null`; провайдер не выводится из названия модели. Внешние span могут явно передать технический `provider_id` с теми же ограничениями, что у name. SDK поддерживает `trace.span(..., provider_id="local")` и `@studio.track(..., provider_id="local")`. UI показывает провайдера в дереве и сводке, либо «Провайдер неизвестен». Проверка в браузере 2026-10-07 подтвердила раздельные группы Studio/local, внешних external-service и старых записей с неизвестным провайдером. Для внешней фикстуры отображены входные/выходные токены 7/9, P50/P95 по 50 мс и сообщённая стоимость USD 0.25. Расчёт и ответ API также проверяются native/contract-тестами.
+
+### Экспорт вызова
+
+`GET /api/observability/traces/:id/export` возвращает ограниченный 3 MiB пакет
+`kind=trace_export`, `schema_version=1`, `exported_ms`, `trace`, `feedback`,
+`privacy`, `provider_calls=0`. Экспортируются завершённые (в том числе failed
+или interrupted) трассы без running span. Удалённые трассы нужно восстановить
+перед экспортом. `trace` содержит исходные идентификаторы, ссылки, провайдеров,
+дерево, времена, статусы и сообщённый usage. Экспорт не вызывает модель.
+
+По умолчанию `feedback=null`. Явное `?include_feedback=true` добавляет текущую
+проверенную версию отзывов и её сводку; эти поля могут содержать человеческие
+комментарии и исправленные ответы. Runtime prompts/tool inputs/outputs не
+захватываются. SDK: `export_trace(id, include_feedback=False)`.
+В раскрытом завершённом вызове Studio есть кнопка «Экспорт вызова JSON» и
+выключенный по умолчанию флажок включения отзывов. Файл получает имя trace ID.
+Пакет — снимок для переноса/анализа, без цифровой подписи; импорт такого пакета
+как native-трассы пока не реализован. Проверка загрузки файла в браузере 2026-10-07 подтвердила выключенный по умолчанию флажок, явное включение отзывов и успешное скачивание JSON. Загруженная трасса и отзыв точно совпали с исходными сохранёнными записями, provider_calls=0; предупреждений и ошибок в консоли не было. API/SDK также проверяют скрытые удалённые записи и отсутствие модельных вызовов.
+
+### Повторная отправка завершённой внешней трассы
+
+`with studio.trace("default", "request-42", idempotency_key="execution-42") as trace`
+фиксирует ключ дедупликации до выполнения функции. При закрытии контекста SDK
+замораживает метаданные и время запуска, затем делает одну попытку отправки.
+После сетевой ошибки явный `trace.export()` повторяет тот же снимок и ключ,
+даже если локальный список `trace.spans` был изменён. Функция не выполняется
+повторно. Без заранее выбранного ключа повторная отправка запрещена: потерянный
+ответ мог уже сохранить запись. После успешной отправки метод возвращает
+сохранённую квитанцию без нового запроса. Одновременные вызовы метода
+сериализуются. Ошибка отправки не заменяет исходную ошибку выполняемой функции.
+Автоматических повторов и фоновой доставки пока нет.
+
+SDK-тест проверяет потерянный ответ, неизменность повторного запроса после
+изменения локальных span, отсутствие повторного выполнения и запрет повторной
+отправки без ключа. Серверная дедупликация отдельно проверяется native-контрактами.
+
+### Сходство соседних символов
+
+В выборе метрик эксперимента доступно «Сходство соседних символов (F1)»
+(`character_bigram_f1`). Сравниваются соседние пары Unicode-символов, включая
+пробелы, регистр и пунктуацию, с учётом числа повторов. Для строк короче двух
+символов используется точное совпадение. Требуется эталон; результат от 0 до 1.
+Метрика доступна также для оценки готовых ответов, матриц SDK и порогов CI.
+Она оценивает локальное текстовое сходство, а не смысл или правильность ответа.
+Браузерная проверка 2026-10-07 подтвердила выбор только этой метрики, запуск сохранённого набора и отображение F1=1 для точного совпадения; предупреждений и ошибок в консоли не было. Отдельная серверная проверка подтвердила отклонение ухудшения 1 → 0.5 в парном сравнении готовых ответов без вызова модели.
+
+### Просмотр оценок готовых ответов
+
+В диалоге «Наборы примеров и оценки» блок «Оценки готовых ответов и
+Python-задач» открывает каталог сохранённых оценок текущего проекта. Страницы
+содержат по 20 записей. Заголовок сообщает число проверенных оценок, пропущенных
+повреждённых записей и неполноту ограниченного каталога. Раскрытие записи заново
+проверяет её на сервере и показывает средние метрики; каждый пример отдельно
+раскрывает ответ и свои оценки. Ответ выводится текстом. Повторное открытие
+диалога очищает старый каталог; устаревшие ответы и чужие проекты не отображаются.
+Тесты обработчика проверяют загрузку, текстовый вывод и защиту от устаревшего
+ответа. Браузерная проверка 2026-10-07 подтвердила загрузку каталога, раскрытие ответа aa с F1=0.5 и provider_calls=0, переход с 20 записей на вторую страницу из одной записи и возврат назад. Предупреждений и ошибок в консоли не было.
+
+### Compare saved ready-answer scores
+
+Expanded offline score receipts now offer explicit baseline/candidate selection.
+The comparison button reloads both verified receipts, checks the current project
+and calls the native paired comparison endpoint. It displays per-sample metric
+changes and counts of regressions/improvements; any decrease is highlighted even
+when other samples improve. Dataset/hash/metric compatibility is enforced by the
+server. Selections survive catalog pagination and are cleared on dialog reopen;
+changed selections invalidate pending comparison responses. This only observes
+results and never promotes settings or invokes a model. Handler tests cover
+server results, foreign-project rejection and stale responses. Browser verification on 2026-10-07 selected a baseline and candidate from separate catalog positions, displayed one regression with F1 1 → 0.5 and zero improvements, and matched the persisted native comparison receipt with provider_calls=0. Console warnings/errors were absent.
+
+### Фильтр каталога оценок по набору
+
+В каталоге готовых ответов флажок «Только выбранный набор, все версии»
+использует сохранённый набор, выбранный ниже в диалоге оценок. Фильтр ограничивает
+каталог по ID набора и сохраняется при переходах страниц. Без выбранного набора
+Studio показывает пояснение и не запрашивает каталог. Изменение фильтра очищает
+базовый/новый выбор и сравнение; смена выбранного набора скрывает старый каталог.
+Ответ, полученный после смены набора или фильтра, отбрасывается. Фильтр охватывает
+все закреплённые версии этого набора. Проверки обработчика и браузерная проверка фильтра проходят; подробности ниже.
+
+### Модельный критерий для сохранённых ответов
+
+Раскрытая оценка готовых ответов/Python-задач содержит форму «Создать план
+оценки ответов моделью». Она предлагает существующие закреплённые критерии или
+свой текст и использует выбранные в Studio модель и провайдера. Сохранение
+передаёт ID исходной оценки и её точные ответы: сервер проверяет источник и
+закрепляет его хеш. Сохранённый план открывается в существующем блоке просмотра;
+запуск остаётся отдельным действием. Ни сохранение, ни просмотр плана не вызывают
+модель. Общая форма используется также для завершённых экспериментов. Проверки
+обработчика подтверждают оба вида источников и блокировку устаревшего сохранения.
+Браузерная проверка 2026-10-07 подтвердила раскрытие сохранённой оценки, выбор критерия «Соответствие вопросу», сохранение плана и его автоматический просмотр. API подтвердил исходный score ID, хеш источника и точный сохранённый ответ; provider_calls=0, запуска judge-run для плана нет. Консоль без предупреждений и ошибок.
+
+Сводка трасс показывает сообщённые токены создания и чтения кэша отдельно
+для всей выборки и каждой модели. Рядом указано число вызовов без этих данных;
+отсутствующие значения не считаются известными нулями. Отображение проверено в браузере на локальной трассе:
+4 токена создания и 9 токенов чтения кэша, с отдельными неизвестными вызовами.
+
+Фильтр сохранённых оценок проверен в браузере: пустой выбор просит выбрать
+сохранённый набор, выбранный набор показывает 21 тестовую оценку, переключение
+на другой набор без оценок очищает список. Исправлено пустое значение пункта
+«Выберите набор»; добавлена регрессионная проверка поведения option без value.
+Ошибок и предупреждений браузера при проверке не было.
+
+### Экспорт выбранных трасс
+
+В разделе «Вызовы и расходы» кнопка «Выбрать вызовы для экспорта» открывает
+каталог с флажками и страницами по 20 записей. Выбор до 100 трасс сохраняется
+между страницами; выполняющиеся трассы недоступны. «Очистить выбор» снимает
+флажки, а «Скачать выбранные вызовы JSON» сохраняет полный пакет в порядке
+выбора. Отзывы и исправленные ответы включаются только отдельным флажком.
+
+Смена проекта или раздела отменяет ожидающие ответы. Изменение выбора или
+настройки отзывов во время экспорта блокирует скачивание устаревшего пакета.
+Если выбранную трассу удалили или она недоступна, сервер отклоняет весь экспорт.
+Проверки обработчика покрывают эти ограничения. Браузерная проверка 2026-10-07
+выбрала две трассы с разных страниц, вернулась на первую страницу с сохранённым
+выбором и скачала JSON. Обе трассы точно совпали с сохранёнными данными сервера;
+отзывы исключены по умолчанию, provider_calls=0, консоль без ошибок и предупреждений.
+
+### Фильтры проверок входа и ответа
+
+В журнале вызовов выбор «Проверки входа и ответа» предлагает все вызовы,
+вызовы с проверками, нарушениями или блокировками. Необязательное поле хеша
+правил ограничивает список конкретной конфигурацией; принимаются 64 цифры
+и строчные символы a–f. Изменение фильтра обновляет каталог. Список показывает
+полное число совпадений и страницы по 20 записей. Запоздалые ответы после смены
+проекта, фильтра или раздела отбрасываются; чужие проекты отклоняются.
+
+Сводка вызовов показывает проверки, успешные исходы, нарушения, блокировки,
+незавершённые/противоречивые записи и разбивку по хешам правил. Если число групп
+ограничено, интерфейс поясняет, что общие суммы остаются полными. Это сообщённые
+результаты SDK-проверок. Проверки обработчиков фильтрации, пагинации, некорректного
+хеша и устаревших/чужих ответов проходят; регрессии экспорта и корзины проходят.
+Браузерная проверка 2026-10-07 подтвердила две трассы с блокировками, одну при выборе конкретного хеша, пояснение для ошибочного хеша и пустой список для неизвестного хеша. Переход страницы общего каталога из 65 трасс сохранил итог и сменил записи. Сводка точно совпала с API: 5 проверок, 3 успешных, 2 нарушения и 2 блокировки, с двумя группами правил. Ошибок и предупреждений в консоли нет.
+
+### Задержка первого текста
+
+Сводка и раскрытые блоки моделей показывают P50/P95, минимум/максимум
+клиентской задержки первого непустого текстового фрагмента, а также число
+измерений и вызовов без данных. Известный ноль остаётся нулём; отсутствие
+наблюдений отображается как «неизвестно». Для старых ответов API без поля
+first_text показывается «данные не сообщены». Полная длительность вызова
+остаётся отдельным показателем. Клиентская задержка включает соединение и
+паузы чтения; серверное время генерации первого токена неизвестно.
+
+Сборка и проверки отображения прошли. Браузерная проверка 2026-10-07 на
+сохранённых синтетических данных подтвердила P50=10 мс, P95=100 мс, минимум=0,
+три измерения и один неизвестный вызов в блоке тестовой модели. Общая сводка
+сохранила неизвестные вызовы других моделей. Консоль без ошибок и предупреждений.
+
+Журнал вызовов дополнительно содержит выбор состояния и границы периода
+запуска в местном времени браузера. Обе границы включены, учитывается время
+начала трассы. Фильтры сочетаются с проверками/хешом правил и сохраняются при
+переходах страниц. Начало позже конца отклоняется до запроса; результаты,
+пришедшие после изменения состояния или даты, не показываются. Проверки
+обработчика покрывают передачу параметров, неверные периоды и смену даты во
+время запроса; регрессии экспорта проходят. Браузерная проверка 2026-10-07 подтвердила одну ошибку за выбранный день, пустой результат за следующий день и отклонение перевёрнутого периода. Консоль без ошибок и предупреждений.
+
+### График активности
+
+В сводке вызовов раздел «Активность по времени» строит график по выбранному
+проекту/разговору и периоду. Без дат используются последние 24 часа; доступны
+интервалы 15 минут, час и день. Показатели: вызовы, вызовы моделей, ошибки
+(состояние failed) и нарушения проверок. Пустые интервалы сохраняются. Выбор
+столбца показывает даты, счётчики, guardrails и задержку первого текста.
+Смена показателя использует уже полученные данные без нового запроса.
+
+Все данные вызова относятся к интервалу начала трассы; это не расход за
+фактическое время завершения. Период ограничен 500 интервалами. Некорректные
+периоды и чужая область ответа отклоняются, устаревшие ответы после смены
+области/дат или закрытия диалога отбрасываются. Проверки обработчика, выбора
+интервала, пустых столбцов, смены показателя и регрессии соседних разделов
+проходят. Браузерная проверка 2026-10-07 сверила все 24 часовых столбца с API, включая пустые интервалы. Выбор интервала показал точные счётчики трасс/моделей; показатели ошибок и guardrails совпали с API. Переход на 15 минут построил 96 интервалов и сохранил точное положение двух нарушений. Консоль без ошибок и предупреждений.
+
+Выбранный столбец графика содержит «Открыть вызовы интервала»: список с
+существующими деревьями трасс и страницами по 20 записей. Границы и область
+проекта/разговора закреплены за выбранным интервалом. Для ошибок выбираются
+трассы со статусом failed, для нарушений — трассы с сообщёнными нарушениями
+guardrails. Один вызов может содержать несколько моделей/проверок, поэтому
+число трасс в списке не обязано совпадать с числом модельных вызовов/нарушений.
+Список отражает текущие данные, график — последний полученный снимок.
+
+Ответы для старого столбца, закрытого/заменённого графика, другой области или
+более раннего запроса страницы отбрасываются. Записи с чужим проектом,
+разговором либо временем вне интервала отклоняются. Проверки обработчиков
+покрывают точные границы, фильтр ошибок, переход страниц, смену столбца и
+ответы страниц в обратном порядке. Сборка проходит. Браузерная проверка 2026-10-07 на локальных фикстурах
+подтвердила 25 трасс выбранного часа (страницы 20 и 5, возврат назад),
+одну трассу при выборе ошибок и две при выборе нарушений проверок.
+Предупреждений и ошибок в консоли не было; облачные модели не вызывались.
+
+График активности также поддерживает входные и выходные токены. Столбцы
+показывают сумму сообщённых значений за интервал запуска трасс; подробности
+отдельно показывают количество вызовов без сведений о токенах. Неизвестные
+значения не превращаются в известные нули. Переключение использует уже
+загруженный ответ API и не вызывает модели. Проверка обработчика покрывает
+обе суммы, неизвестные значения и отклонение некорректного счётчика.
+
+В графике сообщённой стоимости выбирается технический код валюты (по
+умолчанию USD). Валюты не складываются и не конвертируются; подробности
+показывают другие валюты и отдельные счётчики неизвестной стоимости и
+неизвестной валюты. Нулевой столбец означает нулевую сообщённую сумму,
+а не подтверждённую бесплатность всех вызовов. Проверки обработчика
+покрывают дробную стоимость, USD/EUR отдельно, отсутствующую валюту
+и неверный код без дополнительных запросов. Браузерная проверка этого
+нового режима пока не выполнена.
+
+Код валюты графика проверяется по контракту API: ровно три заглавные
+латинские буквы. Некорректные суммы (null, строки, отрицательные и
+нечисловые значения) и неверные коды в любом интервале отклоняются
+до отрисовки, включая интервалы вне текущего выбора. Сборка Studio
+и проверки SDK и связанных каталогов после изменения проходят.
+
+В активности по времени доступны также токены создания и чтения кэша.
+Каждый режим использует собственные сообщённые суммы и счётчик вызовов
+без соответствующих данных. Они не добавляются к входным токенам и
+не интерпретируются как измеренная экономия. Проверки обработчика
+подтверждают суммы 4/9, отдельные неизвестные значения и отклонение
+некорректного счётчика в другом интервале без запросов к моделям.
+Браузерная квалификация новых режимов кэша пока не выполнена.
+
+«Экспорт активности JSON» сохраняет последний успешно загруженный ответ
+`trace_time_series` целиком: область проекта/разговора, точные границы,
+размер интервала и все показатели, включая раздельные валюты и неизвестные
+значения. Выбранный показатель не обрезает файл. Экспорт не делает нового
+запроса и не вызывает модель; это снимок загруженных данных. При изменении
+периода/области кнопка отключается, закрытый диалог и другой проект
+не допускают выгрузку старого снимка. Проверка обработчика подтверждает
+содержимое JSON, имя файла и отсутствие дополнительных запросов.
+Браузерная проверка скачивания пока не выполнена.
+
+В панели вызовов появилась кнопка «Сохранённые правила проверок». Каталог
+показывает отпечатки и число правил с пагинацией по 20 записей. Значения
+правил загружаются только кнопкой «Показать правила». Из записи можно
+применить её отпечаток к существующему фильтру трасс проекта. Закрытый
+диалог, другой проект и устаревшая страница не принимают поздние ответы.
+Проверка обработчика покрывает каталог, чтение правил, переход к фильтру
+и закрытие во время загрузки. Браузерная квалификация пока не выполнена.
+
+Каталог правил поддерживает импорт файла политики: выбор ограниченного
+JSON-файла показывает предварительный просмотр правил и отпечатка, а
+отдельная кнопка сохраняет его. Исходный текст отправляется без повторной
+сериализации, поэтому сервер сохраняет возможность отклонить повторяющиеся
+ключи. Сервер проверяет схему и отпечаток; отказ отображается в диалоге.
+При закрытии или повторном открытии диалога выбранный файл сбрасывается.
+Проверки обработчика покрывают предварительный просмотр, передачу точного
+текста, отказ сервера и ограничение размера до чтения. Браузерная
+квалификация импорта пока не выполнена.
+
+Браузерная проверка 2026-10-07 подтвердила пустой каталог, выбор файла
+политики SDK, предварительный просмотр двух правил (Unicode и перенос
+строки), явное сохранение, обновление списка до одной политики и чтение
+точных сохранённых значений. Переход к трассам установил нужный отпечаток
+и показал пустой результат для политики без выполненных проверок.
+Предупреждений и ошибок консоли не было. Доказательство интерфейса:
+`/tmp/allpaka-policy-catalog-ui-20261007.png`. Авторство новых правил прямо
+в интерфейсе и автоматическое применение в native runtime ещё не реализованы.
+
+Форма «Создать правила» позволяет собрать до 32 правил: минимальную или
+максимальную длину UTF-8 в байтах, запрещённые буквальные фрагменты и
+корректность JSON. Названия должны быть уникальными; запрещённые фрагменты
+вводятся по одному на строку с сохранением пробелов и регистра. Правила
+можно убрать из черновика. Сохранение передаёт снимок серверу, который
+вычисляет отпечаток; изменения черновика во время запроса сохраняются.
+Обработчик проверен на добавление, повторное название и удаление правила.
+Браузерная проверка формы и её сохранения пока не выполнена.
+
+В раскрытой политике доступна явная проверка текста. Она использует native
+endpoint в режиме observe/input, показывает общий результат и исход каждого
+правила, не вызывает модель и не сохраняет текст в трассах. Изменение текста
+очищает старые результаты; ответ на предыдущий текст после правки игнорируется.
+Проверки обработчика покрывают нарушение и правку во время запроса.
+Браузерная квалификация этой формы пока не выполнена. Автоматическая
+блокировка потоковых ответов чата остаётся отдельным незавершённым блоком.
+
+«Проверки текущего чата» позволяет явно включить политики по отпечаткам
+входа и ответа и выбрать блокировку либо наблюдение. Настройки передаются
+с очередным сообщением и восстанавливаются при открытии разговора.
+Отключение передаёт отсутствие проверки; поддерживается Chat, остальные
+режимы сервер явно отклоняет. Проверка настроек UI проходит; браузерная
+квалификация выбора политик пока не выполнена. Native HTTP проверка
+подтвердила отсутствие текста и reasoning в пяти чтениях сессии во время
+потока ответа, последующий отказ и отсутствие заблокированного текста
+в финальной сессии. Проверка после перезапуска ещё выполняется.
+
+В каталоге каждой политики есть «Для входа чата» и «Для ответа чата»:
+кнопки подставляют закреплённый отпечаток в настройки. Они не включают
+проверки автоматически. Тест подтверждает обе подстановки и сохранение
+выключенного состояния. Полный HTTP-контракт с потоковой блокировкой и
+проверкой после перезапуска прошёл; полный набор Rust-тестов chat crate
+также проходит. Браузерная проверка новых кнопок и включения ещё впереди.
+
+В дереве трассы native-проверка раскрывает результаты каждого правила:
+название, тип и исход, а также этап, режим и отпечаток политики. Исходный
+текст и значения правил не показываются из receipt; лишние поля не
+рендерятся, противоречивые исходы отклоняются. Проверка UI подтверждает
+блокировку, исключение приватных дополнительных полей и обработку старых
+трасс без receipts. Новые HTTP-проверки подтверждают сохранённые rule
+outcomes без исходного текста; проверка после перезапуска и полный прогон
+ещё выполняются. Браузерная квалификация раскрытия пока впереди.
+
+### Background tasks from Python
+
+The existing session must permit commands (Auto or Goal mode with the command
+plugin). SDK operations use the same session-owned native background manager:
+
+```python
+from allpaka_studio import Studio
+studio = Studio('http://127.0.0.1:18805')
+task = studio.start_background(session_id, 'printf done', timeout=30)
+result = studio.wait_background(session_id, [task['id']], wait_seconds=30)
+output = studio.background_output(session_id, task['id'])
+```
+
+`background_tasks(session_id)` lists retained task metadata.
+`cancel_background(session_id, task_id)` requests cancellation; use wait/output
+to inspect its actual terminal status. `cleanup_background(session_id)` explicitly
+removes retained terminal task records and saved receipts. Wait returns when any
+selected task becomes terminal, supports 1–32 unique IDs and a 0–60 second wait,
+and does not rerun commands. SDK transport timeout accommodates the server wait.
+Output is intentionally captured; command text is not written to task receipts.
+
+Background SDK failures follow the standard `EvaluationError` contract:
+`reason == 'http_403'` for denied command execution, `http_400` for a task outside
+the selected session, and `connection_error` for transport failures. Provider or
+server error bodies are not included in the exception text. A cancellation
+request is not proof of terminal cancellation; inspect `wait_background` or
+`background_output` afterward.
+
+To explicitly continue agent work after a background command terminates, pass
+`follow_up` to `start_background`, for example
+`studio.start_background(session_id, 'printf done', follow_up='Inspect the task output and continue the current task.')`.
+The same optional bounded field is available to the native background tool/API.
+Studio queues that instruction once after terminal completion, using the chat's
+current settings and reporting task ID/status without injecting raw output.
+It only continues an active Auto/Goal chat that has not been paused or stopped.
+Restart recovery does not replay follow-up instructions. Use task output to
+inspect the command result; completion alone does not imply successful exit.
+
+Persisting an evaluated matrix: `Studio.save_experiment_matrix(project_id, baseline_id, variants)` takes 2–16 dictionaries with `label` and `run_id`, baseline first. These must refer to complete native experiments on the same immutable dataset and selected metrics. `Studio.experiment_matrix(id)` reopens and revalidates the saved summary. A matrix can be retained with `passed:false` to preserve regression evidence; saving does not promote settings or invoke a model. Studio's matrix report viewer offers **Сохранить матрицу в Studio** for complete reports and an explicit saved-ID opener.
+
+Studio can author matrices directly under **Создать и запустить матрицу**. Save/select a dataset and metrics, choose a saved prompt or inline template, then add each current configuration. Edit labels/models and inline variant text before starting; the first variant is the baseline. Starting calls models sequentially through native experiments; Stop cancels the active experiment and prevents new variants. Complete outcomes are saved as a native matrix; failed/stopped outcomes retain completed experiment IDs for review. The sequencing belongs to the browser page and does not automatically resume after closing/restarting it.
+
+Python matrix execution can persist its summary directly with `evaluate_matrix(requests, persist=True)`. The returned client report includes `native_matrix`; each client's threshold/strict-improvement result remains separate from the native no-paired-regression result. Failed persistence preserves completed variants on the exception (`matrix_results`, `matrix_persistence_failed`) and never retries model execution.
+
+
+Матрицы запускаются серверным заданием: в «Создать и запустить матрицу»
+добавьте варианты и запустите их. Закрытие страницы не останавливает Studio.
+«Задания матриц проекта» показывает сохранённые задания; их можно открыть
+по ID, обновить состояние, остановить или открыть готовую матрицу.
+После перезапуска Studio продолжение запрашивается явно. Оно использует
+готовые эксперименты и запускает только ещё не отправленные варианты;
+начатые прерванные вызовы не повторяются. Изменённый адрес провайдера или
+потерянный результат уже начатого эксперимента блокирует продолжение.
+
+
+Если вариант уже был начат и прервался, используйте «Создать новое задание и
+повторить неудачные варианты». Это явный повтор с новыми вызовами моделей:
+готовые проверенные варианты используются повторно, для остальных создаются
+новые эксперименты. Новое задание хранит ссылку на исходное; кнопка «Открыть
+исходное задание» возвращает к прежней истории. Старые результаты сохраняются.
+
+
+### Этапы длительной задачи
+
+В режиме Goal план сохраняет ID этапов, критерии готовности, заявленные подтверждения и номер версии. Добавление этапа требует хотя бы одного критерия. Чтобы отметить этап завершённым, укажите подтверждение; текст подтверждения не является независимой проверкой результата. Завершённые этапы защищены от обычного изменения агентом. Нажатие на их статус явно открывает этап заново для редактирования.
+
+Раздел контрольных точек показывает сохранённые версии плана; история ограничена последними 30 версиями и 1 МиБ. После сбоя незаконченная задача остаётся на паузе. Явное продолжение передаёт модели текущие ID и версию плана. Это защита сохранённых этапов, а не гарантия отсутствия повторных внешних действий.
+
+API: `GET /api/sessions/:id/plan`; изменение через `POST` принимает `steps`, текущий `base_revision` и опциональный `allow_reopen`. Устаревшая версия отклоняется. Python SDK: `session_plan` и `update_session_plan`. Старые планы сохраняют отмеченный прогресс; критерии можно добавлять постепенно. Независимая проверка всех критериев и отдельный жизненный цикл цели пока не реализованы.
+
+
+Перед обычным окончанием ответа Goal проверяет сохранённый план: нужен хотя бы один этап, все этапы должны быть завершены и содержать критерии и заявленные подтверждения. Если это не так, агент получает продолжение оставшейся работы в пределах текущего лимита шагов. Повторное окончание ответа при той же версии плана ставит задачу на паузу; исчерпание шагов с незавершённым планом тоже сохраняет паузу. Трасса получает статус `goal_incomplete`, а API плана — `reported_completion_ready: false`. Это проверка полноты заявленного плана, а не независимое доказательство выполнения исходной цели. При перезапуске автоматических вызовов модели нет.
+
+
+Новое сообщение через отправку в режиме Goal создаёт новую цель с отдельным ID и ссылкой на исходное сообщение. Если текущий план непустой, его этапы остаются в ограниченной истории контрольных точек, а текущий план становится пустым: новая цель не наследует готовность предыдущей. «Продолжить», Steer и пробуждение от фоновой команды сохраняют цель. В контрольных точках различаются текущая и предыдущая цель. Старые сохранённые чаты без ID цели остаются совместимыми при продолжении.
+
+
+Новые контрольные точки сохраняют ссылку на исходную задачу каждой цели. В истории рядом с этапами показываются первые 400 символов её текста. Ссылка проверяется при восстановлении: она должна вести на сообщение пользователя, совпадать с ID цели и не противоречить другим сохранённым ссылкам той же цели. Старые контрольные точки без такой ссылки остаются доступными, но текст исходной задачи для них не выдумывается.
+
+
+В сводке трасс раздел «По разговорам» показывает число трасс, статусы, вызовы моделей, сообщённые токены и стоимость каждого чата. Внешние вызовы моделей подсчитаны отдельно. Неизвестные токены и расходы не подменяются нулём, валюты не складываются. Фильтры проекта, разговора и дат действуют до группировки. Показаны последние 100 разговоров с трассами; общие итоги и число разговоров включают всю найденную выборку. Экспорт сводки содержит эти же группы.
+
+
+Сводку «По разговорам» можно листать кнопками «Предыдущие разговоры» и «Следующие разговоры». «Обновить» возвращает первую страницу. Итоги всей выборки не зависят от страницы; экспорт включает показанную страницу и её номер. API и SDK принимают `conversation_offset` и `conversation_limit` (до 100 разговоров на странице). Новые трассы могут изменить порядок при следующем запросе страницы.
+
+
+В сводке разговора кнопка «Показать вызовы разговора» открывает его трассы с тем же периодом дат. Вызовы показываются страницами по 20; каждую трассу можно раскрыть обычным просмотром дерева. Смена проекта, страницы сводки или фильтров делает старые кнопки неактивными. Ошибку чтения можно повторить кнопкой «Повторить загрузку». Эти действия читают сохранённые данные и не запускают модель.
+
+
+В сводке можно выбрать «Состояние трассы»: ошибки, прерванные задачи, незавершённые цели и другие состояния. Итоги и список разговоров пересчитываются только по выбранным трассам. Фильтр сохраняется при переходе между страницами и при открытии вызовов разговора. API/SDK принимают `status`; экспорт содержит выбранное состояние. Это состояние всей трассы: отдельные вызовы модели внутри неё могут иметь другие результаты.
+
+
+Выбранное «Состояние трассы» действует также на график активности. Интервалы, токены, расходы и проверки рассчитываются только по этим трассам; пустые интервалы сохраняются. При открытии вызовов столбца состояние сохраняется. Если выбранная выборка не содержит ошибок, график ошибок не открывает вызовы из другой выборки. API/SDK графика принимают `status`, экспорт графика сохраняет его.
+
+
+В окне «Наборы примеров и оценки» раздел «Архив наборов» открывает действующие или архивные наборы. «Архивировать набор» скрывает его из рабочего выбора, сохраняя версии и ссылки экспериментов; «Восстановить набор» возвращает его в каталог. Черновик редактора сохраняется. Запись новой версии архивного набора требует восстановления. Если другой клиент изменил версию набора или состояние архива, обновите каталог перед повторной командой. Архивирование не запускает модель и не удаляет данные физически.
+
+
+Действующие и архивные наборы в разделе архива показываются страницами по 20. Переходы доступны кнопками «Предыдущие наборы» и «Следующие наборы». API/SDK каталога принимают необязательные `offset` и `limit` (до 100); запрос без них сохраняет полный каталог для совместимости. Порядок — название, затем ID набора; новые наборы могут изменить страницы при следующем запросе.
+
+
+В разделе архива поле «Поиск набора» ищет часть названия или ID без учёта регистра. «Найти наборы» использует текущий список — действующие или архивные наборы. Страницы и число результатов относятся к найденной выборке. Изменение поиска сбрасывает старый список и его действия. API принимает `q`, SDK — `datasets(search=...)`; длина ограничена 200 символами.
+
+История версий набора: в редакторе оценки выберите сохранённый набор и откройте список версий. Он показывает версии от новых к старым, название, число примеров и SHA-256, по 20 записей на страницу. «Загрузить версию в редактор» загружает выбранный неизменяемый снимок и проверяет его хеш. Просмотр истории не вызывает модель. Запоздавшие ответы не заменяют новый черновик или набор другого проекта.
+
+Вариант набора: загрузите нужную сохранённую версию и нажмите «Создать вариант версии». Примеры остаются в редакторе, имя получает суффикс «вариант». Отредактируйте поля и сохраните: создаётся отдельный набор с собственной нумерацией версий. В редакторе отображается исходный ID, версия и SHA-256. Исходный набор не меняется. Последующие правки варианта сохраняют эту привязку; экспорт включает её. Импорт файла по-прежнему создаёт независимый набор без подтверждённой привязки к источнику.
+
+Сравнение версий: выберите набор, раскройте «Сравнение версий набора» и задайте исходную и новую версии. «Сравнить версии» показывает число добавленных, удалённых, изменённых и неизменённых примеров, изменение названия и SHA-256 обеих версий. Для изменённого примера указаны затронутые поля: вопрос, эталонный ответ, справочные материалы, метаданные. Список идёт по ID примера, по 100 изменений на страницу. Перестановка самих примеров не считается изменением содержания. Для просмотра текста конкретной версии используйте загрузку версии в редактор.
+
+Для сохранённых заданий сравнения действуют общие границы: 1000 заданий и 16 МБ с резервом места под прогресс каждого задания. При заполнении новый запуск или повтор как новое задание отклоняется до обращения к модели; сохранённая история не удаляется автоматически. Уже принятые задания могут сохранять результат и статус. Возобновление существующего задания использует его прежний резерв места.
+
+Python SDK: `export_dataset_comparison_csv(dataset_id, project_id, from_version, to_version)` выгружает все изменения между двумя версиями одного набора в CSV. Метод читает страницы по 100 записей, сверяет постоянство хешей, итогов и порядка ID и возвращает файл только после проверки полного списка. Столбцы: ID набора/проекта, обе версии и хеши, ID примера, тип изменения, затронутые поля. Тексты примеров не экспортируются. Для одинаковых версий CSV содержит только заголовок. Значения, похожие на формулы таблиц, получают защитный апостроф. Это экспорт через SDK; кнопка скачивания в интерфейсе пока не добавлена.
+
+Теперь в результатах сравнения доступна кнопка «Скачать все изменения (CSV)». Она собирает полный список, включая страницы, которые не открывались вручную, и проверяет совпадение версий, хешей и итогов. Повторное нажатие во время выгрузки блокируется. Смена проекта, набора, версий или закрытие окна отменяет устаревшую выгрузку. Файл включает заголовки и ID/хеши/типы изменений/имена полей, без текстов примеров; для открытия в табличных редакторах используется UTF-8 BOM. При отсутствии изменений файл содержит заголовок.
+
+Предпросмотр промпта: загрузите сохранённую версию и откройте «Предпросмотр промпта для одного вопроса». Введите вопрос и необязательные справочные материалы (блоки разделяются пустой строкой). Кнопка покажет системную инструкцию и пользовательское сообщение после подстановки `{{input}}`/`{{contexts}}`, а также версию и SHA-256 источника. Маркеры внутри введённого вопроса или контекста не подставляются повторно; системная инструкция остаётся неизменной. Предпросмотр не сохраняет набор/запуск и не обращается к модели. Изменения в полях промпта сначала сохраните: просмотр использует выбранную сохранённую версию. Результат ограничен 1 МБ.
+
+Playground для одного вопроса: загрузите сохранённую версию промпта, введите вопрос и контекст в блоке предпросмотра и нажмите «Запустить один вопрос». Используются выбранные провайдер и модель, режим Chat без записи в рабочие файлы. ID, версия и хеш промпта фиксируются до запуска; несоответствие хеша отклоняется до сохранения примера и обращения к модели. Каждый запуск сохраняет отдельный набор из одного примера («Playground») и обычный запуск в истории проекта. Ответ, остановка, экспорт и журнал вызовов доступны через существующий экран результатов. В интерфейсе этот запуск выполняется без метрик и не подтверждает качество. SDK `start_playground` дополнительно принимает необязательные метрики и эталонный ответ. Закрытие окна не отменяет уже принятый запуск; он остаётся в истории. Автоматического повторного запуска после завершения процесса нет.
+
+Промпты из сообщений: выберите формат «Примеры диалога и финальный вопрос». Редактор позволяет добавлять и удалять пары User/Assistant перед последним User. В последнем вопросе обязателен `{{input}}`; `{{contexts}}` подставляет справочные материалы. Системная инструкция задаётся отдельно. Сохранённая версия фиксирует весь список сообщений в хеше; старые версии текстовых промптов не меняются. Предпросмотр показывает все роли и тексты в порядке отправки. Этот формат работает и в Playground, и при проверке набора примеров. Допускается до семи пар примеров и финального вопроса, суммарно 64 КБ шаблонов; подставленный список ограничен 1 МБ. Правила входа проверяют объединённый текст сообщений User/Assistant, включая финальный вопрос.
+
+История запусков: раскройте «Поиск запусков», выберите статус, тип (Playground/проверки наборов), часть названия модели и при необходимости текущий набор или провайдера. «Найти / обновить запуски» применяет фильтры, показывает итоговое число и по 20 запусков на страницу. Фильтры применяются ко всей сохранённой истории перед делением на страницы. При поиске только выбранного набора сначала выберите его в редакторе. Смена фильтров очищает старый список; смена набора также очищает список, если включён фильтр по набору. При повторном открытии окна фильтры сбрасываются. Выбор запусков для сравнения по-прежнему содержит весь список завершённых проверок с метриками проекта, независимо от страницы и фильтров истории.
+
+Python SDK `experiments(project_id, status=None, provider=None, model=None, dataset_id=None, playground=None, offset=0, limit=20)` предоставляет тот же каталог. `model` — буквальный поиск подстроки без учёта регистра; ID набора/провайдера и статус сопоставляются точно. Каталог не запускает модель и показывает сохранённые сводки; проверку оснований сравнения выполняет отдельный механизм сравнения запусков.
+
+Метрики Playground: раскройте «Метрики пробного запуска», отметьте нужные проверки и при необходимости включите «Есть эталонный ответ». Доступны точное совпадение, наличие эталона, F1 слов, F1 соседних символов, корректность JSON и структурное равенство JSON. Только проверка корректности JSON не требует эталона. Вопрос, контекст, метрики и эталон фиксируются при нажатии запуска и сохраняются вместе с примером. Если ничего не выбрано, запуск остаётся без оценки качества. При смене/загрузке сохранённого промпта выбор метрик и эталон сбрасываются.
+
+В результате Playground кнопка «Вопрос и эталон этого запуска» открывает именно сохранённый пример, проверяя ID, версию и SHA-256 набора. Она показывает вопрос, использованный эталон и контекст независимо от последующих изменений полей редактора. Оценки видны в результатах примера и в экспорте.
+
+Хранилище запусков ограничено 1000 записями и 128 МиБ. Перед новым запуском сервер резервирует место для ответов и результатов; при нехватке места модель не вызывается, а образец Playground не сохраняется. Завершённые записи остаются в истории. Ответ сохраняется в пределах 65536 байт UTF-8 и примерно 128 КиБ сериализованного JSON. Обрезанный ответ помечается неполным, не получает метрик и не допускается к сравнению качества.
+
+JSON-экспорт эксперимента включает провайдера, модель, ID журнала вызовов, число одновременных примеров, таймаут и ссылку на сохранённый промпт (ID, версия, SHA-256). Для задания без сохранённой версии ссылка равна null. Текст промпта, системные инструкции и полные настройки в этот экспорт не входят; ответы включаются только по отдельному выбору. Python SDK также поддерживает CSV для Playground без метрик: колонки оценок отсутствуют.
+
+CSV-экспорт результатов в Studio и Python SDK включает колонки `provider`, `model`, `trace_id`, `prompt_id`, `prompt_version`, `prompt_sha256`. Для задания без сохранённого промпта его колонки пусты; старые серверные экспорты без новых полей также поддерживаются. Текстовые значения защищены от выполнения как формулы при открытии в таблице.
+
+История ручных оценок доступна через `GET /api/observability/traces/:id/feedback/versions?offset=0&limit=20` и Python `feedback_versions(trace_id, offset=0, limit=20)`. Версии идут от новых к старым; строки содержат дату сохранения, общее число аннотаций и число действующих. Комментарии, исправленные ответы и имена проверяющих не входят в список. Выбранная полная версия читается существующим запросом feedback с параметром version. Список ограничен 100 строками на страницу и не вызывает модель.
+
+В раскрытой панели «Ручные оценки и исправления» доступен «Список версий ручных оценок». Нажмите «Показать версии оценок»: список показывает по 20 версий с датой и числом действующих аннотаций. «Открыть версию» загружает полную сохранённую версию; прошлые версии доступны только для просмотра. Переключение страницы и обновление панели делают старые кнопки недействительными.
+
+В ручных оценках поле поиска отбирает отзывы по имени проверяющего, метрике, категории, комментарию и исправленному ответу без учёта регистра. Фильтр состояния показывает все, действующие или удалённые оценки. Счётчик отражает отобранные аннотации; сводка метрик относится ко всей версии и явно подписана. Изменение фильтра не сбрасывает незавершённую форму правки.
+
+Python SDK: `feedback(trace_id, version=None)` читает ручные оценки, `save_feedback(trace_id, annotation, base_version=...)` сохраняет новую ревизию. Передайте текущий номер версии как base_version; сервер возвращает конфликт, если другой пользователь уже сохранил изменения. Для удаления/восстановления передайте сохранённую аннотацию с её ID и `deleted=True`/`False`. Имя проверяющего остаётся указанным пользователем, без подтверждения личности. SDK проверяет типы и UTF-8-лимиты полей до запроса и не повторяет конфликтующие записи автоматически.
+
+Основа очередей ручной проверки доступна в Python SDK: `create_review_queue(project_id, name, targets, instructions="")`, `review_queue(queue_id)` и `review_queues(project_id, offset=0, limit=20)`. Источники задаются как `{"trace_id": "...", "span_id": 1}`; span_id можно не указывать для всего вызова. Каталог содержит название, версию и число источников, без инструкций и самих ссылок. Сервер допускает только существующие источники того же проекта. Назначение проверяющих, завершение пунктов и интерфейс очередей пока не добавлены.
+
+Назначение проверяющего в очереди: Python `assign_review_queue(queue_id, target_index, reviewer, base_version=...)` или POST `/api/observability/review-queues/:id/assignments`. Индекс источника начинается с нуля; reviewer=None снимает назначение. Укажите текущую версию очереди: сохранение увеличивает её на один, устаревшая версия отклоняется с конфликтом. Назначение сохраняется после перезапуска. Это указанное вручную имя, не подтверждённая учётная запись; завершение проверки по сохранённой оценке пока не реализовано.
+
+Завершение пункта очереди: POST `/api/observability/review-queues/:id/completion` с `base_version`, `target_index`, `action="complete"`, `feedback_version` и `annotation_id`. Отзыв в указанной сохранённой версии должен быть действующим и принадлежать точно тому же вызову/шагу и назначенному проверяющему. Завершённый пункт сохраняет ссылку на отзыв и не допускает смены назначения. Для повторной проверки передайте `action="reopen"` без замены отзыва; назначение сохранится, отметка завершения снимется. Это ручное свидетельство, не автоматическое подтверждение качества модели.
+
+Python SDK предоставляет `complete_review_queue(queue_id, target_index, feedback_version, annotation_id, base_version=...)` и `reopen_review_queue(queue_id, target_index, base_version=...)`. Завершение фиксирует явно выбранную версию отзыва. Более поздняя правка или удаление не меняет этот исторический источник; если выбрана версия, где аннотация уже удалена, сервер отклоняет её. После перезапуска назначение и основание завершения остаются в очереди.
+
+Studio: в контексте проекта откройте «Очереди ручной проверки». Каталог показывает по 20 очередей; можно открыть очередь, назначить или снять проверяющего и открыть исходный вызов. Если пункт относится к шагу, форма ручной оценки заранее выбирает этот шаг. В журнале вызова раздел «Создать очередь проверки для этого вызова» позволяет сохранить новую очередь для всего вызова или выбранного шага с названием и инструкциями. Многоисточниковые очереди пока создаются через SDK; завершение и повторное открытие в этом интерфейсе ещё не добавлены.
+
+В очереди ручной проверки назначьте проверяющего и откройте источник: форма отзыва подставит его имя и выбранный шаг. Чтобы завершить пункт, выберите сохранённый отзыв; пустое поле версии загружает текущую версию. Интерфейс показывает только действующие отзывы этого проверяющего для того же источника. Проверьте текст перед нажатием «Завершить пункт с этим отзывом». Очередь сохраняет номер версии и выбранный отзыв. Кнопка «Открыть пункт повторно» возвращает его в работу, сохраняя назначенного проверяющего. Имена проверяющих вводятся вручную.
+
+При создании очереди из вызова можно выбрать несколько его шагов одновременно: удерживайте Ctrl / Cmd в списке источников. Допустимо от 1 до 200 источников; весь вызов также доступен отдельным пунктом. Создание очереди из нескольких разных вызовов пока доступно через SDK.
+
+Каталог очередей фильтруется по состоянию: есть незавершённые пункты, завершены все пункты или есть пункты без проверяющего. Можно указать точное имя назначенного проверяющего и нажать «Обновить очереди». Фильтры применяются до подсчёта и разбивки на страницы.
+
+В открытой очереди кнопка «Скачать очередь CSV» выгружает показанную сохранённую версию. В файле находятся источники, назначенные проверяющие, состояния пунктов и ссылки на завершившие их отзывы (версия и идентификатор). Тексты вызовов, инструкции и комментарии отзывов не включаются. SDK предоставляет `export_review_queue_csv(queue_id)`, который читает очередь один раз и возвращает CSV. Имена проверяющих остаются введёнными вручную.
+
+В каталоге очередей поиск по названию использует подстроку без учёта регистра и сочетается с остальными фильтрами. Введите название и нажмите «Обновить очереди». SDK принимает `review_queues(project_id, name=...)`; сервер фильтрует весь каталог проекта до разбивки на страницы.
+
+Очередь можно отправить «В архив» и затем восстановить. Архивирование сохраняет источники, назначения и отзывы, увеличивая версию очереди. Архивная очередь доступна для чтения и CSV, но менять её пункты можно только после восстановления. В каталоге разделы «Рабочие», «Архив» и «Все очереди» сочетаются с остальными фильтрами. SDK предоставляет `set_review_queue_archived(id, archived, base_version=...)` и фильтр `archived` в `review_queues`.
+
+SDK `review_queue_history(queue_id, offset=0, limit=20)` возвращает историю изменений очереди: назначения, завершения с конкретным отзывом, повторные открытия, архивирование и восстановление. Поле `history_complete` сообщает, есть ли история с момента создания. Для старых очередей прежние изменения неизвестны. Журнал доступен через API и SDK; просмотр его в интерфейсе пока не добавлен.
+
+В открытой очереди раздел «История очереди» показывает изменения страницами по 20 записей: версии, действия, назначения и сохранённые ссылки на отзывы при завершении. Для старых очередей отображается предупреждение о неполной истории. Если очередь изменилась после открытия, откройте её заново перед просмотром журнала.
+
+SDK `memory_expiry(project_id, include_global=False, horizon_days=30)` возвращает обзор сроков памяти: просроченные и истекающие заметки, их версии и хеши, а также счётчики заметок без срока, с более поздним сроком и удалённых. Горизонт допустим от 0 до 365 дней. Тексты заметок не включаются; обзор не меняет память. Это проверка заданных сроков, а не оценка актуальности содержания. Просмотр обзора в интерфейсе пока не добавлен.
+
+В окне памяти раздел «Сроки памяти» проверяет выбранную область на указанное число дней вперёд (0..365, по умолчанию 30). Он показывает счётчики состояний и список просроченных/истекающих заметок. «Прочитать» открывает зафиксированную версию только для чтения; обзор не продлевает сроки и не удаляет заметки. Для общей памяти выберите её в поле области.
+
+Для явной оценки успешных вызовов SDK используйте `@studio.track('task', evaluate=lambda result: {'quality': ...})` внутри `with studio.trace(...)`. Оценщик получает результат и возвращает от 1 до 20 числовых оценок 0..1 с техническими именами. Они сохраняются в отдельном дочернем шаге; содержание результата не отправляется. Ошибка оценщика не заменяет результат задачи и доступна локально в `trace.evaluation_errors`. Это сообщённые вашим кодом оценки, а не независимая проверка качества. Асинхронные функции поддерживают асинхронный оценщик.
+
+В шаге трассы оценки, сообщённые callback вашего кода, отображаются в разделе «Оценки callback». Это числовые оценки источника, а не независимая проверка качества. Ошибка оценщика видна как неуспешный дочерний шаг.
+
+Параметр `evaluation_sample_rate` у `track` задаёт долю вызовов для оценки: 1 оценивает все, 0 пропускает все, например 0.1 выбирает часть по стабильному хешу проекта, correlation ID, имени и индекса шага. При повторении тех же идентификаторов и структуры выбор повторяется. Это доля по множеству идентификаторов, а не точная квота. Пропущенный вызов не получает оценку. Настройка действует в SDK; она не является сохранённым серверным правилом.
+
+Для успешного вызова с настроенным оценщиком трасса сохраняет `evaluation_sampling`: метод, долю и результат отбора. Запись есть и для пропущенных вызовов. Сервер пересчитывает выбор по хешу и отклоняет несовпадение. Это сведения об отборе успешных вызовов; они не подтверждают успешное выполнение оценщика.
+
+В карточке вызова видны статусы «Выбран для оценки» или «Оценка пропущена по отбору» и заданная доля. Выбор не означает успешную оценку: её результат находится в дочернем шаге. Для пропущенного вызова оценка качества отсутствует.
+
+Для различения оценщиков передайте `evaluator_id='quality-check'` и `evaluator_version=1` вместе с `evaluate` в `track`. Они сохраняются в шаге попытки оценки, включая неуспешную попытку, и видны в Studio. Идентификатор и версия сообщаются вашим кодом; исходный код callback не сохраняется и не проверяется.
+
+SDK `callback_evaluation_summary(project_id, since_ms=None, until_ms=None)` получает сводку сохранённых callback-оценок проекта. Она содержит число, среднее, минимум и максимум по метрике и идентификатору/версии оценщика, а также счётчики отбора и попыток оценки. Разные версии оценщика и оценки без идентификатора учитываются отдельно. Сводка не принимает решение о качестве и не запускает модель; просмотр её в Studio пока не добавлен.
+
+В контексте проекта кнопка «Сводка callback-оценок» открывает счётчики отбора и попыток оценки, а также таблицу метрик по идентификаторам/версиям оценщиков. Можно ограничить время начала трасс; границы включены. Группы показаны страницами по 50. Средние описывают только сообщённые оценки: пропуски и ошибки не получают нулевые или успешные оценки автоматически.
+
+
+### Callback summary exports
+
+Studio exports the displayed callback summary as JSON or CSV. Exports include all metric groups, including groups beyond the visible page, and preserve project/time filters, caller-reported provenance and global counters. CSV repeats global counters on each metric row; an empty summary includes a context-only row. Text cells escape spreadsheet formulas. Changing filters, closing the dialog or changing project invalidates old download controls. Local UI fixtures cover pagination, all-group export, empty metrics, formula escaping and stale controls; browser download qualification remains pending.
+
+### Saved consolidation proposal review in Studio
+
+The memory dialog now opens retained consolidation proposals in pages of 20 for the selected project or global scope. Opening a proposal loads its candidate into the editable memory form with both proposal provenance and exact source revision pins. It makes no generation request and does not save a note. Explicit save still validates current source revisions on the server. UI contract checks cover duplicate request admission, scope/editor stale response exclusion, malformed or duplicate pins, and preservation of both origins. The 100 Python SDK tests pass. This increment has not been visually qualified in a live browser; provider/model quality remains unqualified.
+
+Catalog pagination checks additionally cover a 21-item result across two pages, returning to the first page, repeated navigation clicks, and a retained proposal response arriving after navigation. A page generation guard prevents that old response from replacing the current editor. Browser visual qualification remains pending.
+
+Saved consolidation catalog browser qualification: a retained mock-generated proposal opened into editable fields, with no new provider request and no note created until explicit save. Saving edited text retained both proposal and source revision provenance; the two source notes and original proposal stayed unchanged. Browser warnings/errors were empty. Evidence: `/tmp/allpaka-catalog-browser-evidence.json`, screenshot `/tmp/allpaka-consolidation-catalog-browser.png`. This verifies browser behavior against a local mock, not real-model semantic quality.
+
+Proposal storage admission now runs before provider generation for both conversation extraction and consolidation. It rejects non-regular JSON entries, escaped storage directories, oversized existing receipts, and insufficient catalog capacity. Admission conservatively reserves two files of up to 128,000 bytes for the two concurrent proposal requests; a serialized receipt must also fit that per-file bound before commit. Native tests cover the 998/999-file admission boundary, per-file overflow, and total-byte exhaustion. Three focused memory extraction tests pass. HTTP rejection/provider-call-count qualification for this increment remains pending.
+
+Proposal storage HTTP qualification now passes for both count and byte exhaustion. Conversation extraction and consolidation return rejection with zero additional mock-provider requests, unchanged memory notes, and no added retained proposals. Temporary quota fixtures are removed before continuing, and ordinary generation plus restart persistence still pass. The full Studio contract suite completed successfully; evidence log `/tmp/allpaka-proposal-capacity-http.log`. Real-cloud/model quality qualification remains separate.
+
+Conversation extraction source status: GET `/api/memory/proposals/:id/source-status` and SDK `memory_extraction_source_status` compare the original bounded extraction prefix against its retained SHA-256. Status is current, changed, or unavailable; metadata includes original boundary, current message count and running state, with no conversation text, inference, or note mutation. Appended messages leave the original prefix unchanged. Four native extraction tests, 101 SDK tests, and the full Studio HTTP suite pass, including exact-prefix current status before/after restart and rejecting consolidation receipts on this endpoint. Changed/shortened prefix behavior is unit-tested; HTTP changed/unavailable cases and Studio UI remain pending. Evidence `/tmp/allpaka-extraction-status-http-recheck.log`.
+
+Studio extraction source review: opened conversation proposal receipts now include an explicit source-check button. It displays current/changed/unavailable prefix status, distinguishes revision comparison from factual correctness, and reports running conversations. The UI validates receipt identity/project/boundary/hash, status consistency and no-inference/no-mutation metadata. Duplicate clicks and late replies after session/project/dialog/panel changes are excluded. UI contract tests for all three statuses and malformed/stale replies pass alongside existing memory save and consolidation catalog tests. Real-browser qualification and changed/unavailable HTTP cases remain pending.
+
+Extraction source status HTTP qualification now covers all statuses: appended messages retain current status and the original hash; an isolated test history rewritten while Studio is stopped returns changed after restart; a test history moved outside the data directory returns unavailable. Retained proposals remain exactly readable, notes remain unchanged, and status requests make no additional mock-provider calls. The full Studio contract suite passes (`/tmp/allpaka-extraction-source-status-cases.log`). Source-check browser visual qualification remains pending.
+
+Explicit quality evaluation can now be linked to a completed trace via Python `studio.judge_trace(trace_id, trace_sha256, settings, rubric, input_text, output, reference=None)`. Use an exact native trace fingerprint (for example, the retained online selection's `trace_sha256`). A stale/foreign/incomplete/removed trace is rejected before inference; metadata is rechecked before the verdict is committed. Submitted answer text is explicitly caller supplied: the receipt's trace reference pins execution metadata, and does not independently verify that answer content. Model judgments remain observational and require an explicitly configured provider. Automatic queue model judging is still unfinished.
+
+For retained quality content, first call `save_online_quality_source(project_id, trace_id, trace_sha256, input_text, output, reference=None)` explicitly. Then `judge_online_quality_source(source_sha256, settings, rubric)` loads the exact source on the server and evaluates it with the configured provider. The verdict retains `quality_source_sha256` and the original trace pin. Historical sources stay readable when trace metadata changes, but execution rejects the changed trace. Calls remain explicit; they do not yet schedule a background model job.
+
+To run a saved quality source in the background, call `submit_online_quality_job(source_sha256, settings, rubric)` and poll `online_quality_job(job_id)`. Identical requests reuse the same job. A started job with no terminal result becomes `interrupted` after restart and is not sent to the provider again; pending unstarted jobs remain eligible. Completed jobs link to the existing immutable judge receipt. The Studio rule composer still configures metadata-health rules; automatic model-rule scheduling and model-job UI remain unfinished.
+
+Studio's Context panel now includes “Модельные оценки”. It lists the current project's saved background model jobs, pages of 20, and their state/provider/model. For a completed job, “Показать балл и объяснение” reads the linked immutable judge verdict; browsing and opening a verdict do not invoke the model. Interrupted jobs are shown without automatic retry. Submission remains available through the API/Python SDK; automatic model rules and a submission composer are still incomplete.
+
+Automatic model quality rules can now be configured through Python: save an evaluator with `save_online_model_evaluator(settings, rubric)`, save an online rule referencing its returned `evaluator_id`/`evaluator_version`, then activate that rule's snapshot with `bind_online_evaluation_rule`. When you explicitly save quality text for a selected completed trace, Studio queues the model assessment using pinned rule/selection/configuration hashes. Saving the evaluator or activating the rule does not itself call a model; traces remain metadata-only until you explicitly provide text. Repeating the same source save does not retry a finished/interrupted job. Source persistence and job admission are separate: a capacity/admission error preserves the source and is logged, and a later explicit repeat save can retry missing admission. Studio's rule composer still creates only trace-health rules; a model configuration/capture composer remains unfinished.

@@ -2056,3 +2056,51 @@ header .eyebrow { display: none; }
 /* Один уровень рамок: поповеры и меню без вложенных рамок */
 .pop-body label, .pop-body .seg { border-color: transparent; }
 #messages:has(> .welcome) { display: flex; flex-direction: column; }
+
+#evaluation-dialog { width: min(900px, 94vw); max-width: 900px; max-height: 90vh; overflow-y: auto; }
+#evaluation-dialog textarea { display: block; width: 100%; min-height: 5rem; margin: .5rem 0; }
+#evaluation-dialog input[type=checkbox] { width: auto; margin-right: .5rem; }
+#evaluation-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.evaluation-sample { border: 1px solid var(--line); padding: 1rem; margin: .75rem 0; border-radius: .75rem; }
+.evaluation-sample .sample-reference-label { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; }
+#evaluation-runs > div { display: flex; justify-content: space-between; gap: 1rem; margin: .5rem 0; }
+
+.trace-feedback { margin: .75rem 0; }
+.feedback-form { display: grid; gap: .6rem; margin-top: .75rem; }
+.feedback-form label { display: flex; flex-direction: column; gap: .25rem; }
+.feedback-form textarea { min-height: 5rem; width: 100%; }
+.feedback-entry pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.feedback-entry { margin: .5rem 0; }
+
+.trace-span { overflow-wrap: anywhere; margin: .3rem 0; }
+
+.history-bookmark-filter { display:flex; align-items:center; gap:8px; margin:8px 0; font-size:12px; }
+.history-bookmark-filter input { width:auto; margin:0; }
+#conversation-bookmarks > div { display:flex; gap:6px; margin:6px 0; }
+#conversation-bookmarks > div > button:first-child { flex:1; text-align:left; overflow-wrap:anywhere; }
+.history-bookmark-filter { flex-direction:row; }
+#conversation-bookmarks > div { align-items:flex-start; }
+#conversation-bookmarks > div > button { width:auto; margin-top:0; }
+#conversation-bookmarks > div > button:first-child { min-width:0; }
+#conversation-bookmarks > div > button:last-child { flex:none; }
+
+#memory-dialog { width:min(760px,90vw); max-height:90vh; overflow:auto; }
+#memory-dialog textarea { width:100%; min-height:130px; resize:vertical; }
+#memory-list { display:flex; flex-direction:column; gap:6px; margin:12px 0; }
+.memory-removed-label { flex-direction:row; align-items:center; }
+.memory-removed-label input { width:auto; margin:0; }
+
+.trace-series-bars{display:flex;gap:4px;overflow-x:auto;align-items:end;padding:8px 0;max-width:100%}.trace-series-bucket{display:flex;flex-direction:column;align-items:center;justify-content:end;flex:0 0 44px;gap:4px;height:220px;font-size:11px;padding:4px}.trace-series-bar{display:block;width:24px;background:var(--accent,#d4ad73);border-radius:3px}.trace-series-bucket:focus-visible{outline:2px solid currentColor}
+
+#online-jobs-dialog,#online-rules-dialog{box-sizing:border-box;max-width:min(720px,calc(100vw - 32px));width:100%;}
+#online-jobs-body summary{overflow-wrap:anywhere;}
+#online-jobs-body pre{white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%;}
+#online-rules-body>div{padding:12px 0;border-bottom:1px solid var(--border,#333);}
+
+#quality-jobs-dialog{box-sizing:border-box;max-width:min(720px,calc(100vw - 32px));width:100%;}
+#quality-jobs-body>div{padding:12px 0;border-bottom:1px solid var(--border,#333);overflow-wrap:anywhere;}
+
+#online-rules-body p{overflow-wrap:anywhere;}
+
+#quality-capture-dialog{box-sizing:border-box;max-width:min(720px,calc(100vw - 32px));width:100%;}
+#quality-capture-dialog textarea{min-height:90px;}

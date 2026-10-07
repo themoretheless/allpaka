@@ -662,14 +662,15 @@ pub fn route(probs: &[f32], k: usize) -> Vec<(usize, f32)> {
 
 pub struct Model<'a> {
     pub config: Config,
-    embd: QuantMat<'a>,
+    embd: Option<QuantMat<'a>>,
+    layer_start: usize,
     layers: Vec<Layer<'a>>,
     /// The MTP (nextn) speculative block past the trunk, when the GGUF
     /// carries one (qwen35moe with nextn_predict_layers).
     mtp: Option<MtpLayer<'a>>,
     output_norm: Vec<f32>,
     output_norm_raw: &'a [u8],
-    output: QuantMat<'a>,
+    output: Option<QuantMat<'a>>,
     /// `base^(-2i/d)` per rotary pair, hoisted out of the per-head loops.
     rope_inv_freq: Vec<f32>,
 }
@@ -745,7 +746,31 @@ impl Session {
 
 impl<'a> Model<'a> {
     pub fn load(f: &'a GgufFile) -> Result<Self> {
+        let count = Config::from_gguf(f)?.n_layers as usize;
+        Self::load_range(f, 0, count, false)
+    }
+
+    /// Load only a stage's tensors. Unused layers and endpoint tensors are
+    /// never decoded. Mapping a file does not make its pages resident.
+    pub fn load_stage(f: &'a GgufFile, first: usize, end: usize) -> Result<Self> {
+        Self::load_range(f, first, end, true)
+    }
+
+    fn embedding(&self) -> Result<&QuantMat<'a>> {
+        self.embd.as_ref().context("this stage has no embedding")
+    }
+
+    fn output_head(&self) -> Result<&QuantMat<'a>> {
+        self.output
+            .as_ref()
+            .context("this stage has no output head")
+    }
+
+    fn load_range(f: &'a GgufFile, first: usize, end: usize, stage: bool) -> Result<Self> {
         let config = Config::from_gguf(f)?;
+        if first >= end || end > config.n_layers as usize {
+            bail!("invalid stage layer range {first}..{end}");
+        }
         let capability = config.capability();
         if capability.support == crate::config::ModelSupport::Unsupported {
             bail!(
@@ -757,16 +782,37 @@ impl<'a> Model<'a> {
         // Offer the weights to the GPU; on a machine without Metal this is a
         // no-op and every matmul stays on the CPU reference. Split files get
         // one GPU window set per part.
-        for m in f.mappings() {
-            allpaka_backend::gpu::attach(m);
+        if !stage {
+            for m in f.mappings() {
+                allpaka_backend::gpu::attach(m);
+            }
+        } else {
+            let selected = f.selected_mappings(|tensor| {
+                if let Some(rest) = tensor.name.strip_prefix("blk.") {
+                    return rest
+                        .split('.')
+                        .next()
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .is_some_and(|index| index >= first && index < end);
+                }
+                (first == 0 && tensor.name == "token_embd.weight")
+                    || (end == config.n_layers as usize
+                        && (tensor.name == "output_norm.weight"
+                            || tensor.name == "output.weight"
+                            || (tensor.name == "token_embd.weight"
+                                && f.tensor("output.weight").is_none())))
+            })?;
+            for mapping in selected {
+                allpaka_backend::gpu::attach(mapping);
+            }
         }
         let hidden = config.hidden as usize;
         let q_dim = config.q_dim();
         let kv_dim = config.kv_dim();
         let ffn = config.ffn_hidden as usize;
 
-        let mut layers = Vec::with_capacity(config.n_layers as usize);
-        for i in 0..config.n_layers {
+        let mut layers = Vec::with_capacity(end - first);
+        for i in first as u32..end as u32 {
             let name = |part: &str| format!("blk.{i}.{part}.weight");
             // GLM calls the pre-FFN norm "post_attention_norm".
             let ffn_norm = if f.tensor(&name("ffn_norm")).is_some() {
@@ -874,15 +920,17 @@ impl<'a> Model<'a> {
         }
 
         // A model without a separate output head ties it to the embedding.
-        let output = if f.tensor("output.weight").is_some() {
-            qmat(f, "output.weight", config.vocab as usize, hidden)?
+        let output = if end != config.n_layers as usize {
+            None
+        } else if f.tensor("output.weight").is_some() {
+            Some(qmat(f, "output.weight", config.vocab as usize, hidden)?)
         } else {
-            qmat(f, "token_embd.weight", config.vocab as usize, hidden)?
+            Some(qmat(f, "token_embd.weight", config.vocab as usize, hidden)?)
         };
 
         // The MTP speculative block (blk.n_layers.*), when present: a
         // full-attention layer plus the nextn input/output glue.
-        let mtp = if config.nextn {
+        let mtp = if config.nextn && !stage {
             let i = config.n_layers;
             let name = |part: &str| format!("blk.{i}.{part}.weight");
             let q_dim = config.q_dim();
@@ -941,9 +989,22 @@ impl<'a> Model<'a> {
         };
 
         let model = Model {
-            embd: qmat(f, "token_embd.weight", config.vocab as usize, hidden)?,
-            output_norm: norm_vec(f, "output_norm.weight", hidden)?,
-            output_norm_raw: norm_raw(f, "output_norm.weight"),
+            embd: if first == 0 {
+                Some(qmat(f, "token_embd.weight", config.vocab as usize, hidden)?)
+            } else {
+                None
+            },
+            layer_start: first,
+            output_norm: if end == config.n_layers as usize {
+                norm_vec(f, "output_norm.weight", hidden)?
+            } else {
+                Vec::new()
+            },
+            output_norm_raw: if end == config.n_layers as usize {
+                norm_raw(f, "output_norm.weight")
+            } else {
+                &[]
+            },
             layers,
             mtp,
             output,
@@ -982,16 +1043,12 @@ impl<'a> Model<'a> {
     pub fn new_session(&self, context_tokens: usize) -> Session {
         let context_tokens = context_tokens.max(allpaka_backend::gpu::minimum_kv_capacity());
         Session {
-            kv: KvCache::new(
-                self.config.n_layers as usize,
-                self.config.kv_dim(),
-                context_tokens,
-            ),
+            kv: KvCache::new(self.layers.len(), self.config.kv_dim(), context_tokens),
             rope_cache: Vec::new(),
             rope_cache_pairs: self.config.rope_dim as usize / 2,
             ssm: self.config.ssm.as_ref().map(|s| {
                 crate::kv::SsmCache::new(
-                    self.config.n_layers as usize,
+                    self.layers.len(),
                     s.d_conv as usize,
                     (s.d_inner + 2 * (s.n_group * s.d_state)) as usize,
                     s.dt_rank as usize,
@@ -1175,7 +1232,7 @@ impl<'a> Model<'a> {
                 .and_then(|mut f| f.write_all(body.join(" ").as_bytes()))
                 .unwrap_or_else(|e| eprintln!("ALLPAKA_DUMP_HIDDEN write failed: {e}"));
         }
-        self.output.matmul(&last, 1)
+        self.output_head()?.matmul(&last, 1)
     }
 
     /// rmsnorm(row, output_norm): the trunk's final hidden in the form the
@@ -1188,7 +1245,7 @@ impl<'a> Model<'a> {
 
     /// The LM head over an already output-normed hidden row.
     pub fn lm_head(&self, normed: &[f32]) -> Result<Vec<f32>> {
-        self.output.matmul(normed, 1)
+        self.output_head()?.matmul(normed, 1)
     }
 
     /// One MTP draft step (qwen35moe nextn): run `token` through the MTP
@@ -1212,7 +1269,7 @@ impl<'a> Model<'a> {
         }
 
         // eh_proj([enorm(emb(token)) | hnorm(h_prev)]).
-        let mut e = self.embd.row(token as usize)?;
+        let mut e = self.embedding()?.row(token as usize)?;
         ops::rmsnorm(&mut e, &m.enorm, c.rms_eps);
         let mut hn = h_prev.to_vec();
         ops::rmsnorm(&mut hn, &m.hnorm, c.rms_eps);
@@ -1302,7 +1359,7 @@ impl<'a> Model<'a> {
             *a += b;
         }
         ops::rmsnorm(&mut x, &m.shared_head_norm, c.rms_eps);
-        let logits = self.output.matmul(&x, 1)?;
+        let logits = self.output_head()?.matmul(&x, 1)?;
         Ok((logits, x))
     }
 
@@ -1326,7 +1383,7 @@ impl<'a> Model<'a> {
         let embed_span = profile::span(profile::Phase::Embed);
         let mut xs = Vec::with_capacity(m * hidden);
         for &t in tokens {
-            xs.extend_from_slice(&self.embd.row(t as usize)?);
+            xs.extend_from_slice(&self.embedding()?.row(t as usize)?);
         }
         let rope_flat = s.rope_cache(&self.rope_inv_freq, base, m).to_vec();
         let half = c.rope_dim as usize / 2;
@@ -1938,7 +1995,7 @@ impl<'a> Model<'a> {
         for row in xs.chunks_mut(hidden) {
             ops::rmsnorm(row, &self.output_norm, self.config.rms_eps);
         }
-        let logits = self.output.matmul(&xs, m)?;
+        let logits = self.output_head()?.matmul(&xs, m)?;
         Ok((logits, xs))
     }
 
@@ -1956,7 +2013,7 @@ impl<'a> Model<'a> {
         for row in xs.chunks_mut(hidden) {
             ops::rmsnorm(row, &self.output_norm, self.config.rms_eps);
         }
-        self.output.matmul(&xs, m)
+        self.output_head()?.matmul(&xs, m)
     }
 
     /// Build the whole-token GPU request and run it; Ok(None) means the GPU
@@ -2020,15 +2077,15 @@ impl<'a> Model<'a> {
             },
             None => None,
         };
-        let (embd_ty, embd_bytes) = self.embd.raw();
+        let (embd_ty, embd_bytes) = self.embedding()?.raw();
         let use_gpu_embed = allpaka_backend::gpu::prefer_gpu_embed();
         let x_host = if use_gpu_embed {
             None
         } else {
-            Some(self.embd.row(token as usize)?)
+            Some(self.embedding()?.row(token as usize)?)
         };
         let x: &[f32] = x_host.as_deref().unwrap_or(&[]);
-        let (out_ty, out_bytes) = self.output.raw();
+        let (out_ty, out_bytes) = self.output_head()?.raw();
         let request = TokenReq {
             x,
             m: 1,
@@ -2047,9 +2104,9 @@ impl<'a> Model<'a> {
             rot_dim: c.rope_dim as usize,
             eps: c.rms_eps,
             output_norm: self.output_norm_raw,
-            output: (out_ty, out_bytes, self.output.n_out),
+            output: (out_ty, out_bytes, self.output_head()?.n_out),
             argmax,
-            embd: Some((embd_ty, embd_bytes, self.embd.n_in)),
+            embd: Some((embd_ty, embd_bytes, self.embedding()?.n_in)),
             token_id: Some(token),
         };
         match allpaka_backend::gpu::decode_token_checked(&request) {
@@ -2108,9 +2165,9 @@ impl<'a> Model<'a> {
             if t >= c.vocab {
                 bail!("token {t} out of vocabulary {}", c.vocab);
             }
-            x.extend_from_slice(&self.embd.row(t as usize)?);
+            x.extend_from_slice(&self.embedding()?.row(t as usize)?);
         }
-        let (out_ty, out_bytes) = self.output.raw();
+        let (out_ty, out_bytes) = self.output_head()?.raw();
         let request = TokenReq {
             x: &x,
             m,
@@ -2129,7 +2186,7 @@ impl<'a> Model<'a> {
             rot_dim: c.rope_dim as usize,
             eps: c.rms_eps,
             output_norm: self.output_norm_raw,
-            output: (out_ty, out_bytes, self.output.n_out),
+            output: (out_ty, out_bytes, self.output_head()?.n_out),
             argmax: true,
             embd: None,
             token_id: None,
@@ -2336,7 +2393,6 @@ impl<'a> Model<'a> {
         if token >= c.vocab {
             bail!("token {token} out of vocabulary {}", c.vocab);
         }
-        let head_dim = c.head_dim as usize;
         let pos = s.pos();
 
         // The whole token as ONE GPU command buffer: every layer's attention
@@ -2361,15 +2417,54 @@ impl<'a> Model<'a> {
             }
         }
 
-        let mut x = {
-            let _s = profile::span(profile::Phase::Embed);
-            self.embd.row(token as usize)?
-        };
+        let hidden = self.embed_token(token)?;
+        let hidden = self.forward_layers(&hidden, s, 0, self.layers.len())?;
+        self.finish_hidden(&hidden)
+    }
 
+    /// Embed a token at the head of a distributed pipeline.
+    pub fn embed_token(&self, token: u32) -> Result<Vec<f32>> {
+        if token >= self.config.vocab {
+            bail!("token {token} out of vocabulary {}", self.config.vocab);
+        }
+        self.embedding()?.row(token as usize)
+    }
+
+    /// Execute a contiguous stage. Each stage owns a separate session and
+    /// advances it once per token. Layer indices refer to the original model.
+    pub fn forward_layers(
+        &self,
+        hidden: &[f32],
+        s: &mut Session,
+        first_layer: usize,
+        end_layer: usize,
+    ) -> Result<Vec<f32>> {
+        let c = &self.config;
+        if first_layer >= end_layer
+            || first_layer < self.layer_start
+            || end_layer > self.layer_start + self.layers.len()
+        {
+            bail!("invalid layer range {first_layer}..{end_layer}");
+        }
+        if hidden.len() != c.hidden as usize || hidden.iter().any(|v| !v.is_finite()) {
+            bail!("invalid pipeline activation");
+        }
+        if s.pos() >= s.capacity() {
+            bail!("pipeline session context exhausted");
+        }
+        let head_dim = c.head_dim as usize;
+        let pos = s.pos();
+        let mut x = hidden.to_vec();
         let rope_pairs = s.rope_cache(&self.rope_inv_freq, pos, 1).to_vec();
         let cpu_attn = std::env::var_os("ALLPAKA_CPU_ATTN").is_some();
 
-        for (li, layer) in self.layers.iter().enumerate() {
+        for (li, layer) in self
+            .layers
+            .iter()
+            .enumerate()
+            .take(end_layer - self.layer_start)
+            .skip(first_layer - self.layer_start)
+        {
             // Attention.
             let h = {
                 let _s = profile::span(profile::Phase::AttnNorm);
@@ -2611,10 +2706,18 @@ impl<'a> Model<'a> {
             }
         }
         s.kv.advance();
+        Ok(x)
+    }
 
-        let _s = profile::span(profile::Phase::Output);
-        ops::rmsnorm(&mut x, &self.output_norm, c.rms_eps);
-        self.output.matmul(&x, 1)
+    /// Apply the output head only at the last pipeline stage.
+    pub fn finish_hidden(&self, hidden: &[f32]) -> Result<Vec<f32>> {
+        if hidden.len() != self.config.hidden as usize || hidden.iter().any(|v| !v.is_finite()) {
+            bail!("invalid pipeline output activation");
+        }
+        let output = self.output_head()?;
+        let mut x = hidden.to_vec();
+        ops::rmsnorm(&mut x, &self.output_norm, self.config.rms_eps);
+        output.matmul(&x, 1)
     }
 
     /// Consume one token, return the greedy (argmax) next token. The
@@ -2709,8 +2812,8 @@ impl<'a> Model<'a> {
             Ok(view) => view,
             Err(_) => return Ok(None),
         };
-        let (embd_ty, embd_bytes) = self.embd.raw();
-        let (out_ty, out_bytes) = self.output.raw();
+        let (embd_ty, embd_bytes) = self.embedding()?.raw();
+        let (out_ty, out_bytes) = self.output_head()?.raw();
         let empty_x: &[f32] = &[];
         let empty_rope: &[[f32; 2]] = &[];
         let request = allpaka_backend::gpu::TokenReq {
@@ -2731,9 +2834,9 @@ impl<'a> Model<'a> {
             rot_dim: c.rope_dim as usize,
             eps: c.rms_eps,
             output_norm: self.output_norm_raw,
-            output: (out_ty, out_bytes, self.output.n_out),
+            output: (out_ty, out_bytes, self.output_head()?.n_out),
             argmax: true,
-            embd: Some((embd_ty, embd_bytes, self.embd.n_in)),
+            embd: Some((embd_ty, embd_bytes, self.embedding()?.n_in)),
             token_id: Some(first),
         };
         match allpaka_backend::gpu::decode_greedy_continue(&request, n - 1) {

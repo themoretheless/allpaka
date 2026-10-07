@@ -1,0 +1,10 @@
+const assert=require('assert'),fs=require('fs'),vm=require('vm');
+class Element{constructor(text){this.textContent=text;this.children=[];}append(...items){this.children.push(...items);}replaceChildren(...items){this.children=items;}click(){this.onclick?.();}}
+const elements=Object.fromEntries(['evaluation-comparisons-show','evaluation-comparisons-list','evaluation-comparison-id','evaluation-comparison-open'].map(id=>[id,new Element()]));let opened=0;elements['evaluation-comparison-open'].onclick=()=>opened++;
+const calls=[];let deferred=null;
+const context={$:id=>elements[id],node:(_,text)=>new Element(text),evaluationProject:'project',URLSearchParams,api:async path=>{calls.push(path);if(deferred)return new Promise(deferred);return {comparisons:[{id:'saved',dataset_id:'dataset',dataset_version:1}],has_more:!path.includes('offset=30')};},fail:error=>{throw error;}};
+vm.createContext(context);const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('let comparisonCatalogRequest='),source.indexOf("$('evaluation-comparison-open').onclick=")),context);
+(async()=>{await elements['evaluation-comparisons-show'].onclick();let rows=elements['evaluation-comparisons-list'].children;rows[1].children[1].click();assert.equal(elements['evaluation-comparison-id'].value,'saved');assert.equal(opened,1);
+await rows[2].onclick();assert(calls[1].includes('offset=30'));rows=elements['evaluation-comparisons-list'].children;assert.equal(rows[2].textContent,'Назад');await rows[2].onclick();assert(calls[2].includes('offset=0'));
+let resolve;deferred=done=>resolve=done;const pending=elements['evaluation-comparisons-show'].onclick();context.evaluationProject='other';resolve({comparisons:[],has_more:false});await pending;assert.equal(elements['evaluation-comparisons-list'].children[1].children[0].textContent,'dataset · версия 1 · saved');
+console.log('PASS comparison catalog pagination, verified-open routing and stale project discard');})().catch(error=>{console.error(error);process.exitCode=1;});

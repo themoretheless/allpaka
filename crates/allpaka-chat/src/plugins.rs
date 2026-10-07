@@ -83,10 +83,18 @@ pub fn validate(config: &PluginConfig) -> Result<()> {
             }
         }
         PluginKind::Skill => {
-            if config.instructions.as_ref().is_none_or(|s| s.trim().is_empty()) {
+            if config
+                .instructions
+                .as_ref()
+                .is_none_or(|s| s.trim().is_empty())
+            {
                 bail!("Skill plugin must have instructions");
             }
-            if config.instructions.as_ref().is_some_and(|s| s.len() > 16000) {
+            if config
+                .instructions
+                .as_ref()
+                .is_some_and(|s| s.len() > 16000)
+            {
                 bail!("Skill instructions must be at most 16 000 characters");
             }
         }
@@ -171,7 +179,9 @@ pub(crate) fn spawn_plugin_connect(app: App, id: String) {
     tokio::spawn(async move {
         let (url, kind) = {
             let registry = app.plugins.read().unwrap();
-            let Some(state) = registry.get(&id) else { return };
+            let Some(state) = registry.get(&id) else {
+                return;
+            };
             if !state.config.enabled {
                 return;
             }
@@ -293,29 +303,39 @@ pub(crate) async fn save_plugin(
     }
     let configs: Vec<PluginConfig> = {
         let registry = app.plugins.read().unwrap();
-        registry.values().map(|state| state.config.clone()).collect()
+        registry
+            .values()
+            .map(|state| state.config.clone())
+            .collect()
     };
-    save(app.data.as_path(), &configs)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    save(app.data.as_path(), &configs).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if config.enabled {
         spawn_plugin_connect(app.clone(), config.id.clone());
     }
     Ok(Json(json!({"id": config.id})))
 }
-pub(crate) async fn delete_plugin(State(app): State<App>, AxumPath(id): AxumPath<String>) -> ApiResult<Value> {
+pub(crate) async fn delete_plugin(
+    State(app): State<App>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Value> {
     let existed = app.plugins.write().unwrap().remove(&id).is_some();
     if !existed {
         return Err(error(StatusCode::NOT_FOUND, "Plugin not found"));
     }
     let configs: Vec<PluginConfig> = {
         let registry = app.plugins.read().unwrap();
-        registry.values().map(|state| state.config.clone()).collect()
+        registry
+            .values()
+            .map(|state| state.config.clone())
+            .collect()
     };
-    save(app.data.as_path(), &configs)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    save(app.data.as_path(), &configs).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(json!({"deleted": id})))
 }
-pub(crate) async fn reload_plugin(State(app): State<App>, AxumPath(id): AxumPath<String>) -> ApiResult<Value> {
+pub(crate) async fn reload_plugin(
+    State(app): State<App>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Value> {
     let enabled = {
         let mut registry = app.plugins.write().unwrap();
         let Some(state) = registry.get_mut(&id) else {

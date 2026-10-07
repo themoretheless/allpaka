@@ -52,6 +52,11 @@ pub struct SwarmMember {
     pub role: String,
     pub provider: String,
     pub model: String,
+    /// Worker Studio URL, empty for local execution.
+    #[serde(default)]
+    pub worker: String,
+    #[serde(default)]
+    pub worker_project: String,
 }
 
 /// Where the session's turn loop stands. The wire names are the lowercase
@@ -96,6 +101,10 @@ pub struct SwarmReport {
     pub label: String,
     pub provider: String,
     pub model: String,
+    #[serde(default)]
+    pub worker: String,
+    #[serde(default)]
+    pub worker_project: String,
     #[serde(default = "default_swarm_rounds")]
     pub round: u8,
     #[serde(default)]
@@ -165,6 +174,10 @@ fn default_swarm_report_bytes() -> usize {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Settings {
+    #[serde(skip)]
+    pub(crate) prepared_guardrails: Option<std::sync::Arc<crate::guardrail_policies::Prepared>>,
+    #[serde(default)]
+    pub guardrails: Option<crate::guardrail_policies::Selection>,
     #[serde(default)]
     pub verbosity: Verbosity,
     #[serde(default = "default_project")]
@@ -243,19 +256,51 @@ impl Message {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Pending {
     #[serde(default)]
+    pub(crate) continuation: bool,
+    #[serde(default)]
     pub images: Vec<crate::context::Image>,
     pub text: String,
     pub settings: Settings,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanItem {
+    #[serde(default)]
+    pub id: String,
     pub title: String,
     pub status: String,
+    #[serde(default)]
+    pub acceptance: Vec<String>,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanCheckpoint {
+    #[serde(default)]
+    pub goal_origin: Option<GoalOrigin>,
+    #[serde(default)]
+    pub goal_id: Option<String>,
+    pub revision: u64,
+    pub recorded_ms: u64,
+    pub source: String,
+    pub steps: Vec<PlanItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalOrigin {
+    pub id: String,
+    pub message_index: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Session {
+    #[serde(default)]
+    pub goal: Option<GoalOrigin>,
+    #[serde(skip)]
+    pub(crate) background_continuation_epoch: u64,
     pub id: String,
     #[serde(default)]
     pub folder: HistoryFolder,
@@ -265,16 +310,29 @@ pub struct Session {
     pub compaction: Option<Compaction>,
     pub title: String,
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub bookmarks: Vec<Bookmark>,
     pub settings: Settings,
     pub status: SessionStatus,
     pub queue: Vec<Pending>,
     pub steering: Vec<String>,
     pub plan: Vec<PlanItem>,
+    #[serde(default)]
+    pub plan_revision: u64,
+    #[serde(default)]
+    pub plan_checkpoints: Vec<PlanCheckpoint>,
     pub error: Option<String>,
     #[serde(default)]
     pub notice: Option<String>,
     pub step: usize,
     pub usage: Value,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Bookmark {
+    pub message_index: usize,
+    pub label: String,
+    pub created_ms: u64,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Compaction {
@@ -291,17 +349,22 @@ pub struct BranchOrigin {
 impl Session {
     pub fn new(id: String, settings: Settings) -> Self {
         Self {
+            goal: None,
+            background_continuation_epoch: 0,
             id,
             folder: HistoryFolder::default(),
             parent: None,
             compaction: None,
             title: "Новый чат".into(),
             messages: vec![],
+            bookmarks: vec![],
             settings,
             status: SessionStatus::Idle,
             queue: vec![],
             steering: vec![],
             plan: vec![],
+            plan_revision: 0,
+            plan_checkpoints: vec![],
             error: None,
             notice: None,
             step: 0,
@@ -350,7 +413,10 @@ mod status_wire_tests {
             (SessionStatus::Error, "error"),
         ] {
             assert_eq!(json!(value), json!(word));
-            assert_eq!(serde_json::from_value::<SessionStatus>(json!(word)).unwrap(), value);
+            assert_eq!(
+                serde_json::from_value::<SessionStatus>(json!(word)).unwrap(),
+                value
+            );
         }
         for (value, word) in [
             (MemberStatus::Queued, "queued"),
@@ -360,7 +426,10 @@ mod status_wire_tests {
             (MemberStatus::Error, "error"),
         ] {
             assert_eq!(json!(value), json!(word));
-            assert_eq!(serde_json::from_value::<MemberStatus>(json!(word)).unwrap(), value);
+            assert_eq!(
+                serde_json::from_value::<MemberStatus>(json!(word)).unwrap(),
+                value
+            );
         }
     }
 

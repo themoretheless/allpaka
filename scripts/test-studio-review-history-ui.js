@@ -1,0 +1,13 @@
+const assert=require('assert'),fs=require('fs'),vm=require('vm');
+const pending=[];function node(tag,text){return {tag,text,children:[],append(...x){this.children.push(...x)},replaceChildren(...x){this.children=x}};}
+const context={node,encodeURIComponent,api:path=>new Promise((resolve,reject)=>pending.push({path,resolve,reject}))};vm.createContext(context);const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('function reviewQueueHistoryPanel('),source.indexOf('function reviewQueueExportCsv(')),context);
+const queue={id:'q',project_id:'p',version:21,targets:[{trace_id:'t'}]};
+const packet=(offset=0)=>({kind:'review_queue_history',queue_id:'q',project_id:'p',queue_version:21,offset,limit:20,total:21,has_more:offset===0,order:'version_desc',provider_calls:0,history_complete:true,entries:Array.from({length:offset===0?20:1},(_,i)=>({version:21-offset-i,action:'assignment',target_index:0,reviewer:'Reviewer',feedback_version:null,annotation_id:null,archived:false}))});
+(async()=>{let current=true;const panel=context.reviewQueueHistoryPanel(queue,()=>current),load=panel.children[1],body=panel.children[2];panel.open=true;let task=load.onclick();await load.onclick();assert.equal(pending.length,1);const first=packet();first.entries[0]={...first.entries[0],action:'complete',feedback_version:2,annotation_id:'saved-review'};pending[0].resolve(first);await task;assert.equal(body.children.length,24);assert.match(body.children[2].children[2].text,/saved-review/);
+task=body.children[23].onclick();assert.match(pending[1].path,/offset=20/);pending[1].resolve({...packet(20),history_complete:false});await task;assert.match(body.children[1].text,/неполная/);assert.equal(body.children.length,5);assert.equal(body.children[4].disabled,true);
+task=load.onclick();pending[2].resolve({...packet(),queue_version:22});await task;assert.match(body.children[0].text,/заново/);
+task=load.onclick();panel.open=false;panel.ontoggle();const before=body.children;pending[3].resolve(packet());await task;assert.strictEqual(body.children,before);
+panel.open=true;task=load.onclick();current=false;pending[4].reject(new Error('old error'));await task;assert.strictEqual(body.children,before);
+current=true;task=load.onclick();const invalid=packet();invalid.entries[1].version=invalid.entries[0].version;pending[5].resolve(invalid);await task;assert.match(body.children[0].text,/Некорректная/);
+console.log('PASS queue history pagination, evidence, partial history, snapshot substitution, duplicate versions and stale close/view errors');
+})().catch(error=>{console.error(error);process.exitCode=1});

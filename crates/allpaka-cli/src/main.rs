@@ -18,6 +18,7 @@ mod report;
 mod serve;
 mod verify;
 mod watch;
+mod pipeline;
 
 use allpaka_core::fleet::FleetMember;
 use allpaka_core::{fleet, plan, presets, replicate, Model, PlanRequest, Speculation, Verdict};
@@ -34,6 +35,41 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run a contiguous transformer stage on this machine.
+    Stage {
+        model: PathBuf,
+        #[arg(long)] first: usize,
+        #[arg(long)] end: usize,
+        /// Same immutable model identity on every stage.
+        #[arg(long)] model_id: String,
+        #[arg(long, default_value = "127.0.0.1:9798")] bind: std::net::SocketAddr,
+        #[arg(long, default_value_t = 4096)] context: usize,
+    },
+    /// Produce an executable stage manifest from the cluster planner.
+    PipelinePlan {
+        model: PathBuf,
+        #[arg(long, default_value = "allpaka.toml")] config: PathBuf,
+        #[arg(long)] model_id: String,
+        /// Repeat node-name=host:port for every available worker.
+        #[arg(long = "endpoint", required = true)] endpoints: Vec<String>,
+        #[arg(long)] context: Option<u32>,
+    },
+    /// Expose a distributed model to Studio through a local chat API.
+    PipelineServe {
+        #[arg(long, required = true, value_delimiter = ',')] stages: Vec<String>,
+        /// GGUF supplies tokenizer metadata; no weights are loaded here.
+        #[arg(long)] tokenizer: PathBuf,
+        #[arg(long)] model_id: String,
+        #[arg(long, default_value = "127.0.0.1:8099")] bind: std::net::SocketAddr,
+        #[arg(long, default_value_t = 4096)] context: usize,
+    },
+    /// Execute prompt tokens through ordered remote model stages.
+    Pipeline {
+        #[arg(long, required = true, value_delimiter = ',')] stages: Vec<String>,
+        #[arg(long, required = true, value_delimiter = ',')] tokens: Vec<u32>,
+        #[arg(long, default_value_t = 4096)] context: usize,
+        #[arg(long, default_value_t = 16)] generate: usize,
+    },
     /// Open the multi-provider chat workspace without loading a local model.
     Studio {
         #[arg(long, default_value = "127.0.0.1:8100")]
@@ -347,6 +383,14 @@ fn main() -> Result<()> {
             print!("{}", config::EXAMPLE);
             Ok(())
         }
+        Command::PipelinePlan { model, config, model_id, endpoints, context } =>
+            pipeline::plan_manifest(&model, &config, &model_id, &endpoints, context),
+        Command::PipelineServe { stages, tokenizer, model_id, bind, context } =>
+            pipeline::serve_chat(&stages, &tokenizer, &model_id, bind, context),
+        Command::Stage { model, first, end, model_id, bind, context } =>
+            pipeline::serve(&model, first, end, model_id, bind, context),
+        Command::Pipeline { stages, tokens, context, generate } =>
+            pipeline::generate(&stages, &tokens, context, generate),
         Command::Presets => {
             report::presets(presets::PRESETS);
             Ok(())

@@ -1,0 +1,10 @@
+const assert=require('assert'),fs=require('fs'),vm=require('vm');
+const elements={'evaluation-comparison-id':{value:'saved'},'evaluation-comparison-open':{disabled:false},'evaluation-comparison':{replaceChildren(value){this.value=value;}}};
+let resolve,calls=0,errors=[];
+const context={$:id=>elements[id],evaluationProject:'project',api:async()=>{calls++;return new Promise(done=>resolve=done);},experimentComparisonPanel:receipt=>receipt,fail:error=>errors.push(error.message)};vm.createContext(context);
+const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf("$('evaluation-comparison-open').onclick="),source.indexOf('let evaluationPolling=false;')),context);
+(async()=>{const button=elements['evaluation-comparison-open'];let pending=button.onclick();await button.onclick();assert.equal(calls,1);resolve({id:'saved',project_id:'project'});await pending;assert.equal(elements['evaluation-comparison'].value.id,'saved');assert.equal(button.disabled,false);
+pending=button.onclick();context.evaluationProject='other';resolve({id:'saved',project_id:'project'});await pending;assert.equal(errors.length,0);
+pending=button.onclick();resolve({id:'saved',project_id:'project'});await pending;assert(errors[0].includes('другому проекту'));
+elements['evaluation-comparison-id'].value='../escape';await button.onclick();assert.equal(calls,3);assert(errors[1].includes('идентификатор'));
+console.log('PASS saved comparison reopening, project isolation, stale discard, ID validation and duplicate suppression');})().catch(error=>{console.error(error);process.exitCode=1;});

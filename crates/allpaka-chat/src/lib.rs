@@ -1,13 +1,38 @@
+mod strict_json;
+mod guardrail_policies;
+mod judge;
+mod judge_runs;
+mod judge_presets;
+mod progress;
+mod plan;
+mod background;
+mod bookmarks;
+mod code_search;
 mod compact;
-mod credentials;
 mod context;
+mod conversation_search;
+mod credentials;
+mod data_lock;
+mod evaluation;
+mod experiments;
+mod feedback;
+mod review_queues;
 mod history;
 mod mcp;
+mod memory;
+mod memory_extract;
+mod observability;
+mod online_evaluation;
+mod online_sources;
+mod quality_jobs;
+mod model_evaluators;
 mod plugins;
+mod prompts;
 mod provider;
 mod rag;
-mod swarm;
+mod remote_worker;
 mod state_file;
+mod swarm;
 mod tools;
 mod types;
 
@@ -37,6 +62,18 @@ type SessionRegistry = Arc<Mutex<HashMap<String, (SharedSession, mpsc::Sender<Ac
 #[derive(Clone)]
 pub(crate) struct App {
     pub(crate) sessions: SessionRegistry,
+    pub(crate) background: background::Manager,
+    pub(crate) observability: observability::Store,
+    pub(crate) evaluation: evaluation::Store,
+    pub(crate) memory: memory::Store,
+    pub(crate) judge_runs: judge_runs::Manager,
+    pub(crate) judges: Arc<tokio::sync::Semaphore>,
+    pub(crate) memory_extractions: Arc<tokio::sync::Semaphore>,
+    pub(crate) prompts: prompts::Store,
+    pub(crate) experiments: experiments::Manager,
+    pub(crate) matrix_jobs: experiments::matrix_jobs::Manager,
+    pub(crate) feedback: feedback::Store,
+    pub(crate) review_queues: review_queues::Store,
     pub(crate) providers: Arc<Mutex<Vec<provider::Provider>>>,
     pub(crate) projects: Arc<Mutex<Vec<context::Project>>>,
     pub(crate) client: reqwest::Client,
@@ -48,6 +85,8 @@ pub(crate) struct App {
 }
 #[derive(Deserialize)]
 struct Action {
+    #[serde(skip)]
+    wake_epoch: Option<u64>,
     #[serde(skip)]
     reply: Option<tokio::sync::oneshot::Sender<std::result::Result<(), String>>>,
     #[serde(default)]
@@ -63,6 +102,8 @@ struct Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ActionKind {
+    #[serde(skip)]
+    BackgroundDone,
     Send,
     SendNow,
     Steer,
@@ -145,13 +186,14 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
         home.join(".allpaka").join("studio")
     });
     std::fs::create_dir_all(&data)?;
+    let data = data.canonicalize()?;
+    let _data_lock = data_lock::DataLock::acquire(&data)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(async {
             let listener = tokio::net::TcpListener::bind(bind).await?;
             let addr = listener.local_addr()?;
-            let data = data.canonicalize()?;
             let projects_file = data.join("projects.state");
             let projects: Vec<context::Project> = if projects_file.exists() {
                 state_file::load_list(&data, "projects", "project", |_| Ok(()))?
@@ -222,6 +264,18 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
             let app = App {
                 projects: Arc::new(Mutex::new(projects)),
                 sessions: Default::default(),
+                background: background::Manager::open(&data)?,
+                observability: observability::Store::new(&data)?,
+                evaluation: evaluation::Store::new(&data)?,
+                memory: memory::Store::new(&data)?,
+                judge_runs: judge_runs::Manager::new(&data)?,
+                judges: Arc::new(tokio::sync::Semaphore::new(2)),
+                memory_extractions: Arc::new(tokio::sync::Semaphore::new(2)),
+                prompts: prompts::Store::new(&data)?,
+                experiments: experiments::Manager::new(&data)?,
+                matrix_jobs: experiments::matrix_jobs::Manager::new(&data)?,
+                feedback: feedback::Store::new(&data)?,
+                review_queues: review_queues::Store::new(&data)?,
                 providers: Arc::new(Mutex::new(providers)),
                 key_mutations:Default::default(),
                 client: http,
@@ -230,6 +284,16 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                 origin: format!("http://{addr}"),
                 plugins: plugin_registry,
             };
+            app.judge_runs.recover()?;
+            let recovered_traces = app.observability.recover()?;
+            let recovered_runs = app.experiments.recover()?;
+            app.matrix_jobs.recover()?;
+            quality_jobs::recover(&app.data)?;
+            let _quality_worker=quality_jobs::spawn(app.clone());
+            let _online_worker = (std::env::var("ALLPAKA_ONLINE_WORKER").as_deref()!=Ok("0")).then(||online_evaluation::spawn_worker(app.data.clone()));
+            if recovered_traces > 0 || recovered_runs > 0 {
+                eprintln!("Studio recovered {recovered_traces} interrupted traces and {recovered_runs} interrupted evaluation runs");
+            }
             for config in &plugin_configs {
                 if config.enabled {
                     plugins::spawn_plugin_connect(app.clone(), config.id.clone());
@@ -247,6 +311,9 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                     if !valid_id(&session.id) {
                         bail!("Invalid saved session ID");
                     }
+                    let old_plan_revision=session.plan_revision;
+                    plan::restore(&mut session)?;
+                    if session.plan_revision!=old_plan_revision {save(&app,&session)?;}
                     if session.status == SessionStatus::Running {
                         session.status = SessionStatus::Paused;
                         session.error = Some(
@@ -306,8 +373,118 @@ fn routes(app: App) -> Router {
                 )
             }),
         )
+        .route("/api/worker/run", post(remote_worker::run))
         .route("/api/config", get(config))
-        .route("/api/plugins", get(plugins::list_plugins).post(plugins::save_plugin))
+        .route("/api/memory/notes", get(memory::list).post(memory::save))
+        .route("/api/memory/expiry", get(memory::expiry))
+        .route("/api/memory/consolidation-input",post(memory::consolidation_input))
+        .route("/api/memory/consolidation-proposals",get(memory_extract::list_consolidations).post(memory_extract::consolidate))
+        .route("/api/memory/notes/:id/versions/:version/source-status",get(memory::source_status))
+        .route(
+            "/api/memory/notes/:id/versions/:version",
+            get(memory::snapshot),
+        )
+        .route("/api/observability/traces", get(observability::list))
+        .route("/api/observability/online-jobs",get(online_evaluation::jobs_api))
+        .route("/api/observability/external-traces", post(observability::ingest))
+        .route("/api/observability/evaluations/summary", get(observability::evaluation_summary))
+        .route("/api/observability/trace-exports", post(observability::bulk_export))
+        .route("/api/observability/summary", get(observability::summary))
+        .route("/api/evaluation/datasets/:id/lifecycle", post(evaluation::lifecycle))
+        .route("/api/evaluation/datasets/:id/versions", get(evaluation::versions))
+        .route("/api/evaluation/datasets/:id/compare", get(evaluation::compare))
+        .route("/api/guardrail-policies", get(guardrail_policies::list_api).post(guardrail_policies::save_api))
+        .route("/api/guardrail-policies/create", post(guardrail_policies::create_api))
+        .route("/api/guardrail-policies/:hash/check", post(guardrail_policies::check_api))
+        .route("/api/observability/online-rules", get(online_evaluation::list_api).post(online_evaluation::save_api))
+        .route("/api/observability/online-rules/:hash", get(online_evaluation::get_api))
+        .route("/api/observability/online-rule-bindings", get(online_evaluation::binding_api).post(online_evaluation::bind_api))
+        .route("/api/observability/online-selections", get(online_evaluation::selection_archive_api).post(online_evaluation::select_api))
+        .route("/api/observability/online-model-evaluators",post(model_evaluators::save_api))
+        .route("/api/observability/online-model-evaluators/:hash",get(model_evaluators::read_api))
+        .route("/api/observability/online-quality-jobs",get(quality_jobs::list_api).post(quality_jobs::submit_api))
+        .route("/api/observability/online-quality-jobs/:id",get(quality_jobs::get_api))
+        .route("/api/observability/online-quality-sources",post(online_sources::save_api))
+        .route("/api/observability/online-quality-sources/:hash/judge",post(judge::judge_source))
+        .route("/api/observability/online-quality-sources/:hash",get(online_sources::read_api))
+        .route("/api/observability/online-assessments", post(online_evaluation::assess_api))
+        .route("/api/observability/online-jobs/drain", post(online_evaluation::drain_api))
+        .route("/api/guardrail-policies/:hash", get(guardrail_policies::get_api))
+        .route("/api/observability/time-series", get(observability::time_series))
+        .route("/api/observability/traces/:id", get(observability::get))
+        .route("/api/observability/traces/:id/export", get(observability::export))
+        .route("/api/observability/traces/:id/remove", post(observability::remove))
+        .route("/api/observability/traces/:id/restore", post(observability::restore))
+        .route("/api/observability/review-queues", get(review_queues::list).post(review_queues::create))
+        .route("/api/observability/review-queues/:id", get(review_queues::detail))
+        .route("/api/observability/review-queues/:id/history", get(review_queues::history))
+        .route("/api/observability/review-queues/:id/assignments", post(review_queues::assign))
+        .route("/api/observability/review-queues/:id/completion", post(review_queues::complete))
+        .route("/api/observability/review-queues/:id/lifecycle", post(review_queues::lifecycle))
+        .route("/api/observability/traces/:id/feedback/versions", get(feedback::history))
+        .route(
+            "/api/observability/traces/:id/feedback",
+            get(feedback::list).post(feedback::save),
+        )
+        .route(
+            "/api/evaluation/prompts",
+            get(prompts::list).post(prompts::save),
+        )
+        .route(
+            "/api/evaluation/prompts/:id/versions",
+            get(prompts::history),
+        )
+        .route(
+            "/api/evaluation/prompts/:id/versions/:version",
+            get(prompts::snapshot),
+        )
+        .route("/api/evaluation/playground",post(experiments::playground))
+        .route("/api/evaluation/prompts/:id/versions/:version/preview", post(prompts::preview))
+        .route(
+            "/api/evaluation/datasets",
+            get(evaluation::list).post(evaluation::save),
+        )
+        .route(
+            "/api/evaluation/experiments",
+            get(experiments::list).post(experiments::start),
+        )
+        .route("/api/evaluation/experiments/:id", get(experiments::detail))
+        .route("/api/evaluation/experiments/:id/export", get(experiments::export))
+        .route(
+            "/api/evaluation/experiments/:id/cancel",
+            post(experiments::cancel),
+        )
+        .route("/api/evaluation/judge-runs", get(judge_runs::list).post(judge_runs::start))
+        .route("/api/evaluation/judge-runs/:id", get(judge_runs::get))
+        .route("/api/evaluation/judge-runs/:id/cancel", post(judge_runs::cancel))
+        .route("/api/evaluation/judge-runs/compare", post(judge_runs::compare))
+        .route("/api/evaluation/judge-presets", get(judge_presets::catalog))
+        .route("/api/evaluation/judge-plans", post(judge::plan))
+        .route("/api/evaluation/judge-plans/:id", get(judge::read_plan))
+        .route("/api/evaluation/judge", post(judge::judge))
+        .route("/api/evaluation/judge/:id", get(judge::read))
+        .route("/api/evaluation/score", post(experiments::offline_score).get(experiments::list_offline_scores))
+        .route("/api/evaluation/score/:id", get(experiments::read_offline_score))
+        .route("/api/evaluation/score/compare", post(experiments::compare_offline_scores))
+        .route("/api/evaluation/metrics", get(experiments::metric_catalog))
+        .route("/api/evaluation/compare", post(experiments::compare))
+        .route("/api/evaluation/comparisons/:id", get(experiments::read_comparison))
+        .route("/api/evaluation/comparisons", get(experiments::list_comparisons))
+        .route("/api/evaluation/matrices", post(experiments::save_matrix).get(experiments::list_matrices))
+        .route("/api/evaluation/matrices/:id", get(experiments::read_matrix))
+        .route("/api/evaluation/matrix-jobs", post(experiments::matrix_jobs::start).get(experiments::matrix_jobs::list))
+        .route("/api/evaluation/matrix-jobs/:id", get(experiments::matrix_jobs::detail))
+        .route("/api/evaluation/matrix-jobs/:id/cancel", post(experiments::matrix_jobs::cancel))
+        .route("/api/evaluation/matrix-jobs/:id/resume", post(experiments::matrix_jobs::resume))
+        .route("/api/evaluation/matrix-jobs/:id/retry", post(experiments::matrix_jobs::retry))
+        .route(
+            "/api/evaluation/datasets/:id/versions/:version",
+            get(evaluation::snapshot),
+        )
+        .route(
+            "/api/plugins",
+            get(plugins::list_plugins).post(plugins::save_plugin),
+        )
         .route("/api/plugins/:id/delete", post(plugins::delete_plugin))
         .route("/api/plugins/:id/reload", post(plugins::reload_plugin))
         .route("/api/projects", post(save_project))
@@ -315,17 +492,37 @@ fn routes(app: App) -> Router {
         .route("/api/providers/:id/delete", post(provider::delete_provider))
         .route("/api/providers/:id/key", post(provider::set_key))
         .route("/api/providers/:id/models", get(provider::model_list))
+        .route("/api/providers/:id/doctor", post(provider::doctor))
         .route("/api/sessions", get(history::list).post(create_session))
+        .route("/api/sessions/:id/background", post(background_action))
         .route("/api/sessions/import", post(history::import))
         .route("/api/sessions/:id", get(session).delete(delete_session))
         .route("/api/sessions/:id/branch", post(branch_session))
+        .route(
+            "/api/sessions/:id/memory-proposals",
+            get(memory_extract::list).post(memory_extract::extract),
+        )
+        .route("/api/memory/proposals/:id", get(memory_extract::read))
+        .route("/api/memory/proposals/:id/source-status", get(memory_extract::source_status))
+        .route("/api/sessions/:id/bookmarks", post(bookmarks::save))
+        .route(
+            "/api/sessions/:id/bookmarks/:index",
+            axum::routing::delete(bookmarks::remove),
+        )
         .route("/api/sessions/:id/actions", post(action))
-        .route("/api/sessions/:id/plan", post(save_plan))
+        .route("/api/sessions/:id/plan", get(read_plan).post(save_plan))
         .layer(DefaultBodyLimit::max(10_000_000))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)
 }
 async fn guard(State(app): State<App>, req: axum::extract::Request, next: Next) -> Response {
+    if req.uri().path() == "/api/worker/run" {
+        if !remote_worker::authorized(req.headers()) {
+            return error(StatusCode::UNAUTHORIZED, "Worker authentication required")
+                .into_response();
+        }
+        return next.run(req).await;
+    }
     let expected = app.origin.strip_prefix("http://").unwrap();
     let host_ok = req
         .headers()
@@ -364,10 +561,20 @@ async fn config(State(app): State<App>) -> Json<Value> {
     )
 }
 fn validate_settings(s: &Settings, app: &App) -> Result<()> {
+    if let Some(selection)=&s.guardrails {
+        if matches!(s.mode,Mode::Swarm)&&s.swarm.members.iter().any(|member|!member.worker.is_empty()) {bail!("Guardrails for remote Swarm workers are not yet supported");}
+        selection.prepare(&guardrail_policies::Store::open(&app.data)?)?;
+    }
     if !(4096..=1000000).contains(&s.compact_threshold) {
         bail!("Compaction threshold must be between 4096 and 1000000 estimated tokens");
     }
-    let output_limit = if s.provider == "deepseek" && ["deepseek-v4-pro", "deepseek-flash", "deepseek-v4-flash"].contains(&s.model.as_str()) { 393216 } else { 131072 };
+    let output_limit = if s.provider == "deepseek"
+        && ["deepseek-v4-pro", "deepseek-flash", "deepseek-v4-flash"].contains(&s.model.as_str())
+    {
+        393216
+    } else {
+        131072
+    };
     if !(256..=output_limit).contains(&s.max_output_tokens) {
         bail!("Output token limit must be between 256 and {output_limit}; the selected model may have a lower maximum");
     }
@@ -390,6 +597,9 @@ fn validate_settings(s: &Settings, app: &App) -> Result<()> {
         swarm::validate(&s.swarm)?;
         let providers = app.providers.lock().unwrap();
         for member in &s.swarm.members {
+            if !member.worker.is_empty() {
+                continue;
+            }
             let member_provider = providers
                 .iter()
                 .find(|p| p.id == member.provider)
@@ -505,6 +715,11 @@ async fn branch_session(
     let mut branch = Session::new(new_id.clone(), source.settings);
     branch.title = format!("Ветка · {}", source.title);
     branch.messages = source.messages[..n].to_vec();
+    branch.bookmarks = source
+        .bookmarks
+        .into_iter()
+        .filter(|m| m.message_index < n)
+        .collect();
     branch.parent = Some(BranchOrigin {
         session_id: id,
         message_count: n,
@@ -519,10 +734,80 @@ async fn session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Va
         .get(&id)
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
     let session = s.lock().unwrap().clone();
-    let mut value = serde_json::to_value(&session).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut value =
+        serde_json::to_value(&session).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     value["context_stats"] = compact::statistics(&session);
+    value["background"] = app.background.list(&id);
     Ok(Json(value))
 }
+async fn background_action(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(args): Json<Value>,
+) -> ApiResult<Value> {
+    let settings = {
+        let sessions = app.sessions.lock().unwrap();
+        let (shared, _) = sessions
+            .get(&id)
+            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
+        let session = shared.lock().unwrap();
+        if args["action"] == "start" && session.folder != HistoryFolder::Active {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Restore the conversation before starting background work",
+            ));
+        }
+        session.settings.clone()
+    };
+    if args["action"] == "start"
+        && (!matches!(settings.mode, Mode::Auto | Mode::Goal)
+            || !plugins::tool_unlocked(&app.plugins, "run_command"))
+    {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "Background commands require Auto/Goal mode and the command plugin",
+        ));
+    }
+    let project = app
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.id == settings.project_id)
+        .cloned()
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "Project not found"))?;
+    let root = project
+        .roots
+        .first()
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "No project root available"))?;
+    execute_background(&app,&id,&root.path,&args)
+        .await
+        .map(Json)
+        .map_err(|e| error(StatusCode::BAD_REQUEST, e))
+}
+
+async fn execute_background(app:&App,owner:&str,cwd:&std::path::Path,args:&Value)->Result<Value> {
+    let epoch=app.sessions.lock().unwrap().get(owner).map(|(session,_)|session.lock().unwrap().background_continuation_epoch).context("Conversation not found")?;
+    let result=app.background.execute(owner,cwd,args).await?;
+    if args["action"]=="start" {
+        if let (Some(text),Some(id))=(args["follow_up"].as_str(),result["id"].as_str()) {
+            let app=app.clone();let owner=owner.to_string();let id=id.to_string();let text=text.to_string();let cwd=cwd.to_path_buf();
+            tokio::spawn(async move {
+                loop {
+                    let waited=app.background.execute(&owner,&cwd,&json!({"action":"wait","task_ids":[id],"wait_seconds":60})).await;
+                    let Ok(waited)=waited else {break;};
+                    if waited["tasks"][0]["status"]!="running" {
+                        let sender=app.sessions.lock().unwrap().get(&owner).map(|(_,sender)|sender.clone());
+                        if let Some(sender)=sender {let _=sender.send(Action{wake_epoch:Some(epoch),reply:None,images:vec![],kind:ActionKind::BackgroundDone,text:format!("Background task {id} terminated with status {}. {text}",waited["tasks"][0]["status"].as_str().unwrap_or("unknown")),settings:None}).await;}
+                        break;
+                    }
+                }
+            });
+        }
+    }
+    Ok(result)
+}
+
 async fn delete_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
     let folder = {
         let sessions = app.sessions.lock().unwrap();
@@ -538,13 +823,25 @@ async fn delete_session(State(app): State<App>, Path(id): Path<String>) -> ApiRe
             "Only conversations in Trash can be permanently deleted",
         ));
     }
+    app.background.cancel_owned(&id);
     app.sessions.lock().unwrap().remove(&id);
     let _ = std::fs::remove_file(app.data.join(format!("{id}.json")));
     Ok(Json(json!({"deleted": id})))
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PlanInput {
     steps: Vec<PlanItem>,
+    #[serde(default)]
+    base_revision: Option<u64>,
+    #[serde(default)]
+    allow_reopen: bool,
+}
+async fn read_plan(State(app):State<App>,Path(id):Path<String>)->ApiResult<Value>{
+    let sessions=app.sessions.lock().unwrap();
+    let (shared,_)=sessions.get(&id).ok_or_else(||error(StatusCode::NOT_FOUND,"Conversation not found"))?;
+    let state=shared.lock().unwrap();
+    Ok(Json(json!({"session_id":state.id,"goal":state.goal,"revision":state.plan_revision,"steps":state.plan,"checkpoints":state.plan_checkpoints,"history_truncated":state.plan_checkpoints.first().is_some_and(|entry|entry.revision>1),"evidence_basis":"reported","reported_completion_ready":plan::reported_ready(&state),"automatic_replay":false})))
 }
 async fn save_plan(
     State(app): State<App>,
@@ -573,9 +870,11 @@ async fn save_plan(
             "Conversation is archived or in trash; restore it first",
         ));
     }
-    state.plan = input.steps;
-    save(&app, &state).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(json!({"updated": true})))
+    let mut next=state.clone();
+    plan::update(&mut next,input.steps,input.base_revision,"user",input.allow_reopen).map_err(|e|error(StatusCode::CONFLICT,e))?;
+    save(&app, &next).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    *state=next;
+    Ok(Json(json!({"updated": true,"revision":state.plan_revision,"steps":state.plan,"evidence_basis":"reported"})))
 }
 async fn action(
     State(app): State<App>,
@@ -597,7 +896,10 @@ async fn action(
         if action.kind == ActionKind::Rename {
             let title = action.text.trim();
             if title.is_empty() || title.chars().count() > 100 {
-                return Err(error(StatusCode::BAD_REQUEST, "Title must be 1–100 characters"));
+                return Err(error(
+                    StatusCode::BAD_REQUEST,
+                    "Title must be 1–100 characters",
+                ));
             }
             state.title = title.to_string();
         } else {
@@ -611,8 +913,10 @@ async fn action(
         save(&app, &state).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         return Ok(Json(json!({"accepted":true})));
     }
-    if matches!(action.kind, ActionKind::Send | ActionKind::SendNow | ActionKind::Steer)
-        && (action.text.trim().is_empty() || action.text.len() > 131072)
+    if matches!(
+        action.kind,
+        ActionKind::Send | ActionKind::SendNow | ActionKind::Steer
+    ) && (action.text.trim().is_empty() || action.text.len() > 131072)
     {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -698,6 +1002,8 @@ fn save(app: &App, s: &Session) -> Result<()> {
     f.write_all(&serde_json::to_vec(s)?)?;
     f.sync_all()?;
     std::fs::rename(temp, file)?;
+    #[cfg(unix)]
+    std::fs::File::open(app.data.as_ref())?.sync_all()?;
     Ok(())
 }
 fn persist(app: &App, s: &SharedSession) {
@@ -709,6 +1015,8 @@ fn persist(app: &App, s: &SharedSession) {
 #[derive(Debug)]
 enum TurnOutcome {
     Complete,
+    NoProgress,
+    GoalIncomplete,
     TokenLimit,
     Compacted,
 }
@@ -719,6 +1027,7 @@ async fn cancel(task: &mut Option<JoinHandle<Result<TurnOutcome>>>, s: &SharedSe
         let _ = t.await;
     }
     let mut s = s.lock().unwrap();
+    s.background_continuation_epoch=s.background_continuation_epoch.wrapping_add(1);
     s.close_pending_tools();
     // A stopped swarm wave leaves reports that will never finish; say so instead
     // of showing a member that looks like it is still thinking.
@@ -771,8 +1080,16 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                     let mut message = Message::text("user", p.text);
                     message.images = p.images;
                     s.messages.push(message);
+                    if s.settings.mode == Mode::Goal && !p.continuation {
+                        let origin = s.messages.len() - 1;
+                        if let Err(error) = plan::start_goal(&mut s, origin) {
+                            s.status = SessionStatus::Error;
+                            s.error = Some(error.to_string());
+                        }
+                    }
                 }
                 persist(&app, &s);
+                if s.lock().unwrap().status == SessionStatus::Error { paused = true; continue; }
                 task = Some(tokio::spawn(turn(app.clone(), s.clone(), None)));
             }
         }
@@ -789,7 +1106,7 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                             {let mut state=s.lock().unwrap();if let Some(settings)=a.settings {state.settings=settings;}state.status=SessionStatus::Running;state.error=None;state.notice=Some("Сжатие контекста…".into());}
                             paused=true;
                             let app=app.clone();let s=s.clone();
-                            task=Some(tokio::spawn(async move {compact::run(&app,&s,true).await?;Ok(TurnOutcome::Compacted)}));
+                            task=Some(tokio::spawn(async move {compact::run(&app,&s,true,None).await?;Ok(TurnOutcome::Compacted)}));
                         }
                     },
                     ActionKind::RetryMember => {
@@ -798,6 +1115,12 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                             let mut state=s.lock().unwrap();
                             if state.settings.mode!=Mode::Swarm { rejection=Some("Повтор участника доступен, пока режим разговора — Swarm".into()); }
                             else { state.status=SessionStatus::Running;state.error=None;retry_member=Some(a.text.trim().to_string()); }
+                        }
+                    },
+                    ActionKind::BackgroundDone => {
+                        let mut state=s.lock().unwrap();
+                        if a.wake_epoch==Some(state.background_continuation_epoch) && !paused && state.folder==HistoryFolder::Active && matches!(state.settings.mode,Mode::Auto|Mode::Goal) && state.queue.len()<32 {
+                            let settings=state.settings.clone();state.queue.push(Pending{continuation:true,images:vec![],text:a.text,settings});
                         }
                     },
                     ActionKind::Stop => { cancel(&mut task,&s).await;paused=true; },
@@ -809,7 +1132,7 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                             if truncated || s.queue.is_empty() {
                                 let settings=a.settings.unwrap_or_else(||s.settings.clone());
                                 let text=if truncated {"The previous response reached its output token limit. Continue the unfinished answer without repeating existing text. Any incomplete tool calls were NOT executed: regenerate the necessary calls in full, never continue partial JSON. Do not repeat previously completed side effects."} else {"Continue the task from the current state. Do not repeat completed side effects."};
-                                s.queue.insert(0,Pending{images:vec![],text:text.into(),settings});
+                                s.queue.insert(0,Pending{continuation:true,images:vec![],text:text.into(),settings});
                             }
                         }
                     },
@@ -819,7 +1142,7 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                         if a.kind==ActionKind::SendNow {cancel(&mut task,&s).await;}
                         let mut s=s.lock().unwrap();
                         let settings=a.settings.unwrap_or_else(||s.settings.clone());
-                        let p=Pending{images:a.images,text:a.text,settings};
+                        let p=Pending{continuation:a.kind==ActionKind::Steer,images:a.images,text:a.text,settings};
                         if s.queue.len()>=32 && a.kind!=ActionKind::SendNow {rejection=Some("Message queue is full".to_string());s.error=rejection.clone();} else {
                             if a.kind==ActionKind::SendNow {s.queue.insert(0,p);} else {s.queue.push(p);}
                             paused=false;
@@ -840,9 +1163,11 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                         s.status=SessionStatus::Paused;paused=true;
                         s.notice=Some(format!("Достигнут лимит {} токенов. Частичный ответ сохранён; незавершённые инструменты не выполнялись. Можно увеличить лимит ответа и нажать «Продолжить».",s.settings.max_output_tokens));
                     },
+                    Ok(Ok(TurnOutcome::NoProgress))=>{s.status=SessionStatus::Paused;paused=true;s.notice=Some("Три одинаковых вызова инструмента подряд завершились одной и той же ошибкой. История сохранена. Уточните задачу или нажмите «Продолжить», чтобы повторить попытку.".into());},
+                    Ok(Ok(TurnOutcome::GoalIncomplete))=>{s.status=SessionStatus::Paused;paused=true;s.notice=Some("Цель не завершена: в плане остались незакрытые этапы или отсутствуют критерии и заявленные подтверждения. Прогресс сохранён. Уточните задачу или нажмите «Продолжить».".into());},
                     Ok(Ok(TurnOutcome::Complete))=>{
                         s.status=SessionStatus::Idle;
-                        if !s.steering.is_empty(){let settings=s.settings.clone();s.queue.insert(0,Pending{images:vec![],text:"Apply the pending user steering to the current task.".into(),settings});}
+                        if !s.steering.is_empty(){let settings=s.settings.clone();s.queue.insert(0,Pending{continuation:true,images:vec![],text:"Apply the pending user steering to the current task.".into(),settings});}
                     },
                     Ok(Err(e))=>{s.notice=None;s.status=SessionStatus::Error;s.error=Some(format!("{e:#}"));s.close_pending_tools();paused=true;},
                     Err(e)=>{s.notice=None;s.status=SessionStatus::Error;s.error=Some(format!("Task failed: {e}"));s.close_pending_tools();paused=true;},
@@ -856,8 +1181,50 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
 /// wave; only the Swarm executor understands it, and the actor refuses it for
 /// every other mode.
 async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Result<TurnOutcome> {
-    let settings = s.lock().unwrap().settings.clone();
+    let (id, project) = {
+        let state = s.lock().unwrap();
+        (state.id.clone(), state.settings.project_id.clone())
+    };
+    let trace = app.observability.begin(&id, &project)?;
+    let mut span = trace.span("turn", "agent", None);
+    let result = turn_traced(app, s, retry_member, &trace, span.id()).await;
+    let status = match &result {
+        Ok(TurnOutcome::Complete) => "completed",
+        Ok(TurnOutcome::NoProgress) => "no_progress",
+        Ok(TurnOutcome::GoalIncomplete) => "goal_incomplete",
+        Ok(TurnOutcome::TokenLimit) => "token_limit",
+        Ok(TurnOutcome::Compacted) => "compacted",
+        Err(_) => "failed",
+    };
+    span.finish(status, &Value::Null);
+    result
+}
+
+fn enforce_guardrail(receipt:Value,trace:&observability::Trace,parent:usize)->Result<()> {
+    let passed=receipt["passed"].as_bool().context("Invalid guardrail outcome")?;
+    let blocked=receipt["blocked"].as_bool().context("Invalid guardrail block outcome")?;
+    let name=format!("guardrail.{}.{}.{}.{}",receipt["stage"].as_str().unwrap(),receipt["action"].as_str().unwrap(),if passed {"pass"}else{"fail"},receipt["policy_sha256"].as_str().unwrap());
+    let mut span=trace.span("tool",&name,Some(parent));span.finish(if blocked {"failed"}else{"completed"},&json!({"guardrail_receipt":receipt}));
+    if blocked {bail!("guardrail_blocked");}Ok(())
+}
+
+async fn turn_traced(
+    app: App,
+    s: SharedSession,
+    retry_member: Option<String>,
+    trace: &observability::Trace,
+    parent_span: usize,
+) -> Result<TurnOutcome> {
+    let mut settings = s.lock().unwrap().settings.clone();
     validate_settings(&settings, &app)?;
+    let guardrails=settings.guardrails.as_ref().map(|selection|selection.prepare(&guardrail_policies::Store::open(&app.data)?)).transpose()?;
+    settings.prepared_guardrails=guardrails.as_ref().map(|prepared|Arc::new(prepared.clone()));
+    let mut guarded_input=None;
+    if let Some(prepared)=&guardrails {
+        let text=s.lock().unwrap().messages.iter().rev().find(|message|message.role=="user").map(|message|message.content.clone()).unwrap_or_default();
+        enforce_guardrail(prepared.input(&text)?,trace,parent_span)?;guarded_input=Some(text);
+    }
+
     let p = app
         .providers
         .lock()
@@ -878,6 +1245,11 @@ async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Resul
     tool_settings.allow_writes &= project.roots.iter().any(|r| r.writable);
     let cmd_enabled = plugins::tool_unlocked(&app.plugins, "run_command");
     let mut schemas = tools::schemas(&tool_settings, cmd_enabled);
+    schemas.push(conversation_search::schema());
+    schemas.push(memory::schema());
+    if matches!(settings.mode, Mode::Auto | Mode::Goal) && cmd_enabled {
+        schemas.push(background::schema());
+    }
     {
         let registry = app.plugins.read().unwrap();
         for (id, state) in registry.iter() {
@@ -916,7 +1288,9 @@ async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Resul
         None
     };
     let system = if let Some(wakeup) = &rag_wakeup {
-        format!("{system}\nSession bootstrap from RAG (status, recent diary, pinned docs):\n{wakeup}")
+        format!(
+            "{system}\nSession bootstrap from RAG (status, recent diary, pinned docs):\n{wakeup}"
+        )
     } else {
         system
     };
@@ -960,15 +1334,30 @@ async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Resul
     // critic pass, and never touches the single-model step loop below.
     if settings.mode == Mode::Swarm {
         return match retry_member {
-            Some(label) => swarm::retry(&app, &s, &settings, &project, &system, &label).await,
-            None => swarm::run(&app, &s, &settings, &project, &system).await,
+            Some(label) => {
+                swarm::retry(
+                    &app,
+                    &s,
+                    &settings,
+                    &project,
+                    &system,
+                    &label,
+                    trace,
+                    parent_span,
+                )
+                .await
+            }
+            None => swarm::run(&app, &s, &settings, &project, &system, trace, parent_span).await,
         };
     }
+    let mut failure_loop=progress::FailureLoop::default();
+    let mut goal_continuation_revision = None;
     for step in 1..=settings.max_steps {
-        compact::run(&app, &s, false).await?;
+        compact::run(&app, &s, false, Some((trace, parent_span))).await?;
         let (history, index) = {
             let mut s = s.lock().unwrap();
             let steers = std::mem::take(&mut s.steering);
+            if !steers.is_empty(){failure_loop.reset();}
             for text in steers {
                 s.messages.push(Message::text(
                     "user",
@@ -984,22 +1373,35 @@ async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Resul
         for message in &history {
             context::validate_images(&message.images, &settings.provider)?;
         }
+        if let Some(prepared)=&guardrails {
+            if let Some(user)=history.iter().rev().find(|message|message.role=="user") {if guarded_input.as_ref()!=Some(&user.content) {enforce_guardrail(prepared.input(&user.content)?,trace,parent_span)?;guarded_input=Some(user.content.clone());}}
+        }
+        let buffer_output=guardrails.as_ref().is_some_and(|prepared|prepared.buffers_output());
         let copy = s.clone();
         let save_app = app.clone();
         let mut last_save = std::time::Instant::now();
-        let (mut message, usage) = provider::generate(
+        let mut model_span = trace.span("model", &settings.model, Some(parent_span));
+        model_span.set_provider(&settings.provider);
+        let step_system=if settings.mode==Mode::Goal {let state=s.lock().unwrap();format!("{system}\nCurrent goal origin: {}. Original user objective: {}.\nDurable milestone plan revision: {}. Use this exact base_revision in set_plan. Keep milestone IDs. Completed milestones must not be removed or repeated. Acceptance and evidence are reported claims, not independent proof. Current milestones: {}",serde_json::to_string(&state.goal)?,serde_json::to_string(&state.goal.as_ref().and_then(|goal|state.messages.get(goal.message_index)).map(|message|message.content.as_str()))?,state.plan_revision,serde_json::to_string(&state.plan)?)} else {system.clone()};
+        let generated = provider::generate(
             &app.client,
             &p,
             &settings,
-            &system,
+            &step_system,
             &history,
             &schemas,
             move |text, reasoning| {
+                if buffer_output {return;}
                 {
                     let mut state = copy.lock().unwrap();
                     let message = &mut state.messages[index];
                     message.content.push_str(&text);
-                    if !reasoning.is_empty() { message.reasoning_content.get_or_insert_with(String::new).push_str(&reasoning); }
+                    if !reasoning.is_empty() {
+                        message
+                            .reasoning_content
+                            .get_or_insert_with(String::new)
+                            .push_str(&reasoning);
+                    }
                 }
                 if last_save.elapsed().as_secs() >= 2 {
                     persist(&save_app, &copy);
@@ -1007,7 +1409,25 @@ async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Resul
                 }
             },
         )
-        .await?;
+        .await;
+        model_span.finish(
+            if generated.as_ref().is_ok_and(|(m, _)| !m.truncated) {
+                "completed"
+            } else if generated.is_ok() {
+                "token_limit"
+            } else {
+                "failed"
+            },
+            generated
+                .as_ref()
+                .map(|(_, usage)| usage)
+                .unwrap_or(&Value::Null),
+        );
+        let (mut message, usage) = generated?;
+        if let Some(prepared)=&guardrails {
+            let result=enforce_guardrail(prepared.output(&message.content)?,trace,parent_span);
+            if result.is_err() {{let mut state=s.lock().unwrap();state.messages[index]=Message::text("assistant","");state.usage=usage.clone();}persist(&app,&s);result?;}
+        }
         message.provider = Some(settings.provider.clone());
         message.model = Some(settings.model.clone());
         let truncated = message.truncated;
@@ -1024,6 +1444,19 @@ async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Resul
         }
         if calls.is_empty() {
             if s.lock().unwrap().steering.is_empty() {
+                if settings.mode == Mode::Goal {
+                    let mut state = s.lock().unwrap();
+                    if !plan::reported_ready(&state) {
+                        if goal_continuation_revision == Some(state.plan_revision) {
+                            return Ok(TurnOutcome::GoalIncomplete);
+                        }
+                        goal_continuation_revision = Some(state.plan_revision);
+                        state.messages.push(Message::text("user", "Goal continuation: the persisted milestone plan is incomplete. Continue the remaining work with available tools and update set_plan using the current revision. Do not repeat completed actions. If blocked, explain the blocker; do not claim the goal is complete. Completion evidence is reported, not independently verified."));
+                        drop(state);
+                        persist(&app, &s);
+                        continue;
+                    }
+                }
                 if let Some(rag_id) = &rag_plugin_id {
                     if rag_context.as_ref().is_some_and(|c| !c.is_empty())
                         && answer.chars().count() >= 200
@@ -1045,13 +1478,21 @@ async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Resul
             }
             continue;
         }
+        let mut no_progress=false;
         for call in calls {
+            let mut tool_span = trace.span(
+                "tool",
+                call["function"]["name"].as_str().unwrap_or("unknown"),
+                Some(parent_span),
+            );
             // A steering instruction invalidates the unexecuted remainder of this batch.
             let steered = !s.lock().unwrap().steering.is_empty();
             let result = if steered {
                 Ok(
                     json!({"cancelled":"User steering arrived; re-evaluate this tool after reading it"}),
                 )
+            } else if no_progress {
+                Ok(json!({"cancelled":"Repeated tool failure paused this turn; this call was not executed"}))
             } else {
                 let name = call["function"]["name"]
                     .as_str()
@@ -1061,10 +1502,34 @@ async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Resul
                         .as_str()
                         .context("Missing tool arguments")?,
                 )?;
-                if name == "set_plan" && settings.mode != Mode::Chat {
-                    tools::parse_plan(&args).map(|plan| {
-                        s.lock().unwrap().plan = plan;
-                        json!({"updated":true})
+                if name == "background" {
+                    if !matches!(settings.mode, Mode::Auto | Mode::Goal)
+                        || !plugins::tool_unlocked(&app.plugins, "run_command")
+                    {
+                        Err(anyhow::anyhow!(
+                            "Background commands require Auto/Goal mode and the command plugin"
+                        ))
+                    } else {
+                        let root = project.roots.first().context("No project root available")?;
+                        let owner = s.lock().unwrap().id.clone();
+                        execute_background(&app,&owner, &root.path, &args).await
+                    }
+                } else if name == "memory_recall" {
+                    app.memory.recall(&settings.project_id, &args)
+                } else if name == "conversation_search" {
+                    let session = s.lock().unwrap();
+                    conversation_search::search(
+                        &session.messages,
+                        session.compaction.as_ref().map_or(0, |c| c.through),
+                        &args,
+                    )
+                } else if name == "set_plan" && settings.mode != Mode::Chat {
+                    tools::parse_plan(&args).and_then(|steps| {
+                        let base=args.get("base_revision").map(|value|value.as_u64().context("Invalid plan base_revision")).transpose()?;
+                        let mut state=s.lock().unwrap();let mut next=state.clone();
+                        plan::update(&mut next,steps,base,"agent",false)?;
+                        save(&app,&next)?;*state=next;
+                        Ok(json!({"updated":true,"revision":state.plan_revision,"steps":state.plan,"evidence_basis":"reported"}))
                     })
                 } else if name == "list_files" && args["path"] == "." {
                     Ok(
@@ -1072,8 +1537,13 @@ async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Resul
                     )
                 } else if let Some((client, tool)) = mcp_lookup(&app, name) {
                     client.call(&tool, &args).await
-                } else if name == "run_command" && plugins::tool_unlocked(&app.plugins, "run_command") {
-                    let root = project.roots.first().map(|r| r.path.as_path())
+                } else if name == "run_command"
+                    && plugins::tool_unlocked(&app.plugins, "run_command")
+                {
+                    let root = project
+                        .roots
+                        .first()
+                        .map(|r| r.path.as_path())
                         .context("No project root available")?;
                     execute_command(root, &args).await
                 } else {
@@ -1087,10 +1557,30 @@ async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Resul
                             }
                             let mut args = args.clone();
                             args["path"] = json!(path);
-                            tools::execute(root, &settings, name, &args)
+                            tools::execute_scoped(
+                                root,
+                                &settings,
+                                name,
+                                &args,
+                                Some(app.data.as_ref()),
+                            )
                         })
                 }
             };
+            tool_span.finish(
+                if steered || no_progress {
+                    "cancelled"
+                } else if result.is_ok() {
+                    "completed"
+                } else {
+                    "failed"
+                },
+                &Value::Null,
+            );
+            if steered{failure_loop.reset();}else if !no_progress{
+                let error=result.as_ref().err().map(ToString::to_string);
+                no_progress=failure_loop.observe(&call,error.as_deref());
+            }
             let value = match result {
                 Ok(v) => v,
                 Err(e) => json!({"error":e.to_string()}),
@@ -1104,6 +1594,10 @@ async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Resul
             persist(&app, &s);
             tokio::task::yield_now().await;
         }
+        if no_progress&&s.lock().unwrap().steering.is_empty(){return Ok(TurnOutcome::NoProgress);}
+    }
+    if settings.mode == Mode::Goal && !plan::reported_ready(&s.lock().unwrap()) {
+        return Ok(TurnOutcome::GoalIncomplete);
     }
     bail!(
         "Step limit reached ({}). Review the result and Resume to continue.",

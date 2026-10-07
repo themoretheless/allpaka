@@ -13,7 +13,7 @@
 
 use crate::provider::{self, Provider};
 use crate::types::*;
-use crate::{context, persist, tools, App, SharedSession, TurnOutcome};
+use crate::{context, observability, persist, tools, App, SharedSession, TurnOutcome};
 use anyhow::{bail, Context, Result};
 use futures_util::future::join_all;
 use serde_json::{json, Value};
@@ -48,7 +48,9 @@ pub fn validate(config: &SwarmConfig) -> Result<()> {
         bail!("Swarm steps per member must be between 1 and {MAX_STEPS_PER_MEMBER}");
     }
     if !(MIN_REPORT_BYTES..=MAX_REPORT_BYTES).contains(&config.report_bytes) {
-        bail!("Swarm report budget must be between {MIN_REPORT_BYTES} and {MAX_REPORT_BYTES} bytes");
+        bail!(
+            "Swarm report budget must be between {MIN_REPORT_BYTES} and {MAX_REPORT_BYTES} bytes"
+        );
     }
     if config.synthesis_provider.chars().any(char::is_control)
         || config.synthesis_model.chars().any(char::is_control)
@@ -57,6 +59,9 @@ pub fn validate(config: &SwarmConfig) -> Result<()> {
     }
     let mut labels = std::collections::HashSet::new();
     for member in &config.members {
+        if !member.worker.is_empty() {
+            crate::remote_worker::validate_url(&member.worker)?;
+        }
         let label = member.label.trim();
         if label.is_empty() || label.chars().count() > 60 || label.chars().any(char::is_control) {
             bail!("Every swarm member needs a name of 1–60 printable characters");
@@ -89,6 +94,8 @@ pub async fn run(
     settings: &Settings,
     project: &context::Project,
     system: &str,
+    trace: &observability::Trace,
+    parent: usize,
 ) -> Result<TurnOutcome> {
     let config = settings.swarm.clone();
     validate(&config)?;
@@ -142,6 +149,8 @@ pub async fn run(
                     prompts[slot].clone(),
                     slot,
                     index,
+                    trace,
+                    parent,
                 ));
             }
             let results = join_all(futures).await;
@@ -176,8 +185,10 @@ pub async fn run(
         bail!("Ни один участник Swarm не вернул отчёт");
     }
 
-    let (synth_usage, notice, truncated) =
-        synthesize(app, shared, index, settings, &config, &synth, &brief, &reports).await?;
+    let (synth_usage, notice, truncated) = synthesize(
+        app, shared, index, settings, &config, &synth, &brief, &reports, trace, parent,
+    )
+    .await?;
     total_usage = merge_usage(total_usage, synth_usage);
 
     finish(app, shared, index, total_usage, notice);
@@ -199,22 +210,12 @@ pub async fn retry(
     project: &context::Project,
     system: &str,
     label: &str,
+    trace: &observability::Trace,
+    parent: usize,
 ) -> Result<TurnOutcome> {
     let config = settings.swarm.clone();
     let target = take_report(shared, label, &config)?;
-    let provider = {
-        let providers = app.providers.lock().unwrap().clone();
-        providers
-            .iter()
-            .find(|p| p.id == target.member.provider)
-            .cloned()
-    }
-    .with_context(|| {
-        format!(
-            "Участник {}: неизвестный провайдер {}",
-            target.member.label, target.member.provider
-        )
-    })?;
+    let provider = resolve_member_provider(app, &target.member)?;
     let read_only = {
         let mut member_view = settings.clone();
         member_view.mode = Mode::Chat;
@@ -222,7 +223,12 @@ pub async fn retry(
         tools::schemas(&member_view, false)
     };
     let prompt = if target.round > 1 {
-        wave_two_prompt(&target.member, &target.own, &peer_digests(shared, target.index, target.slot), &config)
+        wave_two_prompt(
+            &target.member,
+            &target.own,
+            &peer_digests(shared, target.index, target.slot),
+            &config,
+        )
     } else {
         wave_one_prompt(&target.member, &config, &target.brief)
     };
@@ -239,6 +245,8 @@ pub async fn retry(
         format!("{prompt}{RETRY_NOTE}"),
         target.slot,
         target.index,
+        trace,
+        parent,
     )
     .await?;
     let mut total_usage = outcome.usage;
@@ -250,7 +258,9 @@ pub async fn retry(
             shared,
             target.index,
             total_usage,
-            Some("Повтор не дал отчёта, и остальные участники пусты — результат не выдуман.".into()),
+            Some(
+                "Повтор не дал отчёта, и остальные участники пусты — результат не выдуман.".into(),
+            ),
         );
         bail!("Повтор участника не вернул отчёт");
     }
@@ -266,6 +276,8 @@ pub async fn retry(
         &synth_provider(app, settings, &config)?,
         &target.brief,
         &reports,
+        trace,
+        parent,
     )
     .await?;
     total_usage = merge_usage(total_usage, synth_usage);
@@ -303,6 +315,8 @@ async fn synthesize(
     synth: &Provider,
     brief: &str,
     reports: &[ReportView],
+    trace: &observability::Trace,
+    parent: usize,
 ) -> Result<(Value, Option<String>, bool)> {
     let merge_cfg = merge_settings(settings, config);
     let (merged, mut usage) = merge_pass(
@@ -314,6 +328,8 @@ async fn synthesize(
         "You are the synthesizer of a swarm. Merge peer reports into one answer. Never invent findings nobody reported.",
         merge_prompt(brief, reports, config),
         MergeOutput::Stream,
+        trace,
+        parent,
     )
     .await?;
     let mut notice = failure_notice(reports, reports.len());
@@ -331,17 +347,23 @@ async fn synthesize(
             "You are an adversarial reviewer of a merged swarm result. Return only the corrected final text.",
             critic_prompt(brief, reports, &draft, config),
             MergeOutput::Buffered,
+            trace,
+            parent,
         )
         .await?;
         usage = merge_usage(usage, critic_usage);
         if critic.truncated {
             notice = Some(match notice {
-                Some(text) => format!("{text} Критик-проход прерван лимитом токенов: показан черновик синтеза."),
+                Some(text) => format!(
+                    "{text} Критик-проход прерван лимитом токенов: показан черновик синтеза."
+                ),
                 None => "Критик-проход прерван лимитом токенов: показан черновик синтеза.".into(),
             });
         } else if critic.content.trim().is_empty() {
             notice = Some(match notice {
-                Some(text) => format!("{text} Критик вернул пустой ответ: показан черновик синтеза."),
+                Some(text) => {
+                    format!("{text} Критик вернул пустой ответ: показан черновик синтеза.")
+                }
                 None => "Критик вернул пустой ответ: показан черновик синтеза.".into(),
             });
         } else {
@@ -354,19 +376,14 @@ async fn synthesize(
 /// One member of the last Swarm turn, taken out of the message and reset for a
 /// re-run: whatever the previous attempt produced is gone before the new one
 /// streams, so a retried report never shows text from two attempts.
-fn take_report(
-    shared: &SharedSession,
-    label: &str,
-    config: &SwarmConfig,
-) -> Result<RetryTarget> {
+fn take_report(shared: &SharedSession, label: &str, config: &SwarmConfig) -> Result<RetryTarget> {
     let mut state = shared.lock().unwrap();
     let index = state
         .messages
         .iter()
         .rposition(|m| !m.swarm.is_empty())
         .context("В этом разговоре ещё не было Swarm-хода")?;
-    let brief = state
-        .messages[..index]
+    let brief = state.messages[..index]
         .iter()
         .rev()
         .find(|m| m.role == "user")
@@ -389,6 +406,8 @@ fn take_report(
             .unwrap_or_default(),
         provider: previous.provider.clone(),
         model: previous.model.clone(),
+        worker: previous.worker.clone(),
+        worker_project: previous.worker_project.clone(),
     };
     let report = &mut state.messages[index].swarm[slot];
     report.content.clear();
@@ -440,6 +459,8 @@ const RETRY_NOTE: &str = "\n\nЭто повтор: прошлый заход э�
 
 struct MemberOutcome {
     usage: Value,
+    truncated: bool,
+    step_limit: bool,
 }
 
 #[derive(Clone)]
@@ -469,16 +490,7 @@ fn resolve(
     let providers = app.providers.lock().unwrap().clone();
     let mut members = Vec::with_capacity(config.members.len());
     for member in &config.members {
-        let provider = providers
-            .iter()
-            .find(|p| p.id == member.provider)
-            .cloned()
-            .with_context(|| {
-                format!(
-                    "Участник {}: неизвестный провайдер {}",
-                    member.label, member.provider
-                )
-            })?;
+        let provider = resolve_member_provider(app, member)?;
         members.push((member.clone(), provider));
     }
     let synthesis = if config.synthesis_provider.trim().is_empty() {
@@ -494,8 +506,34 @@ fn resolve(
     Ok((members, synth))
 }
 
+fn resolve_member_provider(app: &App, member: &SwarmMember) -> Result<Provider> {
+    if !member.worker.is_empty() {
+        crate::remote_worker::validate_url(&member.worker)?;
+        let mut provider = provider::defaults().remove(0);
+        provider.id = member.provider.clone();
+        return Ok(provider);
+    }
+    app.providers
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.id == member.provider)
+        .cloned()
+        .with_context(|| {
+            format!(
+                "Участник {}: неизвестный провайдер {}",
+                member.label, member.provider
+            )
+        })
+}
+
 fn member_settings(settings: &Settings, member: &SwarmMember, config: &SwarmConfig) -> Settings {
     let mut member_settings = settings.clone();
+    member_settings
+        .swarm
+        .members
+        .retain(|m| m.label != member.label);
+    member_settings.swarm.members.push(member.clone());
     member_settings.provider = member.provider.clone();
     member_settings.model = member.model.clone();
     // Members read the context and report; they never write, whatever the session allows.
@@ -691,6 +729,8 @@ fn prepare(shared: &SharedSession, members: &[(SwarmMember, Provider)]) -> (usiz
             label: member.label.clone(),
             provider: member.provider.clone(),
             model: member.model.clone(),
+            worker: member.worker.clone(),
+            worker_project: member.worker_project.clone(),
             round: 1,
             status: MemberStatus::Queued,
             step: 0,
@@ -717,60 +757,204 @@ async fn run_member(
     prompt: String,
     slot: usize,
     index: usize,
+    trace: &observability::Trace,
+    parent: usize,
 ) -> Result<MemberOutcome> {
+    let mut span = trace.span(
+        "swarm_member",
+        &format!("{label} · wave {round}"),
+        Some(parent),
+    );
+    let result = run_member_inner(
+        app,
+        shared,
+        project,
+        label,
+        provider,
+        member_settings,
+        system,
+        schemas,
+        round,
+        prompt,
+        slot,
+        index,
+        trace,
+        span.id(),
+    )
+    .await;
+    match &result {
+        Ok(outcome) => span.finish(
+            if outcome.step_limit {
+                "step_limit"
+            } else if outcome.truncated {
+                "token_limit"
+            } else {
+                "completed"
+            },
+            &Value::Null,
+        ),
+        Err(_) => span.finish("failed", &Value::Null),
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_member_inner(
+    app: &App,
+    shared: &SharedSession,
+    project: &context::Project,
+    label: &str,
+    provider: &Provider,
+    member_settings: Settings,
+    system: String,
+    schemas: &[Value],
+    round: u8,
+    prompt: String,
+    slot: usize,
+    index: usize,
+    trace: &observability::Trace,
+    parent: usize,
+) -> Result<MemberOutcome> {
+    let guards=member_settings.prepared_guardrails.clone();
+    if let Some(prepared)=&guards {crate::enforce_guardrail(prepared.input(&prompt)?,trace,parent)?;}
+    let buffer_output=guards.as_ref().is_some_and(|prepared|prepared.buffers_output());
+    if let Some(member) = member_settings
+        .swarm
+        .members
+        .iter()
+        .find(|m| m.label == label && !m.worker.is_empty())
+    {
+        if guards.is_some() {bail!("Guardrails for remote Swarm workers are not yet supported");}
+        note(shared, index, slot, round, MemberStatus::Running, Some(1));
+        let mut remote_span = trace.span("remote_worker", "dispatch", Some(parent));
+        let result =
+            crate::remote_worker::dispatch(&app.client, member, &member_settings, &system, &prompt)
+                .await;
+        match &result {
+            Ok(report) => remote_span.finish(
+                if report.truncated {
+                    "token_limit"
+                } else {
+                    "completed"
+                },
+                &report.usage,
+            ),
+            Err(_) => remote_span.finish("failed", &Value::Null),
+        }
+        let result = result?;
+        append(shared, index, slot, &result.content);
+        if result.truncated {
+            fail(shared, index, slot, "Удалённый отчёт неполный");
+        } else {
+            note(shared, index, slot, round, MemberStatus::Done, None);
+        }
+        persist(app, shared);
+        return Ok(MemberOutcome {
+            usage: result.usage,
+            truncated: result.truncated,
+            step_limit: false,
+        });
+    }
     let mut history = vec![Message::text("user", prompt)];
     let mut usage = Value::Null;
     let steps = member_settings.max_steps.max(1);
     for step in 1..=steps {
-        note(shared, index, slot, round, MemberStatus::Running, Some(step));
+        note(
+            shared,
+            index,
+            slot,
+            round,
+            MemberStatus::Running,
+            Some(step),
+        );
         if step > 1 {
             append(shared, index, slot, "\n\n");
         }
         let copy = shared.clone();
         let save_app = app.clone();
         let mut last_save = std::time::Instant::now();
-        let (message, step_usage) = provider::generate(
-            &app.client,
-            provider,
-            &member_settings,
-            &system,
-            &history,
-            schemas,
-            move |text, _reasoning| {
-                if text.is_empty() {
-                    return;
-                }
-                {
-                    let mut state = copy.lock().unwrap();
-                    if let Some(report) = state
-                        .messages
-                        .get_mut(index)
-                        .and_then(|m| m.swarm.get_mut(slot))
-                    {
-                        report.content.push_str(&text);
-                    }
-                }
-                if last_save.elapsed().as_secs() >= 2 {
-                    persist(&save_app, &copy);
-                    last_save = std::time::Instant::now();
-                }
-            },
-        )
-        .await
-        .with_context(|| format!("участник {label}"))?;
+        let (message, step_usage) = trace
+            .generation(
+                &member_settings.model, &member_settings.provider,
+                parent,
+                provider::generate(
+                    &app.client,
+                    provider,
+                    &member_settings,
+                    &system,
+                    &history,
+                    schemas,
+                    move |text, _reasoning| {
+                        if buffer_output || text.is_empty() {
+                            return;
+                        }
+                        {
+                            let mut state = copy.lock().unwrap();
+                            if let Some(report) = state
+                                .messages
+                                .get_mut(index)
+                                .and_then(|m| m.swarm.get_mut(slot))
+                            {
+                                report.content.push_str(&text);
+                            }
+                        }
+                        if last_save.elapsed().as_secs() >= 2 {
+                            persist(&save_app, &copy);
+                            last_save = std::time::Instant::now();
+                        }
+                    },
+                ),
+            )
+            .await
+            .with_context(|| format!("участник {label}"))?;
         usage = merge_usage(usage, step_usage);
+        if let Some(prepared)=&guards {crate::enforce_guardrail(prepared.output(&message.content)?,trace,parent)?;}
+        if buffer_output {let mut state=shared.lock().unwrap();if let Some(report)=state.messages.get_mut(index).and_then(|message|message.swarm.get_mut(slot)) {report.content.push_str(&message.content);}}
         if message.truncated {
             note(shared, index, slot, round, MemberStatus::Error, None);
-            fail(shared, index, slot, "Достигнут лимит токенов: отчёт неполный");
+            fail(
+                shared,
+                index,
+                slot,
+                "Достигнут лимит токенов: отчёт неполный",
+            );
             persist(app, shared);
-            return Ok(MemberOutcome { usage });
+            return Ok(MemberOutcome {
+                usage,
+                truncated: true,
+                step_limit: false,
+            });
         }
         if message.tool_calls.is_empty() {
             break;
         }
+        if step == steps {
+            fail(
+                shared,
+                index,
+                slot,
+                "Достигнут лимит шагов: участник запросил инструмент, но не завершил отчёт",
+            );
+            persist(app, shared);
+            return Ok(MemberOutcome {
+                usage,
+                truncated: true,
+                step_limit: true,
+            });
+        }
         history.push(message.clone());
         for call in &message.tool_calls {
+            let name = call["function"]["name"].as_str().unwrap_or("unknown");
+            let mut tool_span = trace.span("tool", name, Some(parent));
             let value = run_tool(app, project, &member_settings, call);
+            tool_span.finish(
+                if value.get("error").is_some() {
+                    "failed"
+                } else {
+                    "completed"
+                },
+                &Value::Null,
+            );
             history.push(Message {
                 role: "tool".into(),
                 content: value.to_string(),
@@ -781,16 +965,25 @@ async fn run_member(
     }
     note(shared, index, slot, round, MemberStatus::Done, None);
     persist(app, shared);
-    Ok(MemberOutcome { usage })
+    Ok(MemberOutcome {
+        usage,
+        truncated: false,
+        step_limit: false,
+    })
 }
 
 /// Read-only tool execution for swarm members. Anything else is refused, not
 /// attempted: the member's schema does not offer it, so a call for it is a lie.
-fn run_tool(app: &App, project: &context::Project, settings: &Settings, call: &Value) -> Value {
+pub(crate) fn run_tool(
+    app: &App,
+    project: &context::Project,
+    settings: &Settings,
+    call: &Value,
+) -> Value {
     let name = call["function"]["name"].as_str().unwrap_or("");
     if !tools::reads(name) {
         return json!({
-            "error": format!("В Swarm-режиме доступны только list_files и read_file; вызов {name} отклонён")
+            "error": format!("В Swarm-режиме доступны только list_files, read_file и agentgrep; вызов {name} отклонён")
         });
     }
     let args: Value = match call["function"]["arguments"]
@@ -814,7 +1007,7 @@ fn run_tool(app: &App, project: &context::Project, settings: &Settings, call: &V
     }
     let mut args = args.clone();
     args["path"] = json!(path);
-    match tools::execute(root, settings, name, &args) {
+    match tools::execute_scoped(root, settings, name, &args, Some(app.data.as_ref())) {
         Ok(value) => value,
         Err(err) => json!({"error": err.to_string()}),
     }
@@ -830,51 +1023,82 @@ async fn merge_pass(
     system: &str,
     prompt: String,
     output: MergeOutput,
+    trace: &observability::Trace,
+    parent: usize,
 ) -> Result<(Message, Value)> {
+    let guards=settings.prepared_guardrails.clone();
+    if let Some(prepared)=&guards {crate::enforce_guardrail(prepared.input(&prompt)?,trace,parent)?;}
+    let buffer_output=guards.as_ref().is_some_and(|prepared|prepared.buffers_output());
     let messages = [Message::text("user", prompt)];
-    match output {
-        MergeOutput::Buffered => {
-            provider::generate(
-                &app.client,
-                provider,
-                settings,
-                system,
-                &messages,
-                &[],
-                |_, _| {},
-            )
-            .await
-        }
-        MergeOutput::Stream => {
-            let copy = shared.clone();
-            let save_app = app.clone();
-            let mut last_save = std::time::Instant::now();
-            provider::generate(
-                &app.client,
-                provider,
-                settings,
-                system,
-                &messages,
-                &[],
-                move |text, _reasoning| {
-                    if text.is_empty() {
-                        return;
-                    }
-                    {
-                        let mut state = copy.lock().unwrap();
-                        if let Some(message) = state.messages.get_mut(index) {
-                            message.content.push_str(&text);
-                        }
-                    }
-                    if last_save.elapsed().as_secs() >= 2 {
-                        persist(&save_app, &copy);
-                        last_save = std::time::Instant::now();
-                    }
-                },
-            )
-            .await
-        }
+    let phase = match output {
+        MergeOutput::Buffered => "critic",
+        MergeOutput::Stream => "synthesis",
+    };
+    let mut span = trace.span(phase, phase, Some(parent));
+    let result = trace
+        .generation(&settings.model, &settings.provider, span.id(), async {
+            match output {
+                MergeOutput::Buffered => {
+                    provider::generate(
+                        &app.client,
+                        provider,
+                        settings,
+                        system,
+                        &messages,
+                        &[],
+                        |_, _| {},
+                    )
+                    .await
+                }
+                MergeOutput::Stream => {
+                    let copy = shared.clone();
+                    let save_app = app.clone();
+                    let mut last_save = std::time::Instant::now();
+                    provider::generate(
+                        &app.client,
+                        provider,
+                        settings,
+                        system,
+                        &messages,
+                        &[],
+                        move |text, _reasoning| {
+                            if buffer_output || text.is_empty() {
+                                return;
+                            }
+                            {
+                                let mut state = copy.lock().unwrap();
+                                if let Some(message) = state.messages.get_mut(index) {
+                                    message.content.push_str(&text);
+                                }
+                            }
+                            if last_save.elapsed().as_secs() >= 2 {
+                                persist(&save_app, &copy);
+                                last_save = std::time::Instant::now();
+                            }
+                        },
+                    )
+                    .await
+                }
+            }
+        })
+        .await;
+    let result=result.and_then(|(message,usage)| {
+        if let Some(prepared)=&guards {crate::enforce_guardrail(prepared.output(&message.content)?,trace,span.id())?;}
+        if buffer_output&&matches!(output,MergeOutput::Stream) {set_content(shared,index,&message.content);}
+        Ok((message,usage))
+    });
+    match &result {
+        Ok((message, _)) => span.finish(
+            if message.truncated {
+                "token_limit"
+            } else {
+                "completed"
+            },
+            &Value::Null,
+        ),
+        Err(_) => span.finish("failed", &Value::Null),
     }
+    result
 }
 
 fn collect_reports(shared: &SharedSession, index: usize) -> Vec<ReportView> {
@@ -961,13 +1185,7 @@ fn fail(shared: &SharedSession, index: usize, slot: usize, message: &str) {
     }
 }
 
-fn finish(
-    app: &App,
-    shared: &SharedSession,
-    index: usize,
-    usage: Value,
-    notice: Option<String>,
-) {
+fn finish(app: &App, shared: &SharedSession, index: usize, usage: Value, notice: Option<String>) {
     {
         let mut state = shared.lock().unwrap();
         state.usage = usage;
@@ -993,7 +1211,7 @@ fn finish(
 
 /// Sum numeric usage fields across the requests of one swarm turn. The last
 /// provider/model identity wins so the UI can still name the model that merged.
-fn merge_usage(mut total: Value, next: Value) -> Value {
+pub(crate) fn merge_usage(mut total: Value, next: Value) -> Value {
     let Some(incoming) = next.as_object() else {
         return total;
     };
@@ -1041,6 +1259,7 @@ mod tests {
             role: "проверь риски".into(),
             provider: "local".into(),
             model: "qwen3".into(),
+            ..SwarmMember::default()
         }
     }
     fn config(members: usize) -> SwarmConfig {
@@ -1048,6 +1267,36 @@ mod tests {
             members: (0..members).map(|i| member(&format!("m{i}"))).collect(),
             ..SwarmConfig::default()
         }
+    }
+
+    #[test]
+    fn retry_keeps_original_worker_after_roster_changes() {
+        let settings: Settings =
+            serde_json::from_value(json!({"provider":"local","model":"m"})).unwrap();
+        let shared: SharedSession = std::sync::Arc::new(std::sync::Mutex::new(Session::new(
+            "retry".into(),
+            settings.clone(),
+        )));
+        let mut message = Message::text("assistant", "merged");
+        message.swarm.push(SwarmReport {
+            label: "remote".into(),
+            provider: "worker-only-provider".into(),
+            model: "worker-model".into(),
+            worker: "http://127.0.0.1:18100".into(),
+            worker_project: "remote-project".into(),
+            content: "old report".into(),
+            round: 1,
+            ..SwarmReport::default()
+        });
+        shared.lock().unwrap().messages.push(message);
+        // The current roster no longer contains the original member.
+        let target = take_report(&shared, "remote", &SwarmConfig::default()).unwrap();
+        assert_eq!(target.member.worker, "http://127.0.0.1:18100");
+        assert_eq!(target.member.worker_project, "remote-project");
+        let resolved = member_settings(&settings, &target.member, &SwarmConfig::default());
+        assert_eq!(resolved.swarm.members.len(), 1);
+        assert_eq!(resolved.swarm.members[0].worker, target.member.worker);
+        assert_eq!(resolved.provider, "worker-only-provider");
     }
 
     #[test]
@@ -1159,8 +1408,9 @@ mod tests {
 
     #[test]
     fn next_round_prompts_quote_peers_not_the_member_itself() {
-        let members = vec![
-            (member("m0"), crate::provider::Provider {
+        let members = vec![(
+            member("m0"),
+            crate::provider::Provider {
                 id: "local".into(),
                 name: "Local".into(),
                 base: "http://127.0.0.1/v1".into(),
@@ -1171,8 +1421,8 @@ mod tests {
                 key_source: "none".into(),
                 key_error: None,
                 saved: false,
-            }),
-        ];
+            },
+        )];
         let shared: SharedSession = std::sync::Arc::new(std::sync::Mutex::new(Session::new(
             "test".into(),
             serde_json::from_value(json!({"provider":"local","model":"m"})).unwrap(),
@@ -1181,13 +1431,34 @@ mod tests {
             let mut state = shared.lock().unwrap();
             let mut message = Message::text("assistant", "");
             message.swarm = vec![
-                SwarmReport { label: "m0".into(), provider: "local".into(), model: "m".into(), round: 1, status: MemberStatus::Done, step: 0, content: "своё".into(), error: None },
-                SwarmReport { label: "m1".into(), provider: "local".into(), model: "m".into(), round: 1, status: MemberStatus::Done, step: 0, content: "чужое".into(), error: None },
+                SwarmReport {
+                    label: "m0".into(),
+                    provider: "local".into(),
+                    model: "m".into(),
+                    round: 1,
+                    status: MemberStatus::Done,
+                    step: 0,
+                    content: "своё".into(),
+                    error: None,
+                    ..SwarmReport::default()
+                },
+                SwarmReport {
+                    label: "m1".into(),
+                    provider: "local".into(),
+                    model: "m".into(),
+                    round: 1,
+                    status: MemberStatus::Done,
+                    step: 0,
+                    content: "чужое".into(),
+                    error: None,
+                    ..SwarmReport::default()
+                },
             ];
             state.messages.push(message);
             state.messages.len() - 1
         };
-        let prompts = next_round_prompts(&shared, index, &members, &two_rounds_for_tests(), "задача");
+        let prompts =
+            next_round_prompts(&shared, index, &members, &two_rounds_for_tests(), "задача");
         assert_eq!(prompts.len(), 1);
         assert!(prompts[0].contains("своё"));
         assert!(prompts[0].contains("чужое"));
@@ -1219,7 +1490,10 @@ mod tests {
         let report = &state.messages[index].swarm[0];
         assert_eq!(report.status, MemberStatus::Running);
         assert_eq!(report.step, 3);
-        assert_eq!(serde_json::to_value(report).unwrap()["status"], json!("running"));
+        assert_eq!(
+            serde_json::to_value(report).unwrap()["status"],
+            json!("running")
+        );
         assert_eq!(serde_json::to_value(report).unwrap()["step"], json!(3));
     }
 

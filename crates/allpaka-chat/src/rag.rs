@@ -24,7 +24,10 @@ pub(crate) async fn retrieve_rag_wakeup(app: &App, rag_id: &str) -> Option<Strin
 pub(crate) async fn retrieve_rag_context(app: &App, rag_id: &str, query: &str) -> Option<String> {
     let client = rag_client(app, rag_id)?;
     if let Ok(value) = client
-        .call("search_wiki", &json!({"query": query, "top_k": 6, "mode": "vec"}))
+        .call(
+            "search_wiki",
+            &json!({"query": query, "top_k": 6, "mode": "vec"}),
+        )
         .await
     {
         if let Some(hits) = value.as_array() {
@@ -71,7 +74,9 @@ pub(crate) async fn retrieve_rag_context(app: &App, rag_id: &str, query: &str) -
     None
 }
 pub(crate) async fn auto_file_answer(app: &App, rag_id: &str, title: &str, body: &str) {
-    let Some(client) = rag_client(app, rag_id) else { return };
+    let Some(client) = rag_client(app, rag_id) else {
+        return;
+    };
     let _ = client
         .call(
             "file_answer",
@@ -109,8 +114,12 @@ pub(crate) fn spawn_rag_maintenance(app: App) {
     });
 }
 async fn run_rag_maintenance(app: &App) {
-    let Some(rag_id) = connected_rag_id(app) else { return };
-    let Some(client) = rag_client(app, &rag_id) else { return };
+    let Some(rag_id) = connected_rag_id(app) else {
+        return;
+    };
+    let Some(client) = rag_client(app, &rag_id) else {
+        return;
+    };
     eprintln!("rag maintenance: analyze_corpus");
     let analysis = client.call("analyze_corpus", &json!({})).await.ok();
     let plan = match client
@@ -156,4 +165,3 @@ async fn run_rag_maintenance(app: &App) {
         );
     }
 }
-

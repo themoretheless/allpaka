@@ -23,8 +23,8 @@ pub fn schemas(settings: &Settings, cmd_enabled: bool) -> Vec<Value> {
         ),
         schema(
             "set_plan",
-            "Publish or update the task plan. Status is pending, in_progress, or completed.",
-            json!({"steps":{"type":"array","maxItems":30,"items":{"type":"object","properties":{"title":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["title","status"],"additionalProperties":false}}}),
+            "Publish/update the durable task plan. Retain milestone IDs. Goal requires current base_revision, acceptance criteria for each milestone and reported evidence for completion. Completed Goal milestones cannot be silently removed, changed or repeated.",
+            json!({"base_revision":{"type":"integer","minimum":0},"steps":{"type":"array","maxItems":30,"items":{"type":"object","properties":{"id":{"type":"string","maxLength":80},"title":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]},"acceptance":{"type":"array","maxItems":4,"items":{"type":"string"}},"evidence":{"type":"array","maxItems":4,"items":{"type":"string"}}},"required":["title","status"],"additionalProperties":false}}}),
             json!(["steps"]),
         ),
     ];
@@ -38,12 +38,13 @@ pub fn schemas(settings: &Settings, cmd_enabled: bool) -> Vec<Value> {
     if matches!(settings.mode, Mode::Auto | Mode::Goal) && cmd_enabled {
         list.push(schema("run_command", "Run a shell command in the project root directory. Returns stdout, stderr and exit code. Timeout 30s by default (max 120s). Output truncated at 128 KiB.", json!({"command":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":120}}),json!(["command"])));
     }
+    list.push(schema("agentgrep", "Search a context file or directory for literal text. Returns line numbers and preceding declaration hints (heuristic, not AST). Skips hidden files, symlinks and binary files. Bounded to 100 matches and 32 MiB scanned.", json!({"path":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":1000},"limit":{"type":"integer","minimum":1,"maximum":100}}),json!(["path","query"])));
     list
 }
 fn schema(name: &str, description: &str, properties: Value, required: Value) -> Value {
     json!({"type":"function","function":{"name":name,"description":description,"parameters":{"type":"object","properties":properties,"required":required,"additionalProperties":false}}})
 }
-fn resolve(root: &Path, path: &str, write: bool) -> Result<PathBuf> {
+pub(crate) fn resolve(root: &Path, path: &str, write: bool) -> Result<PathBuf> {
     let relative = Path::new(path);
     for c in relative.components() {
         match c {
@@ -77,8 +78,37 @@ fn resolve(root: &Path, path: &str, write: bool) -> Result<PathBuf> {
     }
     Ok(resolved)
 }
+// Shared across sessions: hold a path lock throughout each read-modify-write.
+fn mutation_lock(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    static LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
+        OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(path.to_owned(), Arc::downgrade(&lock));
+    lock
+}
+
+#[cfg(test)]
 pub fn execute(root: &Path, settings: &Settings, name: &str, args: &Value) -> Result<Value> {
+    execute_scoped(root, settings, name, args, None)
+}
+pub(crate) fn execute_scoped(
+    root: &Path,
+    settings: &Settings,
+    name: &str,
+    args: &Value,
+    excluded: Option<&Path>,
+) -> Result<Value> {
     match name {
+        "agentgrep" => crate::code_search::search(root, args, excluded),
         "list_files" => {
             let path = resolve(
                 root,
@@ -131,11 +161,17 @@ pub fn execute(root: &Path, settings: &Settings, name: &str, args: &Value) -> Re
             }
             let name = args["path"].as_str().context("path is required")?;
             let path = resolve(root, name, false)?;
+            let lock = mutation_lock(&path);
+            let _guard = lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("File mutation lock poisoned"))?;
             let before = read_text(&path, 131072)?;
             let old = args["old_text"].as_str().context("old_text is required")?;
             let new = args["new_text"].as_str().context("new_text is required")?;
             if old.is_empty() || before.matches(old).count() != 1 {
-                bail!("old_text must match exactly once; read the current file and include more context");
+                bail!(
+                    "old_text must match exactly once; read the current file and include more context"
+                );
             }
             let after = before.replacen(old, new, 1);
             if after.len() > 131072 {
@@ -154,6 +190,10 @@ pub fn execute(root: &Path, settings: &Settings, name: &str, args: &Value) -> Re
                 args["path"].as_str().context("path is required")?,
                 true,
             )?;
+            let lock = mutation_lock(&path);
+            let _guard = lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("File mutation lock poisoned"))?;
             let content = args["content"].as_str().context("content is required")?;
             if content.len() > 131072 {
                 bail!("Write exceeds 128 KiB");
@@ -179,7 +219,7 @@ pub fn writes(name: &str) -> bool {
 }
 /// Tools that only inspect the connected context. Swarm members get these.
 pub fn reads(name: &str) -> bool {
-    matches!(name, "list_files" | "read_file")
+    matches!(name, "list_files" | "read_file" | "agentgrep")
 }
 fn line_arg(args: &Value, key: &str) -> Result<Option<usize>> {
     match args.get(key) {
@@ -191,7 +231,7 @@ fn line_arg(args: &Value, key: &str) -> Result<Option<usize>> {
         )),
     }
 }
-fn read_text(path: &Path, max: usize) -> Result<String> {
+pub(crate) fn read_text(path: &Path, max: usize) -> Result<String> {
     if !fs::metadata(path)?.is_file() {
         bail!("Not a regular file");
     }
@@ -249,16 +289,10 @@ fn unified_diff(path: &str, before: &str, after: &str) -> String {
 }
 pub fn parse_plan(args: &Value) -> Result<Vec<PlanItem>> {
     let items: Vec<PlanItem> = serde_json::from_value(args["steps"].clone())?;
-    if items.is_empty()
-        || items.len() > 30
-        || items.iter().any(|s| {
-            s.title.trim().is_empty()
-                || s.title.len() > 500
-                || !["pending", "in_progress", "completed"].contains(&s.status.as_str())
-        })
-    {
+    if items.is_empty() {
         bail!("Invalid plan");
     }
+    crate::plan::validate_steps(&items)?;
     Ok(items)
 }
 #[cfg(test)]
@@ -267,6 +301,8 @@ mod tests {
     #[test]
     fn plan_enforces_read_only_even_with_write_flag() {
         let s = Settings {
+            guardrails: None,
+            prepared_guardrails: None,
             verbosity: crate::types::Verbosity::Normal,
             project_id: "default".into(),
             provider: "test".into(),
@@ -280,7 +316,7 @@ mod tests {
             compact_threshold: 24000,
             json_mode: false,
         };
-        assert_eq!(schemas(&s, false).len(), 3);
+        assert_eq!(schemas(&s, false).len(), 4);
         assert!(execute(
             Path::new("/tmp"),
             &s,
@@ -381,7 +417,7 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(s.mode, Mode::Swarm));
-        assert_eq!(schemas(&s, false).len(), 3);
+        assert_eq!(schemas(&s, false).len(), 4);
         assert!(execute(
             Path::new("/tmp"),
             &s,
@@ -390,6 +426,43 @@ mod tests {
         )
         .is_err());
         s.mode = Mode::Chat;
-        assert_eq!(schemas(&s, false).len(), 2);
+        assert_eq!(schemas(&s, false).len(), 3);
+    }
+    #[test]
+    fn concurrent_edits_preserve_every_change() {
+        let root = std::env::temp_dir().join(format!(
+            "allpaka-concurrent-edits-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        std::fs::write(root.join("file.txt"), "ANCHOR").unwrap();
+        let settings: Settings = serde_json::from_value(
+            json!({"provider":"test","model":"test","mode":"auto","allow_writes":true}),
+        )
+        .unwrap();
+        std::thread::scope(|scope| {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(32));
+            for index in 0..32 {
+                let barrier = barrier.clone();
+                let root = &root;
+                let settings = &settings;
+                scope.spawn(move || {
+                    barrier.wait();
+                    execute(root, settings, "edit_file", &json!({"path":"file.txt","old_text":"ANCHOR","new_text":format!("change-{index}\nANCHOR")})).unwrap();
+                });
+            }
+        });
+        let content = std::fs::read_to_string(root.join("file.txt")).unwrap();
+        let changes: std::collections::HashSet<_> = content.lines().collect();
+        for index in 0..32 {
+            assert!(changes.contains(format!("change-{index}").as_str()));
+        }
+        assert_eq!(changes.len(), 33);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1,0 +1,6 @@
+const assert=require('assert'),fs=require('fs'),vm=require('vm');
+const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),start=source.indexOf("$('evaluation-fork').onclick"),end=source.indexOf("$('evaluation-add').onclick",start);
+const el={ 'evaluation-fork':{},'evaluation-dataset':{value:'d'},'evaluation-version':{value:3},'evaluation-name':{value:'Cases'},'dataset-versions-result':{replaceChildren(...x){this.children=x}}};
+const context={evaluationDataset:{id:'d',version:3,sha256:'a'.repeat(64)},evaluationDatasetOrigin:null,selectedDatasetLoadEpoch:0,datasetVersionsEpoch:0,$:id=>el[id],node:(tag,text)=>({tag,text}),notify:()=>{},showDatasetOrigin:()=>{}};
+vm.createContext(context);vm.runInContext(source.slice(start,end),context);el['evaluation-fork'].onclick();assert.equal(context.evaluationDataset,null);assert.equal(context.evaluationDatasetOrigin.id,'d');assert.equal(context.evaluationDatasetOrigin.version,3);assert.equal(el['evaluation-dataset'].value,'');assert.equal(el['evaluation-version'].value,1);assert.equal(context.selectedDatasetLoadEpoch,1);assert.equal(context.datasetVersionsEpoch,1);el['evaluation-fork'].onclick();assert.equal(context.selectedDatasetLoadEpoch,1);
+console.log('PASS dataset variant draft pins loaded source and invalidates pending loads without saving or calling model');

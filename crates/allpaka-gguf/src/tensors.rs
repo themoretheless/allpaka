@@ -271,11 +271,78 @@ impl GgufFile {
         Ok(&mmap[start as usize..end as usize])
     }
 
+    /// Page-aligned slices covering only selected tensors. Adjacent or
+    /// overlapping page ranges are merged, independently for each split part.
+    /// 16 KiB alignment satisfies the Apple backend and is also valid on
+    /// platforms with 4 KiB pages. No tensor bytes are copied or read here.
+    pub fn selected_mappings(&self, select: impl Fn(&TensorInfo) -> bool) -> Result<Vec<&[u8]>> {
+        const PAGE: usize = 16384;
+        let mut ranges = Vec::new();
+        for tensor in self.merged.iter().filter(|t| select(t)) {
+            let data = self.data(tensor)?;
+            let mapping = &self.mmaps[tensor.part];
+            let offset = data.as_ptr() as usize - mapping.as_ptr() as usize;
+            let start = offset / PAGE * PAGE;
+            let end = (offset + data.len())
+                .div_ceil(PAGE)
+                .saturating_mul(PAGE)
+                .min(mapping.len());
+            if start < end {
+                ranges.push((tensor.part, start, end));
+            }
+        }
+        ranges.sort_unstable();
+        let mut merged: Vec<(usize, usize, usize)> = Vec::new();
+        for (part, start, end) in ranges {
+            if let Some(last) = merged.last_mut() {
+                if last.0 == part && start <= last.2 {
+                    last.2 = last.2.max(end);
+                    continue;
+                }
+            }
+            merged.push((part, start, end));
+        }
+        Ok(merged
+            .into_iter()
+            .map(|(part, start, end)| &self.mmaps[part][start..end])
+            .collect())
+    }
+
     /// One tensor dequantised to f32, allocated fresh.
     pub fn dequant(&self, t: &TensorInfo) -> Result<Vec<f32>> {
         crate::dequant::dequant(t.ggml_type, self.data(t)?, t.elements() as usize)
             .with_context(|| format!("dequantising tensor {:?}", t.name))
     }
+}
+
+/// Cryptographic identity of all GGUF parts in order. Bounded buffered reads
+/// avoid faulting every mapped weight page into the stage's address space.
+pub fn fingerprint(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let parts = split_paths(path)?;
+    let mut digest = Sha256::new();
+    digest.update(b"allpaka-gguf-v1");
+    digest.update((parts.len() as u64).to_le_bytes());
+    let mut buffer = vec![0u8; 1024 * 1024];
+    for part in parts {
+        let mut file = File::open(&part)?;
+        let expected = file.metadata()?.len();
+        digest.update(expected.to_le_bytes());
+        let mut read = 0u64;
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            digest.update(&buffer[..n]);
+            read += n as u64;
+        }
+        if read != expected {
+            bail!("GGUF part changed while computing identity");
+        }
+    }
+    Ok(digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Expand a possibly-split GGUF path (`name-00001-of-00002.gguf`) into every

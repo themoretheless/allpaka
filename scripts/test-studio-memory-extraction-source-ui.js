@@ -1,0 +1,12 @@
+const assert=require('assert'),fs=require('fs'),vm=require('vm');
+const pending=[],elements={project:{value:'p'},'memory-dialog':{open:true}};
+function node(tag,text){return {tag,text,children:[],append(...items){this.children.push(...items)}}}
+const receipt={id:'proposal',project_id:'p',message_count:2,source_sha256:'a'.repeat(64)};
+const context={node,$:id=>elements[id],active:'session',api:path=>new Promise((resolve,reject)=>pending.push({path,resolve,reject}))};vm.createContext(context);const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('function memoryExtractionSourcePanel('),source.indexOf('async function loadMemoryProposals(')),context);
+const packet=()=>({kind:'memory_extraction_source_status',proposal_id:'proposal',session_id:'session',project_id:'p',message_count:2,source_sha256:receipt.source_sha256,current_source_sha256:receipt.source_sha256,current_message_count:4,running:false,status:'current',semantics:'extraction_prefix',provider_calls:0,notes_modified:false});
+(async()=>{const panel=context.memoryExtractionSourcePanel(receipt,'session'),check=panel.children[0],status=panel.children[1];let task=check.onclick();await check.onclick();assert.equal(pending.length,1);assert.equal(pending[0].path,'memory/proposals/proposal/source-status');pending[0].resolve(packet());await task;assert.match(status.textContent,/совпадает/);
+task=check.onclick();pending[1].resolve({...packet(),status:'changed',current_source_sha256:'b'.repeat(64)});await task;assert.match(status.textContent,/изменилась/);
+task=check.onclick();pending[2].resolve({...packet(),status:'unavailable',current_source_sha256:null,current_message_count:null});await task;assert.match(status.textContent,/недоступен/);
+task=check.onclick();pending[3].resolve({...packet(),current_source_sha256:'b'.repeat(64)});await task;assert.match(status.textContent,/Некорректная/);
+const prior=status.textContent;task=check.onclick();context.active='other';pending[4].resolve(packet());await task;assert.equal(status.textContent,prior);assert.equal(check.disabled,false);
+context.active='session';task=check.onclick();elements['memory-dialog'].open=false;pending[5].reject(new Error('Late failure'));await task;assert.equal(status.textContent,prior);console.log('PASS extraction source status current/changed/unavailable, hash consistency, one admission and stale session/dialog exclusion');})().catch(error=>{console.error(error);process.exitCode=1});

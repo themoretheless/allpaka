@@ -1,0 +1,22 @@
+const assert=require('assert'),fs=require('fs'),vm=require('vm');
+const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const start=source.indexOf('async function loadConversationTraces('),end=source.indexOf('async function loadTraceSummary(',start);
+const node=(tag,text)=>({tag,text,children:[],replaceChildren(...children){this.children=children;}});
+const requests=[],pending=[];let active=true;
+const context={URLSearchParams,node,traceView:trace=>node('details',trace.id),api:path=>{requests.push(path);return new Promise(resolve=>pending.push(resolve));}};
+vm.createContext(context);vm.runInContext(source.slice(start,end),context);
+const scope={project_id:'p',session_id:'s',status:'failed',since_ms:'10',until_ms:'30'},container=node('div');
+const trace=index=>({id:'trace-'+index,project_id:'p',session_id:'s',status:'failed',started_ms:20});
+(async()=>{
+ const first=context.loadConversationTraces(container,scope,()=>active);
+ assert(requests[0].includes('status=failed'));
+ assert(requests[0].includes('session_id=s')&&requests[0].includes('since_ms=10')&&requests[0].includes('until_ms=30'));
+ pending.shift()({traces:Array.from({length:20},(_,i)=>trace(i)),total:21});await first;
+ const next=container.children.at(-1);next.onclick();next.onclick();assert.equal(requests.length,2);assert(requests[1].includes('offset=20'));
+ pending.shift()({traces:[trace(20)],total:21});await new Promise(resolve=>setImmediate(resolve));assert(container.children.at(-1).disabled);assert.equal(container.children[1].text,'trace-20');
+ container.children.at(-2).onclick();pending.shift()({traces:[{...trace(0),session_id:'foreign'}],total:1});await new Promise(resolve=>setImmediate(resolve));assert(container.children[0].text.includes('не соответствуют'));
+ const retry=container.children[1],beforeRetry=requests.length;retry.onclick();retry.onclick();assert.equal(requests.length,beforeRetry+1);pending.shift()({traces:[trace(0)],total:1});await new Promise(resolve=>setImmediate(resolve));assert.equal(container.children[1].text,'trace-0');
+ const wrongStatus=context.loadConversationTraces(container,scope,()=>active);pending.shift()({traces:[{...trace(0),status:'completed'}],total:1});await wrongStatus;assert(container.children[0].text.includes('не соответствуют'));
+ const stale=context.loadConversationTraces(container,scope,()=>active);active=false;const before=container.children;pending.shift()({traces:[trace(0)],total:1});await stale;assert.strictEqual(container.children,before);
+ console.log('PASS conversation trace drill-down pins project/session/time, pages without duplicate requests, rejects substituted scope and discards stale results');
+})().catch(error=>{console.error(error);process.exitCode=1;});

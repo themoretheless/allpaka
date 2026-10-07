@@ -6,11 +6,13 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+fs2 = "0.4.3"
+sha2 = "0.11"
 serde.workspace = true
 serde_json.workspace = true
 axum = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "process", "io-util"] }
 futures-util = "0.3"
 themoretheless-tokenizer.workspace = true
 
@@ -19,3 +21,6 @@ keyring = { version = "3.6.3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6.3", features = ["windows-native"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1,0 +1,11 @@
+const assert=require('assert'),fs=require('fs'),vm=require('vm');
+const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const begin=source.indexOf('function firstTextRows('),end=source.indexOf('function timeSeriesView(',begin);
+const context={node:(_,text)=>({textContent:text})};vm.createContext(context);vm.runInContext(source.slice(begin,end),context);
+const text=latency=>context.firstTextRows(latency).map(row=>row.textContent).join('\n');
+assert(text({p50_ms:0,p95_ms:100,min_ms:0,max_ms:100,known_calls:3,unknown_calls:1}).includes('P50 0 мс'));
+assert(text({p50_ms:null,p95_ms:null,min_ms:null,max_ms:null,known_calls:0,unknown_calls:4}).includes('P50 неизвестно'));
+assert(text({p50_ms:10,p95_ms:100,min_ms:0,max_ms:100,known_calls:3,unknown_calls:1}).includes('измерений: 3 · без измерения: 1'));
+assert(text(undefined).includes('данные не сообщены'));
+assert(source.includes('firstTextRows(result.first_text)'));assert(source.includes('firstTextRows(model.first_text)'));
+console.log('PASS first-text UI renders known zero, unknown quantiles/counts and legacy absent metadata');
