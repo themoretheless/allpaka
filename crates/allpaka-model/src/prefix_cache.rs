@@ -23,6 +23,9 @@ pub struct PrefixCache<V> {
     resident_bytes: usize,
     clock: u64,
     retired: Vec<(Weak<V>, usize)>,
+    hits: u64,
+    misses: u64,
+    reused_tokens: u64,
 }
 
 impl<V> PrefixCache<V> {
@@ -33,11 +36,26 @@ impl<V> PrefixCache<V> {
             resident_bytes: 0,
             clock: 0,
             retired: Vec::new(),
+            hits: 0,
+            misses: 0,
+            reused_tokens: 0,
         }
     }
 
     pub fn resident_bytes(&self) -> usize {
         self.resident_bytes
+    }
+
+    pub fn hits(&self) -> u64 {
+        self.hits
+    }
+
+    pub fn misses(&self) -> u64 {
+        self.misses
+    }
+
+    pub fn reused_tokens(&self) -> u64 {
+        self.reused_tokens
     }
 
     /// Declared payload bytes still alive, including evicted external leases.
@@ -62,18 +80,28 @@ impl<V> PrefixCache<V> {
     }
 
     pub fn longest_prefix(&mut self, tokens: &[u32]) -> Option<PrefixHit<V>> {
-        let index = self
+        let index = match self
             .entries
             .iter()
             .enumerate()
             .filter(|(_, entry)| tokens.starts_with(&entry.tokens))
             .max_by_key(|(_, entry)| entry.tokens.len())
-            .map(|(index, _)| index)?;
+            .map(|(index, _)| index)
+        {
+            Some(idx) => idx,
+            None => {
+                self.misses = self.misses.saturating_add(1);
+                return None;
+            }
+        };
         self.clock = self.clock.wrapping_add(1);
+        self.hits = self.hits.saturating_add(1);
         let entry = &mut self.entries[index];
         entry.last_used = self.clock;
+        let matched = entry.tokens.len();
+        self.reused_tokens = self.reused_tokens.saturating_add(matched as u64);
         Some(PrefixHit {
-            matched_tokens: entry.tokens.len(),
+            matched_tokens: matched,
             value: Arc::clone(&entry.value),
         })
     }
@@ -152,5 +180,35 @@ mod tests {
         let mut cache = PrefixCache::new(16);
         cache.insert(vec![1, 2], 7, 32);
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn telemetry_tracks_hits_misses_and_reused_tokens() {
+        let mut cache = PrefixCache::new(80);
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 0);
+        assert_eq!(cache.reused_tokens(), 0);
+
+        // Miss
+        assert!(cache.longest_prefix(&[1, 2, 3]).is_none());
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 1);
+        assert_eq!(cache.reused_tokens(), 0);
+
+        // Insert and Hit
+        cache.insert(vec![1, 2], "v", 8);
+        let hit = cache.longest_prefix(&[1, 2, 3]).unwrap();
+        assert_eq!(hit.matched_tokens, 2);
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 1);
+        assert_eq!(cache.reused_tokens(), 2);
+
+        // Second Hit with longer match
+        cache.insert(vec![1, 2, 3], "v2", 8);
+        let hit2 = cache.longest_prefix(&[1, 2, 3, 4]).unwrap();
+        assert_eq!(hit2.matched_tokens, 3);
+        assert_eq!(cache.hits(), 2);
+        assert_eq!(cache.misses(), 1);
+        assert_eq!(cache.reused_tokens(), 5);
     }
 }

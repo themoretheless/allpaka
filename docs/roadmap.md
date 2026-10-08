@@ -59,13 +59,9 @@
 **DoD:** либо покрыть эти статьи, либо честно назвать границу в `docs/serving.md`
 и в самом ответе API (сейчас формулировка уже честная — довести до конца).
 
-### A4. KV-блочный prefix cache + hit/miss — ожидает
+### A4. KV-блочный prefix cache + hit/miss — сделано
 
-Сейчас `/stats` отдаёт residency (`prefix_cache_entries`, `prefix_cache_bytes`),
-а не попадания.
-
-**DoD:** hit/miss и reused-token счётчики под нагрузкой; reuse наблюдаем через
-`usage.prompt_tokens_details.cached_tokens`.
+DoD выполнен: hit/miss и reused-token счётчики отдаются через `/stats` (`prefix_cache_hits`, `prefix_cache_misses`, `prefix_cache_reused_tokens`); reuse наблюдаем через `usage.prompt_tokens_details.cached_tokens`. Покрыто тестами `telemetry_tracks_hits_misses_and_reused_tokens` и `exact_hits_are_model_namespaced`.
 
 ### A5. Step scheduler + chunked prefill — ожидает
 

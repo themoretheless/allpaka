@@ -485,6 +485,7 @@ fn run_inference(
                         "prompt_tokens": prompt.len(),
                         "completion_tokens": generated.len(),
                         "total_tokens": prompt.len() + generated.len(),
+                        "prompt_tokens_details": {"cached_tokens": common},
                     },
                     "timing": {
                         "prefill_secs": prefill_secs,
@@ -1423,6 +1424,9 @@ fn handle(
                 "prefix_cache_entries": context.inference.prefixes.len(),
                 "prefix_cache_bytes": context.inference.prefixes.resident_bytes(),
                 "prefix_cache_allocated_bytes": context.inference.prefixes.allocated_bytes(),
+                "prefix_cache_hits": context.inference.prefixes.hits(),
+                "prefix_cache_misses": context.inference.prefixes.misses(),
+                "prefix_cache_reused_tokens": context.inference.prefixes.reused_tokens(),
                 "memory_admission": memory::snapshot(&context.inference.chat.memory.budget()),
                 "prefix_cache_pinned_bytes": context.inference.prefixes.pinned_bytes(),
                 "batching_mode": "model-aware-admission",

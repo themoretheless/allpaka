@@ -435,6 +435,7 @@ kernel void matvec_q8_0_mv(
             a1 = sw4(a1, *(device const float4*)(ub + 4));
         }
         device const uchar* blk = row0 + (ulong)ib * 34u;
+        _Pragma("clang loop unroll(full)")
         for (uint row = 0; row < NR0; ++row) {
             device const packed_char4* qs =
                 (device const packed_char4*)(blk + 2 + il * NQ);
@@ -1207,12 +1208,16 @@ kernel void matvec_q6_k_mv(
         }
 
         for (uint row = 0; row < 2; ++row) {
+            const uchar4 q1_v = uchar4(*(device const packed_uchar4*)q1);
+            const uchar4 q2_v = uchar4(*(device const packed_uchar4*)q2);
+            const uchar4 qh_v = uchar4(*(device const packed_uchar4*)qh);
             float4 sums = {0.0f, 0.0f, 0.0f, 0.0f};
+            _Pragma("clang loop unroll(full)")
             for (short l = 0; l < 4; ++l) {
-                sums[0] += yl[4 * l + 0] * ((char)((q1[l] & 0xF) | ((qh[l] & kmask1) << 4)) - 32);
-                sums[1] += yl[4 * l + 1] * ((char)((q2[l] & 0xF) | ((qh[l] & kmask2) << 2)) - 32);
-                sums[2] += yl[4 * l + 2] * ((char)((q1[l] >> 4) | ((qh[l] & kmask3) << 0)) - 32);
-                sums[3] += yl[4 * l + 3] * ((char)((q2[l] >> 4) | ((qh[l] & kmask4) >> 2)) - 32);
+                sums[0] += yl[4 * l + 0] * ((char)((q1_v[l] & 0xF) | ((qh_v[l] & kmask1) << 4)) - 32);
+                sums[1] += yl[4 * l + 1] * ((char)((q2_v[l] & 0xF) | ((qh_v[l] & kmask2) << 2)) - 32);
+                sums[2] += yl[4 * l + 2] * ((char)((q1_v[l] >> 4) | ((qh_v[l] & kmask3) << 0)) - 32);
+                sums[3] += yl[4 * l + 3] * ((char)((q2_v[l] >> 4) | ((qh_v[l] & kmask4) >> 2)) - 32);
             }
             sumf[row] += half_at(dh) *
                 (sums[0] * sc[0] + sums[1] * sc[2] + sums[2] * sc[4] + sums[3] * sc[6]);
@@ -1380,24 +1385,30 @@ kernel void matvec_q4_k_mv(
         device const uchar* dh = blk;
 
         for (uint row = 0; row < NR0; row++) {
-            sc16[0] = sc[0] & kmask1;
-            sc16[1] = sc[2] & kmask1;
-            sc16[2] = ((sc[4] >> 0) & kmask2) | ((sc[0] & kmask3) >> 2);
-            sc16[3] = ((sc[4] >> 4) & kmask2) | ((sc[2] & kmask3) >> 2);
+            const ushort sc0 = sc[0];
+            const ushort sc2 = sc[2];
+            const ushort sc4 = sc[4];
+            sc16[0] = sc0 & kmask1;
+            sc16[1] = sc2 & kmask1;
+            sc16[2] = ((sc4 >> 0) & kmask2) | ((sc0 & kmask3) >> 2);
+            sc16[3] = ((sc4 >> 4) & kmask2) | ((sc2 & kmask3) >> 2);
 
             device const ushort* q2 = q1 + 32;
+            const ushort4 q1_v = ushort4(*(device const packed_ushort4*)q1);
+            const ushort4 q2_v = ushort4(*(device const packed_ushort4*)q2);
 
             float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
             float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
+            _Pragma("clang loop unroll(full)")
             for (short i = 0; i < 4; ++i) {
-                acc1[0] += yl[2 * i + 0] * (q1[i] & 0x000F);
-                acc1[1] += yl[2 * i + 1] * (q1[i] & 0x0F00);
-                acc1[2] += yl[2 * i + 8] * (q1[i] & 0x00F0);
-                acc1[3] += yl[2 * i + 9] * (q1[i] & 0xF000);
-                acc2[0] += yh[2 * i + 0] * (q2[i] & 0x000F);
-                acc2[1] += yh[2 * i + 1] * (q2[i] & 0x0F00);
-                acc2[2] += yh[2 * i + 8] * (q2[i] & 0x00F0);
-                acc2[3] += yh[2 * i + 9] * (q2[i] & 0xF000);
+                acc1[0] += yl[2 * i + 0] * (q1_v[i] & 0x000F);
+                acc1[1] += yl[2 * i + 1] * (q1_v[i] & 0x0F00);
+                acc1[2] += yl[2 * i + 8] * (q1_v[i] & 0x00F0);
+                acc1[3] += yl[2 * i + 9] * (q1_v[i] & 0xF000);
+                acc2[0] += yh[2 * i + 0] * (q2_v[i] & 0x000F);
+                acc2[1] += yh[2 * i + 1] * (q2_v[i] & 0x0F00);
+                acc2[2] += yh[2 * i + 8] * (q2_v[i] & 0x00F0);
+                acc2[3] += yh[2 * i + 9] * (q2_v[i] & 0xF000);
             }
 
             half2 dm = *(device const half2*)dh;
@@ -1510,19 +1521,27 @@ kernel void matvec_q5_k_mv(
 
         for (uint row = 0; row < NR0; ++row) {
             device const uchar* q2 = q1 + 64;
-            sc16[0] = a[0] & kmask1;
-            sc16[1] = a[2] & kmask1;
-            sc16[2] = ((a[4] >> 0) & kmask2) | ((a[0] & kmask3) >> 2);
-            sc16[3] = ((a[4] >> 4) & kmask2) | ((a[2] & kmask3) >> 2);
+            const ushort a0 = a[0];
+            const ushort a2 = a[2];
+            const ushort a4 = a[4];
+            sc16[0] = a0 & kmask1;
+            sc16[1] = a2 & kmask1;
+            sc16[2] = ((a4 >> 0) & kmask2) | ((a0 & kmask3) >> 2);
+            sc16[3] = ((a4 >> 4) & kmask2) | ((a2 & kmask3) >> 2);
+
+            const uchar8 q1_v = uchar8(*(device const packed_uchar8*)q1);
+            const uchar8 q2_v = uchar8(*(device const packed_uchar8*)q2);
+            const uchar8 qh_v = uchar8(*(device const packed_uchar8*)qh);
 
             float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
             float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
+            _Pragma("clang loop unroll(full)")
             for (short l = 0; l < 8; ++l) {
-                uchar h = qh[l];
-                acc1[0] += yl[l + 0] * (float)(q1[l] & 0x0F);
-                acc1[1] += yl[l + 8] * (float)(q1[l] & 0xF0);
-                acc1[2] += yh[l + 0] * (float)(q2[l] & 0x0F);
-                acc1[3] += yh[l + 8] * (float)(q2[l] & 0xF0);
+                uchar h = qh_v[l];
+                acc1[0] += yl[l + 0] * (float)(q1_v[l] & 0x0F);
+                acc1[1] += yl[l + 8] * (float)(q1_v[l] & 0xF0);
+                acc1[2] += yh[l + 0] * (float)(q2_v[l] & 0x0F);
+                acc1[3] += yh[l + 8] * (float)(q2_v[l] & 0xF0);
                 acc2[0] += (h & hm1) ? yl[l + 0] : 0.0f;
                 acc2[1] += (h & hm2) ? yl[l + 8] : 0.0f;
                 acc2[2] += (h & hm3) ? yh[l + 0] : 0.0f;
