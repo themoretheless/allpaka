@@ -69,3 +69,34 @@ fn fused_decode_matches_the_step_by_step_path() {
         assert!(worst < 0.05, "step {step}: max logit diff {worst}");
     }
 }
+
+#[test]
+fn greedy_chain_matches_the_step_by_step_path() {
+    if !std::path::Path::new(MODEL).is_file() {
+        eprintln!("SKIP: {MODEL} not present (CI runners have no models)");
+        return;
+    }
+    let f = GgufFile::open(std::path::Path::new(MODEL)).expect("0.6B model present");
+    let model = Model::load(&f).unwrap();
+    let prompt = [785u32, 6722, 315, 9625, 374];
+
+    // Reference: step-by-step greedy with chain disabled
+    std::env::set_var("ALLPAKA_GREEDY_CHAIN", "0");
+    let mut s1 = model.new_session(64);
+    let logits = model.forward_batch(&prompt, &mut s1).unwrap();
+    let seed = logits
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(i, _)| i as u32)
+        .unwrap();
+    let ref_tokens = model.forward_greedy_n(seed, &mut s1, 4).unwrap();
+
+    // Candidate: GPU on-device chain with chain enabled
+    std::env::set_var("ALLPAKA_GREEDY_CHAIN", "1");
+    let mut s2 = model.new_session(64);
+    let _ = model.forward_batch(&prompt, &mut s2).unwrap();
+    let chain_tokens = model.forward_greedy_n(seed, &mut s2, 4).unwrap();
+
+    assert_eq!(ref_tokens, chain_tokens, "greedy chain output diverged from step-by-step");
+}

@@ -2807,6 +2807,7 @@ impl<'a> Model<'a> {
         let Some(layers) = self.token_layers(s)? else {
             return Ok(None);
         };
+        let rope_table = s.rope_cache(&self.rope_inv_freq, pos + 1, n - 1).to_vec();
         let cache_capacity = s.kv.capacity();
         let (cache, _, _) = match s.kv.gpu_view_checked(0) {
             Ok(view) => view,
@@ -2815,7 +2816,6 @@ impl<'a> Model<'a> {
         let (embd_ty, embd_bytes) = self.embedding()?.raw();
         let (out_ty, out_bytes) = self.output_head()?.raw();
         let empty_x: &[f32] = &[];
-        let empty_rope: &[[f32; 2]] = &[];
         let request = allpaka_backend::gpu::TokenReq {
             x: empty_x,
             m: 1,
@@ -2830,7 +2830,7 @@ impl<'a> Model<'a> {
             n_kv_heads: c.n_kv_heads as usize,
             pos: pos + 1,
             scale: 1.0 / (c.head_dim as f32).sqrt(),
-            rope: empty_rope,
+            rope: &rope_table,
             rot_dim: c.rope_dim as usize,
             eps: c.rms_eps,
             output_norm: self.output_norm_raw,

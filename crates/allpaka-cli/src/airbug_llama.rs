@@ -3,7 +3,7 @@
 //! across independent process pairs.
 
 use anyhow::{bail, Context, Result};
-use airbug_bench::{
+use ::airbug::{
     analysis::{self, Decision},
     Availability, Case, Direction, Metric, Observation, Run, Status,
 };
@@ -332,7 +332,7 @@ pub fn run(opts: Options) -> Result<()> {
     // pair runs. Prefer size+mtime+inode fingerprint for provenance; override
     // with ALLPAKA_AIRBUG_HASH=1 for a real sha256 when needed.
     let model_sha = if std::env::var("ALLPAKA_AIRBUG_HASH").is_ok_and(|v| v == "1") {
-        airbug_bench::hash_file(&opts.model).map_err(|e| anyhow::anyhow!("{e}"))?
+        ::airbug::hash_file(&opts.model).map_err(|e| anyhow::anyhow!("{e}"))?
     } else {
         let meta = std::fs::metadata(&opts.model)
             .with_context(|| format!("stat {}", opts.model.display()))?;
@@ -354,7 +354,11 @@ pub fn run(opts: Options) -> Result<()> {
     let mut run = Run::new();
     run.cases = cases(opts.pp, opts.tg, &opts.model);
     run.provenance.insert("model".into(), opts.model.display().to_string());
-    run.provenance.insert("model_sha256".into(), model_sha);
+    if std::env::var("ALLPAKA_AIRBUG_HASH").is_ok_and(|v| v == "1") {
+        run.provenance.insert("model_sha256".into(), model_sha);
+    } else {
+        run.provenance.insert("model_fingerprint".into(), model_sha);
+    }
     run.provenance.insert("pp".into(), opts.pp.to_string());
     run.provenance.insert("tg".into(), opts.tg.to_string());
     run.provenance.insert("repeats".into(), opts.repeats.to_string());
@@ -424,12 +428,12 @@ pub fn run(opts: Options) -> Result<()> {
     run.status = Status::Complete;
     run.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
     let run_path = opts.out.join("run.json");
-    airbug_bench::model::write_new(&run_path, &run).map_err(|e| anyhow::anyhow!("{e}"))?;
+    ::airbug::model::write_new(&run_path, &run).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let comparisons = analysis::compare(&run, None, opts.threshold_percent, 0.05)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let cmp_path = opts.out.join("comparison.json");
-    airbug_bench::model::write_new(&cmp_path, &comparisons).map_err(|e| anyhow::anyhow!("{e}"))?;
+    ::airbug::model::write_new(&cmp_path, &comparisons).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     fn max_of(xs: &[f64]) -> Option<f64> {
         xs.iter().copied().filter(|v| v.is_finite()).reduce(f64::max)
@@ -471,7 +475,7 @@ pub fn run(opts: Options) -> Result<()> {
         });
     }
     let summary_path = opts.out.join("summary.json");
-    airbug_bench::model::write_new(&summary_path, &summary).map_err(|e| anyhow::anyhow!("{e}"))?;
+    ::airbug::model::write_new(&summary_path, &summary).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     println!("AIRBUG_RESULT={}", serde_json::to_string(&run)?);
     println!();
