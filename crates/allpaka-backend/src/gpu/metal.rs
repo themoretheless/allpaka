@@ -862,6 +862,7 @@ kernel void matvec_q2_k_mv(
 
     for (uint ib = ix; ib < nb; ib += 4) {
         float4 sumy = {0.0f, 0.0f, 0.0f, 0.0f};
+        #pragma clang loop unroll(full)
         for (short i = 0; i < 8; i++) {
             yl[i + 0] = y4[i + 0];
             sumy[0] += yl[i + 0];
@@ -877,18 +878,22 @@ kernel void matvec_q2_k_mv(
         device const ushort* qs = (device const ushort*)(blk + 16) + 16 * iq + 4 * ir;
         device const uchar* dh = blk + 80;
 
+        #pragma clang loop unroll(full)
         for (uint row = 0; row < NR0; row++) {
             float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
             float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
+            const ushort4 qv = *(device const packed_ushort4*)qs;
+            #pragma clang loop unroll(full)
             for (short i = 0; i < 8; i += 2) {
-                acc1[0] += yl[i + 0] * (qs[i / 2] & 0x0003);
-                acc2[0] += yl[i + 1] * (qs[i / 2] & 0x0300);
-                acc1[1] += yl[i + 8] * (qs[i / 2] & 0x000c);
-                acc2[1] += yl[i + 9] * (qs[i / 2] & 0x0c00);
-                acc1[2] += yl[i + 16] * (qs[i / 2] & 0x0030);
-                acc2[2] += yl[i + 17] * (qs[i / 2] & 0x3000);
-                acc1[3] += yl[i + 24] * (qs[i / 2] & 0x00c0);
-                acc2[3] += yl[i + 25] * (qs[i / 2] & 0xc000);
+                const ushort qsi = qv[i / 2];
+                acc1[0] += yl[i + 0] * (qsi & 0x0003);
+                acc2[0] += yl[i + 1] * (qsi & 0x0300);
+                acc1[1] += yl[i + 8] * (qsi & 0x000c);
+                acc2[1] += yl[i + 9] * (qsi & 0x0c00);
+                acc1[2] += yl[i + 16] * (qsi & 0x0030);
+                acc2[2] += yl[i + 17] * (qsi & 0x3000);
+                acc1[3] += yl[i + 24] * (qsi & 0x00c0);
+                acc2[3] += yl[i + 25] * (qsi & 0xc000);
             }
             half2 dm = *(device const half2*)dh;
             float dall = (float)dm.x;
@@ -1067,6 +1072,7 @@ kernel void matvec_q3_k_mv(
     float sumf2[2] = {0.0f, 0.0f};
 
     for (uint ib = ix; ib < nb; ib += 4) {
+        #pragma clang loop unroll(full)
         for (short l = 0; l < 8; ++l) {
             if (SWIGLU_X) {
                 yl[l + 0] = sw1(y1[l + 0], u1[l + 0]);
@@ -1086,6 +1092,7 @@ kernel void matvec_q3_k_mv(
         device const ushort* a = (device const ushort*)(blk + 96);
         device const uchar* dh = blk + 108;
 
+        #pragma clang loop unroll(full)
         for (short row = 0; row < 2; ++row) {
             const float d_all = half_at(dh);
 
@@ -1097,14 +1104,18 @@ kernel void matvec_q3_k_mv(
             scales32 = ((scales32 >> s_shift1) & 0x0f0f0f0f) | aux32;
 
             float s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0, s6 = 0;
+            const ushort4 qv0 = *(device const packed_ushort4*)q;
+            const ushort4 hv0 = *(device const packed_ushort4*)h;
+            #pragma clang loop unroll(full)
             for (short l = 0; l < 8; l += 2) {
-                const int qsv = q[l / 2];
+                const int qsv = qv0[l / 2];
+                const ushort hsv = hv0[l / 2];
                 s1 += yl[l + 0] * (qsv & qm[il / 2][0]);
                 s2 += yl[l + 1] * (qsv & qm[il / 2][1]);
-                s3 += ((h[l / 2] & hm[0]) ? 0.0f : yl[l + 0]) + ((h[l / 2] & hm[1]) ? 0.0f : yl[l + 1]);
+                s3 += ((hsv & hm[0]) ? 0.0f : yl[l + 0]) + ((hsv & hm[1]) ? 0.0f : yl[l + 1]);
                 s4 += yl[l + 16] * (qsv & qm[il / 2][2]);
                 s5 += yl[l + 17] * (qsv & qm[il / 2][3]);
-                s6 += ((h[l / 2] & hm[2]) ? 0.0f : yl[l + 16]) + ((h[l / 2] & hm[3]) ? 0.0f : yl[l + 17]);
+                s6 += ((hsv & hm[2]) ? 0.0f : yl[l + 16]) + ((hsv & hm[3]) ? 0.0f : yl[l + 17]);
             }
             float d1 = d_all * (s1 + (1.0f / 256.0f) * s2 - s3 * v1);
             float d2 = d_all * (s4 + (1.0f / 256.0f) * s5 - s6 * v2);
@@ -1112,14 +1123,18 @@ kernel void matvec_q3_k_mv(
             sumf2[row] += d2 * (scales[2] - 32);
 
             s1 = s2 = s3 = s4 = s5 = s6 = 0;
+            const ushort4 qv1 = *(device const packed_ushort4*)(q + 8);
+            const ushort4 hv1 = *(device const packed_ushort4*)(h + 8);
+            #pragma clang loop unroll(full)
             for (short l = 0; l < 8; l += 2) {
-                const int qsv = q[l / 2 + 8];
+                const int qsv = qv1[l / 2];
+                const ushort hsv = hv1[l / 2];
                 s1 += yl[l + 8] * (qsv & qm[il / 2][0]);
                 s2 += yl[l + 9] * (qsv & qm[il / 2][1]);
-                s3 += ((h[l / 2 + 8] & hm[0]) ? 0.0f : yl[l + 8]) + ((h[l / 2 + 8] & hm[1]) ? 0.0f : yl[l + 9]);
+                s3 += ((hsv & hm[0]) ? 0.0f : yl[l + 8]) + ((hsv & hm[1]) ? 0.0f : yl[l + 9]);
                 s4 += yl[l + 24] * (qsv & qm[il / 2][2]);
                 s5 += yl[l + 25] * (qsv & qm[il / 2][3]);
-                s6 += ((h[l / 2 + 8] & hm[2]) ? 0.0f : yl[l + 24]) + ((h[l / 2 + 8] & hm[3]) ? 0.0f : yl[l + 25]);
+                s6 += ((hsv & hm[2]) ? 0.0f : yl[l + 24]) + ((hsv & hm[3]) ? 0.0f : yl[l + 25]);
             }
             d1 = d_all * (s1 + (1.0f / 256.0f) * s2 - s3 * v1);
             d2 = d_all * (s4 + (1.0f / 256.0f) * s5 - s6 * v2);
@@ -1260,11 +1275,11 @@ kernel void matvec_q4_k_mv(
     constant ulong& w2_off [[buffer(12)]],
     device float* y2 [[buffer(13)]],
     uint3 tpg [[thread_position_in_grid]],
-    uint ltid [[thread_position_in_threadgroup]],
+    uint3 ltid_v [[thread_position_in_threadgroup]],
     ushort tiisg [[thread_index_in_simdgroup]])
 {
     if (WAIT_X) {
-        if (ltid == 0) {
+        if (ltid_v.x == 0) {
             while (atomic_load_explicit(wait_flag, memory_order_relaxed) < wait_epoch) {
             }
             atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
@@ -1529,9 +1544,12 @@ kernel void matvec_q5_k_mv(
             sc16[2] = ((a4 >> 0) & kmask2) | ((a0 & kmask3) >> 2);
             sc16[3] = ((a4 >> 4) & kmask2) | ((a2 & kmask3) >> 2);
 
-            const uchar8 q1_v = uchar8(*(device const packed_uchar8*)q1);
-            const uchar8 q2_v = uchar8(*(device const packed_uchar8*)q2);
-            const uchar8 qh_v = uchar8(*(device const packed_uchar8*)qh);
+            const ushort4 q1_w = *(device const packed_ushort4*)q1;
+            const ushort4 q2_w = *(device const packed_ushort4*)q2;
+            const ushort4 qh_w = *(device const packed_ushort4*)qh;
+            thread const uchar* q1_v = (thread const uchar*)&q1_w;
+            thread const uchar* q2_v = (thread const uchar*)&q2_w;
+            thread const uchar* qh_v = (thread const uchar*)&qh_w;
 
             float4 acc1 = {0.0f, 0.0f, 0.0f, 0.0f};
             float4 acc2 = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -2583,6 +2601,7 @@ inline void q3k_two_rows(
     float sumf1[2] = {0.0f, 0.0f};
     float sumf2[2] = {0.0f, 0.0f};
     for (uint ib = ix; ib < nb; ib += 4) {
+        #pragma clang loop unroll(full)
         for (short l = 0; l < 8; ++l) {
             yl[l + 0] = y1[l + 0];
             yl[l + 8] = y1[l + 16];
@@ -2594,6 +2613,7 @@ inline void q3k_two_rows(
         device const ushort* h = (device const ushort*)(blk + l0);
         device const ushort* a = (device const ushort*)(blk + 96);
         device const uchar* dh = blk + 108;
+        #pragma clang loop unroll(full)
         for (short row = 0; row < 2; ++row) {
             const float d_all = half_at(dh);
             scales16[0] = a[4];
@@ -2603,28 +2623,36 @@ inline void q3k_two_rows(
             scales16[1] = a[il + 1];
             scales32 = ((scales32 >> s_shift1) & 0x0f0f0f0f) | aux32;
             float s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0, s6 = 0;
+            const ushort4 qv0 = *(device const packed_ushort4*)q;
+            const ushort4 hv0 = *(device const packed_ushort4*)h;
+            #pragma clang loop unroll(full)
             for (short l = 0; l < 8; l += 2) {
-                const int qsv = q[l / 2];
+                const int qsv = qv0[l / 2];
+                const ushort hsv = hv0[l / 2];
                 s1 += yl[l + 0] * (qsv & qm[il / 2][0]);
                 s2 += yl[l + 1] * (qsv & qm[il / 2][1]);
-                s3 += ((h[l / 2] & hm[0]) ? 0.0f : yl[l + 0]) + ((h[l / 2] & hm[1]) ? 0.0f : yl[l + 1]);
+                s3 += ((hsv & hm[0]) ? 0.0f : yl[l + 0]) + ((hsv & hm[1]) ? 0.0f : yl[l + 1]);
                 s4 += yl[l + 16] * (qsv & qm[il / 2][2]);
                 s5 += yl[l + 17] * (qsv & qm[il / 2][3]);
-                s6 += ((h[l / 2] & hm[2]) ? 0.0f : yl[l + 16]) + ((h[l / 2] & hm[3]) ? 0.0f : yl[l + 17]);
+                s6 += ((hsv & hm[2]) ? 0.0f : yl[l + 16]) + ((hsv & hm[3]) ? 0.0f : yl[l + 17]);
             }
             float d1 = d_all * (s1 + (1.0f / 256.0f) * s2 - s3 * v1);
             float d2 = d_all * (s4 + (1.0f / 256.0f) * s5 - s6 * v2);
             sumf1[row] += d1 * (scales[0] - 32);
             sumf2[row] += d2 * (scales[2] - 32);
             s1 = s2 = s3 = s4 = s5 = s6 = 0;
+            const ushort4 qv1 = *(device const packed_ushort4*)(q + 8);
+            const ushort4 hv1 = *(device const packed_ushort4*)(h + 8);
+            #pragma clang loop unroll(full)
             for (short l = 0; l < 8; l += 2) {
-                const int qsv = q[l / 2 + 8];
+                const int qsv = qv1[l / 2];
+                const ushort hsv = hv1[l / 2];
                 s1 += yl[l + 8] * (qsv & qm[il / 2][0]);
                 s2 += yl[l + 9] * (qsv & qm[il / 2][1]);
-                s3 += ((h[l / 2 + 8] & hm[0]) ? 0.0f : yl[l + 8]) + ((h[l / 2 + 8] & hm[1]) ? 0.0f : yl[l + 9]);
+                s3 += ((hsv & hm[0]) ? 0.0f : yl[l + 8]) + ((hsv & hm[1]) ? 0.0f : yl[l + 9]);
                 s4 += yl[l + 24] * (qsv & qm[il / 2][2]);
                 s5 += yl[l + 25] * (qsv & qm[il / 2][3]);
-                s6 += ((h[l / 2 + 8] & hm[2]) ? 0.0f : yl[l + 24]) + ((h[l / 2 + 8] & hm[3]) ? 0.0f : yl[l + 25]);
+                s6 += ((hsv & hm[2]) ? 0.0f : yl[l + 24]) + ((hsv & hm[3]) ? 0.0f : yl[l + 25]);
             }
             d1 = d_all * (s1 + (1.0f / 256.0f) * s2 - s3 * v1);
             d2 = d_all * (s4 + (1.0f / 256.0f) * s5 - s6 * v2);
@@ -8653,12 +8681,14 @@ pub fn upload_region_range(region: &mut SharedRegion, offset: usize, data: &[u8]
     if offset.saturating_add(data.len()) > region.len {
         return false;
     }
+    if data.is_empty() {
+        return true;
+    }
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            data.as_ptr(),
-            (region.buf.contents() as *mut u8).add(offset),
-            data.len(),
-        );
+        let dst = (region.buf.contents() as *mut u8).add(offset);
+        if dst as *const u8 != data.as_ptr() {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+        }
     }
     true
 }
@@ -11918,8 +11948,10 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
         let cmd = cmd.commit_and_wait();
         note_gpu_times(cmd);
         WAIT_NS.fetch_add(t_wait.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        CALLS.fetch_add(n_more as u64, Ordering::Relaxed);
+        CALLS.fetch_add(1, Ordering::Relaxed);
         DISPATCHES.fetch_add((n_more * (layers.len() * 8 + 4)) as u64, Ordering::Relaxed);
+        DECODE_ATTEMPTS.fetch_add(n_more as u64, Ordering::Relaxed);
+        DECODE_SUCCESSES.fetch_add(n_more as u64, Ordering::Relaxed);
 
         let mut results = vec![0u32; n_more];
         unsafe {

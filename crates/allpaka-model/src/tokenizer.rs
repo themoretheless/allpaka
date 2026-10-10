@@ -20,12 +20,12 @@ use std::collections::HashMap;
 
 pub struct Tokenizer {
     pieces: Vec<String>,
+    piece_bytes: Vec<Box<[u8]>>,
     ids: HashMap<String, u32>,
     /// Merge rank by "left right" pair; lower rank merges first.
-    ranks: HashMap<(String, String), usize>,
+    ranks: HashMap<String, usize>,
     /// GPT-2 byte <-> printable char maps.
     byte_to_char: [char; 256],
-    char_to_byte: HashMap<char, u8>,
     pub eos: Option<u32>,
     pub bos: Option<u32>,
 }
@@ -46,26 +46,42 @@ impl Tokenizer {
         }
         let mut ranks = HashMap::with_capacity(merges.len());
         for (rank, rule) in merges.iter().enumerate() {
-            let (l, r) = rule
+            let _ = rule
                 .split_once(' ')
                 .with_context(|| format!("malformed merge rule {rule:?}"))?;
-            ranks.insert((l.to_string(), r.to_string()), rank);
+            ranks.insert(rule.clone(), rank);
         }
 
         let byte_to_char = byte_to_char_table();
-        let mut char_to_byte = HashMap::with_capacity(256);
+        let mut char_to_byte = [u16::MAX; 512];
         for (b, &c) in byte_to_char.iter().enumerate() {
-            char_to_byte.insert(c, b as u8);
+            char_to_byte[c as usize] = b as u16;
+        }
+
+        let mut piece_bytes = Vec::with_capacity(pieces.len());
+        let mut buf = Vec::with_capacity(16);
+        let mut utf8_tmp = [0u8; 4];
+        for piece in &pieces {
+            buf.clear();
+            for ch in piece.chars() {
+                let code = ch as usize;
+                if code < char_to_byte.len() && char_to_byte[code] != u16::MAX {
+                    buf.push(char_to_byte[code] as u8);
+                } else {
+                    buf.extend_from_slice(ch.encode_utf8(&mut utf8_tmp).as_bytes());
+                }
+            }
+            piece_bytes.push(buf.as_slice().into());
         }
 
         Ok(Self {
             eos: f.meta_u32("tokenizer.ggml.eos_token_id"),
             bos: f.meta_u32("tokenizer.ggml.bos_token_id"),
             pieces,
+            piece_bytes,
             ids,
             ranks,
             byte_to_char,
-            char_to_byte,
         })
     }
 
@@ -96,20 +112,23 @@ impl Tokenizer {
             .collect();
 
         // Greedy lowest-rank merging until no rule applies.
+        let mut pair_buf = String::with_capacity(32);
         loop {
             let mut best: Option<(usize, usize)> = None; // (rank, index)
             for i in 0..symbols.len().saturating_sub(1) {
-                let key = (symbols[i].clone(), symbols[i + 1].clone());
-                if let Some(&rank) = self.ranks.get(&key) {
+                pair_buf.clear();
+                pair_buf.push_str(&symbols[i]);
+                pair_buf.push(' ');
+                pair_buf.push_str(&symbols[i + 1]);
+                if let Some(&rank) = self.ranks.get(pair_buf.as_str()) {
                     if best.is_none_or(|(r, _)| rank < r) {
                         best = Some((rank, i));
                     }
                 }
             }
             let Some((_, i)) = best else { break };
-            let merged = format!("{}{}", symbols[i], symbols[i + 1]);
-            symbols[i] = merged;
-            symbols.remove(i + 1);
+            let right = symbols.remove(i + 1);
+            symbols[i].push_str(&right);
         }
 
         for s in &symbols {
@@ -117,11 +136,12 @@ impl Tokenizer {
                 Some(&id) => out.push(id),
                 // A symbol not in the vocabulary decays to per-byte tokens.
                 None => {
+                    let mut single_buf = [0u8; 4];
                     for ch in s.chars() {
-                        let single = ch.to_string();
+                        let single: &str = ch.encode_utf8(&mut single_buf);
                         let id = self
                             .ids
-                            .get(&single)
+                            .get(single)
                             .with_context(|| format!("byte piece {single:?} missing from vocab"))?;
                         out.push(*id);
                     }
@@ -131,21 +151,21 @@ impl Tokenizer {
         Ok(())
     }
 
+    /// Append the raw decoded bytes of a single token to `bytes`.
+    #[inline]
+    pub fn append_token_bytes(&self, token: u32, bytes: &mut Vec<u8>) {
+        if let Some(pb) = self.piece_bytes.get(token as usize) {
+            bytes.extend_from_slice(pb);
+        }
+    }
+
     /// Decode ids to text. Unknown ids render as nothing rather than failing:
     /// decode is for humans, and a hole beats an abort mid-generation.
     pub fn decode(&self, tokens: &[u32]) -> String {
-        let mut bytes = Vec::new();
+        let mut bytes = Vec::with_capacity(tokens.len() * 4);
         for &t in tokens {
-            let Some(piece) = self.pieces.get(t as usize) else {
-                continue;
-            };
-            for ch in piece.chars() {
-                match self.char_to_byte.get(&ch) {
-                    Some(&b) => bytes.push(b),
-                    // Specials and anything outside the byte alphabet pass
-                    // through as UTF-8.
-                    None => bytes.extend_from_slice(ch.to_string().as_bytes()),
-                }
+            if let Some(pb) = self.piece_bytes.get(t as usize) {
+                bytes.extend_from_slice(pb);
             }
         }
         String::from_utf8_lossy(&bytes).into_owned()

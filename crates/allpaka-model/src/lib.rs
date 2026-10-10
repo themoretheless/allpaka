@@ -49,7 +49,7 @@ mod tests {
     struct FileBuilder {
         kvs: Vec<u8>,
         kv_count: u64,
-        tensors: Vec<(String, Vec<u64>, Vec<f32>)>,
+        tensors: Vec<(String, Vec<u64>, u32, Vec<u8>)>,
     }
 
     impl FileBuilder {
@@ -94,14 +94,34 @@ mod tests {
         /// dims in GGUF order: dims[0] is the contiguous (input) dimension.
         fn tensor(mut self, name: &str, dims: &[u64], data: Vec<f32>) -> Self {
             assert_eq!(dims.iter().product::<u64>(), data.len() as u64);
-            self.tensors.push((name.into(), dims.to_vec(), data));
+            let mut raw = Vec::with_capacity(data.len() * 4);
+            for v in data {
+                raw.extend_from_slice(&v.to_le_bytes());
+            }
+            self.tensors.push((name.into(), dims.to_vec(), 0u32, raw));
+            self
+        }
+
+        fn tensor_q8_0(mut self, name: &str, dims: &[u64], data: Vec<f32>) -> Self {
+            assert_eq!(dims.iter().product::<u64>(), data.len() as u64);
+            assert_eq!(data.len() % 32, 0);
+            let mut raw = Vec::with_capacity(data.len() / 32 * 34);
+            let scale_f16 = 0x211Fu16.to_le_bytes(); // ~0.01 in f16
+            for chunk in data.chunks_exact(32) {
+                raw.extend_from_slice(&scale_f16);
+                for &v in chunk {
+                    let q = (v * 100.0).round().clamp(-127.0, 127.0) as i8;
+                    raw.push(q as u8);
+                }
+            }
+            self.tensors.push((name.into(), dims.to_vec(), 8u32, raw));
             self
         }
 
         fn build(self) -> Vec<u8> {
             let mut info = Vec::new();
             let mut data = Vec::new();
-            for (name, dims, values) in &self.tensors {
+            for (name, dims, ty, raw) in &self.tensors {
                 // Each tensor starts 32-byte aligned inside the data section.
                 while data.len() % 32 != 0 {
                     data.push(0u8);
@@ -112,11 +132,9 @@ mod tests {
                 for d in dims {
                     info.extend_from_slice(&d.to_le_bytes());
                 }
-                info.extend_from_slice(&0u32.to_le_bytes()); // f32
+                info.extend_from_slice(&ty.to_le_bytes());
                 info.extend_from_slice(&(data.len() as u64).to_le_bytes());
-                for v in values {
-                    data.extend_from_slice(&v.to_le_bytes());
-                }
+                data.extend_from_slice(raw);
             }
 
             let mut out = Vec::new();
@@ -667,5 +685,93 @@ mod tests {
         for path in [clean, poison_unused, poison_used] {
             std::fs::remove_file(path).ok();
         }
+    }
+
+    #[test]
+    fn gpu_greedy_chain_matches_step_by_step_on_128_head_dim() {
+        let mut rng = Rng(12345);
+        let mut mat = |rows: u64, cols: u64| -> Vec<f32> {
+            (0..rows * cols).map(|_| rng.next_f32()).collect()
+        };
+        let hidden = 128u64;
+        let heads = 2u64;
+        let kv_heads = 1u64;
+        let head_dim = 128u64;
+        let q_dim = heads * head_dim;
+        let kv_dim = kv_heads * head_dim;
+        let ffn = 128u64;
+        let vocab = 32u64;
+        let layers = 2u64;
+
+        let mut b = FileBuilder::new()
+            .str_kv("general.architecture", "qwen3")
+            .u32_kv("qwen3.block_count", layers as u32)
+            .u32_kv("qwen3.embedding_length", hidden as u32)
+            .u32_kv("qwen3.attention.head_count", heads as u32)
+            .u32_kv("qwen3.attention.head_count_kv", kv_heads as u32)
+            .u32_kv("qwen3.attention.key_length", head_dim as u32)
+            .u32_kv("qwen3.feed_forward_length", ffn as u32)
+            .f32_kv("qwen3.attention.layer_norm_rms_epsilon", 1e-5)
+            .f32_kv("qwen3.rope.freq_base", 10000.0)
+            .tensor_q8_0("token_embd.weight", &[hidden, vocab], mat(vocab, hidden))
+            .tensor("output_norm.weight", &[hidden], vec![1.0; hidden as usize])
+            .tensor_q8_0("output.weight", &[hidden, vocab], mat(vocab, hidden));
+
+        for i in 0..layers {
+            let n = |p: &str| format!("blk.{i}.{p}.weight");
+            b = b
+                .tensor(&n("attn_norm"), &[hidden], vec![1.0; hidden as usize])
+                .tensor_q8_0(&n("attn_q"), &[hidden, q_dim], mat(q_dim, hidden))
+                .tensor_q8_0(&n("attn_k"), &[hidden, kv_dim], mat(kv_dim, hidden))
+                .tensor_q8_0(&n("attn_v"), &[hidden, kv_dim], mat(kv_dim, hidden))
+                .tensor_q8_0(&n("attn_output"), &[q_dim, hidden], mat(hidden, q_dim))
+                .tensor(&n("ffn_norm"), &[hidden], vec![1.0; hidden as usize])
+                .tensor_q8_0(&n("ffn_gate"), &[hidden, ffn], mat(ffn, hidden))
+                .tensor_q8_0(&n("ffn_up"), &[hidden, ffn], mat(ffn, hidden))
+                .tensor_q8_0(&n("ffn_down"), &[ffn, hidden], mat(hidden, ffn));
+        }
+        let mut raw = b.build();
+        while raw.len() % 16384 != 0 {
+            raw.push(0);
+        }
+        let path = write_temp("greedy-chain-128", &raw);
+        let f = GgufFile::open(&path).unwrap();
+        let model = Model::load(&f).unwrap();
+        let prompt = [1u32, 5, 12];
+
+        std::env::set_var("ALLPAKA_GREEDY_CHAIN", "0");
+        let mut s1 = model.new_session(32);
+        let logits = model.forward_batch(&prompt, &mut s1).unwrap();
+        let seed = logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, _)| i as u32)
+            .unwrap();
+        let ref_tokens = model.forward_greedy_n(seed, &mut s1, 4).unwrap();
+
+        std::env::set_var("ALLPAKA_GREEDY_CHAIN", "1");
+        let mut s2 = model.new_session(32);
+        let _ = model.forward_batch(&prompt, &mut s2).unwrap();
+        let gpu_before = allpaka_backend::gpu::stats();
+        let before = allpaka_backend::gpu::decode_path_stats();
+        let chain_tokens = model.forward_greedy_n(seed, &mut s2, 4).unwrap();
+        let after = allpaka_backend::gpu::decode_path_stats();
+        let gpu_after = allpaka_backend::gpu::stats();
+        let waits = gpu_after.0 - gpu_before.0;
+
+        assert_eq!(ref_tokens, chain_tokens, "greedy chain diverged from step-by-step");
+        #[cfg(target_os = "macos")]
+        {
+            assert!(
+                allpaka_backend::gpu::is_attached(),
+                "Metal GPU should be attached and shader library compiled cleanly"
+            );
+            assert_eq!(after.attempts - before.attempts, 4);
+            assert_eq!(after.successes - before.successes, 4);
+            assert_eq!(after.declines - before.declines, 0);
+            assert_eq!(waits, 2, "expected 1 wait for seed + 1 wait for 3-token continuation chain");
+        }
+        std::fs::remove_file(path).ok();
     }
 }

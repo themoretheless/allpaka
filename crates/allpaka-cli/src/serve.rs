@@ -349,8 +349,11 @@ fn run_inference(
     }
 
     let t1 = std::time::Instant::now();
-    let mut generated = Vec::new();
-    let mut emitted = String::new();
+    let mut generated = Vec::with_capacity(max_tokens);
+    let mut raw_bytes = Vec::with_capacity(max_tokens * 4);
+    let mut complete_buf = String::with_capacity(if streaming { max_tokens * 4 } else { 0 });
+    let mut decoded_bytes = 0usize;
+    let mut emitted_len = 0usize;
     let mut finish = "length";
     let mut greedy_next: Option<u32> = None;
     crate::airbug::span("decode", || -> Result<()> {
@@ -365,24 +368,50 @@ fn run_inference(
                 break;
             }
             generated.push(next);
+            tok.append_token_bytes(next, &mut raw_bytes);
             if streaming {
-                let full = tok.decode(&generated);
-                let complete = full.strip_suffix('\u{FFFD}').unwrap_or(&full);
-                let complete = if parse_tools {
-                    &complete[..stream_safe_len(complete)]
-                } else {
-                    complete
-                };
-                if let Some(delta) = complete.strip_prefix(emitted.as_str()) {
-                    if !delta.is_empty() {
-                        let chunk = json!({
-                            "object": "chat.completion.chunk",
-                            "choices": [{"index": 0, "delta": {"content": delta}}],
-                            "tokens_generated": generated.len(),
-                        });
-                        write_sse_event(stream.as_mut().unwrap(), &chunk)?;
-                        emitted = complete.to_string();
+                match std::str::from_utf8(&raw_bytes[decoded_bytes..]) {
+                    Ok(valid) => {
+                        complete_buf.push_str(valid);
+                        decoded_bytes = raw_bytes.len();
                     }
+                    Err(e) if e.error_len().is_none() => {
+                        let valid_len = e.valid_up_to();
+                        if valid_len > 0 {
+                            let valid = std::str::from_utf8(
+                                &raw_bytes[decoded_bytes..decoded_bytes + valid_len],
+                            )
+                            .unwrap_or("");
+                            complete_buf.push_str(valid);
+                            decoded_bytes += valid_len;
+                        }
+                    }
+                    Err(_) => {
+                        let full = String::from_utf8_lossy(&raw_bytes);
+                        let trimmed = full.strip_suffix('\u{FFFD}').unwrap_or(&full);
+                        complete_buf.clear();
+                        complete_buf.push_str(trimmed);
+                        decoded_bytes = if full.ends_with('\u{FFFD}') {
+                            raw_bytes.len().saturating_sub(1)
+                        } else {
+                            raw_bytes.len()
+                        };
+                    }
+                }
+                let complete = if parse_tools {
+                    &complete_buf[..stream_safe_len(&complete_buf)]
+                } else {
+                    complete_buf.as_str()
+                };
+                if complete.len() > emitted_len {
+                    let delta = &complete[emitted_len..];
+                    let chunk = json!({
+                        "object": "chat.completion.chunk",
+                        "choices": [{"index": 0, "delta": {"content": delta}}],
+                        "tokens_generated": generated.len(),
+                    });
+                    write_sse_event(stream.as_mut().unwrap(), &chunk)?;
+                    emitted_len = complete.len();
                 }
             }
             if greedy {
@@ -396,7 +425,7 @@ fn run_inference(
     })?;
     let decode_secs = t1.elapsed().as_secs_f64();
 
-    let text = format!("{think_prefix}{}", tok.decode(&generated));
+    let text = format!("{think_prefix}{}", String::from_utf8_lossy(&raw_bytes));
     let (content, tool_calls) = if parse_tools {
         parse_tool_calls(&text)
     } else {
@@ -445,8 +474,8 @@ fn run_inference(
     );
 
     if streaming {
-        // `emitted` tracks the body only; the think prefix went out first.
-        if let Some(delta) = content[think_prefix.len()..].strip_prefix(emitted.as_str()) {
+        // `complete_buf[..emitted_len]` tracks the body only; the think prefix went out first.
+        if let Some(delta) = content[think_prefix.len()..].strip_prefix(&complete_buf[..emitted_len]) {
             if !delta.is_empty() {
                 write_sse_event(
                     stream.as_mut().unwrap(),
