@@ -19,7 +19,12 @@ pub fn list_models() -> Vec<Value> {
     for root in catalog_roots() {
         walk(&root, &mut found, 0);
     }
-    found.sort_by(|a, b| a["path"].as_str().unwrap_or("").cmp(b["path"].as_str().unwrap_or("")));
+    found.sort_by(|a, b| {
+        a["path"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["path"].as_str().unwrap_or(""))
+    });
     found.dedup_by(|a, b| a["path"] == b["path"]);
     found.sort_by(|a, b| {
         a["name"]
@@ -37,7 +42,10 @@ pub fn schedule(path: &str, bind: &str) -> Result<()> {
     } else {
         bind
     };
-    if bind.chars().any(|c| c.is_whitespace() || "&|<>".contains(c)) {
+    if bind
+        .chars()
+        .any(|c| c.is_whitespace() || "&|<>".contains(c))
+    {
         bail!("refusing bind address {bind}");
     }
     let exe = std::env::current_exe().context("locating allpaka.exe")?;
@@ -47,7 +55,9 @@ pub fn schedule(path: &str, bind: &str) -> Result<()> {
     let cuda_line = if cuda.is_empty() {
         String::new()
     } else {
-        format!("set CUDA_PATH={cuda}\r\nset PATH=%CUDA_PATH%\\bin\\x64;%CUDA_PATH%\\bin;%PATH%\r\n")
+        format!(
+            "set CUDA_PATH={cuda}\r\nset PATH=%CUDA_PATH%\\bin\\x64;%CUDA_PATH%\\bin;%PATH%\r\n"
+        )
     };
     let script = format!(
         "@echo off\r\n{cuda_line}ping -n 4 127.0.0.1 >nul\r\necho ===== relaunch %DATE% %TIME% =====>> \"{}\"\r\n\"{}\" serve --bind {bind} --model \"{}\" >> \"{}\" 2>&1\r\n",
@@ -62,7 +72,11 @@ pub fn schedule(path: &str, bind: &str) -> Result<()> {
 }
 
 fn check_model_path(path: &str) -> Result<PathBuf> {
-    if path.is_empty() || path.chars().any(|c| c == '"' || c == '\n' || c == '\r' || "&|<>".contains(c)) {
+    if path.is_empty()
+        || path
+            .chars()
+            .any(|c| c == '"' || c == '\n' || c == '\r' || "&|<>".contains(c))
+    {
         bail!("model path is empty or not safe to relaunch");
     }
     let model = PathBuf::from(path);

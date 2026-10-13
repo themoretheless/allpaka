@@ -36,7 +36,12 @@ pub fn gauge(name: &'static str, value: f64) {
     imp::gauge(name, value);
 }
 
-pub fn save_run(prefill_tok_s: f64, prefill_tokens: usize, decode_tok_s: f64, decode_tokens: usize) {
+pub fn save_run(
+    prefill_tok_s: f64,
+    prefill_tokens: usize,
+    decode_tok_s: f64,
+    decode_tokens: usize,
+) {
     imp::save_run(prefill_tok_s, prefill_tokens, decode_tok_s, decode_tokens);
 }
 
@@ -141,8 +146,7 @@ mod imp {
         }
         let mut run = Run::new();
         run.status = Status::Complete;
-        run.provenance
-            .insert("tool".into(), "allpaka".into());
+        run.provenance.insert("tool".into(), "allpaka".into());
         run.cases.push(Case {
             id: "engine".into(),
             contract: BTreeMap::new(),
@@ -160,7 +164,8 @@ mod imp {
         ));
         run.observations
             .push(rate_obs("decode_tok_s", decode_tok_s, decode_tokens, pid));
-        let dir = std::path::PathBuf::from("target/allpaka-bench").join(format!("airbug-{}", run.id));
+        let dir =
+            std::path::PathBuf::from("target/allpaka-bench").join(format!("airbug-{}", run.id));
         match run.save_new(&dir) {
             Ok(()) => eprintln!("airbug bench run: {}", dir.display()),
             Err(e) => eprintln!("airbug bench run: {e}"),

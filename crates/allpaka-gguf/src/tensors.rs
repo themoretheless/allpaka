@@ -342,7 +342,11 @@ pub fn fingerprint(path: &Path) -> Result<String> {
             bail!("GGUF part changed while computing identity");
         }
     }
-    Ok(digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 /// Expand a possibly-split GGUF path (`name-00001-of-00002.gguf`) into every

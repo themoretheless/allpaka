@@ -55,7 +55,14 @@ fn bench_shape(region: &[u8], ty: GgmlType, n_out: usize, n_in: usize, label: &s
     );
 }
 
-fn bench_indexed(region: &[u8], ty: GgmlType, n_out: usize, n_in: usize, slots: usize, label: &str) {
+fn bench_indexed(
+    region: &[u8],
+    ty: GgmlType,
+    n_out: usize,
+    n_in: usize,
+    slots: usize,
+    label: &str,
+) {
     let expert = n_out * block_bytes(ty, n_in);
     let need = expert * slots;
     if region.len() < need {

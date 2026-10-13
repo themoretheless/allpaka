@@ -12,34 +12,42 @@ mod integration_tests {
     /// Create a minimal valid safetensors file with Q4Affine-like structure.
     fn create_test_safetensors() -> tempfile::TempDir {
         let dir = tempdir().unwrap();
-        
+
         // Build header with two tensors: one q4 block + some f32 data
         let mut header_json = serde_json::Map::new();
-        header_json.insert("__metadata__".to_string(), 
-            serde_json::json!({"total_byte_size": 100}));
-        
+        header_json.insert(
+            "__metadata__".to_string(),
+            serde_json::json!({"total_byte_size": 100}),
+        );
+
         // Tensor 1: 64 bytes of fake q4 data (one block)
-        header_json.insert("q4_block".to_string(), serde_json::json!({
-            "dtype": "Q4_AFFINE",
-            "shape": [64],
-            "data_offsets": [0, 68]
-        }));
-        
+        header_json.insert(
+            "q4_block".to_string(),
+            serde_json::json!({
+                "dtype": "Q4_AFFINE",
+                "shape": [64],
+                "data_offsets": [0, 68]
+            }),
+        );
+
         // Tensor 2: 4 f32 values
-        header_json.insert("weights.f32".to_string(), serde_json::json!({
-            "dtype": "BFLOAT16",
-            "shape": [4],
-            "data_offsets": [68, 72]
-        }));
-        
+        header_json.insert(
+            "weights.f32".to_string(),
+            serde_json::json!({
+                "dtype": "BFLOAT16",
+                "shape": [4],
+                "data_offsets": [68, 72]
+            }),
+        );
+
         let header = serde_json::to_string(&header_json).unwrap();
         let header_bytes: Vec<u8> = header.into_bytes();
-        
+
         // Pad to 32-byte alignment
         let total_header_len = 8 + header_bytes.len();
-        let padded_hdr = ((total_header_len + 31) / 32) * 32;
+        let padded_hdr = total_header_len.div_ceil(32) * 32;
         let padding = vec![0u8; padded_hdr - total_header_len];
-        
+
         let mut data = Vec::new();
         // Size prefix
         data.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
@@ -50,15 +58,27 @@ mod integration_tests {
         // Fake tensor data
         data.extend_from_slice(&[0u8; 68]); // q4 block
         data.extend_from_slice(&[0u16.to_le_bytes()[0], 0x3f, 0x00, 0x00]); // bf16 scale/bias
-        
+
         // Write to file
         let path = dir.path().join("model.safetensors");
         fs::write(&path, &data).unwrap();
-        
+
         dir
     }
 
     #[test]
+    fn test_load_safetensors_container() {
+        let dir = create_test_safetensors();
+        let container = allpaka_mlx::load_safetensors(dir.path()).unwrap();
+        assert_eq!(container.len(), 2);
+        assert!(!container.is_empty());
+        let q4 = container
+            .tensor_by_name("0/model.safetensors/q4_block")
+            .unwrap();
+        assert_eq!(q4.bytes, 68);
+        let raw = allpaka_mlx::tensor_data(&container, q4).unwrap();
+        assert_eq!(raw.len(), 68);
+    }
 
     #[test]
     fn test_q4_dequant_zero_block() {
@@ -67,10 +87,10 @@ mod integration_tests {
         block[32..34].copy_from_slice(&0x3f80u16.to_le_bytes());
         block[34..36].copy_from_slice(&0u16.to_le_bytes());
         // All nibbles are 0
-        
+
         let mut out = Vec::with_capacity(64);
         allpaka_mlx::dequant_mlx_q4_block(&block, &mut out);
-        
+
         assert_eq!(out.len(), 64);
         for v in out.iter() {
             assert_eq!(*v, 0.0);
@@ -81,23 +101,19 @@ mod integration_tests {
     fn test_q8_dequant_uniform_block() {
         let mut block = [0u8; 68];
         block[64..66].copy_from_slice(&0x3f80u16.to_le_bytes()); // scale=1.0
-        block[66..68].copy_from_slice(&0u16.to_le_bytes());     // bias=0.0
-        
+        block[66..68].copy_from_slice(&0u16.to_le_bytes()); // bias=0.0
+
         // Set all bytes to 128
-        for i in 0..64 {
-            block[i] = 128u8;
-        }
-        
+        block[..64].fill(128u8);
+
         let mut out = Vec::with_capacity(64);
         allpaka_mlx::dequant_mlx_q8_block(&block, &mut out);
-        
+
         assert_eq!(out.len(), 64);
         for v in out.iter() {
             assert_eq!(*v, 128.0);
         }
     }
-
-    #[test]
 
     #[test]
     fn test_shape_flattening_for_matmul() {
@@ -106,7 +122,7 @@ mod integration_tests {
         let (n_out, n_in) = allpaka_mlx::flatten_for_matmul(&shape_2d);
         assert_eq!(n_out, 256);
         assert_eq!(n_in, 64);
-        
+
         let shape_3d_expert = vec![8, 2048, 512]; // [expert_count, intermediate, hidden]
         let (n_out, n_in) = allpaka_mlx::flatten_for_matmul(&shape_3d_expert);
         assert_eq!(n_out, 2048 * 512);
@@ -123,7 +139,7 @@ mod integration_tests {
             offset: 0,
             bytes: 4,
         };
-        
+
         assert_eq!(info.name, "scalar");
         assert!(info.shape.is_empty());
         assert_eq!(info.bytes, 4);

@@ -18,7 +18,11 @@ use tokio::{
 
 const OUTPUT_LIMIT: usize = 128 * 1024;
 fn timestamp_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
 }
 struct ProcessGroup(u32);
 impl Drop for ProcessGroup {
@@ -60,24 +64,45 @@ struct Snapshot {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Record { schema_version:u32, owner:String, snapshot:Snapshot }
+struct Record {
+    schema_version: u32,
+    owner: String,
+    snapshot: Snapshot,
+}
 impl Task {
-    fn persist(&self, phase:&str)->Result<()> {
-        if let Some(root)=&self.storage {
-            let record=Record{schema_version:1,owner:self.owner.clone(),snapshot:self.state.lock().unwrap().clone()};
-            if !std::fs::symlink_metadata(root.as_ref())?.is_dir() {bail!("Invalid background storage");}
-            let path=root.join(format!("{}.{}.json",record.snapshot.id,phase));
-            let bytes=serde_json::to_vec(&record)?;
-            if bytes.len()>2*1024*1024 {bail!("Oversize background receipt");}
-            let temp=root.join(format!(".{}.tmp",crate::evaluation::new_id()));
-            let result=(||->Result<()> {
+    fn persist(&self, phase: &str) -> Result<()> {
+        if let Some(root) = &self.storage {
+            let record = Record {
+                schema_version: 1,
+                owner: self.owner.clone(),
+                snapshot: self.state.lock().unwrap().clone(),
+            };
+            if !std::fs::symlink_metadata(root.as_ref())?.is_dir() {
+                bail!("Invalid background storage");
+            }
+            let path = root.join(format!("{}.{}.json", record.snapshot.id, phase));
+            let bytes = serde_json::to_vec(&record)?;
+            if bytes.len() > 2 * 1024 * 1024 {
+                bail!("Oversize background receipt");
+            }
+            let temp = root.join(format!(".{}.tmp", crate::evaluation::new_id()));
+            let result = (|| -> Result<()> {
                 use std::io::Write;
-                let mut options=std::fs::OpenOptions::new();options.write(true).create_new(true);
-                #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
-                let mut file=options.open(&temp)?;file.write_all(&bytes)?;file.sync_all()?;
-                std::fs::hard_link(&temp,&path)?;Ok(())
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                let mut file = options.open(&temp)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+                std::fs::hard_link(&temp, &path)?;
+                Ok(())
             })();
-            let _=std::fs::remove_file(temp);result?;
+            let _ = std::fs::remove_file(temp);
+            result?;
         }
         Ok(())
     }
@@ -88,39 +113,146 @@ impl Task {
         self.events.send_modify(|v| *v = v.wrapping_add(1));
     }
     fn terminal(&self) -> bool {
-        let state=self.state.lock().unwrap();
-        state.status!="running" && (state.status=="interrupted"||self.storage.as_ref().is_none_or(|root|root.join(format!("{}.done.json",state.id)).is_file())||state.error.as_deref()==Some("receipt_storage_error"))
+        let state = self.state.lock().unwrap();
+        state.status != "running"
+            && (state.status == "interrupted"
+                || self
+                    .storage
+                    .as_ref()
+                    .is_none_or(|root| root.join(format!("{}.done.json", state.id)).is_file())
+                || state.error.as_deref() == Some("receipt_storage_error"))
     }
 }
 impl Manager {
-    pub(crate) fn open(data:&Path)->Result<Self> {
+    pub(crate) fn open(data: &Path) -> Result<Self> {
         use std::io::Read;
-        let root=data.join("background-tasks");std::fs::create_dir_all(&root)?;
-        if !std::fs::symlink_metadata(&root)?.is_dir() {bail!("Invalid background storage");}
-        let manager=Self(Default::default(),Some(Arc::new(root.clone())));
-        let mut records:HashMap<String,Record>=HashMap::new();let mut files=0;
-        for entry in std::fs::read_dir(&root)? {
-            let entry=entry?;let name=entry.file_name().to_string_lossy().to_string();
-            if !name.ends_with(".start.json")&&!name.ends_with(".done.json") {continue;}
-            files+=1;if files>256||!entry.file_type()?.is_file()||entry.metadata()?.len()>2*1024*1024 {bail!("Invalid background receipt bounds");}
-            let mut bytes=Vec::new();std::fs::File::open(entry.path())?.take(2*1024*1024+1).read_to_end(&mut bytes)?;
-            if bytes.len()>2*1024*1024 {bail!("Oversize background receipt");}
-            let record:Record=serde_json::from_value(crate::strict_json::parse(std::str::from_utf8(&bytes)?)?)?;
-            let state=&record.snapshot;
-            let phase=if name.ends_with(".done.json"){"done"}else{"start"};
-            if record.schema_version!=1||record.owner.is_empty()||record.owner.len()>200||state.id.is_empty()||state.id.len()>100||!state.id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-')||name!=format!("{}.{}.json",state.id,phase)||state.stdout.len()>OUTPUT_LIMIT*3||state.stderr.len()>OUTPUT_LIMIT*3 {bail!("Invalid background receipt identity");}
-            if (phase=="start"&&state.status!="running")||(phase=="done"&&!matches!(state.status.as_str(),"completed"|"failed"|"cancelled"|"timed_out")) {bail!("Invalid background receipt status");}
-            if state.name.as_ref().is_some_and(|name|name.trim().is_empty()||name.len()>200)||state.signal.is_some_and(|signal|signal<=0||signal>128||state.exit_code.is_some())||state.started_ms==0||state.error.as_ref().is_some_and(|error|error.len()>2000) {bail!("Invalid background receipt metadata");}
-            if phase=="start"&&(state.finished_ms.is_some()||state.duration_ms.is_some()||state.exit_code.is_some()||state.signal.is_some()||state.error.is_some()||!state.stdout.is_empty()||!state.stderr.is_empty()||state.stdout_truncated||state.stderr_truncated) {bail!("Invalid background start receipt");}
-            if phase=="done"&&(state.finished_ms.is_none()||state.duration_ms.is_none()||(state.status=="completed"&&(state.exit_code!=Some(0)||state.error.is_some()))||(state.status=="failed"&&state.exit_code==Some(0))) {bail!("Invalid background terminal receipt");}
-            if let Some(previous)=records.get(&state.id) {if previous.owner!=record.owner||previous.snapshot.started_ms!=state.started_ms||previous.snapshot.name!=state.name {bail!("Background receipt pair differs");}}
-            if phase=="done"||!records.contains_key(&state.id){records.insert(state.id.clone(),record);}
+        let root = data.join("background-tasks");
+        std::fs::create_dir_all(&root)?;
+        if !std::fs::symlink_metadata(&root)?.is_dir() {
+            bail!("Invalid background storage");
         }
-        for (_,mut record) in records {
-            if record.snapshot.status=="running" {record.snapshot.status="interrupted".into();record.snapshot.exit_code=None;record.snapshot.finished_ms=None;record.snapshot.duration_ms=None;record.snapshot.error=Some("server_restart".into());}
-            let (events,_)=watch::channel(0);
-            let id=record.snapshot.id.clone();
-            manager.0.lock().unwrap().insert(id,Arc::new(Task{storage:manager.1.clone(),started:Instant::now(),owner:record.owner,state:Mutex::new(record.snapshot),cancel:Mutex::new(None),events}));
+        let manager = Self(Default::default(), Some(Arc::new(root.clone())));
+        let mut records: HashMap<String, Record> = HashMap::new();
+        let mut files = 0;
+        for entry in std::fs::read_dir(&root)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".start.json") && !name.ends_with(".done.json") {
+                continue;
+            }
+            files += 1;
+            if files > 256
+                || !entry.file_type()?.is_file()
+                || entry.metadata()?.len() > 2 * 1024 * 1024
+            {
+                bail!("Invalid background receipt bounds");
+            }
+            let mut bytes = Vec::new();
+            std::fs::File::open(entry.path())?
+                .take(2 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 2 * 1024 * 1024 {
+                bail!("Oversize background receipt");
+            }
+            let record: Record =
+                serde_json::from_value(crate::strict_json::parse(std::str::from_utf8(&bytes)?)?)?;
+            let state = &record.snapshot;
+            let phase = if name.ends_with(".done.json") {
+                "done"
+            } else {
+                "start"
+            };
+            if record.schema_version != 1
+                || record.owner.is_empty()
+                || record.owner.len() > 200
+                || state.id.is_empty()
+                || state.id.len() > 100
+                || !state
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                || name != format!("{}.{}.json", state.id, phase)
+                || state.stdout.len() > OUTPUT_LIMIT * 3
+                || state.stderr.len() > OUTPUT_LIMIT * 3
+            {
+                bail!("Invalid background receipt identity");
+            }
+            if (phase == "start" && state.status != "running")
+                || (phase == "done"
+                    && !matches!(
+                        state.status.as_str(),
+                        "completed" | "failed" | "cancelled" | "timed_out"
+                    ))
+            {
+                bail!("Invalid background receipt status");
+            }
+            if state
+                .name
+                .as_ref()
+                .is_some_and(|name| name.trim().is_empty() || name.len() > 200)
+                || state
+                    .signal
+                    .is_some_and(|signal| signal <= 0 || signal > 128 || state.exit_code.is_some())
+                || state.started_ms == 0
+                || state.error.as_ref().is_some_and(|error| error.len() > 2000)
+            {
+                bail!("Invalid background receipt metadata");
+            }
+            if phase == "start"
+                && (state.finished_ms.is_some()
+                    || state.duration_ms.is_some()
+                    || state.exit_code.is_some()
+                    || state.signal.is_some()
+                    || state.error.is_some()
+                    || !state.stdout.is_empty()
+                    || !state.stderr.is_empty()
+                    || state.stdout_truncated
+                    || state.stderr_truncated)
+            {
+                bail!("Invalid background start receipt");
+            }
+            if phase == "done"
+                && (state.finished_ms.is_none()
+                    || state.duration_ms.is_none()
+                    || (state.status == "completed"
+                        && (state.exit_code != Some(0) || state.error.is_some()))
+                    || (state.status == "failed" && state.exit_code == Some(0)))
+            {
+                bail!("Invalid background terminal receipt");
+            }
+            if let Some(previous) = records.get(&state.id) {
+                if previous.owner != record.owner
+                    || previous.snapshot.started_ms != state.started_ms
+                    || previous.snapshot.name != state.name
+                {
+                    bail!("Background receipt pair differs");
+                }
+            }
+            if phase == "done" || !records.contains_key(&state.id) {
+                records.insert(state.id.clone(), record);
+            }
+        }
+        for (_, mut record) in records {
+            if record.snapshot.status == "running" {
+                record.snapshot.status = "interrupted".into();
+                record.snapshot.exit_code = None;
+                record.snapshot.finished_ms = None;
+                record.snapshot.duration_ms = None;
+                record.snapshot.error = Some("server_restart".into());
+            }
+            let (events, _) = watch::channel(0);
+            let id = record.snapshot.id.clone();
+            manager.0.lock().unwrap().insert(
+                id,
+                Arc::new(Task {
+                    storage: manager.1.clone(),
+                    started: Instant::now(),
+                    owner: record.owner,
+                    state: Mutex::new(record.snapshot),
+                    cancel: Mutex::new(None),
+                    events,
+                }),
+            );
         }
         Ok(manager)
     }
@@ -153,11 +285,17 @@ impl Manager {
             })
             .collect();
         rows.sort_by_key(|v| v["id"].as_str().unwrap_or("").to_owned());
-        let mut status_counts=std::collections::BTreeMap::<String,usize>::new();
-        let mut known_duration_ms=0u64;let mut unknown_duration_count=0usize;
+        let mut status_counts = std::collections::BTreeMap::<String, usize>::new();
+        let mut known_duration_ms = 0u64;
+        let mut unknown_duration_count = 0usize;
         for row in &rows {
-            *status_counts.entry(row["status"].as_str().unwrap_or("unknown").to_owned()).or_default()+=1;
-            match row["duration_ms"].as_u64(){Some(value)=>known_duration_ms=known_duration_ms.saturating_add(value),None=>unknown_duration_count+=1}
+            *status_counts
+                .entry(row["status"].as_str().unwrap_or("unknown").to_owned())
+                .or_default() += 1;
+            match row["duration_ms"].as_u64() {
+                Some(value) => known_duration_ms = known_duration_ms.saturating_add(value),
+                None => unknown_duration_count += 1,
+            }
         }
         json!({"tasks":rows,"persistent":self.1.is_some(),"automatic_replay":false,"summary":{"status_counts":status_counts,"known_duration_ms":known_duration_ms,"unknown_duration_count":unknown_duration_count,"duration_semantics":"sum_task_elapsed"}})
     }
@@ -166,17 +304,26 @@ impl Manager {
             "start" => self.start(owner, cwd, args),
             "list" => Ok(self.list(owner)),
             "export" => {
-                let include_outputs=match args.get("include_outputs"){None=>false,Some(value)=>value.as_bool().context("include_outputs must be boolean")?};
-                let tasks=self.0.lock().unwrap();let mut rows=Vec::new();
-                for task in tasks.values().filter(|task|task.owner==owner){
-                    let state=task.state.lock().unwrap();
-                    let mut row=json!({"id":state.id,"name":state.name,"status":state.status,"started_ms":state.started_ms,"finished_ms":state.finished_ms,"duration_ms":state.duration_ms,"exit_code":state.exit_code,"signal":state.signal,"has_error":state.error.is_some(),"stdout_bytes":state.stdout.len(),"stderr_bytes":state.stderr.len(),"stdout_truncated":state.stdout_truncated,"stderr_truncated":state.stderr_truncated});
-                    if include_outputs{row["stdout"]=json!(state.stdout);row["stderr"]=json!(state.stderr);}
+                let include_outputs = match args.get("include_outputs") {
+                    None => false,
+                    Some(value) => value.as_bool().context("include_outputs must be boolean")?,
+                };
+                let tasks = self.0.lock().unwrap();
+                let mut rows = Vec::new();
+                for task in tasks.values().filter(|task| task.owner == owner) {
+                    let state = task.state.lock().unwrap();
+                    let mut row = json!({"id":state.id,"name":state.name,"status":state.status,"started_ms":state.started_ms,"finished_ms":state.finished_ms,"duration_ms":state.duration_ms,"exit_code":state.exit_code,"signal":state.signal,"has_error":state.error.is_some(),"stdout_bytes":state.stdout.len(),"stderr_bytes":state.stderr.len(),"stdout_truncated":state.stdout_truncated,"stderr_truncated":state.stderr_truncated});
+                    if include_outputs {
+                        row["stdout"] = json!(state.stdout);
+                        row["stderr"] = json!(state.stderr);
+                    }
                     rows.push(row);
                 }
-                rows.sort_by(|a,b|a["id"].as_str().cmp(&b["id"].as_str()));
-                let packet=json!({"kind":"background_export","schema_version":1,"session_id":owner,"tasks":rows,"outputs_included":include_outputs,"automatic_replay":false});
-                if serde_json::to_vec(&packet)?.len()>8*1024*1024 {bail!("Background export exceeds 8 MiB");}
+                rows.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+                let packet = json!({"kind":"background_export","schema_version":1,"session_id":owner,"tasks":rows,"outputs_included":include_outputs,"automatic_replay":false});
+                if serde_json::to_vec(&packet)?.len() > 8 * 1024 * 1024 {
+                    bail!("Background export exceeds 8 MiB");
+                }
                 Ok(packet)
             }
             "status" | "output" => Ok(self
@@ -200,16 +347,39 @@ impl Manager {
             }
             "cleanup" => {
                 let mut tasks = self.0.lock().unwrap();
-                let selected=args.get("task_id").map(|value|value.as_str().context("task_id must be a string")).transpose()?;
-                if let Some(id)=selected {
-                    let task=tasks.get(id).filter(|task|task.owner==owner).context("Background task not found in this conversation")?;
-                    if !task.terminal(){bail!("Only terminal background receipts can be removed");}
+                let selected = args
+                    .get("task_id")
+                    .map(|value| value.as_str().context("task_id must be a string"))
+                    .transpose()?;
+                if let Some(id) = selected {
+                    let task = tasks
+                        .get(id)
+                        .filter(|task| task.owner == owner)
+                        .context("Background task not found in this conversation")?;
+                    if !task.terminal() {
+                        bail!("Only terminal background receipts can be removed");
+                    }
                 }
                 let before = tasks.len();
-                let removed_ids:std::collections::HashSet<_>=tasks.iter().filter(|(id,t)|t.owner==owner&&t.terminal()&&selected.is_none_or(|selected|selected==id.as_str())).map(|(id,_)|id.clone()).collect();
-                if let Some(root)=&self.1 {
+                let removed_ids: std::collections::HashSet<_> = tasks
+                    .iter()
+                    .filter(|(id, t)| {
+                        t.owner == owner
+                            && t.terminal()
+                            && selected.is_none_or(|selected| selected == id.as_str())
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                if let Some(root) = &self.1 {
                     for id in &removed_ids {
-                        for phase in ["done","start"] {let path=root.join(format!("{id}.{phase}.json"));match std::fs::remove_file(path){Ok(())=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.into())}}
+                        for phase in ["done", "start"] {
+                            let path = root.join(format!("{id}.{phase}.json"));
+                            match std::fs::remove_file(path) {
+                                Ok(()) => {}
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(e) => return Err(e.into()),
+                            }
+                        }
                     }
                 }
                 tasks.retain(|id, _| !removed_ids.contains(id));
@@ -220,10 +390,24 @@ impl Manager {
         }
     }
     fn start(&self, owner: &str, cwd: &Path, args: &Value) -> Result<Value> {
-        if let Some(follow_up)=args.get("follow_up") {
-            if !follow_up.as_str().is_some_and(|text|!text.trim().is_empty()&&text.len()<=16000) {bail!("follow_up must contain 1-16000 bytes");}
+        if let Some(follow_up) = args.get("follow_up") {
+            if !follow_up
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty() && text.len() <= 16000)
+            {
+                bail!("follow_up must contain 1-16000 bytes");
+            }
         }
-        let name=args.get("name").map(|value|value.as_str().filter(|name|!name.trim().is_empty()&&name.len()<=200).map(str::to_owned).context("name must contain 1-200 bytes")).transpose()?;
+        let name = args
+            .get("name")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|name| !name.trim().is_empty() && name.len() <= 200)
+                    .map(str::to_owned)
+                    .context("name must contain 1-200 bytes")
+            })
+            .transpose()?;
         let command = args["command"].as_str().context("command is required")?;
         if command.trim().is_empty() || command.len() > 16_000 {
             bail!("command must contain 1–16000 bytes");
@@ -328,7 +512,8 @@ impl Manager {
             {
                 let mut state = task.state.lock().unwrap();
                 state.finished_ms = Some(timestamp_ms());
-                state.duration_ms = Some(task.started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+                state.duration_ms =
+                    Some(task.started.elapsed().as_millis().min(u64::MAX as u128) as u64);
                 state.status = reason
                     .unwrap_or(if result.as_ref().is_ok_and(|s| s.success()) {
                         "completed"
@@ -337,14 +522,21 @@ impl Manager {
                     })
                     .into();
                 match result {
-                    Ok(s) => {state.exit_code = s.code();
-                        #[cfg(unix)] {use std::os::unix::process::ExitStatusExt;state.signal=s.signal();}
-                    },
+                    Ok(s) => {
+                        state.exit_code = s.code();
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::process::ExitStatusExt;
+                            state.signal = s.signal();
+                        }
+                    }
                     Err(e) => state.error = Some(e.to_string()),
                 }
             }
             task.cancel.lock().unwrap().take();
-            if task.persist("done").is_err() {task.state.lock().unwrap().error=Some("receipt_storage_error".into());}
+            if task.persist("done").is_err() {
+                task.state.lock().unwrap().error = Some("receipt_storage_error".into());
+            }
             task.changed();
         });
         Ok(output)
@@ -492,76 +684,240 @@ mod tests {
     }
     #[tokio::test]
     async fn persistent_receipts_recover_finished_output_and_interrupt_orphans_without_replay() {
-        let directory=std::env::temp_dir().join(format!("allpaka-bg-{}",crate::evaluation::new_id()));
-        let manager=Manager::open(&directory).unwrap();
-        let running=manager.execute("owner",Path::new("/tmp"),&json!({"action":"start","command":"printf retained","name":"Сборка"})).await.unwrap();
-        let id=running["id"].as_str().unwrap();
-        let done=finish(&manager,"owner",id).await;
-        assert_eq!(done["stdout"],"retained");assert_eq!(done["name"],"Сборка");
-        {use std::os::unix::fs::PermissionsExt;assert_eq!(std::fs::metadata(directory.join(format!("background-tasks/{id}.done.json"))).unwrap().permissions().mode()&0o777,0o600);}
+        let directory =
+            std::env::temp_dir().join(format!("allpaka-bg-{}", crate::evaluation::new_id()));
+        let manager = Manager::open(&directory).unwrap();
+        let running = manager
+            .execute(
+                "owner",
+                Path::new("/tmp"),
+                &json!({"action":"start","command":"printf retained","name":"Сборка"}),
+            )
+            .await
+            .unwrap();
+        let id = running["id"].as_str().unwrap();
+        let done = finish(&manager, "owner", id).await;
+        assert_eq!(done["stdout"], "retained");
+        assert_eq!(done["name"], "Сборка");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(directory.join(format!("background-tasks/{id}.done.json")))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
 
-        let receipt_path=directory.join(format!("background-tasks/{id}.done.json"));
-        let original=std::fs::read(&receipt_path).unwrap();
-        let saved:Value=serde_json::from_slice(&original).unwrap();
-        for (field,value) in [("owner",json!("different")),("started_ms",json!(0)),("duration_ms",Value::Null),("exit_code",json!(7)),("name",json!("x".repeat(201)))] {
-            let mut corrupt=saved.clone();if field=="owner" {corrupt[field]=value;}else{corrupt["snapshot"][field]=value;}
-            std::fs::write(&receipt_path,serde_json::to_vec(&corrupt).unwrap()).unwrap();
+        let receipt_path = directory.join(format!("background-tasks/{id}.done.json"));
+        let original = std::fs::read(&receipt_path).unwrap();
+        let saved: Value = serde_json::from_slice(&original).unwrap();
+        for (field, value) in [
+            ("owner", json!("different")),
+            ("started_ms", json!(0)),
+            ("duration_ms", Value::Null),
+            ("exit_code", json!(7)),
+            ("name", json!("x".repeat(201))),
+        ] {
+            let mut corrupt = saved.clone();
+            if field == "owner" {
+                corrupt[field] = value;
+            } else {
+                corrupt["snapshot"][field] = value;
+            }
+            std::fs::write(&receipt_path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
             assert!(Manager::open(&directory).is_err());
         }
-        std::fs::write(&receipt_path,&original).unwrap();
-        let start_path=directory.join(format!("background-tasks/{id}.start.json"));
-        let start_original=std::fs::read(&start_path).unwrap();
-        for path in [&start_path,&receipt_path]{let mut legacy:Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();legacy["snapshot"].as_object_mut().unwrap().remove("name");legacy["snapshot"].as_object_mut().unwrap().remove("signal");std::fs::write(path,serde_json::to_vec(&legacy).unwrap()).unwrap();}
-        let legacy=Manager::open(&directory).unwrap().get("owner",id).unwrap().snapshot();assert!(legacy["name"].is_null());assert_eq!(legacy["stdout"],"retained");
-        std::fs::write(&start_path,start_original).unwrap();std::fs::write(&receipt_path,&original).unwrap();
-        let mut orphan=manager.get("owner",id).unwrap().state.lock().unwrap().clone();
-        orphan.id="bg-orphan".into();orphan.status="running".into();orphan.stdout.clear();orphan.finished_ms=None;orphan.duration_ms=None;orphan.exit_code=None;
-        crate::evaluation::commit_new(&directory.join("background-tasks/bg-orphan.start.json"),&Record{schema_version:1,owner:"owner".into(),snapshot:orphan}).unwrap();
-        let restored=Manager::open(&directory).unwrap();
-        assert_eq!(restored.get("owner",id).unwrap().snapshot(),done);
-        let interrupted=restored.get("owner","bg-orphan").unwrap().snapshot();
-        assert_eq!(interrupted["status"],"interrupted");assert!(interrupted["duration_ms"].is_null());assert!(interrupted["exit_code"].is_null());
-        assert!(restored.get("other",id).is_err());
-        let metadata=restored.execute("owner",Path::new("/tmp"),&json!({"action":"export"})).await.unwrap();assert_eq!(metadata["tasks"].as_array().unwrap().len(),2);assert_eq!(metadata["outputs_included"],false);assert!(!serde_json::to_string(&metadata).unwrap().contains("retained"));
-        let outputs=restored.execute("owner",Path::new("/tmp"),&json!({"action":"export","include_outputs":true})).await.unwrap();assert!(outputs["tasks"].as_array().unwrap().iter().any(|row|row["stdout"]=="retained"));
-        assert_eq!(restored.execute("other",Path::new("/tmp"),&json!({"action":"export"})).await.unwrap()["tasks"],json!([]));
-        assert!(restored.execute("owner",Path::new("/tmp"),&json!({"action":"export","include_outputs":"true"})).await.is_err());
+        std::fs::write(&receipt_path, &original).unwrap();
+        let start_path = directory.join(format!("background-tasks/{id}.start.json"));
+        let start_original = std::fs::read(&start_path).unwrap();
+        for path in [&start_path, &receipt_path] {
+            let mut legacy: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            legacy["snapshot"].as_object_mut().unwrap().remove("name");
+            legacy["snapshot"].as_object_mut().unwrap().remove("signal");
+            std::fs::write(path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        }
+        let legacy = Manager::open(&directory)
+            .unwrap()
+            .get("owner", id)
+            .unwrap()
+            .snapshot();
+        assert!(legacy["name"].is_null());
+        assert_eq!(legacy["stdout"], "retained");
+        std::fs::write(&start_path, start_original).unwrap();
+        std::fs::write(&receipt_path, &original).unwrap();
+        let mut orphan = manager
+            .get("owner", id)
+            .unwrap()
+            .state
+            .lock()
+            .unwrap()
+            .clone();
+        orphan.id = "bg-orphan".into();
+        orphan.status = "running".into();
+        orphan.stdout.clear();
+        orphan.finished_ms = None;
+        orphan.duration_ms = None;
+        orphan.exit_code = None;
+        crate::evaluation::commit_new(
+            &directory.join("background-tasks/bg-orphan.start.json"),
+            &Record {
+                schema_version: 1,
+                owner: "owner".into(),
+                snapshot: orphan,
+            },
+        )
+        .unwrap();
+        let restored = Manager::open(&directory).unwrap();
+        assert_eq!(restored.get("owner", id).unwrap().snapshot(), done);
+        let interrupted = restored.get("owner", "bg-orphan").unwrap().snapshot();
+        assert_eq!(interrupted["status"], "interrupted");
+        assert!(interrupted["duration_ms"].is_null());
+        assert!(interrupted["exit_code"].is_null());
+        assert!(restored.get("other", id).is_err());
+        let metadata = restored
+            .execute("owner", Path::new("/tmp"), &json!({"action":"export"}))
+            .await
+            .unwrap();
+        assert_eq!(metadata["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(metadata["outputs_included"], false);
+        assert!(!serde_json::to_string(&metadata)
+            .unwrap()
+            .contains("retained"));
+        let outputs = restored
+            .execute(
+                "owner",
+                Path::new("/tmp"),
+                &json!({"action":"export","include_outputs":true}),
+            )
+            .await
+            .unwrap();
+        assert!(outputs["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["stdout"] == "retained"));
+        assert_eq!(
+            restored
+                .execute("other", Path::new("/tmp"), &json!({"action":"export"}))
+                .await
+                .unwrap()["tasks"],
+            json!([])
+        );
+        assert!(restored
+            .execute(
+                "owner",
+                Path::new("/tmp"),
+                &json!({"action":"export","include_outputs":"true"})
+            )
+            .await
+            .is_err());
 
-        assert_eq!(restored.list("owner")["persistent"],true);
-        assert!(restored.execute("other",Path::new("/tmp"),&json!({"action":"cleanup","task_id":id})).await.is_err());
-        assert_eq!(restored.execute("owner",Path::new("/tmp"),&json!({"action":"cleanup","task_id":id})).await.unwrap()["removed"],1);
-        assert!(restored.get("owner",id).is_err());assert!(restored.get("owner","bg-orphan").is_ok());
-        let reopened=Manager::open(&directory).unwrap();assert!(reopened.get("owner",id).is_err());assert!(reopened.get("owner","bg-orphan").is_ok());
-        restored.execute("owner",Path::new("/tmp"),&json!({"action":"cleanup"})).await.unwrap();
-        assert!(restored.list("owner")["tasks"].as_array().unwrap().is_empty());
-        assert!(Manager::open(&directory).unwrap().list("owner")["tasks"].as_array().unwrap().is_empty());
+        assert_eq!(restored.list("owner")["persistent"], true);
+        assert!(restored
+            .execute(
+                "other",
+                Path::new("/tmp"),
+                &json!({"action":"cleanup","task_id":id})
+            )
+            .await
+            .is_err());
+        assert_eq!(
+            restored
+                .execute(
+                    "owner",
+                    Path::new("/tmp"),
+                    &json!({"action":"cleanup","task_id":id})
+                )
+                .await
+                .unwrap()["removed"],
+            1
+        );
+        assert!(restored.get("owner", id).is_err());
+        assert!(restored.get("owner", "bg-orphan").is_ok());
+        let reopened = Manager::open(&directory).unwrap();
+        assert!(reopened.get("owner", id).is_err());
+        assert!(reopened.get("owner", "bg-orphan").is_ok());
+        restored
+            .execute("owner", Path::new("/tmp"), &json!({"action":"cleanup"}))
+            .await
+            .unwrap();
+        assert!(restored.list("owner")["tasks"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(Manager::open(&directory).unwrap().list("owner")["tasks"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         std::fs::remove_dir_all(directory).unwrap();
     }
     #[tokio::test]
     async fn unix_signal_termination_is_distinct_from_exit_code() {
-        let directory=std::env::temp_dir().join(format!("allpaka-signal-{}",crate::evaluation::new_id()));
-        let manager=Manager::open(&directory).unwrap();let running=manager.execute("signal",Path::new("/tmp"),&json!({"action":"start","command":"kill -TERM $$"})).await.unwrap();
-        let done=finish(&manager,"signal",running["id"].as_str().unwrap()).await;
-        assert_eq!(done["status"],"failed");assert!(done["exit_code"].is_null());assert_eq!(done["signal"],15);
-        assert_eq!(manager.list("signal")["tasks"][0]["signal"],15);
-        assert_eq!(Manager::open(&directory).unwrap().get("signal",running["id"].as_str().unwrap()).unwrap().snapshot(),done);
+        let directory =
+            std::env::temp_dir().join(format!("allpaka-signal-{}", crate::evaluation::new_id()));
+        let manager = Manager::open(&directory).unwrap();
+        let running = manager
+            .execute(
+                "signal",
+                Path::new("/tmp"),
+                &json!({"action":"start","command":"kill -TERM $$"}),
+            )
+            .await
+            .unwrap();
+        let done = finish(&manager, "signal", running["id"].as_str().unwrap()).await;
+        assert_eq!(done["status"], "failed");
+        assert!(done["exit_code"].is_null());
+        assert_eq!(done["signal"], 15);
+        assert_eq!(manager.list("signal")["tasks"][0]["signal"], 15);
+        assert_eq!(
+            Manager::open(&directory)
+                .unwrap()
+                .get("signal", running["id"].as_str().unwrap())
+                .unwrap()
+                .snapshot(),
+            done
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
     #[tokio::test]
     async fn timing_is_unknown_until_terminal_and_available_in_catalog() {
-        let manager=Manager::default();
-        let running=manager.execute("timing",Path::new("/tmp"),&json!({"action":"start","command":"sleep 0.05"})).await.unwrap();
-        assert!(manager.execute("timing",Path::new("/tmp"),&json!({"action":"cleanup","task_id":running["id"]})).await.is_err());
-        assert!(running["started_ms"].as_u64().unwrap()>0);
+        let manager = Manager::default();
+        let running = manager
+            .execute(
+                "timing",
+                Path::new("/tmp"),
+                &json!({"action":"start","command":"sleep 0.05"}),
+            )
+            .await
+            .unwrap();
+        assert!(manager
+            .execute(
+                "timing",
+                Path::new("/tmp"),
+                &json!({"action":"cleanup","task_id":running["id"]})
+            )
+            .await
+            .is_err());
+        assert!(running["started_ms"].as_u64().unwrap() > 0);
         assert!(running["finished_ms"].is_null());
         assert!(running["duration_ms"].is_null());
-        let live=manager.list("timing");assert_eq!(live["summary"]["status_counts"]["running"],1);assert_eq!(live["summary"]["known_duration_ms"],0);assert_eq!(live["summary"]["unknown_duration_count"],1);
-        let done=finish(&manager,"timing",running["id"].as_str().unwrap()).await;
-        assert_eq!(done["status"],"completed");
+        let live = manager.list("timing");
+        assert_eq!(live["summary"]["status_counts"]["running"], 1);
+        assert_eq!(live["summary"]["known_duration_ms"], 0);
+        assert_eq!(live["summary"]["unknown_duration_count"], 1);
+        let done = finish(&manager, "timing", running["id"].as_str().unwrap()).await;
+        assert_eq!(done["status"], "completed");
         assert!(done["finished_ms"].as_u64().is_some());
-        assert!(done["duration_ms"].as_u64().unwrap()>=40);
-        let catalog=manager.list("timing");assert_eq!(catalog["tasks"][0]["duration_ms"],done["duration_ms"]);assert_eq!(catalog["summary"]["status_counts"]["completed"],1);assert_eq!(catalog["summary"]["unknown_duration_count"],0);assert_eq!(catalog["summary"]["known_duration_ms"],done["duration_ms"]);
-        assert_eq!(manager.list("other")["summary"]["known_duration_ms"],0);
+        assert!(done["duration_ms"].as_u64().unwrap() >= 40);
+        let catalog = manager.list("timing");
+        assert_eq!(catalog["tasks"][0]["duration_ms"], done["duration_ms"]);
+        assert_eq!(catalog["summary"]["status_counts"]["completed"], 1);
+        assert_eq!(catalog["summary"]["unknown_duration_count"], 0);
+        assert_eq!(catalog["summary"]["known_duration_ms"], done["duration_ms"]);
+        assert_eq!(manager.list("other")["summary"]["known_duration_ms"], 0);
     }
     #[tokio::test]
     async fn captures_output_and_exit_code_and_enforces_ownership() {

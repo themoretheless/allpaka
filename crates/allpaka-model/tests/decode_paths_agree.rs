@@ -103,9 +103,15 @@ fn greedy_chain_matches_the_step_by_step_path() {
     let gpu_after = allpaka_backend::gpu::stats();
     let waits = gpu_after.0 - gpu_before.0;
 
-    assert_eq!(ref_tokens, chain_tokens, "greedy chain output diverged from step-by-step");
+    assert_eq!(
+        ref_tokens, chain_tokens,
+        "greedy chain output diverged from step-by-step"
+    );
     assert_eq!(after.attempts - before.attempts, 4);
     assert_eq!(after.successes - before.successes, 4);
     assert_eq!(after.declines - before.declines, 0);
-    assert_eq!(waits, 2, "expected 1 wait for seed + 1 wait for 3-token continuation chain");
+    assert_eq!(
+        waits, 2,
+        "expected 1 wait for seed + 1 wait for 3-token continuation chain"
+    );
 }

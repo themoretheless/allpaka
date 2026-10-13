@@ -2,11 +2,11 @@
 //! schema. Candidate = allpaka, baseline = llama-bench; AB/BA order is balanced
 //! across independent process pairs.
 
-use anyhow::{bail, Context, Result};
 use ::airbug::{
     analysis::{self, Decision},
     Availability, Case, Direction, Metric, Observation, Run, Status,
 };
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -95,7 +95,8 @@ fn cases(pp: u32, tg: u32, model: &Path) -> Vec<Case> {
                 ("model".into(), model_s.clone()),
                 (
                     "limitations".into(),
-                    "llama-bench generates its own token stream; MoE routing is not identical".into(),
+                    "llama-bench generates its own token stream; MoE routing is not identical"
+                        .into(),
                 ),
             ]),
             metrics: vec![tok_s_metric()],
@@ -107,7 +108,8 @@ fn cases(pp: u32, tg: u32, model: &Path) -> Vec<Case> {
                 ("model".into(), model_s),
                 (
                     "limitations".into(),
-                    "KV cache type must match (f16); verify against allpaka capability report".into(),
+                    "KV cache type must match (f16); verify against allpaka capability report"
+                        .into(),
                 ),
             ]),
             metrics: vec![tok_s_metric()],
@@ -124,7 +126,10 @@ fn push_obs(
     sequence: u64,
     tok_s: f64,
 ) -> Result<()> {
-    anyhow::ensure!(tok_s.is_finite() && tok_s > 0.0, "{case}/{variant}: non-positive tok/s");
+    anyhow::ensure!(
+        tok_s.is_finite() && tok_s > 0.0,
+        "{case}/{variant}: non-positive tok/s"
+    );
     run.observations.push(Observation {
         case: case.into(),
         metric: "tok_s".into(),
@@ -167,7 +172,11 @@ fn run_allpaka(opts: &Options, pair: u32, work: &Path) -> Result<(f64, f64)> {
         ))
         .status()
         .with_context(|| format!("spawning {}", opts.allpaka_bin.display()))?;
-    anyhow::ensure!(status.success(), "allpaka bench failed; see {}", log_path.display());
+    anyhow::ensure!(
+        status.success(),
+        "allpaka bench failed; see {}",
+        log_path.display()
+    );
     let report: AllpakaReport = serde_json::from_slice(
         &std::fs::read(&report_path)
             .with_context(|| format!("reading {}", report_path.display()))?,
@@ -218,7 +227,12 @@ fn llama_rate(rows: &[LlamaRow], prompt: u32, gen: u32, depth: u32) -> Result<f6
         .iter()
         .find(|r| r.n_prompt == prompt && r.n_gen == gen && r.n_depth == depth)
         .with_context(|| format!("llama-bench row missing pp={prompt} tg={gen} depth={depth}"))?;
-    if let Some(v) = row.samples_ts.iter().copied().find(|v| v.is_finite() && *v > 0.0) {
+    if let Some(v) = row
+        .samples_ts
+        .iter()
+        .copied()
+        .find(|v| v.is_finite() && *v > 0.0)
+    {
         return Ok(v);
     }
     row.avg_ts
@@ -257,7 +271,11 @@ fn run_llama(opts: &Options, pair: u32, work: &Path) -> Result<(f64, f64)> {
         .stderr(std::fs::File::create(&pp_log)?)
         .status()
         .with_context(|| format!("spawning {}", opts.llama_bench.display()))?;
-    anyhow::ensure!(pp_status.success(), "llama-bench prefill failed; see {}", pp_log.display());
+    anyhow::ensure!(
+        pp_status.success(),
+        "llama-bench prefill failed; see {}",
+        pp_log.display()
+    );
 
     let tg_status = Command::new(&opts.llama_bench)
         .args([
@@ -283,7 +301,11 @@ fn run_llama(opts: &Options, pair: u32, work: &Path) -> Result<(f64, f64)> {
         .stdout(std::fs::File::create(&tg_json)?)
         .stderr(std::fs::File::create(&tg_log)?)
         .status()?;
-    anyhow::ensure!(tg_status.success(), "llama-bench decode failed; see {}", tg_log.display());
+    anyhow::ensure!(
+        tg_status.success(),
+        "llama-bench decode failed; see {}",
+        tg_log.display()
+    );
 
     let pp_rows: Vec<LlamaRow> = parse_llama_json(&std::fs::read(&pp_json)?)?;
     let tg_rows: Vec<LlamaRow> = parse_llama_json(&std::fs::read(&tg_json)?)?;
@@ -306,13 +328,20 @@ fn parse_llama_json(bytes: &[u8]) -> Result<Vec<LlamaRow>> {
 pub fn run(opts: Options) -> Result<()> {
     anyhow::ensure!((1..=32768).contains(&opts.pp), "pp must be in 1..=32768");
     anyhow::ensure!((1..=32768).contains(&opts.tg), "tg must be in 1..=32768");
-    anyhow::ensure!((1..=10_000).contains(&opts.repeats), "repeats must be in 1..=10000");
+    anyhow::ensure!(
+        (1..=10_000).contains(&opts.repeats),
+        "repeats must be in 1..=10000"
+    );
     anyhow::ensure!((0..=16).contains(&opts.warmup), "warmup must be in 0..=16");
     anyhow::ensure!(
         (0.0..100.0).contains(&opts.threshold_percent),
         "threshold must be in 0..100"
     );
-    anyhow::ensure!(opts.model.is_file(), "model not found: {}", opts.model.display());
+    anyhow::ensure!(
+        opts.model.is_file(),
+        "model not found: {}",
+        opts.model.display()
+    );
     anyhow::ensure!(
         opts.allpaka_bin.exists(),
         "allpaka binary not found: {}",
@@ -353,7 +382,8 @@ pub fn run(opts: Options) -> Result<()> {
     };
     let mut run = Run::new();
     run.cases = cases(opts.pp, opts.tg, &opts.model);
-    run.provenance.insert("model".into(), opts.model.display().to_string());
+    run.provenance
+        .insert("model".into(), opts.model.display().to_string());
     if std::env::var("ALLPAKA_AIRBUG_HASH").is_ok_and(|v| v == "1") {
         run.provenance.insert("model_sha256".into(), model_sha);
     } else {
@@ -361,8 +391,10 @@ pub fn run(opts: Options) -> Result<()> {
     }
     run.provenance.insert("pp".into(), opts.pp.to_string());
     run.provenance.insert("tg".into(), opts.tg.to_string());
-    run.provenance.insert("repeats".into(), opts.repeats.to_string());
-    run.provenance.insert("warmup".into(), opts.warmup.to_string());
+    run.provenance
+        .insert("repeats".into(), opts.repeats.to_string());
+    run.provenance
+        .insert("warmup".into(), opts.warmup.to_string());
     run.provenance
         .insert("cooldown_ms".into(), opts.cooldown_ms.to_string());
     run.provenance
@@ -436,7 +468,10 @@ pub fn run(opts: Options) -> Result<()> {
     ::airbug::model::write_new(&cmp_path, &comparisons).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     fn max_of(xs: &[f64]) -> Option<f64> {
-        xs.iter().copied().filter(|v| v.is_finite()).reduce(f64::max)
+        xs.iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .reduce(f64::max)
     }
 
     // Legacy-shaped summary for scripts/bench-matrix.sh consumers.
@@ -504,9 +539,14 @@ pub fn run(opts: Options) -> Result<()> {
     println!("  run:         {}", run_path.display());
     println!("  comparison:  {}", cmp_path.display());
 
-    let failed = comparisons.iter().any(|c| c.decision == Decision::Regression);
+    let failed = comparisons
+        .iter()
+        .any(|c| c.decision == Decision::Regression);
     if failed && opts.check {
-        bail!("airbug reported a regression vs llama at ±{}%", opts.threshold_percent);
+        bail!(
+            "airbug reported a regression vs llama at ±{}%",
+            opts.threshold_percent
+        );
     }
     if failed {
         eprintln!(

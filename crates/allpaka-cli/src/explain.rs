@@ -101,8 +101,13 @@ impl ExecutionPlan {
 
 pub fn run(path: &Path, profile: &str, json: bool) -> anyhow::Result<()> {
     let file = allpaka_gguf::GgufFile::open(path)?;
-    let requirements = ModelRequirements::for_architecture(file.architecture())
-        .ok_or_else(|| anyhow::anyhow!("no model requirements registered for {}", file.architecture()))?;
+    let requirements =
+        ModelRequirements::for_architecture(file.architecture()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model requirements registered for {}",
+                file.architecture()
+            )
+        })?;
     let profile: allpaka_backend::profile::RuntimeProfile = profile.parse()?;
     let mut census: BTreeMap<String, (usize, u64, bool)> = BTreeMap::new();
     for tensor in file.tensors() {
@@ -116,12 +121,14 @@ pub fn run(path: &Path, profile: &str, json: bool) -> anyhow::Result<()> {
     }
     let tensors = census
         .into_iter()
-        .map(|(tensor_type, (tensors, bytes, has_kernel))| TensorCoverage {
-            kernel: has_kernel.then(|| format!("metal.{}", tensor_type.to_ascii_lowercase())),
-            tensor_type,
-            tensors,
-            bytes,
-        })
+        .map(
+            |(tensor_type, (tensors, bytes, has_kernel))| TensorCoverage {
+                kernel: has_kernel.then(|| format!("metal.{}", tensor_type.to_ascii_lowercase())),
+                tensor_type,
+                tensors,
+                bytes,
+            },
+        )
         .collect();
     let plan = ExecutionPlan::resolve(
         &requirements,

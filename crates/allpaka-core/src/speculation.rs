@@ -21,7 +21,7 @@
 //! network_per_pass  <  compute_saved_per_pass
 //! ```
 //!
-//! - comes out identical with and without speculation. That is asserted in
+//! comes out identical with and without speculation. That is asserted in
 //! `plan::tests::speculation_does_not_change_the_split_verdict`. Speculation is
 //! a throughput multiplier applied to whichever placement already won, not a
 //! cure for latency.

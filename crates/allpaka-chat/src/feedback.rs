@@ -106,14 +106,30 @@ fn validate(a: &Annotation) -> Result<()> {
     Ok(())
 }
 impl Store {
-    pub(crate) fn validate_review_reference(&self,trace:&str,version:u64,annotation_id:&str,span:Option<usize>,reviewer:&str)->Result<()> {
-        if version==0 {bail!("Review completion requires a saved feedback version");}
-        let revision=self.load(trace,Some(version))?;
-        if !revision.annotations.iter().any(|a|a.id.as_deref()==Some(annotation_id)&&!a.deleted&&a.span_id==span&&a.author==reviewer){bail!("Review evidence does not match target and assigned reviewer");}
+    pub(crate) fn validate_review_reference(
+        &self,
+        trace: &str,
+        version: u64,
+        annotation_id: &str,
+        span: Option<usize>,
+        reviewer: &str,
+    ) -> Result<()> {
+        if version == 0 {
+            bail!("Review completion requires a saved feedback version");
+        }
+        let revision = self.load(trace, Some(version))?;
+        if !revision.annotations.iter().any(|a| {
+            a.id.as_deref() == Some(annotation_id)
+                && !a.deleted
+                && a.span_id == span
+                && a.author == reviewer
+        }) {
+            bail!("Review evidence does not match target and assigned reviewer");
+        }
         Ok(())
     }
-    pub(crate) fn export_snapshot(&self,id:&str)->Result<Value>{
-        self.load(id,None).map(response)
+    pub(crate) fn export_snapshot(&self, id: &str) -> Result<Value> {
+        self.load(id, None).map(response)
     }
     pub(crate) fn new(data: &FsPath) -> Result<Self> {
         let root = data.join("observability/feedback");
@@ -255,9 +271,10 @@ impl Store {
         Ok(revision)
     }
 }
+type ScoreStats = (f64, usize, BTreeMap<String, usize>);
+
 fn response(revision: Revision) -> Value {
-    let mut scores: BTreeMap<(Option<usize>, String), (f64, usize, BTreeMap<String, usize>)> =
-        BTreeMap::new();
+    let mut scores: BTreeMap<(Option<usize>, String), ScoreStats> = BTreeMap::new();
     for a in revision.annotations.iter().filter(|a| !a.deleted) {
         if let Some(metric) = &a.metric {
             let entry = scores.entry((a.span_id, metric.clone())).or_default();
@@ -288,10 +305,14 @@ pub(crate) async fn list(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HistoryQuery {
-    #[serde(default)] offset: usize,
-    #[serde(default = "history_limit")] limit: usize,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "history_limit")]
+    limit: usize,
 }
-fn history_limit() -> usize { 20 }
+fn history_limit() -> usize {
+    20
+}
 pub(crate) async fn history(
     State(app): State<crate::App>,
     Path(id): Path<String>,
@@ -301,7 +322,9 @@ pub(crate) async fn history(
         app.observability.validate_target(&id, None)?;
         app.feedback.history(&id, query.offset, query.limit)
     })();
-    result.map(Json).map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result
+        .map(Json)
+        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 impl Store {
     fn history(&self, id: &str, offset: usize, limit: usize) -> Result<Value> {
@@ -313,14 +336,18 @@ impl Store {
         let mut rows = Vec::new();
         for index in offset..total.min(offset + limit) {
             let revision = self.load(id, Some(latest - index as u64))?;
-            rows.push(json!({"version":revision.version,"saved_ms":revision.saved_ms,
+            rows.push(
+                json!({"version":revision.version,"saved_ms":revision.saved_ms,
                 "annotation_count":revision.annotations.len(),
-                "active_count":revision.annotations.iter().filter(|a|!a.deleted).count()}));
+                "active_count":revision.annotations.iter().filter(|a|!a.deleted).count()}),
+            );
         }
-        Ok(json!({"kind":"feedback_history","trace_id":id,"latest_version":latest,
+        Ok(
+            json!({"kind":"feedback_history","trace_id":id,"latest_version":latest,
             "total":total,"offset":offset,"limit":limit,"has_more":offset+rows.len()<total,
             "order":"version_desc","versions":rows,"provider_calls":0,
-            "reviewer_identity":"self_reported"}))
+            "reviewer_identity":"self_reported"}),
+        )
     }
 }
 pub(crate) async fn save(
@@ -423,10 +450,14 @@ mod tests {
         assert_eq!(restarted.load(id, None).unwrap().version, 4);
         assert_eq!(restarted.load(id, Some(1)).unwrap().annotations.len(), 1);
         let page = restarted.history(id, 0, 2).unwrap();
-        assert_eq!(page["total"], 4); assert_eq!(page["has_more"], true);
+        assert_eq!(page["total"], 4);
+        assert_eq!(page["has_more"], true);
         assert_eq!(page["versions"][0]["version"], 4);
         assert_eq!(page["versions"][1]["active_count"], 1);
-        assert_eq!(restarted.history(id, 2, 2).unwrap()["versions"][1]["version"], 1);
+        assert_eq!(
+            restarted.history(id, 2, 2).unwrap()["versions"][1]["version"],
+            1
+        );
         assert!(restarted.history(id, 0, 101).is_err());
         assert!(restarted.history(id, 2001, 20).is_err());
         assert_eq!(restarted.history("trace-empty", 0, 20).unwrap()["total"], 0);

@@ -17,13 +17,14 @@ pub struct MlxBlob {
     pub size: usize,
 }
 
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum mlx_dtype_t {
     FLOAT32 = 0,
     BFLOAT16 = 1,
     FLOAT16 = 2,
-    Q8_0 = 8,   // reusing GGML type id for compatibility
+    Q8_0 = 8, // reusing GGML type id for compatibility
     Q4_0 = 4,
     MLX_Q4_AFFINE = 100,
     MLX_Q8_AFFINE = 101,
@@ -38,17 +39,17 @@ extern "C" {
     /// The caller owns both buffers; we just change representation.
     pub fn mlx_repack_to_allpaka(
         src: *const f32,
-        dst: *mut std::ffi::c_void,      // points to an allocated BlockBuffer
+        dst: *mut std::ffi::c_void, // points to an allocated BlockBuffer
         n_elements: usize,
         ty: GgmlType,
-    ) -> *mut std::ffi::c_void;       // returns same pointer on success, null on error
+    ) -> *mut std::ffi::c_void; // returns same pointer on success, null on error
 
     /// Load a safetensors tensor directly into memory without full dequantize.
     /// Returns a Blob ready for GPU-only quantized matmul paths.
     pub fn mlx_load_tensor_sparse(
         tensor_name: *const std::ffi::c_char,
         layout_ptr: *const std::ffi::c_void, // MlxSafetensors* opaque
-    ) -> *mut MlxBlob;                   // blob owned by caller, must free_mlx_blob
+    ) -> *mut MlxBlob; // blob owned by caller, must free_mlx_blob
 
     /// Free a blob returned by mlx_load_tensor_sparse.
     pub fn free_mlx_blob(blob: *mut MlxBlob);
@@ -58,17 +59,30 @@ extern "C" {
 #[cfg(not(feature = "libmlx"))]
 mod ffi_stubs {
     use super::*;
-    
+
     #[inline]
-    pub fn mlx_repack_to_allpaka(_src: *const f32, _dst: *mut std::ffi::c_void, _n_elements: usize, _ty: GgmlType) -> *mut std::ffi::c_void {
+    pub fn mlx_repack_to_allpaka(
+        _src: *const f32,
+        _dst: *mut std::ffi::c_void,
+        _n_elements: usize,
+        _ty: GgmlType,
+    ) -> *mut std::ffi::c_void {
         std::ptr::null_mut()
     }
-    
+
     #[inline]
-    pub fn mlx_load_tensor_sparse(_tensor_name: *const std::ffi::c_char, _layout_ptr: *const std::ffi::c_void) -> *mut MlxBlob {
+    pub fn mlx_load_tensor_sparse(
+        _tensor_name: *const std::ffi::c_char,
+        _layout_ptr: *const std::ffi::c_void,
+    ) -> *mut MlxBlob {
         std::ptr::null_mut()
     }
-    
+
+    /// Free a blob returned by `mlx_load_tensor_sparse`.
+    ///
+    /// # Safety
+    ///
+    /// `_blob` must be a pointer returned by `mlx_load_tensor_sparse` or null.
     #[inline]
     pub unsafe fn free_mlx_blob(_blob: *mut MlxBlob) {}
 }
@@ -77,6 +91,7 @@ mod ffi_stubs {
 pub use ffi_stubs::*;
 
 /// Allpaka-side representation of GgmlType for FFI.
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum GgmlType {
@@ -110,7 +125,13 @@ mod tests {
 
     #[test]
     fn test_ggmltype_conversion() {
-        assert_eq!(mlx_dtype_t::from(GgmlType::MlxQ4), mlx_dtype_t::MLX_Q4_AFFINE);
-        assert_eq!(mlx_dtype_t::from(GgmlType::MlxQ8), mlx_dtype_t::MLX_Q8_AFFINE);
+        assert_eq!(
+            mlx_dtype_t::from(GgmlType::MlxQ4),
+            mlx_dtype_t::MLX_Q4_AFFINE
+        );
+        assert_eq!(
+            mlx_dtype_t::from(GgmlType::MlxQ8),
+            mlx_dtype_t::MLX_Q8_AFFINE
+        );
     }
 }

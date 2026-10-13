@@ -77,6 +77,13 @@ pub fn prefer_gpu_embed() -> bool {
             .unwrap_or(false)
 }
 
+pub fn can_embed_on_gpu(ty: GgmlType, bytes: &[u8], n_in: usize) -> bool {
+    prefer_gpu_embed()
+        && dq_fmt(ty).is_some()
+        && row_bytes(ty, n_in).is_some()
+        && with_gpu(|gpu| Some(resolve_w(gpu, bytes).is_some())).unwrap_or(false)
+}
+
 pub fn is_attached() -> bool {
     GPU.get().map_or(false, Option::is_some)
 }
@@ -88,6 +95,10 @@ pub fn residency_status() -> (usize, bool) {
     cell.lock()
         .map(|gpu| (gpu.chunks.len(), !gpu.chunks.is_empty()))
         .unwrap_or((0, false))
+}
+
+pub fn arena_bytes() -> usize {
+    0
 }
 
 pub fn stats() -> (u64, u64, u64, u64) {
@@ -1281,11 +1292,7 @@ fn decode_token_one_fused(
     let rope_k_at = rope_q_at + req.n_heads * rope_pairs * 2;
     let out_norm_at = rope_k_at + req.n_kv_heads * rope_pairs * 2;
     let norms_base = out_norm_at + hidden;
-    let bias_stride = if has_attn_bias {
-        q_dim + 2 * kv
-    } else {
-        0
-    };
+    let bias_stride = if has_attn_bias { q_dim + 2 * kv } else { 0 };
     let per_layer_norms = 2 * hidden + 2 * hd + bias_stride;
     let x_elems = norms_base + req.layers.len() * per_layer_norms;
 
@@ -3599,11 +3606,7 @@ fn try_prefill_attn_fused_dev(
             let (ybase, _yg) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
             let (xbase, _xg) = DevicePtr::device_ptr(&gpu.x_arena, &stream);
             let m_u = m as u32;
-            for (off, bias_off, n) in [
-                (q_at, qb_at, q_dim),
-                (k_at, kb_at, kv),
-                (v_at, vb_at, kv),
-            ] {
+            for (off, bias_off, n) in [(q_at, qb_at, q_dim), (k_at, kb_at, kv), (v_at, vb_at, kv)] {
                 let n_u = n as u32;
                 let cfg = LaunchConfig {
                     grid_dim: (n_u.div_ceil(256), m_u, 1),

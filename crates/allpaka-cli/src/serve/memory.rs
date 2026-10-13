@@ -3,14 +3,23 @@ pub(super) use allpaka_backend::memory::{Budget, Exhausted, Lease};
 
 pub(super) fn snapshot(budget: &Budget) -> serde_json::Value {
     let state = budget.snapshot();
-    serde_json::json!({"limit_bytes":state.limit_bytes, "reserved_bytes":state.reserved_bytes,
-        "peak_reserved_bytes":state.peak_reserved_bytes,
-        "scope":"weights,prefix capacity,session KV/SSM/RoPE; excludes scratch and process overhead"})
+    let gpu_arena_bytes = allpaka_backend::gpu::arena_bytes() as u64;
+    serde_json::json!({
+        "limit_bytes": state.limit_bytes,
+        "reserved_bytes": state.reserved_bytes,
+        "peak_reserved_bytes": state.peak_reserved_bytes,
+        "gpu_arena_bytes": gpu_arena_bytes,
+        "effective_used_bytes": state.reserved_bytes.saturating_add(gpu_arena_bytes),
+        "scope": "weights,prefix capacity,session KV/SSM/RoPE,GPU arenas; excludes CPU scratch and process overhead"
+    })
 }
 
 /// Matches page-rounded f16 KV and f32 recurrent storage; reserves twice the
 /// logical RoPE size for Vec growth. Does not include MTP rollback slots.
-pub(super) fn session_bytes(model: &allpaka_model::Model<'_>, capacity: usize) -> anyhow::Result<u64> {
+pub(super) fn session_bytes(
+    model: &allpaka_model::Model<'_>,
+    capacity: usize,
+) -> anyhow::Result<u64> {
     let c = &model.config;
     let layers = u128::from(c.n_layers);
     let page = |bytes: u128| bytes.div_ceil(16384) * 16384;
@@ -50,16 +59,25 @@ mod tests {
     fn concurrent_reservations_cannot_overcommit() {
         let budget = Budget::new(100);
         let barrier = Arc::new(std::sync::Barrier::new(8));
-        let handles: Vec<_> = (0..8).map(|_| {
-            let budget = budget.clone(); let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                let lease = budget.reserve(60);
-                barrier.wait();
-                lease.is_ok()
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let budget = budget.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let lease = budget.reserve(60);
+                    barrier.wait();
+                    lease.is_ok()
+                })
             })
-        }).collect();
-        assert_eq!(handles.into_iter().filter(|h| h.thread().id() != std::thread::current().id())
-            .map(|h| usize::from(h.join().unwrap())).sum::<usize>(), 1);
+            .collect();
+        assert_eq!(
+            handles
+                .into_iter()
+                .filter(|h| h.thread().id() != std::thread::current().id())
+                .map(|h| usize::from(h.join().unwrap()))
+                .sum::<usize>(),
+            1
+        );
         assert_eq!(snapshot(&budget)["reserved_bytes"], 0);
     }
 }

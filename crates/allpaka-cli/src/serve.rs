@@ -5,13 +5,13 @@
 //! an agent framework pointed at this URL cannot tell it is not llama-server -
 //! same route, same response shape.
 
-mod rag_tools;
-mod request_control;
 mod ingress;
 mod launch;
+mod rag_tools;
+mod request_control;
 mod resources;
-use request_control::{Interrupted, Registry as RequestRegistry, RequestControl};
 use rag_tools::{rag_default_tool_schemas, run_rag_tool, RagTools};
+use request_control::{Interrupted, Registry as RequestRegistry, RequestControl};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -20,9 +20,9 @@ use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::serving_runtime::{ServingLimits, ServingRuntime};
 use allpaka_model::prefix_cache::PrefixCache;
 use allpaka_model::{Model, Session, Tokenizer};
-use crate::serving_runtime::{ServingLimits, ServingRuntime};
 
 /// The KV cache carried across requests.
 ///
@@ -42,7 +42,11 @@ struct ChatState {
 impl ChatState {
     fn new(model: &Model<'static>, budget: &memory::Budget, capacity: usize) -> Result<Self> {
         let memory = budget.reserve(memory::session_bytes(model, capacity)?)?;
-        Ok(Self { session: model.new_session(capacity), tokens: Vec::new(), memory })
+        Ok(Self {
+            session: model.new_session(capacity),
+            tokens: Vec::new(),
+            memory,
+        })
     }
 
     fn reset(&mut self, model: &Model<'static>, capacity: usize) -> Result<()> {
@@ -107,11 +111,9 @@ struct QueuedConnection {
 type ServerRuntime = ServingRuntime<Mutex<ModelService>, QueuedConnection, PrefixSnap>;
 
 fn model_prefix_namespace(model: &str) -> u32 {
-    model
-        .bytes()
-        .fold(2_166_136_261u32, |hash, byte| {
-            (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
-        })
+    model.bytes().fold(2_166_136_261u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
+    })
 }
 
 fn prefix_key(namespace: u32, tokens: &[u32]) -> Vec<u32> {
@@ -475,7 +477,9 @@ fn run_inference(
 
     if streaming {
         // `complete_buf[..emitted_len]` tracks the body only; the think prefix went out first.
-        if let Some(delta) = content[think_prefix.len()..].strip_prefix(&complete_buf[..emitted_len]) {
+        if let Some(delta) =
+            content[think_prefix.len()..].strip_prefix(&complete_buf[..emitted_len])
+        {
             if !delta.is_empty() {
                 write_sse_event(
                     stream.as_mut().unwrap(),
@@ -664,7 +668,11 @@ impl Template {
 
     /// Format a conversation into token ids, ending where the assistant
     /// starts writing.
-    pub(crate) fn prompt(&self, tok: &Tokenizer, messages: &[(String, String)]) -> Result<Vec<u32>> {
+    pub(crate) fn prompt(
+        &self,
+        tok: &Tokenizer,
+        messages: &[(String, String)],
+    ) -> Result<Vec<u32>> {
         let mut ids = Vec::new();
         match self {
             Template::ChatMl {
@@ -1040,7 +1048,9 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
         planned_bytes.push(file.mappings().map(|m| m.len() as u64).sum::<u64>());
     }
     let total_bytes = planned_bytes.iter().try_fold(0u64, |total, bytes| {
-        total.checked_add(*bytes).context("resident model byte total overflow")
+        total
+            .checked_add(*bytes)
+            .context("resident model byte total overflow")
     })?;
     anyhow::ensure!(
         total_bytes <= limits.model_budget_bytes,
@@ -1105,7 +1115,11 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
         for (model_name, context_tokens, connection) in ready {
             let mut rejection_stream = connection.stream.try_clone()?;
             if let Err(error) = runtime.enqueue(model_name, context_tokens, connection) {
-                respond(&mut rejection_stream, 429, &json!({"error":format!("scheduler: {error:?}")}))?;
+                respond(
+                    &mut rejection_stream,
+                    429,
+                    &json!({"error":format!("scheduler: {error:?}")}),
+                )?;
             }
         }
 
@@ -1124,7 +1138,10 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
     }
 }
 
-fn load_model_service(model_path: &Path, memory: &memory::Budget) -> Result<(String, ModelService)> {
+fn load_model_service(
+    model_path: &Path,
+    memory: &memory::Budget,
+) -> Result<(String, ModelService)> {
     // A serving model borrows mmap-backed tensor bytes for the process
     // lifetime. Leaking the owner is deliberate: Metal bytes-no-copy buffers
     // must remain valid until server shutdown, when the OS reclaims mappings.
@@ -1193,29 +1210,48 @@ fn prepare_connection(
     if let Some(route) = request_line.strip_prefix("POST /v1/requests/") {
         if let Some(id) = route.strip_suffix("/cancel HTTP/1.1") {
             let cancelled = registry.cancel(id);
-            respond(&mut stream, if cancelled { 200 } else { 404 }, &json!({"cancelled":cancelled}))?;
+            respond(
+                &mut stream,
+                if cancelled { 200 } else { 404 },
+                &json!({"cancelled":cancelled}),
+            )?;
             return Ok(None);
         }
     }
-    let request: Value = if body.is_empty() { json!({}) } else { serde_json::from_str(&body)? };
+    let request: Value = if body.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(&body)?
+    };
     if let Some(id) = request.get("session_id") {
-        anyhow::ensure!(id.as_str().is_some_and(|id| !id.is_empty() && id.len() <= 128), "invalid session_id");
+        anyhow::ensure!(
+            id.as_str()
+                .is_some_and(|id| !id.is_empty() && id.len() <= 128),
+            "invalid session_id"
+        );
     }
     if let Some(id) = request.get("request_id") {
         anyhow::ensure!(id.is_string(), "request_id must be a string");
     }
     if let Some(tokens) = request.get("max_tokens") {
         anyhow::ensure!(
-            tokens.as_u64().is_some_and(|n| n > 0 && n <= MAX_NEW_TOKENS as u64),
+            tokens
+                .as_u64()
+                .is_some_and(|n| n > 0 && n <= MAX_NEW_TOKENS as u64),
             "max_tokens must be in 1..={MAX_NEW_TOKENS}"
         );
     }
     let timeout_ms = match request.get("timeout_ms") {
         None => 120_000,
-        Some(value) => value.as_u64().filter(|n| (1..=600_000).contains(n))
+        Some(value) => value
+            .as_u64()
+            .filter(|n| (1..=600_000).contains(n))
             .context("timeout_ms must be in 1..=600000")?,
     };
-    let control = registry.register(request["request_id"].as_str(), std::time::Duration::from_millis(timeout_ms))?;
+    let control = registry.register(
+        request["request_id"].as_str(),
+        std::time::Duration::from_millis(timeout_ms),
+    )?;
     let requested = serde_json::from_str::<Value>(&body)
         .ok()
         .and_then(|request| request["model"].as_str().map(ToOwned::to_owned))
@@ -1254,8 +1290,14 @@ mod model_resolution_tests {
     fn aliases_must_be_unique_and_exact_names_win() {
         let names = vec!["qwen3".into(), "qwen3-0.6b".into(), "llama-3".into()];
 
-        assert_eq!(resolve_model_name("qwen3", &names).as_deref(), Some("qwen3"));
-        assert_eq!(resolve_model_name("qwen3-0", &names).as_deref(), Some("qwen3-0.6b"));
+        assert_eq!(
+            resolve_model_name("qwen3", &names).as_deref(),
+            Some("qwen3")
+        );
+        assert_eq!(
+            resolve_model_name("qwen3-0", &names).as_deref(),
+            Some("qwen3-0.6b")
+        );
         assert_eq!(resolve_model_name("qwen", &names), None);
         assert_eq!(resolve_model_name("mistral", &names), None);
     }
@@ -1317,25 +1359,51 @@ fn dispatch_connection(
     let mut service = service
         .lock()
         .map_err(|_| anyhow::anyhow!("model service lock poisoned: {model_name}"))?;
-    let is_chat = connection.request_line.starts_with("POST /v1/chat/completions");
+    let is_chat = connection
+        .request_line
+        .starts_with("POST /v1/chat/completions");
     let request: Value = serde_json::from_str(&connection.body).unwrap_or(Value::Null);
-    let session_id = request.get("session_id").map(|value| {
-        value.as_str().filter(|id| !id.is_empty() && id.len() <= 128)
-            .map(str::to_owned).context("session_id must be a non-empty string of at most 128 bytes")
-    }).transpose()?;
+    let session_id = request
+        .get("session_id")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 128)
+                .map(str::to_owned)
+                .context("session_id must be a non-empty string of at most 128 bytes")
+        })
+        .transpose()?;
     let now = std::time::Instant::now();
-    service.sessions.retain(|_, (_, used)| now.duration_since(*used).as_secs() < 600);
+    service
+        .sessions
+        .retain(|_, (_, used)| now.duration_since(*used).as_secs() < 600);
     if is_chat {
-        if session_id.as_ref().is_some_and(|id| !service.sessions.contains_key(id)) && service.sessions.len() >= 4 {
+        if session_id
+            .as_ref()
+            .is_some_and(|id| !service.sessions.contains_key(id))
+            && service.sessions.len() >= 4
+        {
             let mut stream = connection.stream;
-            return respond(&mut stream, 429, &json!({"error":"resident session capacity exhausted"}));
+            return respond(
+                &mut stream,
+                429,
+                &json!({"error":"resident session capacity exhausted"}),
+            );
         }
-        let restored = session_id.as_ref().and_then(|id| service.sessions.remove(id));
+        let restored = session_id
+            .as_ref()
+            .and_then(|id| service.sessions.remove(id));
         service.chat = match restored {
             Some((chat, _)) => chat,
             None => match ChatState::new(&service.model, &service.chat.memory.budget(), 1) {
                 Ok(chat) => chat,
-                Err(error) => return respond(&mut connection.stream.try_clone()?, 429, &json!({"error":error.to_string()})),
+                Err(error) => {
+                    return respond(
+                        &mut connection.stream.try_clone()?,
+                        429,
+                        &json!({"error":error.to_string()}),
+                    )
+                }
             },
         };
     }
@@ -1377,8 +1445,13 @@ fn dispatch_connection(
     );
     let succeeded = outcome.is_ok();
     if let Err(error) = outcome {
-        let status = if error.downcast_ref::<Interrupted>().is_some() { 408 }
-            else if error.downcast_ref::<memory::Exhausted>().is_some() { 429 } else { 500 };
+        let status = if error.downcast_ref::<Interrupted>().is_some() {
+            408
+        } else if error.downcast_ref::<memory::Exhausted>().is_some() {
+            429
+        } else {
+            500
+        };
         let body = json!({"error":error.to_string(), "request_id":connection.control.id});
         if connection.control.streaming() {
             write_sse_event(&mut error_stream, &body)?;
@@ -1391,7 +1464,11 @@ fn dispatch_connection(
         let empty = ChatState::new(&service.model, &service.chat.memory.budget(), 1)?;
         let chat = std::mem::replace(&mut service.chat, empty);
         if succeeded {
-            if let Some(id) = session_id { service.sessions.insert(id, (chat, std::time::Instant::now())); }
+            if let Some(id) = session_id {
+                service
+                    .sessions
+                    .insert(id, (chat, std::time::Instant::now()));
+            }
         }
     }
     Ok(())
@@ -1807,7 +1884,10 @@ mod tests {
             {"type": "text", "text": "b"},
         ]));
         assert_eq!((text.as_str(), images), ("ab", 0));
-        assert_eq!(image_part_count(&[json!({"role": "user", "content": "hi"})]), 0);
+        assert_eq!(
+            image_part_count(&[json!({"role": "user", "content": "hi"})]),
+            0
+        );
     }
 
     #[test]

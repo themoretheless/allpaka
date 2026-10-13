@@ -48,6 +48,7 @@ pub const NAMES: [&str; 13] = [
     "output proj",
 ];
 
+#[allow(clippy::declare_interior_mutable_const)]
 const ZERO: AtomicU64 = AtomicU64::new(0);
 static NS: [AtomicU64; NAMES.len()] = [ZERO; NAMES.len()];
 static CALLS: [AtomicU64; NAMES.len()] = [ZERO; NAMES.len()];

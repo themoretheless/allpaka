@@ -209,10 +209,7 @@ pub fn apply_cached(model_path: &Path, cache_path: Option<&Path>) -> Result<bool
     // Startup is still single-threaded here. Publish the resolved profile so
     // legacy capability reporters and remaining env-backed probes cannot
     // disagree with the installed typed policy.
-    std::env::set_var(
-        "ALLPAKA_PROFILE",
-        &hit.parameters.command_strategy,
-    );
+    std::env::set_var("ALLPAKA_PROFILE", &hit.parameters.command_strategy);
     let profile: allpaka_backend::profile::RuntimeProfile =
         hit.parameters.command_strategy.parse()?;
     let resolved = profile.resolve_with_env();
@@ -238,7 +235,10 @@ fn key_for(model_path: &Path, file: &allpaka_gguf::GgufFile) -> AutotuneKey {
     }
 }
 
-fn measurement<'a>(report: &'a BenchmarkReport, name: &str) -> Result<&'a crate::benchmark_report::Measurement> {
+fn measurement<'a>(
+    report: &'a BenchmarkReport,
+    name: &str,
+) -> Result<&'a crate::benchmark_report::Measurement> {
     report
         .measurements
         .iter()
@@ -280,9 +280,7 @@ fn default_cache_path() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AutotuneCache, AutotuneEntry, AutotuneKey, TunedParameters, KERNEL_ABI_VERSION,
-    };
+    use super::{AutotuneCache, AutotuneEntry, AutotuneKey, TunedParameters, KERNEL_ABI_VERSION};
 
     fn key(model: &str) -> AutotuneKey {
         AutotuneKey {

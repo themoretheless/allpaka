@@ -1,11 +1,11 @@
 //! Swarm mode: a wave of parallel agents on one task, then one merged answer.
 //!
 //! Shape of a turn:
-//!   1. fan-out   — every member gets its own persona, provider and model plus a
-//!                  read-only tool loop, and streams into its own report slot;
-//!   2. fan-in    — one synthesizer call merges the reports into a MASTER-style
-//!                  answer (deduplicated, conflicts kept explicit);
-//!   3. critic    — optional adversarial pass over the merged draft.
+//!   1. fan-out — every member gets its own persona, provider and model plus a
+//!      read-only tool loop, and streams into its own report slot;
+//!   2. fan-in — one synthesizer call merges the reports into a MASTER-style
+//!      answer (deduplicated, conflicts kept explicit);
+//!   3. critic — optional adversarial pass over the merged draft.
 //!
 //! Members never write files: they run with `Mode::Chat` schemas regardless of the
 //! session's write permission, and only `list_files`/`read_file` are accepted.
@@ -203,6 +203,7 @@ pub async fn run(
 /// from the current roster, so editing the roster between turns does not hide the
 /// retry; only its persona is re-read from the roster, and a member that is no
 /// longer there gets the generic role.
+#[allow(clippy::too_many_arguments)]
 pub async fn retry(
     app: &App,
     shared: &SharedSession,
@@ -306,6 +307,7 @@ fn synth_provider(app: &App, settings: &Settings, config: &SwarmConfig) -> Resul
 /// Merge the reports that exist right now into the Swarm message, then run the
 /// critic pass over that draft when it is enabled. Returns the usage of these
 /// requests, the notice for the caller and whether the merge hit a token limit.
+#[allow(clippy::too_many_arguments)]
 async fn synthesize(
     app: &App,
     shared: &SharedSession,
@@ -815,16 +817,22 @@ async fn run_member_inner(
     trace: &observability::Trace,
     parent: usize,
 ) -> Result<MemberOutcome> {
-    let guards=member_settings.prepared_guardrails.clone();
-    if let Some(prepared)=&guards {crate::enforce_guardrail(prepared.input(&prompt)?,trace,parent)?;}
-    let buffer_output=guards.as_ref().is_some_and(|prepared|prepared.buffers_output());
+    let guards = member_settings.prepared_guardrails.clone();
+    if let Some(prepared) = &guards {
+        crate::enforce_guardrail(prepared.input(&prompt)?, trace, parent)?;
+    }
+    let buffer_output = guards
+        .as_ref()
+        .is_some_and(|prepared| prepared.buffers_output());
     if let Some(member) = member_settings
         .swarm
         .members
         .iter()
         .find(|m| m.label == label && !m.worker.is_empty())
     {
-        if guards.is_some() {bail!("Guardrails for remote Swarm workers are not yet supported");}
+        if guards.is_some() {
+            bail!("Guardrails for remote Swarm workers are not yet supported");
+        }
         note(shared, index, slot, round, MemberStatus::Running, Some(1));
         let mut remote_span = trace.span("remote_worker", "dispatch", Some(parent));
         let result =
@@ -875,7 +883,8 @@ async fn run_member_inner(
         let mut last_save = std::time::Instant::now();
         let (message, step_usage) = trace
             .generation(
-                &member_settings.model, &member_settings.provider,
+                &member_settings.model,
+                &member_settings.provider,
                 parent,
                 provider::generate(
                     &app.client,
@@ -908,8 +917,19 @@ async fn run_member_inner(
             .await
             .with_context(|| format!("участник {label}"))?;
         usage = merge_usage(usage, step_usage);
-        if let Some(prepared)=&guards {crate::enforce_guardrail(prepared.output(&message.content)?,trace,parent)?;}
-        if buffer_output {let mut state=shared.lock().unwrap();if let Some(report)=state.messages.get_mut(index).and_then(|message|message.swarm.get_mut(slot)) {report.content.push_str(&message.content);}}
+        if let Some(prepared) = &guards {
+            crate::enforce_guardrail(prepared.output(&message.content)?, trace, parent)?;
+        }
+        if buffer_output {
+            let mut state = shared.lock().unwrap();
+            if let Some(report) = state
+                .messages
+                .get_mut(index)
+                .and_then(|message| message.swarm.get_mut(slot))
+            {
+                report.content.push_str(&message.content);
+            }
+        }
         if message.truncated {
             note(shared, index, slot, round, MemberStatus::Error, None);
             fail(
@@ -1026,9 +1046,13 @@ async fn merge_pass(
     trace: &observability::Trace,
     parent: usize,
 ) -> Result<(Message, Value)> {
-    let guards=settings.prepared_guardrails.clone();
-    if let Some(prepared)=&guards {crate::enforce_guardrail(prepared.input(&prompt)?,trace,parent)?;}
-    let buffer_output=guards.as_ref().is_some_and(|prepared|prepared.buffers_output());
+    let guards = settings.prepared_guardrails.clone();
+    if let Some(prepared) = &guards {
+        crate::enforce_guardrail(prepared.input(&prompt)?, trace, parent)?;
+    }
+    let buffer_output = guards
+        .as_ref()
+        .is_some_and(|prepared| prepared.buffers_output());
     let messages = [Message::text("user", prompt)];
     let phase = match output {
         MergeOutput::Buffered => "critic",
@@ -1082,10 +1106,14 @@ async fn merge_pass(
             }
         })
         .await;
-    let result=result.and_then(|(message,usage)| {
-        if let Some(prepared)=&guards {crate::enforce_guardrail(prepared.output(&message.content)?,trace,span.id())?;}
-        if buffer_output&&matches!(output,MergeOutput::Stream) {set_content(shared,index,&message.content);}
-        Ok((message,usage))
+    let result = result.and_then(|(message, usage)| {
+        if let Some(prepared) = &guards {
+            crate::enforce_guardrail(prepared.output(&message.content)?, trace, span.id())?;
+        }
+        if buffer_output && matches!(output, MergeOutput::Stream) {
+            set_content(shared, index, &message.content);
+        }
+        Ok((message, usage))
     });
     match &result {
         Ok((message, _)) => span.finish(

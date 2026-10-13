@@ -208,7 +208,10 @@ mod tests {
         assert_eq!(vision.count, 1);
         assert_eq!(vision.elements, 64u128 * 3 * 14 * 14);
         assert_eq!(vision.types, vec![("F32".to_string(), 1)]);
-        assert_eq!(vision.examples, vec!["v.patch_embd.weight [64 x 3 x 14 x 14]"]);
+        assert_eq!(
+            vision.examples,
+            vec!["v.patch_embd.weight [64 x 3 x 14 x 14]"]
+        );
 
         let projector = census.group("mm").expect("projector group");
         assert_eq!(projector.count, 1);

@@ -17,17 +17,12 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {
+    #[default]
     Mcp,
     Skill,
-}
-
-impl Default for PluginKind {
-    fn default() -> Self {
-        Self::Mcp
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -33,17 +33,17 @@ impl Default for RuntimePolicy {
 
 impl RuntimePolicy {
     pub fn from_env() -> Self {
-        let mut policy = Self::default();
-        policy.normflag = !std::env::var("ALLPAKA_NORMFLAG").is_ok_and(|v| v == "0");
-        policy.attention_split = std::env::var("ALLPAKA_ATTN_SPLIT")
-            .ok()
-            .and_then(|v| v.parse().ok());
-        policy.decode_serial = std::env::var("ALLPAKA_DECODE_SERIAL").is_ok_and(|v| v == "1");
-        policy.prefill_defer = std::env::var("ALLPAKA_PF_DEFER").map_or(true, |v| v != "0");
-        policy.prefill_one_buffer = std::env::var("ALLPAKA_PF_ONEBUF").map_or(true, |v| v != "0");
-        policy.gpu_route = std::env::var("ALLPAKA_GPU_ROUTE").map_or(true, |v| v != "0");
-        policy.mm_pipeline = std::env::var("ALLPAKA_MM_PIPE").map_or(true, |v| v != "0");
-        policy
+        Self {
+            normflag: !std::env::var("ALLPAKA_NORMFLAG").is_ok_and(|v| v == "0"),
+            attention_split: std::env::var("ALLPAKA_ATTN_SPLIT")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+            decode_serial: std::env::var("ALLPAKA_DECODE_SERIAL").is_ok_and(|v| v == "1"),
+            prefill_defer: std::env::var("ALLPAKA_PF_DEFER").map_or(true, |v| v != "0"),
+            prefill_one_buffer: std::env::var("ALLPAKA_PF_ONEBUF").map_or(true, |v| v != "0"),
+            gpu_route: std::env::var("ALLPAKA_GPU_ROUTE").map_or(true, |v| v != "0"),
+            mm_pipeline: std::env::var("ALLPAKA_MM_PIPE").map_or(true, |v| v != "0"),
+        }
     }
 }
 

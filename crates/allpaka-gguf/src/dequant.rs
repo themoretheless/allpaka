@@ -428,8 +428,8 @@ mod tests {
         // d = 1.0, dmin = 0 so values are scale * quant.
         block[80..82].copy_from_slice(&f32_to_f16(1.0).to_le_bytes());
         // scales: sub-block j gets scale j (4-bit, so 0..=15; min stays 0).
-        for j in 0..16 {
-            block[j] = j as u8;
+        for (j, b) in block[..16].iter_mut().enumerate() {
+            *b = j as u8;
         }
         // qs all 0b11_10_01_00: shift 0 -> 0, shift 2 -> 1, shift 4 -> 2, shift 6 -> 3.
         for b in &mut block[16..80] {

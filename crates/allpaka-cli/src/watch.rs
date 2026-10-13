@@ -81,7 +81,11 @@ pub struct Condition {
 
 impl Condition {
     fn because(name: &'static str, held: bool, reason: impl Into<String>) -> Self {
-        Self { name, held, reason: reason.into() }
+        Self {
+            name,
+            held,
+            reason: reason.into(),
+        }
     }
 }
 
@@ -225,9 +229,7 @@ pub fn classify(facts: &Facts, previous: Option<&Facts>) -> Status {
         Some(reason) => (true, reason.clone()),
         None => cache,
     };
-    conditions.push(Condition::because(
-        "PrefixCacheResident", held, reason,
-    ));
+    conditions.push(Condition::because("PrefixCacheResident", held, reason));
 
     Status { phase, conditions }
 }
@@ -393,9 +395,7 @@ fn poll(addr: &str, budget: Duration) -> Facts {
 
     let (resources, body) = probe_endpoint(addr, "/resources", budget);
     facts.resources = resources;
-    facts.last_generation_context = body
-        .as_ref()
-        .and_then(|v| number(v, "context_used"));
+    facts.last_generation_context = body.as_ref().and_then(|v| number(v, "context_used"));
 
     facts
 }
@@ -592,7 +592,11 @@ mod tests {
             .find(|c| c.name == "PrefixCacheResident")
             .unwrap();
         assert!(cache.held);
-        assert!(cache.reason.contains("residency, not hits"), "{}", cache.reason);
+        assert!(
+            cache.reason.contains("residency, not hits"),
+            "{}",
+            cache.reason
+        );
     }
 
     #[test]
@@ -646,11 +650,7 @@ mod tests {
         let status = classify(&facts, None);
         assert_eq!(status.phase, Phase::Generating);
         for name in ["ModelsAdmitted", "EngineResponsive"] {
-            let condition = status
-                .conditions
-                .iter()
-                .find(|c| c.name == name)
-                .unwrap();
+            let condition = status.conditions.iter().find(|c| c.name == name).unwrap();
             assert!(condition.held, "{name}: {}", condition.reason);
         }
     }
@@ -683,7 +683,11 @@ mod tests {
             .find(|c| c.name == "MemoryHeadroom")
             .unwrap();
         assert!(headroom.held);
-        assert!(headroom.reason.contains("no cap set"), "{}", headroom.reason);
+        assert!(
+            headroom.reason.contains("no cap set"),
+            "{}",
+            headroom.reason
+        );
         assert!(!measurements(&facts).contains("18446744073"));
     }
 

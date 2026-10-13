@@ -94,11 +94,7 @@ impl ModelRequirements {
             ),
             "deepseek" | "deepseek2" | "deepseek_mla" => (
                 ModelFamily::DeepSeekMla,
-                vec![
-                    Feature::SparseMoe,
-                    Feature::MlaAttention,
-                    Feature::F16Kv,
-                ],
+                vec![Feature::SparseMoe, Feature::MlaAttention, Feature::F16Kv],
                 vec![Feature::PagedKv],
             ),
             _ => return None,

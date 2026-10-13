@@ -88,7 +88,11 @@ pub struct ExecutionDeclined {
 
 impl std::fmt::Display for ExecutionDeclined {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?} acceleration declined: {}", self.operation, self.reason)
+        write!(
+            f,
+            "{:?} acceleration declined: {}",
+            self.operation, self.reason
+        )
     }
 }
 

@@ -75,7 +75,10 @@ fn swiglu_fold_is_a_scheduling_choice_not_a_numeric_one() {
             max_abs = a;
             worst = i;
         }
-        assert!(a <= 1e-5 * p.abs().max(1.0), "logit {worst}: fold {f} vs standalone {p}");
+        assert!(
+            a <= 1e-5 * p.abs().max(1.0),
+            "logit {worst}: fold {f} vs standalone {p}"
+        );
     }
     // Both arms are the same GPU path on the same weights, so agreement is
     // exact-or-nothing: a nonzero delta means the fold computes different

@@ -21,7 +21,7 @@ fn speculation_microbench_100_rounds() {
             acc += s.expected_accepted();
         }
         let expected_ms = t0.elapsed();
-        expected_ns.push(expected_ms.as_nanos() as u128);
+        expected_ns.push(expected_ms.as_nanos());
 
         let logits: Vec<f32> = (0..512)
             .map(|i| ((i % 23) as f32) * 0.125 + (round as f32) * 0.01)
@@ -37,7 +37,7 @@ fn speculation_microbench_100_rounds() {
             let _ = argmax_manual(&logits);
         }
         let argmax_ms = t1.elapsed();
-        argmax_ns.push(argmax_ms.as_nanos() as u128);
+        argmax_ns.push(argmax_ms.as_nanos());
 
         if round == 0 {
             assert!(acc > 0.0, "microbench should produce valid numeric output");

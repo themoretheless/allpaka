@@ -14,8 +14,8 @@ pub mod config;
 pub mod kv;
 pub mod model;
 pub mod pipeline;
-pub mod profile;
 pub mod prefix_cache;
+pub mod profile;
 pub mod requirements;
 pub mod speculate;
 pub mod tokenizer;
@@ -230,7 +230,9 @@ mod tests {
             .build();
         let path = write_temp("selected-mapping", &bytes);
         let file = GgufFile::open(&path).unwrap();
-        let mappings = file.selected_mappings(|tensor| tensor.name == "chosen").unwrap();
+        let mappings = file
+            .selected_mappings(|tensor| tensor.name == "chosen")
+            .unwrap();
         assert_eq!(mappings.len(), 1);
         assert!(mappings[0].len() <= 32768);
         assert!(mappings[0].len() < file.mapping().len() / 2);
@@ -250,10 +252,16 @@ mod tests {
         // even when the other layer and output head are absent from metadata.
         let mut bytes = original.clone();
         for index in 0..bytes.len() - 5 {
-            if &bytes[index..index + 5] == b"blk.1" && bytes.get(index + 6..index + 9) == Some(b"ffn") { bytes[index + 4] = b'9'; }
+            if &bytes[index..index + 5] == b"blk.1"
+                && bytes.get(index + 6..index + 9) == Some(b"ffn")
+            {
+                bytes[index + 4] = b'9';
+            }
         }
         for index in 0..bytes.len() - 6 {
-            if &bytes[index..index + 6] == b"output" && (index == 0 || bytes[index - 1] != b'_') { bytes[index] = b'X'; }
+            if &bytes[index..index + 6] == b"output" && (index == 0 || bytes[index - 1] != b'_') {
+                bytes[index] = b'X';
+            }
         }
         let path = write_temp("head-only", &bytes);
         let file = GgufFile::open(&path).unwrap();
@@ -268,14 +276,20 @@ mod tests {
 
         let mut bytes = original;
         for index in 0..bytes.len() - 5 {
-            if &bytes[index..index + 5] == b"blk.0" && bytes.get(index + 6..index + 9) == Some(b"ffn") { bytes[index + 4] = b'9'; }
+            if &bytes[index..index + 5] == b"blk.0"
+                && bytes.get(index + 6..index + 9) == Some(b"ffn")
+            {
+                bytes[index + 4] = b'9';
+            }
         }
         let path = write_temp("tail-only", &bytes);
         let file = GgufFile::open(&path).unwrap();
         let tail = Model::load_stage(&file, 1, 2).unwrap();
         assert!(tail.embed_token(3).is_err());
         let mut session = tail.new_session(16);
-        let h = tail.forward_layers(&vec![0.01; HIDDEN as usize], &mut session, 1, 2).unwrap();
+        let h = tail
+            .forward_layers(&vec![0.01; HIDDEN as usize], &mut session, 1, 2)
+            .unwrap();
         assert!(tail.finish_hidden(&h).is_ok());
         std::fs::remove_file(path).ok();
     }
@@ -295,13 +309,24 @@ mod tests {
                 let model = Model::load_stage(&file, first, first + 1).unwrap();
                 let info = pipeline::StageInfo {
                     model_id: "tiny-llama-v1".into(),
-                    fingerprint: allpaka_gguf::fingerprint(&path).unwrap(), first, end: first + 1,
-                    layers: 2, hidden: HIDDEN as usize, vocab: VOCAB as u32,
+                    fingerprint: allpaka_gguf::fingerprint(&path).unwrap(),
+                    first,
+                    end: first + 1,
+                    layers: 2,
+                    hidden: HIDDEN as usize,
+                    vocab: VOCAB as u32,
                 };
                 // The head first receives a deliberately unauthorised connection.
                 if first == 0 {
                     let (stream, _) = listener.accept().unwrap();
-                    assert!(pipeline::serve_connection(stream, &model, info.clone(), "test-key", 16).is_err());
+                    assert!(pipeline::serve_connection(
+                        stream,
+                        &model,
+                        info.clone(),
+                        "test-key",
+                        16
+                    )
+                    .is_err());
                 }
                 let (stream, _) = listener.accept().unwrap();
                 let _ = pipeline::serve_connection(stream, &model, info, "test-key", 16);
@@ -320,7 +345,9 @@ mod tests {
             }
         }
         drop(remote);
-        for handle in handles { handle.join().unwrap(); }
+        for handle in handles {
+            handle.join().unwrap();
+        }
         std::fs::remove_file(path).ok();
     }
 
@@ -336,7 +363,9 @@ mod tests {
             let expected = model.forward(token, &mut whole).unwrap();
             let h = model.embed_token(token).unwrap();
             let h = model.forward_layers(&h, &mut head, 0, 1).unwrap();
-            let h = model.forward_layers(&h, &mut tail, 1, model.config.n_layers as usize).unwrap();
+            let h = model
+                .forward_layers(&h, &mut tail, 1, model.config.n_layers as usize)
+                .unwrap();
             let actual = model.finish_hidden(&h).unwrap();
             for (a, b) in actual.iter().zip(&expected) {
                 assert!((a - b).abs() < 1e-5, "{a} != {b}");
@@ -346,7 +375,9 @@ mod tests {
         }
         let pos = head.pos();
         assert!(model.forward_layers(&[], &mut head, 0, 1).is_err());
-        assert!(model.forward_layers(&vec![0.0; HIDDEN as usize], &mut head, 1, 1).is_err());
+        assert!(model
+            .forward_layers(&vec![0.0; HIDDEN as usize], &mut head, 1, 1)
+            .is_err());
         assert_eq!(head.pos(), pos);
         std::fs::remove_file(path).ok();
     }
@@ -367,6 +398,7 @@ mod tests {
 
     #[test]
     fn qwen_shaped_files_flip_the_two_switches() {
+        let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = write_temp("qwen", &tiny_model("qwen3", true));
         let f = GgufFile::open(&path).unwrap();
         let c = Config::from_gguf(&f).unwrap();
@@ -489,6 +521,7 @@ mod tests {
     /// and the cache it leaves behind must continue identically.
     #[test]
     fn forward_batch_matches_sequential_forward() {
+        let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for (arch, qk) in [("llama", false), ("qwen3", true)] {
             let path = write_temp(&format!("batch-{arch}"), &tiny_model(arch, qk));
             let f = GgufFile::open(&path).unwrap();
@@ -525,6 +558,7 @@ mod tests {
     /// The MoE path routes per token inside a batch too.
     #[test]
     fn forward_batch_matches_sequential_on_a_moe() {
+        let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = write_temp("batch-moe", &tiny_moe(None, 0));
         let f = GgufFile::open(&path).unwrap();
         let model = Model::load(&f).unwrap();
@@ -651,6 +685,7 @@ mod tests {
 
     #[test]
     fn a_moe_model_produces_finite_deterministic_logits() {
+        let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = write_temp("moe-runs", &tiny_moe(None, 0));
         let f = GgufFile::open(&path).unwrap();
         let c = Config::from_gguf(&f).unwrap();
@@ -670,6 +705,7 @@ mod tests {
     /// nothing; poisoning a picked one blows the logits up visibly.
     #[test]
     fn unrouted_experts_do_not_influence_the_output() {
+        let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let clean = write_temp("moe-clean", &tiny_moe(None, 0));
         // Experts 0 and 1 form the always-picked pair (router rows +-1);
         // experts 2 and 3 have zero router rows and lose every top-2.
@@ -687,8 +723,11 @@ mod tests {
         }
     }
 
+    static GREEDY_CHAIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn gpu_greedy_chain_matches_step_by_step_on_128_head_dim() {
+        let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut rng = Rng(12345);
         let mut mat = |rows: u64, cols: u64| -> Vec<f32> {
             (0..rows * cols).map(|_| rng.next_f32()).collect()
@@ -760,7 +799,10 @@ mod tests {
         let gpu_after = allpaka_backend::gpu::stats();
         let waits = gpu_after.0 - gpu_before.0;
 
-        assert_eq!(ref_tokens, chain_tokens, "greedy chain diverged from step-by-step");
+        assert_eq!(
+            ref_tokens, chain_tokens,
+            "greedy chain diverged from step-by-step"
+        );
         #[cfg(target_os = "macos")]
         {
             assert!(
@@ -770,7 +812,125 @@ mod tests {
             assert_eq!(after.attempts - before.attempts, 4);
             assert_eq!(after.successes - before.successes, 4);
             assert_eq!(after.declines - before.declines, 0);
-            assert_eq!(waits, 2, "expected 1 wait for seed + 1 wait for 3-token continuation chain");
+            assert_eq!(
+                waits, 2,
+                "expected 1 wait for seed + 1 wait for 3-token continuation chain"
+            );
+        }
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn gpu_moe_greedy_chain_matches_step_by_step() {
+        let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rng = Rng(67890);
+        let mut mat = |rows: u64, cols: u64| -> Vec<f32> {
+            (0..rows * cols).map(|_| rng.next_f32()).collect()
+        };
+        let hidden = 128u64;
+        let heads = 2u64;
+        let kv_heads = 1u64;
+        let head_dim = 128u64;
+        let q_dim = heads * head_dim;
+        let kv_dim = kv_heads * head_dim;
+        let ffn = 128u64;
+        let experts = 4u64;
+        let used = 2u64;
+        let expert_ffn = 64u64;
+        let vocab = 32u64;
+        let layers = 2u64;
+        let arch = "qwen3moe";
+
+        let mut b = FileBuilder::new()
+            .str_kv("general.architecture", arch)
+            .u32_kv(&format!("{arch}.block_count"), layers as u32)
+            .u32_kv(&format!("{arch}.embedding_length"), hidden as u32)
+            .u32_kv(&format!("{arch}.attention.head_count"), heads as u32)
+            .u32_kv(&format!("{arch}.attention.head_count_kv"), kv_heads as u32)
+            .u32_kv(&format!("{arch}.attention.key_length"), head_dim as u32)
+            .u32_kv(&format!("{arch}.feed_forward_length"), ffn as u32)
+            .u32_kv(&format!("{arch}.expert_count"), experts as u32)
+            .u32_kv(&format!("{arch}.expert_used_count"), used as u32)
+            .u32_kv(
+                &format!("{arch}.expert_feed_forward_length"),
+                expert_ffn as u32,
+            )
+            .f32_kv(&format!("{arch}.attention.layer_norm_rms_epsilon"), 1e-5)
+            .f32_kv(&format!("{arch}.rope.freq_base"), 10000.0)
+            .tensor_q8_0("token_embd.weight", &[hidden, vocab], mat(vocab, hidden))
+            .tensor("output_norm.weight", &[hidden], vec![1.0; hidden as usize])
+            .tensor_q8_0("output.weight", &[hidden, vocab], mat(vocab, hidden));
+
+        for i in 0..layers {
+            let n = |p: &str| format!("blk.{i}.{p}.weight");
+            b = b
+                .tensor(&n("attn_norm"), &[hidden], vec![1.0; hidden as usize])
+                .tensor_q8_0(&n("attn_q"), &[hidden, q_dim], mat(q_dim, hidden))
+                .tensor_q8_0(&n("attn_k"), &[hidden, kv_dim], mat(kv_dim, hidden))
+                .tensor_q8_0(&n("attn_v"), &[hidden, kv_dim], mat(kv_dim, hidden))
+                .tensor_q8_0(&n("attn_output"), &[q_dim, hidden], mat(hidden, q_dim))
+                .tensor(&n("ffn_norm"), &[hidden], vec![1.0; hidden as usize])
+                .tensor(&n("ffn_gate_inp"), &[hidden, experts], mat(experts, hidden))
+                .tensor_q8_0(
+                    &n("ffn_gate_exps"),
+                    &[hidden, expert_ffn, experts],
+                    mat(experts * expert_ffn, hidden),
+                )
+                .tensor_q8_0(
+                    &n("ffn_up_exps"),
+                    &[hidden, expert_ffn, experts],
+                    mat(experts * expert_ffn, hidden),
+                )
+                .tensor_q8_0(
+                    &n("ffn_down_exps"),
+                    &[expert_ffn, hidden, experts],
+                    mat(experts * hidden, expert_ffn),
+                );
+        }
+        let mut raw = b.build();
+        while raw.len() % 16384 != 0 {
+            raw.push(0);
+        }
+        let path = write_temp("moe-greedy-chain-128", &raw);
+        let f = GgufFile::open(&path).unwrap();
+        let model = Model::load(&f).unwrap();
+        let prompt = [2u32, 7, 14];
+
+        std::env::set_var("ALLPAKA_GREEDY_CHAIN", "0");
+        let mut s1 = model.new_session(32);
+        let logits = model.forward_batch(&prompt, &mut s1).unwrap();
+        let seed = logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, _)| i as u32)
+            .unwrap();
+        let ref_tokens = model.forward_greedy_n(seed, &mut s1, 4).unwrap();
+
+        std::env::set_var("ALLPAKA_GREEDY_CHAIN", "1");
+        let mut s2 = model.new_session(32);
+        let _ = model.forward_batch(&prompt, &mut s2).unwrap();
+        let gpu_before = allpaka_backend::gpu::stats();
+        let before = allpaka_backend::gpu::decode_path_stats();
+        let chain_tokens = model.forward_greedy_n(seed, &mut s2, 4).unwrap();
+        let after = allpaka_backend::gpu::decode_path_stats();
+        let gpu_after = allpaka_backend::gpu::stats();
+        let waits = gpu_after.0 - gpu_before.0;
+
+        assert_eq!(
+            ref_tokens, chain_tokens,
+            "MoE greedy chain diverged from step-by-step"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            assert!(allpaka_backend::gpu::is_attached());
+            assert_eq!(after.attempts - before.attempts, 4);
+            assert_eq!(after.successes - before.successes, 4);
+            assert_eq!(after.declines - before.declines, 0);
+            assert_eq!(
+                waits, 2,
+                "expected 1 wait for seed + 1 wait for 3-token MoE continuation chain"
+            );
         }
         std::fs::remove_file(path).ok();
     }

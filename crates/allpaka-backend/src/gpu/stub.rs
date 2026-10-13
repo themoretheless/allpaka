@@ -18,6 +18,10 @@ pub fn prefer_gpu_embed() -> bool {
     false
 }
 
+pub fn can_embed_on_gpu(_ty: GgmlType, _bytes: &[u8], _n_in: usize) -> bool {
+    false
+}
+
 pub fn decode_greedy_continue(_req: &TokenReq, _n_more: usize) -> Option<Vec<u32>> {
     None
 }
@@ -28,6 +32,10 @@ pub fn is_attached() -> bool {
 
 pub fn residency_status() -> (usize, bool) {
     (0, false)
+}
+
+pub fn arena_bytes() -> usize {
+    0
 }
 
 pub fn stats() -> (u64, u64, u64, u64) {

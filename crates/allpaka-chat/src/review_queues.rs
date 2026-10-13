@@ -1,9 +1,9 @@
 //! Explicit, project-scoped sources for durable human review queues.
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::StatusCode,
+    Json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -139,7 +139,7 @@ impl Store {
                 options.mode(0o600);
             }
             let mut file = options.open(&temp)?;
-            file.write_all(&bytes)?;
+            file.write_all(bytes)?;
             file.sync_all()?;
             std::fs::rename(&temp, final_path)?;
             std::fs::File::open(self.root.as_ref())?.sync_all()?;
@@ -386,7 +386,7 @@ impl Store {
                 bail!("Review queue capacity reached");
             }
         }
-        self.write_locked(&queue, &bytes)?;
+        self.write_locked(queue, &bytes)?;
         Ok(())
     }
     fn assign(&self, id: &str, input: Assignment) -> Result<Queue> {
@@ -671,31 +671,27 @@ mod tests {
                 .assignments[&0],
             "Reviewer"
         );
-        assert!(
-            store
-                .assign(
-                    &queue.id,
-                    Assignment {
-                        base_version: 1,
-                        target_index: 0,
-                        reviewer: None
-                    }
-                )
-                .unwrap_err()
-                .is::<Conflict>()
-        );
-        assert!(
-            store
-                .assign(
-                    &queue.id,
-                    Assignment {
-                        base_version: 2,
-                        target_index: 1,
-                        reviewer: None
-                    }
-                )
-                .is_err()
-        );
+        assert!(store
+            .assign(
+                &queue.id,
+                Assignment {
+                    base_version: 1,
+                    target_index: 0,
+                    reviewer: None
+                }
+            )
+            .unwrap_err()
+            .is::<Conflict>());
+        assert!(store
+            .assign(
+                &queue.id,
+                Assignment {
+                    base_version: 2,
+                    target_index: 1,
+                    reviewer: None
+                }
+            )
+            .is_err());
         let cleared = store
             .assign(
                 &queue.id,
@@ -759,16 +755,14 @@ mod tests {
                 .unwrap()["total"],
             0
         );
-        assert!(
-            store
-                .list(&Search {
-                    project_id: "default".into(),
-                    offset: 0,
-                    limit: 101,
-                    ..Search::default()
-                })
-                .is_err()
-        );
+        assert!(store
+            .list(&Search {
+                project_id: "default".into(),
+                offset: 0,
+                limit: 101,
+                ..Search::default()
+            })
+            .is_err());
 
         let assigned_name = store.read(&queue.id).unwrap().assignments[&0].clone();
         let filtered = |status: &str, reviewer: Option<String>| {
@@ -786,16 +780,14 @@ mod tests {
         assert_eq!(filtered("completed", None)["total"], 0);
         assert_eq!(filtered("unassigned", None)["total"], 0);
         assert_eq!(filtered("pending", Some("absent".into()))["total"], 0);
-        assert!(
-            store
-                .list(&Search {
-                    project_id: "default".into(),
-                    status: Some("unknown".into()),
-                    limit: 20,
-                    ..Search::default()
-                })
-                .is_err()
-        );
+        assert!(store
+            .list(&Search {
+                project_id: "default".into(),
+                status: Some("unknown".into()),
+                limit: 20,
+                ..Search::default()
+            })
+            .is_err());
         let named = store.read(&queue.id).unwrap().name.to_uppercase();
         assert_eq!(
             store
@@ -819,16 +811,14 @@ mod tests {
                 .unwrap()["total"],
             0
         );
-        assert!(
-            store
-                .list(&Search {
-                    project_id: "default".into(),
-                    name: Some(" ".into()),
-                    limit: 20,
-                    ..Search::default()
-                })
-                .is_err()
-        );
+        assert!(store
+            .list(&Search {
+                project_id: "default".into(),
+                name: Some(" ".into()),
+                limit: 20,
+                ..Search::default()
+            })
+            .is_err());
         let current = store.read(&queue.id).unwrap();
         let archived = store
             .lifecycle(
@@ -840,30 +830,26 @@ mod tests {
             )
             .unwrap();
         assert!(Store::new(&root).unwrap().read(&queue.id).unwrap().archived);
-        assert!(
-            store
-                .assign(
-                    &queue.id,
-                    Assignment {
-                        base_version: archived.version,
-                        target_index: 0,
-                        reviewer: None
-                    }
-                )
-                .is_err()
-        );
-        assert!(
-            store
-                .lifecycle(
-                    &queue.id,
-                    Lifecycle {
-                        base_version: current.version,
-                        archived: false
-                    }
-                )
-                .unwrap_err()
-                .is::<Conflict>()
-        );
+        assert!(store
+            .assign(
+                &queue.id,
+                Assignment {
+                    base_version: archived.version,
+                    target_index: 0,
+                    reviewer: None
+                }
+            )
+            .is_err());
+        assert!(store
+            .lifecycle(
+                &queue.id,
+                Lifecycle {
+                    base_version: current.version,
+                    archived: false
+                }
+            )
+            .unwrap_err()
+            .is::<Conflict>());
         assert_eq!(
             store
                 .list(&Search {
@@ -904,12 +890,10 @@ mod tests {
         assert_eq!(restored.history.first().unwrap().action, "create");
         assert_eq!(restored.history.last().unwrap().action, "restore");
         assert_eq!(restored.history.last().unwrap().version, restored.version);
-        assert!(
-            restored
-                .history
-                .windows(2)
-                .all(|w| w[0].version < w[1].version)
-        );
+        assert!(restored
+            .history
+            .windows(2)
+            .all(|w| w[0].version < w[1].version));
         let mut legacy_value = serde_json::to_value(&restored).unwrap();
         legacy_value.as_object_mut().unwrap().remove("history");
         let mut legacy: Queue = serde_json::from_value(legacy_value).unwrap();

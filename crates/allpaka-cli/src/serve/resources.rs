@@ -238,8 +238,7 @@ fn windows_memory_mib() -> (u64, u64, u64) {
     unsafe {
         let mut counters = std::mem::zeroed::<Counters>();
         counters.cb = std::mem::size_of::<Counters>() as u32;
-        let rss = if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) != 0
-        {
+        let rss = if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) != 0 {
             counters.working_set_size as u64
         } else {
             0
@@ -254,6 +253,10 @@ fn windows_memory_mib() -> (u64, u64, u64) {
         } else {
             (0, 0)
         };
-        (rss / (1024 * 1024), used / (1024 * 1024), total / (1024 * 1024))
+        (
+            rss / (1024 * 1024),
+            used / (1024 * 1024),
+            total / (1024 * 1024),
+        )
     }
 }

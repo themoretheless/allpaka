@@ -150,14 +150,12 @@ fn main() {
         let file = std::fs::File::open(path).unwrap();
         let map = unsafe { memmap2::Mmap::map(&file).unwrap() };
         let len = (map.len() + 16383) & !16383;
-        let buf = unsafe {
-            device.new_buffer_with_bytes_no_copy(
-                map.as_ptr() as *const _,
-                len as u64,
-                MTLResourceOptions::StorageModeShared,
-                None,
-            )
-        };
+        let buf = device.new_buffer_with_bytes_no_copy(
+            map.as_ptr() as *const _,
+            len as u64,
+            MTLResourceOptions::StorageModeShared,
+            None,
+        );
         _mmap = map;
         buf
     } else {
@@ -205,7 +203,6 @@ fn main() {
         let gy = (m as u64).div_ceil(row_tile);
         let ni = n_in as u32;
         let no = n_out as u32;
-        let wo = 0u64;
         let mm = m as u32;
         let iter_no = std::cell::Cell::new(0u64);
         let t = time_kernel(
@@ -216,13 +213,13 @@ fn main() {
                 enc.set_compute_pipeline_state(&pipe);
                 enc.set_buffer(0, Some(&w_buf), 0);
                 enc.set_buffer(1, Some(&x_buf), 0);
-                enc.set_buffer(2, Some(&y_buf), 0);
+                enc.set_buffer(2, Some(y_buf), 0);
                 enc.set_bytes(3, 4, &ni as *const u32 as *const _);
                 enc.set_bytes(4, 4, &no as *const u32 as *const _);
                 enc.set_bytes(5, 8, &wo as *const u64 as *const _);
                 enc.set_bytes(6, 4, &mm as *const u32 as *const _);
-                for p in 0..n_par {
-                    enc.set_buffer(2, Some(&y_bufs[p]), 0);
+                for yb in y_bufs.iter().take(n_par) {
+                    enc.set_buffer(2, Some(yb), 0);
                     enc.dispatch_thread_groups(MTLSize::new(gx, gy, 1), MTLSize::new(128, 1, 1));
                 }
             },
@@ -246,8 +243,8 @@ fn main() {
         let rows_per = (m * n_used / n_act).max(1);
         let mut table: Vec<[u32; 3]> = vec![[0, 0, 0]; n_exp];
         let mut row0 = 0u32;
-        for e in 0..n_act {
-            table[e] = [e as u32, row0, rows_per as u32];
+        for (e, slot) in table.iter_mut().enumerate().take(n_act) {
+            *slot = [e as u32, row0, rows_per as u32];
             row0 += rows_per as u32;
         }
         let total_rows = row0 as usize;
@@ -569,7 +566,7 @@ fn main() {
             MTLResourceOptions::StorageModeShared,
         );
         let scale: f32 = 1.0 / (hd as f32).sqrt();
-        let mut run = |name: &str, out: &Buffer, grid_y: u64| {
+        let run = |name: &str, out: &Buffer, grid_y: u64| {
             let fun = lib.get_function(name, None).unwrap();
             let pipe = device
                 .new_compute_pipeline_state_with_function(&fun)
@@ -732,54 +729,53 @@ fn main() {
     let llib = device
         .new_library_with_source(&src, &CompileOptions::new())
         .unwrap();
-    for name in ["llama_mul_mm_q4_K"] {
-        let fun = llib.get_function(name, None).unwrap();
-        let pipe = device
-            .new_compute_pipeline_state_with_function(&fun)
-            .unwrap();
-        let args = LlamaMmArgs {
-            ne00: n_in as i32,
-            ne02: 1,
-            nb01: row_bytes as u64,
-            nb02: (n_out * row_bytes) as u64,
-            nb03: (n_out * row_bytes) as u64,
-            ne12: 1,
-            nb10: 4,
-            nb11: (n_in * 4) as u64,
-            nb12: (m * n_in * 4) as u64,
-            nb13: (m * n_in * 4) as u64,
-            ne0: n_out as i32,
-            ne1: m as i32,
-            r2: 1,
-            r3: 1,
-        };
-        let gx = (m as u64).div_ceil(32);
-        let gy = (n_out as u64).div_ceil(64);
-        let t = time_kernel(
-            &queue,
-            |enc| {
-                enc.set_compute_pipeline_state(&pipe);
-                enc.set_bytes(
-                    0,
-                    std::mem::size_of::<LlamaMmArgs>() as u64,
-                    &args as *const _ as *const _,
-                );
-                enc.set_buffer(1, Some(&w_buf), 0);
-                enc.set_buffer(2, Some(&x_buf), 0);
-                enc.set_buffer(3, Some(&y_buf), 0);
-                enc.set_threadgroup_memory_length(0, 8192);
-                for p in 0..n_par {
-                    enc.set_buffer(3, Some(&y_bufs[p]), 0);
-                    enc.dispatch_thread_groups(MTLSize::new(gx, gy, 1), MTLSize::new(128, 1, 1));
-                }
-            },
-            10,
-        );
-        let fl = 2.0 * (m * n_in * n_out) as f64 * n_par as f64;
-        println!(
-            "llama {name}: {:.3} ms, {:.2} TFLOPS",
-            t * 1e3,
-            fl / t / 1e12
-        );
-    }
+    let name = "llama_mul_mm_q4_K";
+    let fun = llib.get_function(name, None).unwrap();
+    let pipe = device
+        .new_compute_pipeline_state_with_function(&fun)
+        .unwrap();
+    let args = LlamaMmArgs {
+        ne00: n_in as i32,
+        ne02: 1,
+        nb01: row_bytes as u64,
+        nb02: (n_out * row_bytes) as u64,
+        nb03: (n_out * row_bytes) as u64,
+        ne12: 1,
+        nb10: 4,
+        nb11: (n_in * 4) as u64,
+        nb12: (m * n_in * 4) as u64,
+        nb13: (m * n_in * 4) as u64,
+        ne0: n_out as i32,
+        ne1: m as i32,
+        r2: 1,
+        r3: 1,
+    };
+    let gx = (m as u64).div_ceil(32);
+    let gy = (n_out as u64).div_ceil(64);
+    let t = time_kernel(
+        &queue,
+        |enc| {
+            enc.set_compute_pipeline_state(&pipe);
+            enc.set_bytes(
+                0,
+                std::mem::size_of::<LlamaMmArgs>() as u64,
+                &args as *const _ as *const _,
+            );
+            enc.set_buffer(1, Some(&w_buf), 0);
+            enc.set_buffer(2, Some(&x_buf), 0);
+            enc.set_buffer(3, Some(y_buf), 0);
+            enc.set_threadgroup_memory_length(0, 8192);
+            for yb in y_bufs.iter().take(n_par) {
+                enc.set_buffer(3, Some(yb), 0);
+                enc.dispatch_thread_groups(MTLSize::new(gx, gy, 1), MTLSize::new(128, 1, 1));
+            }
+        },
+        10,
+    );
+    let fl = 2.0 * (m * n_in * n_out) as f64 * n_par as f64;
+    println!(
+        "llama {name}: {:.3} ms, {:.2} TFLOPS",
+        t * 1e3,
+        fl / t / 1e12
+    );
 }

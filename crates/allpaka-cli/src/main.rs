@@ -2,23 +2,23 @@
 //! and if so, where to cut it.
 
 mod airbug;
+mod autotune;
 mod bench;
 mod benchmark_report;
-mod autotune;
-mod explain;
-mod scheduler;
-mod model_registry;
-mod serving_runtime;
 mod client;
 mod config;
+mod explain;
+mod model_registry;
+mod scheduler;
+mod serving_runtime;
 use allpaka_gguf as gguf;
-mod rag_mcp;
 mod airbug_llama;
+mod pipeline;
+mod rag_mcp;
 mod report;
 mod serve;
 mod verify;
 mod watch;
-mod pipeline;
 
 use allpaka_core::fleet::FleetMember;
 use allpaka_core::{fleet, plan, presets, replicate, Model, PlanRequest, Speculation, Verdict};
@@ -38,37 +38,55 @@ enum Command {
     /// Run a contiguous transformer stage on this machine.
     Stage {
         model: PathBuf,
-        #[arg(long)] first: usize,
-        #[arg(long)] end: usize,
+        #[arg(long)]
+        first: usize,
+        #[arg(long)]
+        end: usize,
         /// Same immutable model identity on every stage.
-        #[arg(long)] model_id: String,
-        #[arg(long, default_value = "127.0.0.1:9798")] bind: std::net::SocketAddr,
-        #[arg(long, default_value_t = 4096)] context: usize,
+        #[arg(long)]
+        model_id: String,
+        #[arg(long, default_value = "127.0.0.1:9798")]
+        bind: std::net::SocketAddr,
+        #[arg(long, default_value_t = 4096)]
+        context: usize,
     },
     /// Produce an executable stage manifest from the cluster planner.
     PipelinePlan {
         model: PathBuf,
-        #[arg(long, default_value = "allpaka.toml")] config: PathBuf,
-        #[arg(long)] model_id: String,
+        #[arg(long, default_value = "allpaka.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        model_id: String,
         /// Repeat node-name=host:port for every available worker.
-        #[arg(long = "endpoint", required = true)] endpoints: Vec<String>,
-        #[arg(long)] context: Option<u32>,
+        #[arg(long = "endpoint", required = true)]
+        endpoints: Vec<String>,
+        #[arg(long)]
+        context: Option<u32>,
     },
     /// Expose a distributed model to Studio through a local chat API.
     PipelineServe {
-        #[arg(long, required = true, value_delimiter = ',')] stages: Vec<String>,
+        #[arg(long, required = true, value_delimiter = ',')]
+        stages: Vec<String>,
         /// GGUF supplies tokenizer metadata; no weights are loaded here.
-        #[arg(long)] tokenizer: PathBuf,
-        #[arg(long)] model_id: String,
-        #[arg(long, default_value = "127.0.0.1:8099")] bind: std::net::SocketAddr,
-        #[arg(long, default_value_t = 4096)] context: usize,
+        #[arg(long)]
+        tokenizer: PathBuf,
+        #[arg(long)]
+        model_id: String,
+        #[arg(long, default_value = "127.0.0.1:8099")]
+        bind: std::net::SocketAddr,
+        #[arg(long, default_value_t = 4096)]
+        context: usize,
     },
     /// Execute prompt tokens through ordered remote model stages.
     Pipeline {
-        #[arg(long, required = true, value_delimiter = ',')] stages: Vec<String>,
-        #[arg(long, required = true, value_delimiter = ',')] tokens: Vec<u32>,
-        #[arg(long, default_value_t = 4096)] context: usize,
-        #[arg(long, default_value_t = 16)] generate: usize,
+        #[arg(long, required = true, value_delimiter = ',')]
+        stages: Vec<String>,
+        #[arg(long, required = true, value_delimiter = ',')]
+        tokens: Vec<u32>,
+        #[arg(long, default_value_t = 4096)]
+        context: usize,
+        #[arg(long, default_value_t = 16)]
+        generate: usize,
     },
     /// Open the multi-provider chat workspace without loading a local model.
     Studio {
@@ -368,7 +386,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     airbug::install();
     match cli.command {
-        Command::Studio { bind, workspace, data_dir } => allpaka_chat::run(bind, workspace, data_dir),
+        Command::Studio {
+            bind,
+            workspace,
+            data_dir,
+        } => allpaka_chat::run(bind, workspace, data_dir),
         Command::Explain {
             engine,
             profile,
@@ -383,14 +405,34 @@ fn main() -> Result<()> {
             print!("{}", config::EXAMPLE);
             Ok(())
         }
-        Command::PipelinePlan { model, config, model_id, endpoints, context } =>
-            pipeline::plan_manifest(&model, &config, &model_id, &endpoints, context),
-        Command::PipelineServe { stages, tokenizer, model_id, bind, context } =>
-            pipeline::serve_chat(&stages, &tokenizer, &model_id, bind, context),
-        Command::Stage { model, first, end, model_id, bind, context } =>
-            pipeline::serve(&model, first, end, model_id, bind, context),
-        Command::Pipeline { stages, tokens, context, generate } =>
-            pipeline::generate(&stages, &tokens, context, generate),
+        Command::PipelinePlan {
+            model,
+            config,
+            model_id,
+            endpoints,
+            context,
+        } => pipeline::plan_manifest(&model, &config, &model_id, &endpoints, context),
+        Command::PipelineServe {
+            stages,
+            tokenizer,
+            model_id,
+            bind,
+            context,
+        } => pipeline::serve_chat(&stages, &tokenizer, &model_id, bind, context),
+        Command::Stage {
+            model,
+            first,
+            end,
+            model_id,
+            bind,
+            context,
+        } => pipeline::serve(&model, first, end, model_id, bind, context),
+        Command::Pipeline {
+            stages,
+            tokens,
+            context,
+            generate,
+        } => pipeline::generate(&stages, &tokens, context, generate),
         Command::Presets => {
             report::presets(presets::PRESETS);
             Ok(())
@@ -537,17 +579,22 @@ fn main() -> Result<()> {
                         model_budget_gib.saturating_mul(1 << 30)
                     },
                     prefix_budget_bytes: prefix_cache_mib.saturating_mul(1 << 20),
-                    memory_budget_bytes: if memory_budget_mib == 0 { u64::MAX }
-                        else { memory_budget_mib.checked_mul(1 << 20).context("memory budget overflow")? },
+                    memory_budget_bytes: if memory_budget_mib == 0 {
+                        u64::MAX
+                    } else {
+                        memory_budget_mib
+                            .checked_mul(1 << 20)
+                            .context("memory budget overflow")?
+                    },
                 },
             )
         }
         Command::Status { addr } => client::status(&addr),
-        Command::Watch { addr, interval_ms, json } => watch::watch(
-            &addr,
-            std::time::Duration::from_millis(interval_ms),
+        Command::Watch {
+            addr,
+            interval_ms,
             json,
-        ),
+        } => watch::watch(&addr, std::time::Duration::from_millis(interval_ms), json),
         Command::Chat {
             prompt,
             system,

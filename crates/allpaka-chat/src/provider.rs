@@ -635,40 +635,133 @@ pub(crate) async fn model_list(State(app): State<App>, Path(id): Path<String>) -
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DoctorRequest { model:Option<String> }
-pub(crate) async fn doctor(State(app):State<App>,Path(id):Path<String>,Json(input):Json<DoctorRequest>)->ApiResult<Value>{
-    let p=app.providers.lock().unwrap().iter().find(|p|p.id==id).cloned().ok_or_else(||error(StatusCode::NOT_FOUND,"Unknown provider"))?;
-    if input.model.as_ref().is_some_and(|model|model.trim().is_empty()||model.len()>200){return Err(error(StatusCode::BAD_REQUEST,"Invalid diagnostic model"));}
-    let started=std::time::Instant::now();
-    let endpoint=reqwest::Url::parse(&p.base).ok().filter(|url|matches!(url.scheme(),"http"|"https")&&url.host_str().is_some()&&url.username().is_empty()&&url.password().is_none()&&url.query().is_none()&&url.fragment().is_none());
-    let mut report=json!({"provider_id":p.id,"model":input.model,"status":"pending","generation_calls":0,"credential_present":!p.key.is_empty(),"credential_source":p.key_source,"http_status":null,"model_count":null});
-    let status=if endpoint.is_none(){"invalid_endpoint"}else if p.key_error.is_some(){"credential_store_error"}else if p.key.is_empty()&&p.id!="local"&&!p.custom{"missing_key"}else{
-        let probe=async{
-            let mut response=match request(&app.client,&p,reqwest::Method::GET,"/models").send().await{
-                Ok(response)=>response,Err(error)=>return if error.is_timeout(){"timeout"}else{"unreachable"},
+pub(crate) struct DoctorRequest {
+    model: Option<String>,
+}
+pub(crate) async fn doctor(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(input): Json<DoctorRequest>,
+) -> ApiResult<Value> {
+    let p = app
+        .providers
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.id == id)
+        .cloned()
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Unknown provider"))?;
+    if input
+        .model
+        .as_ref()
+        .is_some_and(|model| model.trim().is_empty() || model.len() > 200)
+    {
+        return Err(error(StatusCode::BAD_REQUEST, "Invalid diagnostic model"));
+    }
+    let started = std::time::Instant::now();
+    let endpoint = reqwest::Url::parse(&p.base).ok().filter(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    });
+    let mut report = json!({"provider_id":p.id,"model":input.model,"status":"pending","generation_calls":0,"credential_present":!p.key.is_empty(),"credential_source":p.key_source,"http_status":null,"model_count":null});
+    let status = if endpoint.is_none() {
+        "invalid_endpoint"
+    } else if p.key_error.is_some() {
+        "credential_store_error"
+    } else if p.key.is_empty() && p.id != "local" && !p.custom {
+        "missing_key"
+    } else {
+        let probe = async {
+            let mut response = match request(&app.client, &p, reqwest::Method::GET, "/models")
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    return if error.is_timeout() {
+                        "timeout"
+                    } else {
+                        "unreachable"
+                    }
+                }
             };
-            report["http_status"]=json!(response.status().as_u16());
-            match response.status().as_u16(){
-                401|403=>return "unauthorized",429=>return "rate_limited",300..=399=>return "redirect_rejected",404=>return "catalog_unavailable",200..=299=>{},_=>return "provider_error",
+            report["http_status"] = json!(response.status().as_u16());
+            match response.status().as_u16() {
+                401 | 403 => return "unauthorized",
+                429 => return "rate_limited",
+                300..=399 => return "redirect_rejected",
+                404 => return "catalog_unavailable",
+                200..=299 => {}
+                _ => return "provider_error",
             }
-            if response.content_length().is_some_and(|length|length>1024*1024){return "catalog_too_large";}
-            let mut bytes=Vec::new();
-            loop{match response.chunk().await{
-                Ok(Some(chunk))=>{if bytes.len()+chunk.len()>1024*1024{return "catalog_too_large";}bytes.extend_from_slice(&chunk);},
-                Ok(None)=>break,Err(_)=>return "unreachable",
-            }}
-            let catalog=match std::str::from_utf8(&bytes).ok().and_then(|text|crate::strict_json::parse(text).ok()){Some(value)=>value,None=>return "invalid_catalog"};
-            let Some(models)=catalog["data"].as_array()else{return "invalid_catalog";};
-            if models.len()>10000{return "catalog_too_large";}
-            let mut ids=std::collections::HashSet::new();
-            for model in models{let Some(id)=model["id"].as_str().filter(|id|!id.trim().is_empty()&&id.len()<=200)else{return "invalid_catalog";};if !ids.insert(id){return "invalid_catalog";}}
-            report["model_count"]=json!(ids.len());
-            if ids.is_empty(){"empty_catalog"}else if input.model.as_ref().is_some_and(|model|!ids.contains(model.as_str())){"model_missing"}else{"ready"}
+            if response
+                .content_length()
+                .is_some_and(|length| length > 1024 * 1024)
+            {
+                return "catalog_too_large";
+            }
+            let mut bytes = Vec::new();
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if bytes.len() + chunk.len() > 1024 * 1024 {
+                            return "catalog_too_large";
+                        }
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    Ok(None) => break,
+                    Err(_) => return "unreachable",
+                }
+            }
+            let catalog = match std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|text| crate::strict_json::parse(text).ok())
+            {
+                Some(value) => value,
+                None => return "invalid_catalog",
+            };
+            let Some(models) = catalog["data"].as_array() else {
+                return "invalid_catalog";
+            };
+            if models.len() > 10000 {
+                return "catalog_too_large";
+            }
+            let mut ids = std::collections::HashSet::new();
+            for model in models {
+                let Some(id) = model["id"]
+                    .as_str()
+                    .filter(|id| !id.trim().is_empty() && id.len() <= 200)
+                else {
+                    return "invalid_catalog";
+                };
+                if !ids.insert(id) {
+                    return "invalid_catalog";
+                }
+            }
+            report["model_count"] = json!(ids.len());
+            if ids.is_empty() {
+                "empty_catalog"
+            } else if input
+                .model
+                .as_ref()
+                .is_some_and(|model| !ids.contains(model.as_str()))
+            {
+                "model_missing"
+            } else {
+                "ready"
+            }
         };
-        match tokio::time::timeout(Duration::from_secs(10),probe).await{Ok(status)=>status,Err(_)=>"timeout"}
+        tokio::time::timeout(Duration::from_secs(10), probe)
+            .await
+            .unwrap_or("timeout")
     };
-    report["status"]=json!(status);report["elapsed_ms"]=json!(started.elapsed().as_millis());
-    report["inference_verified"]=json!(false);
+    report["status"] = json!(status);
+    report["elapsed_ms"] = json!(started.elapsed().as_millis());
+    report["inference_verified"] = json!(false);
     Ok(Json(report))
 }
 pub(crate) async fn save_provider(

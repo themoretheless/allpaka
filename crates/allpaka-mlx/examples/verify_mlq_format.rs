@@ -22,44 +22,44 @@ fn main() -> anyhow::Result<()> {
 
     eprintln!("Loading MLX checkpoint from: {:?}", root);
     let load_start = Instant::now();
-    
+
     // Test container layer
     let mlx = allpaka_mlx::load_safetensors(root)?;
     let load_time = load_start.elapsed();
     eprintln!("Loaded {} tensors in {:?}", mlx.len(), load_time);
-    
+
     // Validate tensor info structure
     for t in mlx.tensors() {
         assert!(!t.name.is_empty());
         assert!(!t.shape.is_empty() || t.bytes == 0);
-        assert!(t.offset >= 0);
         assert!(t.bytes > 0 || t.shape.iter().all(|&d| d == 0));
     }
-    
+
     // Dequantize sample q4 blocks
     let mut q4_count = 0;
     for t in mlx.tensors() {
-        if t.bytes < 36 { continue; }
-        
+        if t.bytes < 36 {
+            continue;
+        }
+
         // Get raw bytes (in real implementation this would use mmap)
         // For now just validate the structure exists
         q4_count += 1;
-        if q4_count >= 3 { break; } // Sample a few blocks
+        if q4_count >= 3 {
+            break;
+        } // Sample a few blocks
     }
-    
+
     eprintln!("Validated {} Q4 blocks", q4_count);
     eprintln!("All checks passed!");
-    
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_example_builds() {
-        // This test passes when the example compiles
-        assert!(true);
+        assert_eq!(allpaka_mlx::MlxQuantType::Q4Affine.bits(), 4);
     }
 }

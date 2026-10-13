@@ -53,7 +53,11 @@ impl<T> ModelRegistry<T> {
         if bytes > self.budget_bytes {
             return Err(RegistryError::ModelExceedsBudget);
         }
-        if self.entries.get(&name).is_some_and(|entry| Arc::strong_count(&entry.model) > 1) {
+        if self
+            .entries
+            .get(&name)
+            .is_some_and(|entry| Arc::strong_count(&entry.model) > 1)
+        {
             return Err(RegistryError::CapacityPinnedByActiveRequests);
         }
         let replaced_bytes = self.entries.get(&name).map_or(0, |entry| entry.bytes);
@@ -80,13 +84,18 @@ impl<T> ModelRegistry<T> {
         mut projected_bytes: u128,
         protected_name: Option<&str>,
     ) -> Result<(), RegistryError> {
-        let mut candidates: Vec<_> = self.entries.iter()
+        let mut candidates: Vec<_> = self
+            .entries
+            .iter()
             .filter(|(name, entry)| {
                 Some(name.as_str()) != protected_name && Arc::strong_count(&entry.model) == 1
             })
             .map(|(name, entry)| (name.clone(), entry.bytes, entry.last_used))
             .collect();
-        let reclaimable: u128 = candidates.iter().map(|(_, bytes, _)| u128::from(*bytes)).sum();
+        let reclaimable: u128 = candidates
+            .iter()
+            .map(|(_, bytes, _)| u128::from(*bytes))
+            .sum();
         if projected_bytes.saturating_sub(reclaimable) > u128::from(self.budget_bytes) {
             return Err(RegistryError::CapacityPinnedByActiveRequests);
         }
@@ -113,8 +122,10 @@ mod tests {
         registry.install("idle".into(), 1, 30).unwrap();
         registry.install("active".into(), 2, 70).unwrap();
         let lease = registry.get("active").unwrap();
-        assert_eq!(registry.install("new".into(), 3, 80),
-            Err(RegistryError::CapacityPinnedByActiveRequests));
+        assert_eq!(
+            registry.install("new".into(), 3, 80),
+            Err(RegistryError::CapacityPinnedByActiveRequests)
+        );
         assert_eq!(registry.resident_bytes(), 100);
         assert_eq!(*registry.get("idle").unwrap(), 1);
         assert_eq!(*lease, 2);
@@ -125,8 +136,10 @@ mod tests {
         let mut registry = ModelRegistry::new(u64::MAX);
         registry.install("active".into(), 1, u64::MAX).unwrap();
         let _lease = registry.get("active").unwrap();
-        assert_eq!(registry.install("new".into(), 2, 1),
-            Err(RegistryError::CapacityPinnedByActiveRequests));
+        assert_eq!(
+            registry.install("new".into(), 2, 1),
+            Err(RegistryError::CapacityPinnedByActiveRequests)
+        );
         assert_eq!(registry.resident_bytes(), u64::MAX);
     }
 
@@ -159,7 +172,10 @@ mod tests {
         let mut registry = ModelRegistry::new(100);
         registry.install("chat".into(), 1, 80).unwrap();
         let lease = registry.get("chat").unwrap();
-        assert_eq!(registry.install("chat".into(), 2, 90), Err(RegistryError::CapacityPinnedByActiveRequests));
+        assert_eq!(
+            registry.install("chat".into(), 2, 90),
+            Err(RegistryError::CapacityPinnedByActiveRequests)
+        );
         assert_eq!(registry.resident_bytes(), 80);
         assert_eq!(*lease, 1);
     }

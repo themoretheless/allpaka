@@ -28,7 +28,11 @@ pub(crate) struct ProposalSource {
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ConsolidationSource {id:String,version:u64,sha256:String}
+pub(crate) struct ConsolidationSource {
+    id: String,
+    version: u64,
+    sha256: String,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Snapshot {
@@ -85,7 +89,9 @@ fn digest(snapshot: &Snapshot) -> Result<String> {
     if let Some(source) = &snapshot.proposal_source {
         bytes.extend(serde_json::to_vec(source)?);
     }
-    if let Some(sources)=&snapshot.consolidation_sources {bytes.extend(serde_json::to_vec(sources)?);}
+    if let Some(sources) = &snapshot.consolidation_sources {
+        bytes.extend(serde_json::to_vec(sources)?);
+    }
     Ok(Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -212,40 +218,83 @@ impl Store {
                 bail!("Memory proposal origin cannot change");
             }
             old
-        } else { input.proposal_source };
+        } else {
+            input.proposal_source
+        };
         if latest == 0 {
             if let Some(source) = &proposal_source {
-                if !valid_id(&source.proposal_id) { bail!("Invalid proposal ID"); }
+                if !valid_id(&source.proposal_id) {
+                    bail!("Invalid proposal ID");
+                }
                 let memory_root = self.root.parent().context("Missing memory directory")?;
                 let proposals = memory_root.join("proposals").canonicalize()?;
-                if !proposals.starts_with(memory_root) { bail!("Invalid proposal storage path"); }
-                let receipt: Value = read_bounded(&proposals.join(format!("{}.json",source.proposal_id)), 128000)?;
+                if !proposals.starts_with(memory_root) {
+                    bail!("Invalid proposal storage path");
+                }
+                let receipt: Value = read_bounded(
+                    &proposals.join(format!("{}.json", source.proposal_id)),
+                    128000,
+                )?;
                 if receipt["id"].as_str() != Some(source.proposal_id.as_str())
                     || receipt["project_id"].as_str() != Some(input.project_id.as_str())
-                    || receipt["notes"].get(source.note_index).is_none() {
+                    || receipt["notes"].get(source.note_index).is_none()
+                {
                     bail!("Invalid memory proposal source");
                 }
-                if receipt["kind"]=="memory_consolidation_proposal" && receipt["consolidation_sources"]!=serde_json::to_value(&input.consolidation_sources)? {bail!("Consolidation proposal requires its exact source pins");}
+                if receipt["kind"] == "memory_consolidation_proposal"
+                    && receipt["consolidation_sources"]
+                        != serde_json::to_value(&input.consolidation_sources)?
+                {
+                    bail!("Consolidation proposal requires its exact source pins");
+                }
             }
         }
-        let consolidation_sources=if latest>0 {
-            let old=self.load(&id,Some(latest))?.consolidation_sources;
-            if input.consolidation_sources.is_some()&&input.consolidation_sources!=old {bail!("Memory consolidation origin cannot change");}
+        let consolidation_sources = if latest > 0 {
+            let old = self.load(&id, Some(latest))?.consolidation_sources;
+            if input.consolidation_sources.is_some() && input.consolidation_sources != old {
+                bail!("Memory consolidation origin cannot change");
+            }
             old
-        }else{input.consolidation_sources};
-        if latest==0 {if let Some(sources)=&consolidation_sources {
-            if !(2..=20).contains(&sources.len()) {bail!("Use 2..20 consolidation sources without proposal origin");}
-            if let Some(origin)=&proposal_source {
-                let receipt:Value=read_bounded(&self.root.parent().context("Missing memory root")?.join("proposals").join(format!("{}.json",origin.proposal_id)),128000)?;
-                if receipt["kind"]!="memory_consolidation_proposal"||receipt["consolidation_sources"]!=serde_json::to_value(sources)? {bail!("Consolidation proposal sources do not match");}
+        } else {
+            input.consolidation_sources
+        };
+        if latest == 0 {
+            if let Some(sources) = &consolidation_sources {
+                if !(2..=20).contains(&sources.len()) {
+                    bail!("Use 2..20 consolidation sources without proposal origin");
+                }
+                if let Some(origin) = &proposal_source {
+                    let receipt: Value = read_bounded(
+                        &self
+                            .root
+                            .parent()
+                            .context("Missing memory root")?
+                            .join("proposals")
+                            .join(format!("{}.json", origin.proposal_id)),
+                        128000,
+                    )?;
+                    if receipt["kind"] != "memory_consolidation_proposal"
+                        || receipt["consolidation_sources"] != serde_json::to_value(sources)?
+                    {
+                        bail!("Consolidation proposal sources do not match");
+                    }
+                }
+                let mut seen = std::collections::HashSet::new();
+                for source in sources {
+                    if !seen.insert(&source.id) || source.id == id || source.version == 0 {
+                        bail!("Invalid or duplicate consolidation source");
+                    }
+                    let original = self.load(&source.id, Some(source.version))?;
+                    if original.project_id != input.project_id
+                        || original.removed
+                        || original.sha256 != source.sha256
+                        || self.latest(&source.id)? != source.version
+                    {
+                        bail!("Memory consolidation source changed or is outside scope");
+                    }
+                }
             }
-            let mut seen=std::collections::HashSet::new();
-            for source in sources {
-                if !seen.insert(&source.id)||source.id==id||source.version==0 {bail!("Invalid or duplicate consolidation source");}
-                let original=self.load(&source.id,Some(source.version))?;
-                if original.project_id!=input.project_id||original.removed||original.sha256!=source.sha256||self.latest(&source.id)?!=source.version {bail!("Memory consolidation source changed or is outside scope");}
-            }
-        }}
+        }
         let mut snapshot = Snapshot {
             id,
             project_id: input.project_id,
@@ -268,29 +317,63 @@ impl Store {
         )?;
         Ok(snapshot)
     }
-    pub(crate) fn consolidation_input(&self,project:&str,sources:&[ConsolidationSource])->Result<Value>{
-        let _writer=self.writes.lock().unwrap();if !valid_id(project)||!(2..=20).contains(&sources.len()){bail!("Invalid consolidation input scope or source count");}
-        let mut seen=std::collections::HashSet::new();let mut rows=Vec::new();
+    pub(crate) fn consolidation_input(
+        &self,
+        project: &str,
+        sources: &[ConsolidationSource],
+    ) -> Result<Value> {
+        let _writer = self.writes.lock().unwrap();
+        if !valid_id(project) || !(2..=20).contains(&sources.len()) {
+            bail!("Invalid consolidation input scope or source count");
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut rows = Vec::new();
         for source in sources {
-            if !seen.insert(&source.id){bail!("Duplicate consolidation source");}
-            let note=self.load(&source.id,Some(source.version))?;
-            if note.project_id!=project||note.removed||note.sha256!=source.sha256||self.latest(&source.id)?!=source.version {bail!("Consolidation input source changed or is outside scope");}
+            if !seen.insert(&source.id) {
+                bail!("Duplicate consolidation source");
+            }
+            let note = self.load(&source.id, Some(source.version))?;
+            if note.project_id != project
+                || note.removed
+                || note.sha256 != source.sha256
+                || self.latest(&source.id)? != source.version
+            {
+                bail!("Consolidation input source changed or is outside scope");
+            }
             rows.push(json!({"id":note.id,"version":note.version,"sha256":note.sha256,"name":note.name,"content":note.content,"expires_ms":note.expires_ms}));
         }
-        let bytes=serde_json::to_vec(&rows)?;if bytes.len()>24000 {bail!("Consolidation input exceeds 24 KiB");}
-        let hash=Sha256::digest(&bytes).iter().map(|byte|format!("{byte:02x}")).collect::<String>();
-        Ok(json!({"kind":"memory_consolidation_input","project_id":project,"sources":rows,"source_sha256":hash,"source_bytes":bytes.len(),"provider_calls":0,"notes_modified":false}))
+        let bytes = serde_json::to_vec(&rows)?;
+        if bytes.len() > 24000 {
+            bail!("Consolidation input exceeds 24 KiB");
+        }
+        let hash = Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Ok(
+            json!({"kind":"memory_consolidation_input","project_id":project,"sources":rows,"source_sha256":hash,"source_bytes":bytes.len(),"provider_calls":0,"notes_modified":false}),
+        )
     }
-    fn source_status(&self,id:&str,version:u64)->Result<Value>{
-        let _writer=self.writes.lock().unwrap();let note=self.load(id,Some(version))?;let mut sources=Vec::new();
-        if let Some(pins)=&note.consolidation_sources {for pin in pins {
-            let original=self.load(&pin.id,Some(pin.version))?;
-            if original.project_id!=note.project_id||original.sha256!=pin.sha256 {bail!("Consolidation source integrity check failed");}
-            let latest=self.load(&pin.id,None)?;
-            if latest.project_id!=note.project_id {bail!("Consolidation source scope mismatch");}
-            sources.push(json!({"id":pin.id,"version":pin.version,"sha256":pin.sha256,"latest_version":latest.version,"latest_sha256":latest.sha256,"removed":latest.removed,"status":if latest.removed {"removed"}else if latest.version!=pin.version {"changed"}else{"current"}}));
-        }}
-        Ok(json!({"kind":"memory_consolidation_source_status","id":note.id,"version":note.version,"sha256":note.sha256,"project_id":note.project_id,"sources":sources,"semantics":"revision_status","provider_calls":0,"notes_modified":false}))
+    fn source_status(&self, id: &str, version: u64) -> Result<Value> {
+        let _writer = self.writes.lock().unwrap();
+        let note = self.load(id, Some(version))?;
+        let mut sources = Vec::new();
+        if let Some(pins) = &note.consolidation_sources {
+            for pin in pins {
+                let original = self.load(&pin.id, Some(pin.version))?;
+                if original.project_id != note.project_id || original.sha256 != pin.sha256 {
+                    bail!("Consolidation source integrity check failed");
+                }
+                let latest = self.load(&pin.id, None)?;
+                if latest.project_id != note.project_id {
+                    bail!("Consolidation source scope mismatch");
+                }
+                sources.push(json!({"id":pin.id,"version":pin.version,"sha256":pin.sha256,"latest_version":latest.version,"latest_sha256":latest.sha256,"removed":latest.removed,"status":if latest.removed {"removed"}else if latest.version!=pin.version {"changed"}else{"current"}}));
+            }
+        }
+        Ok(
+            json!({"kind":"memory_consolidation_source_status","id":note.id,"version":note.version,"sha256":note.sha256,"project_id":note.project_id,"sources":sources,"semantics":"revision_status","provider_calls":0,"notes_modified":false}),
+        )
     }
     fn list(&self, project: &str) -> Result<Value> {
         let mut rows = Vec::new();
@@ -318,35 +401,98 @@ impl Store {
     }
 }
 impl Store {
-    fn expiry(&self,project:&str,include_global:bool,now:u64,days:u64)->Result<Value>{
-        if days>365 {bail!("Expiry horizon must be 0-365 days");}
-        let horizon=now.checked_add(days*86_400_000).context("Expiry horizon overflow")?;
-        let mut expired=0;let mut expiring=0;let mut active=0;let mut no_expiry=0;let mut removed=0;let mut rows=Vec::new();
-        let scopes=if include_global && project!="global" {vec![project,"global"]} else {vec![project]};
+    fn expiry(&self, project: &str, include_global: bool, now: u64, days: u64) -> Result<Value> {
+        if days > 365 {
+            bail!("Expiry horizon must be 0-365 days");
+        }
+        let horizon = now
+            .checked_add(days * 86_400_000)
+            .context("Expiry horizon overflow")?;
+        let mut expired = 0;
+        let mut expiring = 0;
+        let mut active = 0;
+        let mut no_expiry = 0;
+        let mut removed = 0;
+        let mut rows = Vec::new();
+        let scopes = if include_global && project != "global" {
+            vec![project, "global"]
+        } else {
+            vec![project]
+        };
         for scope in scopes {
-            let catalog=self.list(scope)?;
-            for value in catalog["notes"].as_array().context("Invalid memory catalog")? {
-                let note:Snapshot=serde_json::from_value(value.clone())?;
-                if note.removed {removed+=1;continue;}
-                let status=match note.expires_ms {None=>{no_expiry+=1;continue;},Some(ms) if ms<=now=>{expired+=1;"expired"},Some(ms) if ms<=horizon=>{expiring+=1;"expiring"},Some(_)=>{active+=1;continue;}};
+            let catalog = self.list(scope)?;
+            for value in catalog["notes"]
+                .as_array()
+                .context("Invalid memory catalog")?
+            {
+                let note: Snapshot = serde_json::from_value(value.clone())?;
+                if note.removed {
+                    removed += 1;
+                    continue;
+                }
+                let status = match note.expires_ms {
+                    None => {
+                        no_expiry += 1;
+                        continue;
+                    }
+                    Some(ms) if ms <= now => {
+                        expired += 1;
+                        "expired"
+                    }
+                    Some(ms) if ms <= horizon => {
+                        expiring += 1;
+                        "expiring"
+                    }
+                    Some(_) => {
+                        active += 1;
+                        continue;
+                    }
+                };
                 rows.push(json!({"id":note.id,"project_id":note.project_id,"name":note.name,"version":note.version,"sha256":note.sha256,"expires_ms":note.expires_ms,"status":status}));
             }
         }
-        rows.sort_by(|a,b|a["expires_ms"].as_u64().cmp(&b["expires_ms"].as_u64()).then_with(||a["id"].as_str().cmp(&b["id"].as_str())));
-        Ok(json!({"kind":"memory_expiry","project_id":project,"include_global":include_global,"as_of_ms":now,"horizon_days":days,"horizon_ms":horizon,"semantics":"declared_expiry","counts":{"expired":expired,"expiring":expiring,"active":active,"no_expiry":no_expiry,"removed":removed},"notes":rows,"provider_calls":0}))
+        rows.sort_by(|a, b| {
+            a["expires_ms"]
+                .as_u64()
+                .cmp(&b["expires_ms"].as_u64())
+                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
+        Ok(
+            json!({"kind":"memory_expiry","project_id":project,"include_global":include_global,"as_of_ms":now,"horizon_days":days,"horizon_ms":horizon,"semantics":"declared_expiry","counts":{"expired":expired,"expiring":expiring,"active":active,"no_expiry":no_expiry,"removed":removed},"notes":rows,"provider_calls":0}),
+        )
     }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExpiryQuery {
-    project_id:String,
-    #[serde(default)] include_global:bool,
-    #[serde(default="expiry_days")] horizon_days:u64,
+    project_id: String,
+    #[serde(default)]
+    include_global: bool,
+    #[serde(default = "expiry_days")]
+    horizon_days: u64,
 }
-fn expiry_days()->u64 {30}
-pub(crate) async fn expiry(State(app):State<crate::App>,Query(query):Query<ExpiryQuery>)->crate::ApiResult<Value>{
-    let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-    project_exists(&app,&query.project_id).and_then(|_|app.memory.expiry(&query.project_id,query.include_global,now,query.horizon_days)).map(Json).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))
+fn expiry_days() -> u64 {
+    30
+}
+pub(crate) async fn expiry(
+    State(app): State<crate::App>,
+    Query(query): Query<ExpiryQuery>,
+) -> crate::ApiResult<Value> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    project_exists(&app, &query.project_id)
+        .and_then(|_| {
+            app.memory.expiry(
+                &query.project_id,
+                query.include_global,
+                now,
+                query.horizon_days,
+            )
+        })
+        .map(Json)
+        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 #[derive(Deserialize)]
 pub(crate) struct ListQuery {
@@ -389,12 +535,30 @@ pub(crate) async fn save(
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ConsolidationInput {project_id:String,sources:Vec<ConsolidationSource>}
-pub(crate) async fn consolidation_input(State(app):State<crate::App>,Json(input):Json<ConsolidationInput>)->crate::ApiResult<Value>{
-    project_exists(&app,&input.project_id).and_then(|_|app.memory.consolidation_input(&input.project_id,&input.sources)).map(Json).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))
+pub(crate) struct ConsolidationInput {
+    project_id: String,
+    sources: Vec<ConsolidationSource>,
 }
-pub(crate) async fn source_status(State(app):State<crate::App>,Path((id,version)):Path<(String,u64)>)->crate::ApiResult<Value>{
-    app.memory.source_status(&id,version).map(Json).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))
+pub(crate) async fn consolidation_input(
+    State(app): State<crate::App>,
+    Json(input): Json<ConsolidationInput>,
+) -> crate::ApiResult<Value> {
+    project_exists(&app, &input.project_id)
+        .and_then(|_| {
+            app.memory
+                .consolidation_input(&input.project_id, &input.sources)
+        })
+        .map(Json)
+        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+}
+pub(crate) async fn source_status(
+    State(app): State<crate::App>,
+    Path((id, version)): Path<(String, u64)>,
+) -> crate::ApiResult<Value> {
+    app.memory
+        .source_status(&id, version)
+        .map(Json)
+        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 pub(crate) async fn snapshot(
     State(app): State<crate::App>,
@@ -495,49 +659,186 @@ mod tests {
     }
     #[test]
     fn consolidation_model_input_is_bounded_and_preserves_sources() {
-        let root=std::env::temp_dir().join(new_id());std::fs::create_dir_all(&root).unwrap();let root=root.canonicalize().unwrap();let store=Store::new(&root).unwrap();
-        let mut large=input("p");large.content="x".repeat(16000);let first=store.save(large).unwrap();let mut large=input("p");large.content="y".repeat(16000);let second=store.save(large).unwrap();
-        let pins=vec![ConsolidationSource{id:first.id.clone(),version:1,sha256:first.sha256.clone()},ConsolidationSource{id:second.id.clone(),version:1,sha256:second.sha256.clone()}];
-        assert!(store.consolidation_input("p",&pins).unwrap_err().to_string().contains("24 KiB"));assert_eq!(store.load(&first.id,None).unwrap().sha256,first.sha256);assert_eq!(store.load(&second.id,None).unwrap().sha256,second.sha256);
-        assert!(store.consolidation_input("p",&[pins[0].clone(),pins[0].clone()]).is_err());std::fs::remove_dir_all(root).unwrap();
+        let root = std::env::temp_dir().join(new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let store = Store::new(&root).unwrap();
+        let mut large = input("p");
+        large.content = "x".repeat(16000);
+        let first = store.save(large).unwrap();
+        let mut large = input("p");
+        large.content = "y".repeat(16000);
+        let second = store.save(large).unwrap();
+        let pins = vec![
+            ConsolidationSource {
+                id: first.id.clone(),
+                version: 1,
+                sha256: first.sha256.clone(),
+            },
+            ConsolidationSource {
+                id: second.id.clone(),
+                version: 1,
+                sha256: second.sha256.clone(),
+            },
+        ];
+        assert!(store
+            .consolidation_input("p", &pins)
+            .unwrap_err()
+            .to_string()
+            .contains("24 KiB"));
+        assert_eq!(store.load(&first.id, None).unwrap().sha256, first.sha256);
+        assert_eq!(store.load(&second.id, None).unwrap().sha256, second.sha256);
+        assert!(store
+            .consolidation_input("p", &[pins[0].clone(), pins[0].clone()])
+            .is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn consolidation_retains_pinned_sources_and_rejects_stale_origin() {
-        let root=std::env::temp_dir().join(new_id());std::fs::create_dir_all(&root).unwrap();let root=root.canonicalize().unwrap();let store=Store::new(&root).unwrap();
-        let first=store.save(input("p")).unwrap();let second=store.save(input("p")).unwrap();
-        let sources=vec![ConsolidationSource{id:first.id.clone(),version:1,sha256:first.sha256.clone()},ConsolidationSource{id:second.id.clone(),version:1,sha256:second.sha256.clone()}];
-        let prepared=store.consolidation_input("p",&sources).unwrap();assert_eq!(prepared["sources"].as_array().unwrap().len(),2);assert_eq!(prepared["sources"][0]["content"],first.content);assert_eq!(prepared["provider_calls"],0);assert!(store.consolidation_input("other",&sources).is_err());
-        let proposals=root.join("memory/proposals");std::fs::create_dir_all(&proposals).unwrap();let proposal_id=new_id();commit_new(&proposals.join(format!("{proposal_id}.json")),&json!({"kind":"memory_consolidation_proposal","id":proposal_id,"project_id":"p","notes":[{"name":"Merged","content":"Reviewed"}],"consolidation_sources":sources})).unwrap();
-        let mut accepted=input("p");accepted.proposal_source=Some(ProposalSource{proposal_id:proposal_id.clone(),note_index:0});accepted.consolidation_sources=Some(sources.clone());let accepted=store.save(accepted).unwrap();assert!(accepted.proposal_source.is_some());assert_eq!(accepted.consolidation_sources.as_ref().unwrap(),&sources);
-        let mut missing_pins=input("p");missing_pins.proposal_source=Some(ProposalSource{proposal_id,note_index:0});assert!(store.save(missing_pins).is_err());
-        let mut merged=input("p");merged.consolidation_sources=Some(sources.clone());merged.content="Reviewed combined decision".into();let merged=store.save(merged).unwrap();
-        assert_eq!(store.source_status(&merged.id,1).unwrap()["sources"][0]["status"],"current");
-        assert_eq!(merged.consolidation_sources.as_ref().unwrap(),&sources);assert_eq!(store.load(&first.id,None).unwrap().sha256,first.sha256);
-        let mut edit=input("p");edit.id=Some(merged.id.clone());edit.base_version=1;let edited=store.save(edit).unwrap();assert_eq!(edited.consolidation_sources.as_ref().unwrap(),&sources);
-        let mut duplicate=input("p");duplicate.consolidation_sources=Some(vec![sources[0].clone(),sources[0].clone()]);assert!(store.save(duplicate).is_err());
-        let mut corrupt=input("p");let mut wrong=sources.clone();wrong[0].sha256="0".repeat(64);corrupt.consolidation_sources=Some(wrong);assert!(store.save(corrupt).is_err());
-        let mut replace_origin=input("p");replace_origin.id=Some(merged.id.clone());replace_origin.base_version=2;let mut reversed=sources.clone();reversed.reverse();replace_origin.consolidation_sources=Some(reversed);assert!(store.save(replace_origin).is_err());
-        let mut changed=input("p");changed.id=Some(first.id.clone());changed.base_version=1;store.save(changed).unwrap();
-        let status=store.source_status(&merged.id,1).unwrap();assert_eq!(status["sources"][0]["status"],"changed");assert_eq!(status["sources"][0]["latest_version"],2);assert_eq!(status["notes_modified"],false);
-        assert!(store.consolidation_input("p",&sources).is_err());
-        let mut stale=input("p");stale.consolidation_sources=Some(sources.clone());assert!(store.save(stale).is_err());
-        let mut removed=input("p");removed.id=Some(second.id.clone());removed.base_version=1;removed.removed=true;store.save(removed).unwrap();assert_eq!(store.source_status(&merged.id,1).unwrap()["sources"][1]["status"],"removed");
-        let mut foreign=input("other");foreign.consolidation_sources=Some(sources);assert!(store.save(foreign).is_err());
+        let root = std::env::temp_dir().join(new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let store = Store::new(&root).unwrap();
+        let first = store.save(input("p")).unwrap();
+        let second = store.save(input("p")).unwrap();
+        let sources = vec![
+            ConsolidationSource {
+                id: first.id.clone(),
+                version: 1,
+                sha256: first.sha256.clone(),
+            },
+            ConsolidationSource {
+                id: second.id.clone(),
+                version: 1,
+                sha256: second.sha256.clone(),
+            },
+        ];
+        let prepared = store.consolidation_input("p", &sources).unwrap();
+        assert_eq!(prepared["sources"].as_array().unwrap().len(), 2);
+        assert_eq!(prepared["sources"][0]["content"], first.content);
+        assert_eq!(prepared["provider_calls"], 0);
+        assert!(store.consolidation_input("other", &sources).is_err());
+        let proposals = root.join("memory/proposals");
+        std::fs::create_dir_all(&proposals).unwrap();
+        let proposal_id = new_id();
+        commit_new(&proposals.join(format!("{proposal_id}.json")),&json!({"kind":"memory_consolidation_proposal","id":proposal_id,"project_id":"p","notes":[{"name":"Merged","content":"Reviewed"}],"consolidation_sources":sources})).unwrap();
+        let mut accepted = input("p");
+        accepted.proposal_source = Some(ProposalSource {
+            proposal_id: proposal_id.clone(),
+            note_index: 0,
+        });
+        accepted.consolidation_sources = Some(sources.clone());
+        let accepted = store.save(accepted).unwrap();
+        assert!(accepted.proposal_source.is_some());
+        assert_eq!(accepted.consolidation_sources.as_ref().unwrap(), &sources);
+        let mut missing_pins = input("p");
+        missing_pins.proposal_source = Some(ProposalSource {
+            proposal_id,
+            note_index: 0,
+        });
+        assert!(store.save(missing_pins).is_err());
+        let mut merged = input("p");
+        merged.consolidation_sources = Some(sources.clone());
+        merged.content = "Reviewed combined decision".into();
+        let merged = store.save(merged).unwrap();
+        assert_eq!(
+            store.source_status(&merged.id, 1).unwrap()["sources"][0]["status"],
+            "current"
+        );
+        assert_eq!(merged.consolidation_sources.as_ref().unwrap(), &sources);
+        assert_eq!(store.load(&first.id, None).unwrap().sha256, first.sha256);
+        let mut edit = input("p");
+        edit.id = Some(merged.id.clone());
+        edit.base_version = 1;
+        let edited = store.save(edit).unwrap();
+        assert_eq!(edited.consolidation_sources.as_ref().unwrap(), &sources);
+        let mut duplicate = input("p");
+        duplicate.consolidation_sources = Some(vec![sources[0].clone(), sources[0].clone()]);
+        assert!(store.save(duplicate).is_err());
+        let mut corrupt = input("p");
+        let mut wrong = sources.clone();
+        wrong[0].sha256 = "0".repeat(64);
+        corrupt.consolidation_sources = Some(wrong);
+        assert!(store.save(corrupt).is_err());
+        let mut replace_origin = input("p");
+        replace_origin.id = Some(merged.id.clone());
+        replace_origin.base_version = 2;
+        let mut reversed = sources.clone();
+        reversed.reverse();
+        replace_origin.consolidation_sources = Some(reversed);
+        assert!(store.save(replace_origin).is_err());
+        let mut changed = input("p");
+        changed.id = Some(first.id.clone());
+        changed.base_version = 1;
+        store.save(changed).unwrap();
+        let status = store.source_status(&merged.id, 1).unwrap();
+        assert_eq!(status["sources"][0]["status"], "changed");
+        assert_eq!(status["sources"][0]["latest_version"], 2);
+        assert_eq!(status["notes_modified"], false);
+        assert!(store.consolidation_input("p", &sources).is_err());
+        let mut stale = input("p");
+        stale.consolidation_sources = Some(sources.clone());
+        assert!(store.save(stale).is_err());
+        let mut removed = input("p");
+        removed.id = Some(second.id.clone());
+        removed.base_version = 1;
+        removed.removed = true;
+        store.save(removed).unwrap();
+        assert_eq!(
+            store.source_status(&merged.id, 1).unwrap()["sources"][1]["status"],
+            "removed"
+        );
+        let mut foreign = input("other");
+        foreign.consolidation_sources = Some(sources);
+        assert!(store.save(foreign).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn expiry_report_is_scoped_pinned_and_read_only() {
-        let root=std::env::temp_dir().join(format!("allpaka-memory-expiry-{}",new_id()));std::fs::create_dir_all(&root).unwrap();let root=root.canonicalize().unwrap();let store=Store::new(&root).unwrap();
-        let now=1_000_000;
-        let mut expired=input("project-a");expired.expires_ms=Some(now);let saved=store.save(expired).unwrap();
-        let mut due=input("project-a");due.expires_ms=Some(now+86_400_000);store.save(due).unwrap();
-        let mut future=input("project-a");future.expires_ms=Some(now+86_400_001);store.save(future).unwrap();
+        let root = std::env::temp_dir().join(format!("allpaka-memory-expiry-{}", new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let store = Store::new(&root).unwrap();
+        let now = 1_000_000;
+        let mut expired = input("project-a");
+        expired.expires_ms = Some(now);
+        let saved = store.save(expired).unwrap();
+        let mut due = input("project-a");
+        due.expires_ms = Some(now + 86_400_000);
+        store.save(due).unwrap();
+        let mut future = input("project-a");
+        future.expires_ms = Some(now + 86_400_001);
+        store.save(future).unwrap();
         store.save(input("project-a")).unwrap();
-        let mut removed=input("project-a");removed.removed=true;removed.expires_ms=Some(1);store.save(removed).unwrap();
-        let mut foreign=input("project-b");foreign.expires_ms=Some(1);store.save(foreign).unwrap();
-        let mut global=input("global");global.expires_ms=Some(1);store.save(global).unwrap();
-        let report=store.expiry("project-a",false,now,1).unwrap();assert_eq!(report["counts"],json!({"expired":1,"expiring":1,"active":1,"no_expiry":1,"removed":1}));assert_eq!(report["notes"].as_array().unwrap().len(),2);assert_eq!(report["notes"][0]["sha256"],saved.sha256);assert!(report["notes"][0].get("content").is_none());
-        assert_eq!(store.expiry("project-a",true,now,1).unwrap()["counts"]["expired"],2);assert_eq!(store.expiry("global",true,now,1).unwrap()["counts"]["expired"],1);assert!(store.expiry("project-a",false,now,366).is_err());assert_eq!(store.load(&saved.id,None).unwrap().version,1);std::fs::remove_dir_all(root).unwrap();
+        let mut removed = input("project-a");
+        removed.removed = true;
+        removed.expires_ms = Some(1);
+        store.save(removed).unwrap();
+        let mut foreign = input("project-b");
+        foreign.expires_ms = Some(1);
+        store.save(foreign).unwrap();
+        let mut global = input("global");
+        global.expires_ms = Some(1);
+        store.save(global).unwrap();
+        let report = store.expiry("project-a", false, now, 1).unwrap();
+        assert_eq!(
+            report["counts"],
+            json!({"expired":1,"expiring":1,"active":1,"no_expiry":1,"removed":1})
+        );
+        assert_eq!(report["notes"].as_array().unwrap().len(), 2);
+        assert_eq!(report["notes"][0]["sha256"], saved.sha256);
+        assert!(report["notes"][0].get("content").is_none());
+        assert_eq!(
+            store.expiry("project-a", true, now, 1).unwrap()["counts"]["expired"],
+            2
+        );
+        assert_eq!(
+            store.expiry("global", true, now, 1).unwrap()["counts"]["expired"],
+            1
+        );
+        assert!(store.expiry("project-a", false, now, 366).is_err());
+        assert_eq!(store.load(&saved.id, None).unwrap().version, 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn proposal_provenance_accepts_large_receipts_and_survives_edits() {
@@ -548,18 +849,36 @@ mod tests {
         commit_new(&root.join("memory/proposals/source.json"), &receipt).unwrap();
         let store = Store::new(&root).unwrap();
         let mut proposed = input("project-a");
-        proposed.proposal_source = Some(ProposalSource { proposal_id:"source".into(), note_index:0 });
+        proposed.proposal_source = Some(ProposalSource {
+            proposal_id: "source".into(),
+            note_index: 0,
+        });
         let saved = store.save(proposed).unwrap();
         let mut revision = input("project-a");
-        revision.id = Some(saved.id.clone()); revision.base_version=1;
+        revision.id = Some(saved.id.clone());
+        revision.base_version = 1;
         let updated = store.save(revision).unwrap();
         assert!(updated.proposal_source == saved.proposal_source);
-        assert!(Store::new(&root).unwrap().load(&saved.id,None).unwrap().proposal_source == saved.proposal_source);
-        let mut wrong = input("project-b"); wrong.proposal_source=saved.proposal_source.clone();
+        assert!(
+            Store::new(&root)
+                .unwrap()
+                .load(&saved.id, None)
+                .unwrap()
+                .proposal_source
+                == saved.proposal_source
+        );
+        let mut wrong = input("project-b");
+        wrong.proposal_source = saved.proposal_source.clone();
         assert!(store.save(wrong).is_err());
-        let mut oversize = receipt; oversize["padding"]=json!("x".repeat(128000));
-        std::fs::write(root.join("memory/proposals/source.json"),serde_json::to_vec(&oversize).unwrap()).unwrap();
-        let mut proposed = input("project-a"); proposed.proposal_source=saved.proposal_source;
+        let mut oversize = receipt;
+        oversize["padding"] = json!("x".repeat(128000));
+        std::fs::write(
+            root.join("memory/proposals/source.json"),
+            serde_json::to_vec(&oversize).unwrap(),
+        )
+        .unwrap();
+        let mut proposed = input("project-a");
+        proposed.proposal_source = saved.proposal_source;
         assert!(store.save(proposed).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }

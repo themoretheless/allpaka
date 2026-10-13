@@ -165,12 +165,25 @@ async fn run_body(
         }
     }
     let mut settings = s.settings.clone();
-    let guards=settings.guardrails.as_ref().map(|selection|selection.prepare(&crate::guardrail_policies::Store::open(&app.data)?)).transpose()?;
+    let guards = settings
+        .guardrails
+        .as_ref()
+        .map(|selection| selection.prepare(&crate::guardrail_policies::Store::open(&app.data)?))
+        .transpose()?;
     let total_bytes = transcript.len();
     let mut part = 0;
     while !transcript.is_empty() {
         part += 1;
-        let chunk_limit=if guards.is_some() {64000usize.checked_sub(summary.len()+256).filter(|n|*n>=4).ok_or_else(||anyhow::anyhow!("Guardrail summary exceeds compaction input budget"))?} else {96000};
+        let chunk_limit = if guards.is_some() {
+            64000usize
+                .checked_sub(summary.len() + 256)
+                .filter(|n| *n >= 4)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Guardrail summary exceeds compaction input budget")
+                })?
+        } else {
+            96000
+        };
         let mut n = transcript.len().min(chunk_limit);
         while !transcript.is_char_boundary(n) {
             n -= 1;
@@ -178,7 +191,9 @@ async fn run_body(
         let chunk: String = transcript.drain(..n).collect();
         let reduced_chunk = compact_repeated_blocks(&chunk);
         let prompt=format!("Previous summary:\n{summary}\n\nNext chronological transcript segment (may end mid-message):\n{reduced_chunk}");
-        if let Some(guards)=&guards {crate::enforce_guardrail(guards.input(&prompt)?,trace,parent)?;}
+        if let Some(guards) = &guards {
+            crate::enforce_guardrail(guards.input(&prompt)?, trace, parent)?;
+        }
         let mut complete = None;
         // Reasoning models share the output budget between thinking and summary text.
         // Retry the same input once; never feed a truncated summary into the next chunk.
@@ -202,7 +217,9 @@ async fn run_body(
                     _ = tick.tick() => shared.lock().unwrap().notice = Some(progress()),
                 }
             };
-            if let Some(guards)=&guards {crate::enforce_guardrail(guards.output(&result.content)?,trace,parent)?;}
+            if let Some(guards) = &guards {
+                crate::enforce_guardrail(guards.output(&result.content)?, trace, parent)?;
+            }
             if !result.tool_calls.is_empty() {
                 bail!("Модель вызвала инструмент вместо сводки. Исходная история сохранена.");
             }
@@ -229,7 +246,7 @@ async fn run_body(
     });
     let after = estimate(&history(&updated));
     let saved = before.saturating_sub(after);
-    let pct = if before > 0 { saved * 100 / before } else { 0 };
+    let pct = (saved * 100).checked_div(before).unwrap_or(0);
     updated.notice=Some(format!(
         "Контекст сжат: {end} сообщений заменены кратким содержанием. Было ≈ {before} токенов → стало ≈ {after} (экономия ≈ {pct}%). Полная история сохранена."
     ));

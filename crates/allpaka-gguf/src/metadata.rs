@@ -304,11 +304,7 @@ pub fn read(path: &Path) -> Result<GgufInfo> {
         .unwrap_or(head_count);
 
     // Most models omit key_length/value_length and imply embedding / heads.
-    let implied = if head_count > 0 {
-        embedding_length / head_count
-    } else {
-        0
-    };
+    let implied = embedding_length.checked_div(head_count).unwrap_or(0);
     let key_length = header.get_u32("attention.key_length").unwrap_or(implied);
     let value_length = header.get_u32("attention.value_length").unwrap_or(implied);
 
@@ -404,8 +400,8 @@ fn skip_array(r: &mut (impl Read + Seek)) -> Result<()> {
     let width = match elem_type {
         0 | 1 | 7 => Some(1u64),
         2 | 3 => Some(2),
-        4 | 5 | 6 => Some(4),
-        10 | 11 | 12 => Some(8),
+        4..=6 => Some(4),
+        10..=12 => Some(8),
         _ => None,
     };
     match width {

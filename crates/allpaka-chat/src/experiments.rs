@@ -23,23 +23,62 @@ use std::{
 };
 use tokio::sync::oneshot;
 const MAX_RUN_BYTES: usize = 32 * 1024 * 1024;
-const MAX_RUNS:usize=1000;
-const MAX_CATALOG_BYTES:u64=128*1024*1024;
-const MAX_OUTPUT_JSON_BYTES:usize=128*1024+16;
-const PROGRESS_RESERVE:usize=16*1024;
-fn run_reservation(run:&Run)->Result<usize>{
-    let mut fixed=run.clone();fixed.status.clear();fixed.trace_id=None;fixed.recovered_ms=None;fixed.strict_quality=false;fixed.mean_scores.clear();
-    for item in &mut fixed.items {item.status.clear();item.output=None;item.output_truncated=false;item.scores.clear();item.usage=Value::Null;item.duration_ms=None;item.error=None;}
-    let size=serde_json::to_vec(&fixed)?.len()+PROGRESS_RESERVE+fixed.items.len()*(MAX_OUTPUT_JSON_BYTES+PROGRESS_RESERVE);
-    if size>MAX_RUN_BYTES {bail!("Experiment cannot reserve durable output space");}Ok(size)
-}
-fn bound_output(mut output:String)->Result<(String,bool)>{
-    let original=output.len();let mut end=original.min(65536);while !output.is_char_boundary(end){end-=1;}output.truncate(end);
-    if serde_json::to_vec(&output)?.len()>MAX_OUTPUT_JSON_BYTES {
-        let(mut low,mut high)=(0,output.len());while low<high {let mid=(low+high+1)/2;let mut boundary=mid;while !output.is_char_boundary(boundary){boundary-=1;}if serde_json::to_vec(&output[..boundary])?.len()<=MAX_OUTPUT_JSON_BYTES{low=mid;}else{high=mid-1;}}
-        while !output.is_char_boundary(low){low-=1;}output.truncate(low);
+const MAX_RUNS: usize = 1000;
+const MAX_CATALOG_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_OUTPUT_JSON_BYTES: usize = 128 * 1024 + 16;
+const PROGRESS_RESERVE: usize = 16 * 1024;
+fn run_reservation(run: &Run) -> Result<usize> {
+    let mut fixed = run.clone();
+    fixed.status.clear();
+    fixed.trace_id = None;
+    fixed.recovered_ms = None;
+    fixed.strict_quality = false;
+    fixed.mean_scores.clear();
+    for item in &mut fixed.items {
+        item.status.clear();
+        item.output = None;
+        item.output_truncated = false;
+        item.scores.clear();
+        item.usage = Value::Null;
+        item.duration_ms = None;
+        item.error = None;
     }
-    let truncated=output.len()!=original;Ok((output,truncated))
+    let size = serde_json::to_vec(&fixed)?.len()
+        + PROGRESS_RESERVE
+        + fixed.items.len() * (MAX_OUTPUT_JSON_BYTES + PROGRESS_RESERVE);
+    if size > MAX_RUN_BYTES {
+        bail!("Experiment cannot reserve durable output space");
+    }
+    Ok(size)
+}
+fn bound_output(mut output: String) -> Result<(String, bool)> {
+    let original = output.len();
+    let mut end = original.min(65536);
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.truncate(end);
+    if serde_json::to_vec(&output)?.len() > MAX_OUTPUT_JSON_BYTES {
+        let (mut low, mut high) = (0, output.len());
+        while low < high {
+            let mid = (low + high).div_ceil(2);
+            let mut boundary = mid;
+            while !output.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            if serde_json::to_vec(&output[..boundary])?.len() <= MAX_OUTPUT_JSON_BYTES {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        while !output.is_char_boundary(low) {
+            low -= 1;
+        }
+        output.truncate(low);
+    }
+    let truncated = output.len() != original;
+    Ok((output, truncated))
 }
 #[derive(Clone)]
 pub(crate) struct Manager {
@@ -397,8 +436,8 @@ pub(crate) struct Run {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     prompt_snapshot: Option<crate::prompts::Snapshot>,
     metrics: Vec<Metric>,
-    #[serde(default,skip_serializing_if="is_false")]
-    playground:bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    playground: bool,
     concurrency: usize,
     item_timeout_secs: u64,
     status: String,
@@ -419,7 +458,7 @@ pub(crate) struct Start {
     #[serde(skip)]
     prompt_snapshot: Option<crate::prompts::Snapshot>,
     #[serde(skip)]
-    playground:bool,
+    playground: bool,
     metrics: Vec<Metric>,
     #[serde(default = "default_concurrency")]
     concurrency: usize,
@@ -432,7 +471,9 @@ struct PromptRef {
     id: String,
     version: u64,
 }
-fn is_false(value:&bool)->bool{!*value}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 fn default_concurrency() -> usize {
     4
 }
@@ -598,12 +639,21 @@ fn validate(request: &Start, snapshot: &Snapshot) -> Result<()> {
     {
         bail!("Runs support 1–200 samples, 1–8 concurrent requests and 1–600 seconds per item");
     }
-    let chat=request.prompt_snapshot.as_ref().is_some_and(|p|p.messages.is_some());
-    if !chat&&(request.prompt_template.len() > 16000 || !request.prompt_template.contains("{{input}}")) {
+    let chat = request
+        .prompt_snapshot
+        .as_ref()
+        .is_some_and(|p| p.messages.is_some());
+    if !chat
+        && (request.prompt_template.len() > 16000 || !request.prompt_template.contains("{{input}}"))
+    {
         bail!("Prompt template must contain {{input}} and fit 16000 bytes");
     }
-    if request.playground&&snapshot.samples.len()!=1 {bail!("Playground accepts one sample");}
-    if !request.playground||!request.metrics.is_empty(){validate_metrics(&request.metrics, snapshot)?;}
+    if request.playground && snapshot.samples.len() != 1 {
+        bail!("Playground accepts one sample");
+    }
+    if !request.playground || !request.metrics.is_empty() {
+        validate_metrics(&request.metrics, snapshot)?;
+    }
     if request.settings.project_id != snapshot.project_id {
         bail!("Dataset and run projects must match");
     }
@@ -677,8 +727,10 @@ impl Manager {
         }
         Ok(self.root.join(format!("{id}.json")))
     }
-    fn save(&self,run:&Run)->Result<()>{self.save_with(run,||Ok(()))}
-    fn save_with(&self, run: &Run,before_write:impl FnOnce()->Result<()>) -> Result<()> {
+    fn save(&self, run: &Run) -> Result<()> {
+        self.save_with(run, || Ok(()))
+    }
+    fn save_with(&self, run: &Run, before_write: impl FnOnce() -> Result<()>) -> Result<()> {
         use std::io::Write;
         let bytes = serde_json::to_vec(run)?;
         if bytes.len() > MAX_RUN_BYTES {
@@ -687,15 +739,42 @@ impl Manager {
         let _writer = self.writes.lock().unwrap();
         let path = self.path(&run.id)?;
         if !path.try_exists()? {
-            let mut count=0usize;let mut reserved=run_reservation(run)? as u64;
+            let mut count = 0usize;
+            let mut reserved = run_reservation(run)? as u64;
             for entry in std::fs::read_dir(self.root.as_ref())? {
-                let entry=entry?;let path=entry.path();if path.extension().is_none_or(|ext|ext!="json"){continue;}
-                count+=1;if count>=MAX_RUNS {bail!("Experiment retention limit reached; new run was not started");}
-                let metadata=entry.file_type()?;if !metadata.is_file(){bail!("Invalid experiment catalog entry");}
-                let id=path.file_stem().and_then(|id|id.to_str()).context("Invalid experiment filename")?;let existing=self.load(id)?;
-                let weight=if existing.status=="running" {run_reservation(&existing)? as u64}else{entry.metadata()?.len().checked_add(PROGRESS_RESERVE as u64).context("Experiment capacity overflow")?};
-                reserved=reserved.checked_add(weight).context("Experiment capacity overflow")?;
-                if reserved>MAX_CATALOG_BYTES {bail!("Experiment storage capacity reached; new run was not started");}
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().is_none_or(|ext| ext != "json") {
+                    continue;
+                }
+                count += 1;
+                if count >= MAX_RUNS {
+                    bail!("Experiment retention limit reached; new run was not started");
+                }
+                let metadata = entry.file_type()?;
+                if !metadata.is_file() {
+                    bail!("Invalid experiment catalog entry");
+                }
+                let id = path
+                    .file_stem()
+                    .and_then(|id| id.to_str())
+                    .context("Invalid experiment filename")?;
+                let existing = self.load(id)?;
+                let weight = if existing.status == "running" {
+                    run_reservation(&existing)? as u64
+                } else {
+                    entry
+                        .metadata()?
+                        .len()
+                        .checked_add(PROGRESS_RESERVE as u64)
+                        .context("Experiment capacity overflow")?
+                };
+                reserved = reserved
+                    .checked_add(weight)
+                    .context("Experiment capacity overflow")?;
+                if reserved > MAX_CATALOG_BYTES {
+                    bail!("Experiment storage capacity reached; new run was not started");
+                }
             }
         }
         before_write()?;
@@ -703,7 +782,11 @@ impl Manager {
         let result = (|| -> Result<()> {
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create_new(true);
-            #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
             let mut file = options.open(&temp)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
@@ -733,13 +816,42 @@ impl Manager {
         }
         Ok(run)
     }
-    fn list(&self, query:&ListQuery) -> Result<Value> {
-        let offset=query.offset.unwrap_or(0);let paged=query.offset.is_some()||query.limit.is_some();let limit=query.limit.unwrap_or(if paged {100}else{1000});
-        if offset>1000||limit==0||(paged&&limit>100){bail!("Invalid experiment pagination");}
-        if query.status.as_deref().is_some_and(|s|!matches!(s,"running"|"completed"|"failed"|"cancelled"|"interrupted")){bail!("Invalid experiment status filter");}
-        for id in [query.provider.as_deref(),query.dataset_id.as_deref()].into_iter().flatten(){if id.is_empty()||id.len()>80||!id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_'){bail!("Invalid experiment identity filter");}}
-        if query.model.as_ref().is_some_and(|m|m.chars().count()>200||m.len()>800){bail!("Experiment model search exceeds bounds");}
-        let model=query.model.as_deref().unwrap_or("").trim().to_lowercase();
+    fn list(&self, query: &ListQuery) -> Result<Value> {
+        let offset = query.offset.unwrap_or(0);
+        let paged = query.offset.is_some() || query.limit.is_some();
+        let limit = query.limit.unwrap_or(if paged { 100 } else { 1000 });
+        if offset > 1000 || limit == 0 || (paged && limit > 100) {
+            bail!("Invalid experiment pagination");
+        }
+        if query.status.as_deref().is_some_and(|s| {
+            !matches!(
+                s,
+                "running" | "completed" | "failed" | "cancelled" | "interrupted"
+            )
+        }) {
+            bail!("Invalid experiment status filter");
+        }
+        for id in [query.provider.as_deref(), query.dataset_id.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if id.is_empty()
+                || id.len() > 80
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            {
+                bail!("Invalid experiment identity filter");
+            }
+        }
+        if query
+            .model
+            .as_ref()
+            .is_some_and(|m| m.chars().count() > 200 || m.len() > 800)
+        {
+            bail!("Experiment model search exceeds bounds");
+        }
+        let model = query.model.as_deref().unwrap_or("").trim().to_lowercase();
         let mut rows = Vec::new();
         let mut bytes = 0u64;
         let mut count = 0;
@@ -759,13 +871,28 @@ impl Manager {
                     .and_then(|s| s.to_str())
                     .context("Invalid experiment file")?,
             )?;
-            if run.project_id == query.project_id&&query.status.as_ref().is_none_or(|s|s==&run.status)&&query.provider.as_ref().is_none_or(|p|p==&run.settings.provider)&&query.dataset_id.as_ref().is_none_or(|id|id==&run.dataset_id)&&query.playground.is_none_or(|v|v==run.playground)&&(model.is_empty()||run.settings.model.to_lowercase().contains(&model)) {
+            if run.project_id == query.project_id
+                && query.status.as_ref().is_none_or(|s| s == &run.status)
+                && query
+                    .provider
+                    .as_ref()
+                    .is_none_or(|p| p == &run.settings.provider)
+                && query
+                    .dataset_id
+                    .as_ref()
+                    .is_none_or(|id| id == &run.dataset_id)
+                && query.playground.is_none_or(|v| v == run.playground)
+                && (model.is_empty() || run.settings.model.to_lowercase().contains(&model))
+            {
                 rows.push(json!({"project_id":run.project_id,"id":run.id,"dataset_id":run.dataset_id,"dataset_version":run.dataset_version,"dataset_sha256":run.dataset_sha256,"status":run.status,"strict_quality":run.strict_quality,"mean_scores":run.mean_scores,"items":run.items.len(),"provider":run.settings.provider,"model":run.settings.model,"playground":run.playground}));
             }
         }
         rows.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
-        let total=rows.len();let rows:Vec<_>=rows.into_iter().skip(offset).take(limit).collect();
-        Ok(json!({"runs":rows,"total":total,"offset":offset,"limit":limit,"has_more":offset+rows.len()<total,"order":"id_desc","provider_calls":0,"summaries_verified":false}))
+        let total = rows.len();
+        let rows: Vec<_> = rows.into_iter().skip(offset).take(limit).collect();
+        Ok(
+            json!({"runs":rows,"total":total,"offset":offset,"limit":limit,"has_more":offset+rows.len()<total,"order":"id_desc","provider_calls":0,"summaries_verified":false}),
+        )
     }
     fn start(
         &self,
@@ -802,7 +929,7 @@ impl Manager {
             prompt_template: request.prompt_template,
             prompt_snapshot: request.prompt_snapshot,
             metrics: request.metrics,
-            playground:request.playground,
+            playground: request.playground,
             concurrency: request.concurrency,
             item_timeout_secs: request.item_timeout_secs,
             status: "running".into(),
@@ -823,8 +950,15 @@ impl Manager {
                 })
                 .collect(),
         };
-        if self.path(&run.id)?.exists() { bail!("Reserved experiment already exists"); }
-        self.save_with(&run,||{if run.playground{app.evaluation.commit_single(snapshot.clone())?;}Ok(())})?;
+        if self.path(&run.id)?.exists() {
+            bail!("Reserved experiment already exists");
+        }
+        self.save_with(&run, || {
+            if run.playground {
+                app.evaluation.commit_single(snapshot.clone())?;
+            }
+            Ok(())
+        })?;
         let (tx, rx) = oneshot::channel();
         active.insert(run.id.clone(), Some(tx));
         let response = run.clone();
@@ -909,7 +1043,7 @@ async fn execute(
         .as_ref()
         .map(|s| s.system.clone())
         .unwrap_or_else(crate::prompts::default_system);
-    let chat_prompt=guard.run.prompt_snapshot.clone();
+    let chat_prompt = guard.run.prompt_snapshot.clone();
     let metrics = guard.run.metrics.clone();
     let timeout = guard.run.item_timeout_secs;
     let mut stream = futures_util::stream::iter(snapshot.samples.into_iter().enumerate())
@@ -921,15 +1055,30 @@ async fn execute(
             let template = template.clone();
             let system = system.clone();
             let metrics = metrics.clone();
-            let chat_prompt=chat_prompt.clone();
+            let chat_prompt = chat_prompt.clone();
             async move {
                 let mut span = trace.span("evaluation_item", &sample.id, Some(parent));
                 let started = Instant::now();
                 let result = tokio::time::timeout(Duration::from_secs(timeout), async {
-                    let history=if let Some(prompt)=chat_prompt.as_ref().filter(|p|p.messages.is_some()){crate::prompts::render_messages(prompt,&sample.input,&sample.contexts)?.into_iter().map(|m|Message::text(&m.role,m.content)).collect::<Vec<_>>()}else{vec![Message::text("user",render_prompt(&template,&sample))]};
+                    let history = if let Some(prompt) =
+                        chat_prompt.as_ref().filter(|p| p.messages.is_some())
+                    {
+                        crate::prompts::render_messages(prompt, &sample.input, &sample.contexts)?
+                            .into_iter()
+                            .map(|m| Message::text(&m.role, m.content))
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![Message::text("user", render_prompt(&template, &sample))]
+                    };
                     if let Some(prepared) = &settings.prepared_guardrails {
                         crate::enforce_guardrail(
-                            prepared.input(&history.iter().map(|m|m.content.as_str()).collect::<Vec<_>>().join("\n\n"))?,
+                            prepared.input(
+                                &history
+                                    .iter()
+                                    .map(|m| m.content.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n"),
+                            )?,
                             &trace,
                             span.id(),
                         )?;
@@ -979,9 +1128,17 @@ async fn execute(
                             span.finish("failed", &Value::Null);
                             return (index, item);
                         }
-                        let (output,storage_truncated)=match bound_output(message.content){Ok(value)=>value,Err(_)=>{item.error=Some("output_storage_error".into());return(index,item);}};
-                        let incomplete=message.truncated||!message.tool_calls.is_empty()||storage_truncated;
-                        item.output_truncated=message.truncated||storage_truncated;
+                        let (output, storage_truncated) = match bound_output(message.content) {
+                            Ok(value) => value,
+                            Err(_) => {
+                                item.error = Some("output_storage_error".into());
+                                return (index, item);
+                            }
+                        };
+                        let incomplete = message.truncated
+                            || !message.tool_calls.is_empty()
+                            || storage_truncated;
+                        item.output_truncated = message.truncated || storage_truncated;
                         if incomplete {
                             item.error = Some("incomplete_or_oversize_output".into());
                         } else {
@@ -1029,7 +1186,8 @@ async fn execute(
     }
     drop(stream);
     root.finish(&guard.run.status, &Value::Null);
-    guard.run.strict_quality = !guard.run.metrics.is_empty() && guard.run.status == "completed"
+    guard.run.strict_quality = !guard.run.metrics.is_empty()
+        && guard.run.status == "completed"
         && guard.run.items.iter().all(|i| {
             i.status == "completed"
                 && i.error.is_none()
@@ -1047,7 +1205,14 @@ async fn execute(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListQuery {
-    project_id:String,offset:Option<usize>,limit:Option<usize>,status:Option<String>,provider:Option<String>,model:Option<String>,dataset_id:Option<String>,playground:Option<bool>,
+    project_id: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    status: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    dataset_id: Option<String>,
+    playground: Option<bool>,
 }
 pub(crate) async fn list(
     State(app): State<crate::App>,
@@ -1058,75 +1223,129 @@ pub(crate) async fn list(
         .map(Json)
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
-fn prepare_start(app: &crate::App,input:Start)->Result<(Start,Snapshot,provider::Provider)>{
-    let snapshot=app.evaluation.load(&input.dataset_id,Some(input.dataset_version))?;
-    prepare_with_snapshot(app,input,snapshot)
+fn prepare_start(app: &crate::App, input: Start) -> Result<(Start, Snapshot, provider::Provider)> {
+    let snapshot = app
+        .evaluation
+        .load(&input.dataset_id, Some(input.dataset_version))?;
+    prepare_with_snapshot(app, input, snapshot)
 }
-fn prepare_with_snapshot(app: &crate::App, mut input: Start,snapshot:Snapshot) -> Result<(Start, Snapshot, provider::Provider)> {
-        crate::validate_settings(&input.settings, app)?;
-        input.settings.prepared_guardrails = input
-            .settings
-            .guardrails
-            .as_ref()
-            .map(|selection| {
-                selection
-                    .prepare(&crate::guardrail_policies::Store::open(&app.data)?)
-                    .map(Arc::new)
-            })
-            .transpose()?;
-        if let Some(reference) = input.prompt_ref.as_ref() {
-            if !input.prompt_template.is_empty() {
-                bail!("Choose inline template or prompt_ref, not both");
-            }
-            let prompt = app.prompts.load(&reference.id, Some(reference.version))?;
-            if prompt.project_id != input.settings.project_id {
-                bail!("Prompt belongs to another project");
-            }
-            input.prompt_template = prompt.template.clone();
-            input.prompt_snapshot = Some(prompt);
+fn prepare_with_snapshot(
+    app: &crate::App,
+    mut input: Start,
+    snapshot: Snapshot,
+) -> Result<(Start, Snapshot, provider::Provider)> {
+    crate::validate_settings(&input.settings, app)?;
+    input.settings.prepared_guardrails = input
+        .settings
+        .guardrails
+        .as_ref()
+        .map(|selection| {
+            selection
+                .prepare(&crate::guardrail_policies::Store::open(&app.data)?)
+                .map(Arc::new)
+        })
+        .transpose()?;
+    if let Some(reference) = input.prompt_ref.as_ref() {
+        if !input.prompt_template.is_empty() {
+            bail!("Choose inline template or prompt_ref, not both");
         }
+        let prompt = app.prompts.load(&reference.id, Some(reference.version))?;
+        if prompt.project_id != input.settings.project_id {
+            bail!("Prompt belongs to another project");
+        }
+        input.prompt_template = prompt.template.clone();
+        input.prompt_snapshot = Some(prompt);
+    }
 
-        let p = app
-            .providers
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|p| p.id == input.settings.provider)
-            .cloned()
-            .context("Provider not found")?;
-        validate(&input, &snapshot)?;
-        Ok((input, snapshot, p))
+    let p = app
+        .providers
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.id == input.settings.provider)
+        .cloned()
+        .context("Provider not found")?;
+    validate(&input, &snapshot)?;
+    Ok((input, snapshot, p))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PlaygroundInput {
-    settings:Settings,prompt_ref:PromptRef,prompt_sha256:String,input:String,
-    #[serde(default)]contexts:Vec<String>,
-    #[serde(default)]expected_output:Option<String>,
-    #[serde(default)]metrics:Vec<Metric>,
-    #[serde(default="default_timeout")]item_timeout_secs:u64,
+    settings: Settings,
+    prompt_ref: PromptRef,
+    prompt_sha256: String,
+    input: String,
+    #[serde(default)]
+    contexts: Vec<String>,
+    #[serde(default)]
+    expected_output: Option<String>,
+    #[serde(default)]
+    metrics: Vec<Metric>,
+    #[serde(default = "default_timeout")]
+    item_timeout_secs: u64,
 }
-pub(crate) async fn playground(State(app):State<crate::App>,Json(input):Json<PlaygroundInput>)->crate::ApiResult<Value>{
-    let result=(||->Result<Run>{
-        let sample=Sample{id:"input".into(),input:input.input,expected_output:input.expected_output,contexts:input.contexts,metadata:BTreeMap::from([("kind".into(),json!("playground"))])};
-        let snapshot=crate::evaluation::Store::draft_single(&input.settings.project_id,"Playground",sample)?;
-        let request=Start{dataset_id:snapshot.id.clone(),dataset_version:1,settings:input.settings,prompt_template:String::new(),prompt_ref:Some(input.prompt_ref),prompt_snapshot:None,playground:true,metrics:input.metrics,concurrency:1,item_timeout_secs:input.item_timeout_secs};
-        let(request,snapshot,provider)=prepare_with_snapshot(&app,request,snapshot)?;
-        let prompt=request.prompt_snapshot.as_ref().context("Playground requires a saved prompt")?;
-        if prompt.sha256!=input.prompt_sha256 {bail!("Playground prompt hash differs from reviewed version");}
-        crate::prompts::preview_receipt(prompt,&crate::prompts::PreviewInput{project_id:snapshot.project_id.clone(),input:snapshot.samples[0].input.clone(),contexts:snapshot.samples[0].contexts.clone()})?;
-        app.experiments.start(app.clone(),request,snapshot,provider)
+pub(crate) async fn playground(
+    State(app): State<crate::App>,
+    Json(input): Json<PlaygroundInput>,
+) -> crate::ApiResult<Value> {
+    let result = (|| -> Result<Run> {
+        let sample = Sample {
+            id: "input".into(),
+            input: input.input,
+            expected_output: input.expected_output,
+            contexts: input.contexts,
+            metadata: BTreeMap::from([("kind".into(), json!("playground"))]),
+        };
+        let snapshot = crate::evaluation::Store::draft_single(
+            &input.settings.project_id,
+            "Playground",
+            sample,
+        )?;
+        let request = Start {
+            dataset_id: snapshot.id.clone(),
+            dataset_version: 1,
+            settings: input.settings,
+            prompt_template: String::new(),
+            prompt_ref: Some(input.prompt_ref),
+            prompt_snapshot: None,
+            playground: true,
+            metrics: input.metrics,
+            concurrency: 1,
+            item_timeout_secs: input.item_timeout_secs,
+        };
+        let (request, snapshot, provider) = prepare_with_snapshot(&app, request, snapshot)?;
+        let prompt = request
+            .prompt_snapshot
+            .as_ref()
+            .context("Playground requires a saved prompt")?;
+        if prompt.sha256 != input.prompt_sha256 {
+            bail!("Playground prompt hash differs from reviewed version");
+        }
+        crate::prompts::preview_receipt(
+            prompt,
+            &crate::prompts::PreviewInput {
+                project_id: snapshot.project_id.clone(),
+                input: snapshot.samples[0].input.clone(),
+                contexts: snapshot.samples[0].contexts.clone(),
+            },
+        )?;
+        app.experiments
+            .start(app.clone(), request, snapshot, provider)
     })();
-    result.and_then(|run|Ok(serde_json::to_value(run)?)).map(Json).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))
+    result
+        .and_then(|run| Ok(serde_json::to_value(run)?))
+        .map(Json)
+        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 pub(crate) async fn start(
     State(app): State<crate::App>,
     Json(input): Json<Start>,
 ) -> crate::ApiResult<Value> {
-    let result = prepare_start(&app, input).and_then(|(input, snapshot, p)| {
-        app.experiments.start(app.clone(), input, snapshot, p)
-    });
-    result.and_then(|r| Ok(serde_json::to_value(r)?)).map(Json)
+    let result = prepare_start(&app, input)
+        .and_then(|(input, snapshot, p)| app.experiments.start(app.clone(), input, snapshot, p));
+    result
+        .and_then(|r| Ok(serde_json::to_value(r)?))
+        .map(Json)
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 pub(crate) async fn detail(
@@ -1146,13 +1365,19 @@ pub(crate) struct ExportQuery {
     include_outputs: bool,
 }
 fn export_receipt(run: &Run, include_outputs: bool) -> Value {
-    let items=run.items.iter().map(|item| {
-        let mut row=json!({"sample_id":item.sample_id,"status":item.status,
+    let items = run
+        .items
+        .iter()
+        .map(|item| {
+            let mut row = json!({"sample_id":item.sample_id,"status":item.status,
             "scores":item.scores,"duration_ms":item.duration_ms,
             "has_error":item.error.is_some(),"output_truncated":item.output_truncated});
-        if include_outputs {row["output"]=json!(item.output);}
-        row
-    }).collect::<Vec<_>>();
+            if include_outputs {
+                row["output"] = json!(item.output);
+            }
+            row
+        })
+        .collect::<Vec<_>>();
     json!({"kind":"experiment_export","schema_version":1,"run_id":run.id,
         "project_id":run.project_id,"dataset_id":run.dataset_id,
         "dataset_version":run.dataset_version,"dataset_sha256":run.dataset_sha256,
@@ -1168,8 +1393,10 @@ pub(crate) async fn export(
     Path(id): Path<String>,
     Query(query): Query<ExportQuery>,
 ) -> crate::ApiResult<Value> {
-    app.experiments.load(&id).map(|run| Json(export_receipt(&run,query.include_outputs)))
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST,e))
+    app.experiments
+        .load(&id)
+        .map(|run| Json(export_receipt(&run, query.include_outputs)))
+        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 pub(crate) async fn cancel(
     State(app): State<crate::App>,
@@ -1295,178 +1522,511 @@ pub(crate) async fn compare(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ComparisonCatalog {
-    project_id:String,
-    #[serde(default)] offset:usize,
-    #[serde(default="comparison_page_size")] limit:usize,
+    project_id: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "comparison_page_size")]
+    limit: usize,
 }
-fn comparison_page_size()->usize{30}
+fn comparison_page_size() -> usize {
+    30
+}
 pub(crate) async fn list_comparisons(
-    State(app):State<crate::App>, Query(query):Query<ComparisonCatalog>,
-)->crate::ApiResult<Value>{
-    let result=(||->Result<Value>{
-        crate::evaluation::project_exists(&app,&query.project_id)?;
-        if query.limit==0||query.limit>100||query.offset>2000{bail!("Invalid comparison page");}
-        let root=app.data.join("evaluation/comparisons");
-        if !root.exists(){return Ok(json!({"comparisons":[],"offset":query.offset,"has_more":false,"summaries_verified":false}));}
-        if !std::fs::symlink_metadata(&root)?.is_dir()||!root.canonicalize()?.starts_with(app.data.as_ref()){bail!("Invalid comparison directory");}
-        let mut rows=Vec::new();let mut files=0;let mut total=0;
-        for entry in std::fs::read_dir(root)?{
-            let entry=entry?;let path=entry.path();if path.extension().is_none_or(|ext|ext!="json"){continue;}
-            files+=1;let size=entry.metadata()?.len();total+=size;
-            if files>2000||total>16*1024*1024||size>4*1024*1024||!entry.file_type()?.is_file(){bail!("Comparison catalog bounds exceeded");}
-            let mut bytes=Vec::new();std::fs::File::open(&path)?.take(4*1024*1024+1).read_to_end(&mut bytes)?;
-            if bytes.len()>4*1024*1024{bail!("Oversize comparison receipt");}
-            let receipt=crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
-            let id=receipt["id"].as_str().context("Missing comparison ID")?;
-            if id.is_empty()||id.len()>80||!id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-')||path.file_stem().and_then(|v|v.to_str())!=Some(id){bail!("Comparison catalog identity mismatch");}
-            if receipt["project_id"]!=query.project_id{continue;}
+    State(app): State<crate::App>,
+    Query(query): Query<ComparisonCatalog>,
+) -> crate::ApiResult<Value> {
+    let result = (|| -> Result<Value> {
+        crate::evaluation::project_exists(&app, &query.project_id)?;
+        if query.limit == 0 || query.limit > 100 || query.offset > 2000 {
+            bail!("Invalid comparison page");
+        }
+        let root = app.data.join("evaluation/comparisons");
+        if !root.exists() {
+            return Ok(
+                json!({"comparisons":[],"offset":query.offset,"has_more":false,"summaries_verified":false}),
+            );
+        }
+        if !std::fs::symlink_metadata(&root)?.is_dir()
+            || !root.canonicalize()?.starts_with(app.data.as_ref())
+        {
+            bail!("Invalid comparison directory");
+        }
+        let mut rows = Vec::new();
+        let mut files = 0;
+        let mut total = 0;
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            files += 1;
+            let size = entry.metadata()?.len();
+            total += size;
+            if files > 2000
+                || total > 16 * 1024 * 1024
+                || size > 4 * 1024 * 1024
+                || !entry.file_type()?.is_file()
+            {
+                bail!("Comparison catalog bounds exceeded");
+            }
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path)?
+                .take(4 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 4 * 1024 * 1024 {
+                bail!("Oversize comparison receipt");
+            }
+            let receipt = crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
+            let id = receipt["id"].as_str().context("Missing comparison ID")?;
+            if id.is_empty()
+                || id.len() > 80
+                || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                || path.file_stem().and_then(|v| v.to_str()) != Some(id)
+            {
+                bail!("Comparison catalog identity mismatch");
+            }
+            if receipt["project_id"] != query.project_id {
+                continue;
+            }
             rows.push(json!({"id":id,"baseline_id":receipt["baseline_id"],"candidate_id":receipt["candidate_id"],"dataset_id":receipt["dataset_id"],"dataset_version":receipt["dataset_version"],"regressions":receipt["regressions"],"improvements":receipt["improvements"],"reason":receipt["reason"]}));
         }
-        rows.sort_by(|a,b|b["id"].as_str().cmp(&a["id"].as_str()));
-        let has_more=rows.len()>query.offset+query.limit;
-        Ok(json!({"comparisons":rows.into_iter().skip(query.offset).take(query.limit).collect::<Vec<_>>(),"offset":query.offset,"has_more":has_more,"summaries_verified":false}))
-    })();result.map(Json).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))
+        rows.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
+        let has_more = rows.len() > query.offset + query.limit;
+        Ok(
+            json!({"comparisons":rows.into_iter().skip(query.offset).take(query.limit).collect::<Vec<_>>(),"offset":query.offset,"has_more":has_more,"summaries_verified":false}),
+        )
+    })();
+    result
+        .map(Json)
+        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 pub(crate) async fn read_comparison(
-    State(app): State<crate::App>, Path(id): Path<String>,
+    State(app): State<crate::App>,
+    Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    let result=(|| -> Result<Value> {
-        if id.is_empty()||id.len()>80||!id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'){bail!("Invalid comparison ID");}
-        let path=app.data.join("evaluation/comparisons").join(format!("{id}.json"));
-        let metadata=std::fs::symlink_metadata(&path)?;
-        if !metadata.is_file()||metadata.len()>4*1024*1024 {bail!("Invalid comparison receipt");}
-        let path=path.canonicalize()?;if !path.starts_with(app.data.as_ref()){bail!("Comparison escapes Studio data");}
-        let mut bytes=Vec::new();std::fs::File::open(path)?.take(4*1024*1024+1).read_to_end(&mut bytes)?;
-        if bytes.len()>4*1024*1024 {bail!("Oversize comparison receipt");}
-        let receipt=crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
-        if receipt["id"]!=id {bail!("Comparison identity mismatch");}
-        let baseline=app.experiments.load(receipt["baseline_id"].as_str().context("Missing baseline")?)?;
-        let candidate=app.experiments.load(receipt["candidate_id"].as_str().context("Missing candidate")?)?;
-        let snapshot=app.evaluation.load(&baseline.dataset_id,Some(baseline.dataset_version))?;
-        let mut expected=paired_comparison(&baseline,&candidate,&snapshot)?;expected["id"]=json!(id);
-        if expected!=receipt {bail!("Comparison receipt does not match pinned results");}
+    let result = (|| -> Result<Value> {
+        if id.is_empty()
+            || id.len() > 80
+            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            bail!("Invalid comparison ID");
+        }
+        let path = app
+            .data
+            .join("evaluation/comparisons")
+            .join(format!("{id}.json"));
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.len() > 4 * 1024 * 1024 {
+            bail!("Invalid comparison receipt");
+        }
+        let path = path.canonicalize()?;
+        if !path.starts_with(app.data.as_ref()) {
+            bail!("Comparison escapes Studio data");
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(4 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 4 * 1024 * 1024 {
+            bail!("Oversize comparison receipt");
+        }
+        let receipt = crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
+        if receipt["id"] != id {
+            bail!("Comparison identity mismatch");
+        }
+        let baseline = app.experiments.load(
+            receipt["baseline_id"]
+                .as_str()
+                .context("Missing baseline")?,
+        )?;
+        let candidate = app.experiments.load(
+            receipt["candidate_id"]
+                .as_str()
+                .context("Missing candidate")?,
+        )?;
+        let snapshot = app
+            .evaluation
+            .load(&baseline.dataset_id, Some(baseline.dataset_version))?;
+        let mut expected = paired_comparison(&baseline, &candidate, &snapshot)?;
+        expected["id"] = json!(id);
+        if expected != receipt {
+            bail!("Comparison receipt does not match pinned results");
+        }
         Ok(receipt)
     })();
-    result.map(Json).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))
+    result
+        .map(Json)
+        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 
-#[derive(Serialize,Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MatrixVariant {label:String,run_id:String}
-#[derive(Serialize,Deserialize)]
+pub(crate) struct MatrixVariant {
+    label: String,
+    run_id: String,
+}
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MatrixSave {project_id:String,baseline_id:String,variants:Vec<MatrixVariant>}
-fn matrix_receipt(app:&crate::App,id:&str,input:&MatrixSave)->Result<Value>{
-    crate::evaluation::project_exists(app,&input.project_id)?;
-    if input.variants.len()<2||input.variants.len()>16||input.variants[0].run_id!=input.baseline_id{bail!("Select 2-16 variants, with the baseline first");}
-    let baseline=app.experiments.load(&input.baseline_id)?;
-    if baseline.project_id!=input.project_id{bail!("Matrix project mismatch");}
-    let snapshot=app.evaluation.load(&baseline.dataset_id,Some(baseline.dataset_version))?;
-    let mut ids=std::collections::HashSet::new();let mut labels=std::collections::HashSet::new();let mut variants=Vec::new();let mut passed=true;
+pub(crate) struct MatrixSave {
+    project_id: String,
+    baseline_id: String,
+    variants: Vec<MatrixVariant>,
+}
+fn matrix_receipt(app: &crate::App, id: &str, input: &MatrixSave) -> Result<Value> {
+    crate::evaluation::project_exists(app, &input.project_id)?;
+    if input.variants.len() < 2
+        || input.variants.len() > 16
+        || input.variants[0].run_id != input.baseline_id
+    {
+        bail!("Select 2-16 variants, with the baseline first");
+    }
+    let baseline = app.experiments.load(&input.baseline_id)?;
+    if baseline.project_id != input.project_id {
+        bail!("Matrix project mismatch");
+    }
+    let snapshot = app
+        .evaluation
+        .load(&baseline.dataset_id, Some(baseline.dataset_version))?;
+    let mut ids = std::collections::HashSet::new();
+    let mut labels = std::collections::HashSet::new();
+    let mut variants = Vec::new();
+    let mut passed = true;
     for variant in &input.variants {
-        if variant.label.trim().is_empty()||variant.label.len()>200||!labels.insert(&variant.label)||!ids.insert(&variant.run_id){bail!("Select unique runs and bounded unique labels");}
-        let run=app.experiments.load(&variant.run_id)?;
-        let mut comparison=paired_comparison(&baseline,&run,&snapshot)?;comparison.as_object_mut().unwrap().remove("id");
-        passed&=comparison["regressions"]==0;
+        if variant.label.trim().is_empty()
+            || variant.label.len() > 200
+            || !labels.insert(&variant.label)
+            || !ids.insert(&variant.run_id)
+        {
+            bail!("Select unique runs and bounded unique labels");
+        }
+        let run = app.experiments.load(&variant.run_id)?;
+        let mut comparison = paired_comparison(&baseline, &run, &snapshot)?;
+        comparison.as_object_mut().unwrap().remove("id");
+        passed &= comparison["regressions"] == 0;
         variants.push(json!({"label":variant.label,"run_id":run.id,"provider":run.settings.provider,"model":run.settings.model,"mean_scores":run.mean_scores,"comparison":comparison}));
     }
-    Ok(json!({"kind":"experiment_matrix","schema_version":1,"id":id,"project_id":input.project_id,"baseline_id":input.baseline_id,"dataset_id":baseline.dataset_id,"dataset_version":baseline.dataset_version,"dataset_sha256":baseline.dataset_sha256,"metrics":baseline.metrics,"request":input,"variants":variants,"passed":passed,"gate_policy":"no_paired_regression","automatic_promotion":false}))
+    Ok(
+        json!({"kind":"experiment_matrix","schema_version":1,"id":id,"project_id":input.project_id,"baseline_id":input.baseline_id,"dataset_id":baseline.dataset_id,"dataset_version":baseline.dataset_version,"dataset_sha256":baseline.dataset_sha256,"metrics":baseline.metrics,"request":input,"variants":variants,"passed":passed,"gate_policy":"no_paired_regression","automatic_promotion":false}),
+    )
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MatrixCatalog {
-    project_id:String,
-    #[serde(default)] offset:usize,
-    #[serde(default="comparison_page_size")] limit:usize,
+    project_id: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "comparison_page_size")]
+    limit: usize,
 }
-pub(crate) async fn list_matrices(State(app):State<crate::App>,Query(query):Query<MatrixCatalog>)->crate::ApiResult<Value>{
-    let result=(||->Result<Value>{
-        crate::evaluation::project_exists(&app,&query.project_id)?;
-        if query.limit==0||query.limit>100||query.offset>2000{bail!("Invalid matrix page");}
-        let root=app.data.join("evaluation/matrices");
-        if !root.exists(){return Ok(json!({"matrices":[],"offset":query.offset,"has_more":false,"summaries_verified":false}));}
-        if !std::fs::symlink_metadata(&root)?.is_dir()||!root.canonicalize()?.starts_with(app.data.as_ref()){bail!("Invalid matrix directory");}
-        let mut rows=Vec::new();let mut files=0;let mut total=0;
-        for entry in std::fs::read_dir(root)?{
-            let entry=entry?;let path=entry.path();if path.extension().is_none_or(|ext|ext!="json"){continue;}
-            files+=1;let size=entry.metadata()?.len();total+=size;
-            if files>2000||total>16*1024*1024||size>4*1024*1024||!entry.file_type()?.is_file(){bail!("Matrix catalog bounds exceeded");}
-            let mut bytes=Vec::new();std::fs::File::open(&path)?.take(4*1024*1024+1).read_to_end(&mut bytes)?;
-            if bytes.len()>4*1024*1024{bail!("Oversize matrix receipt");}
-            let receipt=crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
-            let id=receipt["id"].as_str().context("Missing matrix ID")?;
-            if id.is_empty()||id.len()>80||!id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-')||path.file_stem().and_then(|v|v.to_str())!=Some(id)||receipt["kind"]!="experiment_matrix"||receipt["schema_version"]!=1{bail!("Matrix catalog identity mismatch");}
-            if receipt["project_id"]!=query.project_id{continue;}
-            let count=receipt["variants"].as_array().context("Missing matrix variants")?.len();
-            if !(2..=16).contains(&count){bail!("Invalid matrix variant count");}
+pub(crate) async fn list_matrices(
+    State(app): State<crate::App>,
+    Query(query): Query<MatrixCatalog>,
+) -> crate::ApiResult<Value> {
+    let result = (|| -> Result<Value> {
+        crate::evaluation::project_exists(&app, &query.project_id)?;
+        if query.limit == 0 || query.limit > 100 || query.offset > 2000 {
+            bail!("Invalid matrix page");
+        }
+        let root = app.data.join("evaluation/matrices");
+        if !root.exists() {
+            return Ok(
+                json!({"matrices":[],"offset":query.offset,"has_more":false,"summaries_verified":false}),
+            );
+        }
+        if !std::fs::symlink_metadata(&root)?.is_dir()
+            || !root.canonicalize()?.starts_with(app.data.as_ref())
+        {
+            bail!("Invalid matrix directory");
+        }
+        let mut rows = Vec::new();
+        let mut files = 0;
+        let mut total = 0;
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            files += 1;
+            let size = entry.metadata()?.len();
+            total += size;
+            if files > 2000
+                || total > 16 * 1024 * 1024
+                || size > 4 * 1024 * 1024
+                || !entry.file_type()?.is_file()
+            {
+                bail!("Matrix catalog bounds exceeded");
+            }
+            let mut bytes = Vec::new();
+            std::fs::File::open(&path)?
+                .take(4 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 4 * 1024 * 1024 {
+                bail!("Oversize matrix receipt");
+            }
+            let receipt = crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
+            let id = receipt["id"].as_str().context("Missing matrix ID")?;
+            if id.is_empty()
+                || id.len() > 80
+                || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                || path.file_stem().and_then(|v| v.to_str()) != Some(id)
+                || receipt["kind"] != "experiment_matrix"
+                || receipt["schema_version"] != 1
+            {
+                bail!("Matrix catalog identity mismatch");
+            }
+            if receipt["project_id"] != query.project_id {
+                continue;
+            }
+            let count = receipt["variants"]
+                .as_array()
+                .context("Missing matrix variants")?
+                .len();
+            if !(2..=16).contains(&count) {
+                bail!("Invalid matrix variant count");
+            }
             rows.push(json!({"id":id,"dataset_id":receipt["dataset_id"],"dataset_version":receipt["dataset_version"],"baseline_id":receipt["baseline_id"],"variant_count":count}));
         }
-        rows.sort_by(|a,b|b["id"].as_str().cmp(&a["id"].as_str()));let has_more=rows.len()>query.offset+query.limit;
-        Ok(json!({"matrices":rows.into_iter().skip(query.offset).take(query.limit).collect::<Vec<_>>(),"offset":query.offset,"has_more":has_more,"summaries_verified":false}))
-    })();result.map(Json).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))
+        rows.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
+        let has_more = rows.len() > query.offset + query.limit;
+        Ok(
+            json!({"matrices":rows.into_iter().skip(query.offset).take(query.limit).collect::<Vec<_>>(),"offset":query.offset,"has_more":has_more,"summaries_verified":false}),
+        )
+    })();
+    result
+        .map(Json)
+        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
-pub(crate) async fn save_matrix(State(app):State<crate::App>,Json(input):Json<MatrixSave>)->crate::ApiResult<Value>{
-    let result=(||->Result<Value>{
-        let id=crate::evaluation::new_id();let receipt=matrix_receipt(&app,&id,&input)?;
-        let root=app.data.join("evaluation/matrices");std::fs::create_dir_all(&root)?;
-        if !std::fs::symlink_metadata(&root)?.is_dir()||!root.canonicalize()?.starts_with(app.data.as_ref()){bail!("Invalid matrix directory");}
-        if serde_json::to_vec(&receipt)?.len()>4*1024*1024{bail!("Oversize matrix artifact");}
-        crate::evaluation::commit_new(&root.join(format!("{id}.json")),&receipt)?;Ok(receipt)
-    })();result.map(Json).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))
-}
-pub(crate) async fn read_matrix(State(app):State<crate::App>,Path(id):Path<String>)->crate::ApiResult<Value>{
-    let result=(||->Result<Value>{
-        if id.is_empty()||id.len()>80||!id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'){bail!("Invalid matrix ID");}
-        let path=app.data.join("evaluation/matrices").join(format!("{id}.json"));let metadata=std::fs::symlink_metadata(&path)?;
-        if !metadata.is_file()||metadata.len()>4*1024*1024{bail!("Invalid matrix artifact");}
-        let path=path.canonicalize()?;if !path.starts_with(app.data.as_ref()){bail!("Matrix escapes Studio data");}
-        let mut bytes=Vec::new();std::fs::File::open(path)?.take(4*1024*1024+1).read_to_end(&mut bytes)?;
-        if bytes.len()>4*1024*1024{bail!("Oversize matrix artifact");}
-        let receipt=crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
-        let input:MatrixSave=serde_json::from_value(receipt["request"].clone())?;
-        if matrix_receipt(&app,&id,&input)?!=receipt{bail!("Matrix does not match pinned results");}
+pub(crate) async fn save_matrix(
+    State(app): State<crate::App>,
+    Json(input): Json<MatrixSave>,
+) -> crate::ApiResult<Value> {
+    let result = (|| -> Result<Value> {
+        let id = crate::evaluation::new_id();
+        let receipt = matrix_receipt(&app, &id, &input)?;
+        let root = app.data.join("evaluation/matrices");
+        std::fs::create_dir_all(&root)?;
+        if !std::fs::symlink_metadata(&root)?.is_dir()
+            || !root.canonicalize()?.starts_with(app.data.as_ref())
+        {
+            bail!("Invalid matrix directory");
+        }
+        if serde_json::to_vec(&receipt)?.len() > 4 * 1024 * 1024 {
+            bail!("Oversize matrix artifact");
+        }
+        crate::evaluation::commit_new(&root.join(format!("{id}.json")), &receipt)?;
         Ok(receipt)
-    })();result.map(Json).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))
+    })();
+    result
+        .map(Json)
+        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+}
+pub(crate) async fn read_matrix(
+    State(app): State<crate::App>,
+    Path(id): Path<String>,
+) -> crate::ApiResult<Value> {
+    let result = (|| -> Result<Value> {
+        if id.is_empty()
+            || id.len() > 80
+            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            bail!("Invalid matrix ID");
+        }
+        let path = app
+            .data
+            .join("evaluation/matrices")
+            .join(format!("{id}.json"));
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.len() > 4 * 1024 * 1024 {
+            bail!("Invalid matrix artifact");
+        }
+        let path = path.canonicalize()?;
+        if !path.starts_with(app.data.as_ref()) {
+            bail!("Matrix escapes Studio data");
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(4 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 4 * 1024 * 1024 {
+            bail!("Oversize matrix artifact");
+        }
+        let receipt = crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
+        let input: MatrixSave = serde_json::from_value(receipt["request"].clone())?;
+        if matrix_receipt(&app, &id, &input)? != receipt {
+            bail!("Matrix does not match pinned results");
+        }
+        Ok(receipt)
+    })();
+    result
+        .map(Json)
+        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn capacity_fixture()->(PathBuf,Manager,Run){
-        let root=std::env::temp_dir().join(crate::evaluation::new_id());std::fs::create_dir_all(&root).unwrap();let root=root.canonicalize().unwrap();let manager=Manager::new(&root).unwrap();
-        let run:Run=serde_json::from_value(json!({"id":crate::evaluation::new_id(),"project_id":"default","dataset_id":"cases","dataset_version":1,"dataset_sha256":"a".repeat(64),"settings":{"project_id":"default","provider":"local","model":"mock","mode":"chat","allow_writes":false},"prompt_template":"{{input}}","metrics":["json_valid"],"concurrency":1,"item_timeout_secs":120,"status":"running","items":[{"sample_id":"input","status":"pending","output":null,"scores":{},"usage":null,"duration_ms":null,"error":null}],"strict_quality":false,"mean_scores":{}})).unwrap();(root,manager,run)
+    fn capacity_fixture() -> (PathBuf, Manager, Run) {
+        let root = std::env::temp_dir().join(crate::evaluation::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let manager = Manager::new(&root).unwrap();
+        let run:Run=serde_json::from_value(json!({"id":crate::evaluation::new_id(),"project_id":"default","dataset_id":"cases","dataset_version":1,"dataset_sha256":"a".repeat(64),"settings":{"project_id":"default","provider":"local","model":"mock","mode":"chat","allow_writes":false},"prompt_template":"{{input}}","metrics":["json_valid"],"concurrency":1,"item_timeout_secs":120,"status":"running","items":[{"sample_id":"input","status":"pending","output":null,"scores":{},"usage":null,"duration_ms":null,"error":null}],"strict_quality":false,"mean_scores":{}})).unwrap();
+        (root, manager, run)
     }
     #[test]
-    fn escaped_output_bounds_preserve_utf8(){
-        let plain="x".repeat(65536);assert_eq!(bound_output(plain.clone()).unwrap(),(plain,false));
-        let(output,truncated)=bound_output("\u{0000}".repeat(65536)).unwrap();assert!(truncated);assert!(serde_json::to_vec(&output).unwrap().len()<=MAX_OUTPUT_JSON_BYTES);
-        let(output,truncated)=bound_output("я".repeat(40000)).unwrap();assert!(truncated);assert_eq!(output.len(),65536);assert!(output.chars().all(|c|c=='я'));
-        let(root,_manager,mut run)=capacity_fixture();run.items=vec![run.items[0].clone();200];assert!(run_reservation(&run).unwrap()<MAX_RUN_BYTES);std::fs::remove_dir_all(root).unwrap();
-    }
-    #[test]
-    fn full_run_catalog_rejects_new_write_callbacks_and_keeps_updates(){
-        let(root,manager,mut run)=capacity_fixture();run.status="completed".into();for i in 0..MAX_RUNS{let mut existing=run.clone();existing.id=format!("{i:x}");std::fs::write(manager.path(&existing.id).unwrap(),serde_json::to_vec(&existing).unwrap()).unwrap();}
-        let called=std::sync::atomic::AtomicBool::new(false);assert!(manager.save_with(&run,||{called.store(true,std::sync::atomic::Ordering::Relaxed);Ok(())}).unwrap_err().to_string().contains("retention limit"));assert!(!called.load(std::sync::atomic::Ordering::Relaxed));assert!(!manager.path(&run.id).unwrap().exists());run.id="0".into();run.status="interrupted".into();manager.save(&run).unwrap();assert_eq!(manager.load("0").unwrap().status,"interrupted");std::fs::remove_dir_all(root).unwrap();
-    }
-    #[test]
-    fn output_reservations_serialize_competing_admissions(){
-        let(root,manager,mut run)=capacity_fixture();run.items=vec![run.items[0].clone();200];let capacity=MAX_CATALOG_BYTES as usize/run_reservation(&run).unwrap();for i in 0..capacity-1 {let mut existing=run.clone();existing.id=format!("{i:x}");std::fs::write(manager.path(&existing.id).unwrap(),serde_json::to_vec(&existing).unwrap()).unwrap();}
-        let barrier=Arc::new(std::sync::Barrier::new(2));let threads:Vec<_>=(0..2).map(|_|{let mut run=run.clone();run.id=crate::evaluation::new_id();let manager=manager.clone();let barrier=barrier.clone();std::thread::spawn(move||{barrier.wait();manager.save(&run).is_ok()})}).collect();assert_eq!(threads.into_iter().filter_map(|t|t.join().ok()).filter(|v|*v).count(),1);
+    fn escaped_output_bounds_preserve_utf8() {
+        let plain = "x".repeat(65536);
+        assert_eq!(bound_output(plain.clone()).unwrap(), (plain, false));
+        let (output, truncated) = bound_output("\u{0000}".repeat(65536)).unwrap();
+        assert!(truncated);
+        assert!(serde_json::to_vec(&output).unwrap().len() <= MAX_OUTPUT_JSON_BYTES);
+        let (output, truncated) = bound_output("я".repeat(40000)).unwrap();
+        assert!(truncated);
+        assert_eq!(output.len(), 65536);
+        assert!(output.chars().all(|c| c == 'я'));
+        let (root, _manager, mut run) = capacity_fixture();
+        run.items = vec![run.items[0].clone(); 200];
+        assert!(run_reservation(&run).unwrap() < MAX_RUN_BYTES);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn catalog_filters_before_pagination_and_keeps_legacy_full_list(){
-        let root=std::env::temp_dir().join(crate::evaluation::new_id());std::fs::create_dir_all(&root).unwrap();let root=root.canonicalize().unwrap();let manager=Manager::new(&root).unwrap();
-        for i in 0..26 {let run:Run=serde_json::from_value(json!({"id":format!("{i:04x}"),"project_id":if i==25 {"foreign"}else{"default"},"dataset_id":if i<20 {"cases"}else{"other"},"dataset_version":1,"dataset_sha256":"a".repeat(64),"settings":{"project_id":"default","provider":"local","model":if i%2==0 {"MODEL-A"}else{"Model-B"},"mode":"chat","allow_writes":false},"prompt_template":"{{input}}","metrics":["json_valid"],"playground":i%2==0,"concurrency":1,"item_timeout_secs":120,"status":if i%3==0 {"failed"}else{"completed"},"items":[],"strict_quality":false,"mean_scores":{}})).unwrap();manager.save(&run).unwrap();}
-        let mut query:ListQuery=serde_json::from_value(json!({"project_id":"default","offset":0,"limit":20})).unwrap();let first=manager.list(&query).unwrap();assert_eq!(first["total"],25);assert_eq!(first["runs"].as_array().unwrap().len(),20);assert_eq!(first["has_more"],true);query.offset=Some(20);assert_eq!(manager.list(&query).unwrap()["runs"].as_array().unwrap().len(),5);
-        query.offset=Some(0);query.model=Some("model-a".into());assert_eq!(manager.list(&query).unwrap()["total"],13);query.playground=Some(false);assert_eq!(manager.list(&query).unwrap()["total"],0);query.playground=Some(true);query.dataset_id=Some("cases".into());query.status=Some("failed".into());assert_eq!(manager.list(&query).unwrap()["total"],4);query.limit=Some(101);assert!(manager.list(&query).is_err());
-        let legacy:ListQuery=serde_json::from_value(json!({"project_id":"default"})).unwrap();assert_eq!(manager.list(&legacy).unwrap()["runs"].as_array().unwrap().len(),25);std::fs::remove_dir_all(root).unwrap();
+    fn full_run_catalog_rejects_new_write_callbacks_and_keeps_updates() {
+        let (root, manager, mut run) = capacity_fixture();
+        run.status = "completed".into();
+        for i in 0..MAX_RUNS {
+            let mut existing = run.clone();
+            existing.id = format!("{i:x}");
+            std::fs::write(
+                manager.path(&existing.id).unwrap(),
+                serde_json::to_vec(&existing).unwrap(),
+            )
+            .unwrap();
+        }
+        let called = std::sync::atomic::AtomicBool::new(false);
+        assert!(manager
+            .save_with(&run, || {
+                called.store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("retention limit"));
+        assert!(!called.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!manager.path(&run.id).unwrap().exists());
+        run.id = "0".into();
+        run.status = "interrupted".into();
+        manager.save(&run).unwrap();
+        assert_eq!(manager.load("0").unwrap().status, "interrupted");
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn only_single_input_playground_can_skip_metrics(){
+    fn output_reservations_serialize_competing_admissions() {
+        let (root, manager, mut run) = capacity_fixture();
+        run.items = vec![run.items[0].clone(); 200];
+        let capacity = MAX_CATALOG_BYTES as usize / run_reservation(&run).unwrap();
+        for i in 0..capacity - 1 {
+            let mut existing = run.clone();
+            existing.id = format!("{i:x}");
+            std::fs::write(
+                manager.path(&existing.id).unwrap(),
+                serde_json::to_vec(&existing).unwrap(),
+            )
+            .unwrap();
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let mut run = run.clone();
+                run.id = crate::evaluation::new_id();
+                let manager = manager.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    manager.save(&run).is_ok()
+                })
+            })
+            .collect();
+        assert_eq!(
+            threads
+                .into_iter()
+                .filter_map(|t| t.join().ok())
+                .filter(|v| *v)
+                .count(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn catalog_filters_before_pagination_and_keeps_legacy_full_list() {
+        let root = std::env::temp_dir().join(crate::evaluation::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let manager = Manager::new(&root).unwrap();
+        for i in 0..26 {
+            let run:Run=serde_json::from_value(json!({"id":format!("{i:04x}"),"project_id":if i==25 {"foreign"}else{"default"},"dataset_id":if i<20 {"cases"}else{"other"},"dataset_version":1,"dataset_sha256":"a".repeat(64),"settings":{"project_id":"default","provider":"local","model":if i%2==0 {"MODEL-A"}else{"Model-B"},"mode":"chat","allow_writes":false},"prompt_template":"{{input}}","metrics":["json_valid"],"playground":i%2==0,"concurrency":1,"item_timeout_secs":120,"status":if i%3==0 {"failed"}else{"completed"},"items":[],"strict_quality":false,"mean_scores":{}})).unwrap();
+            manager.save(&run).unwrap();
+        }
+        let mut query: ListQuery =
+            serde_json::from_value(json!({"project_id":"default","offset":0,"limit":20})).unwrap();
+        let first = manager.list(&query).unwrap();
+        assert_eq!(first["total"], 25);
+        assert_eq!(first["runs"].as_array().unwrap().len(), 20);
+        assert_eq!(first["has_more"], true);
+        query.offset = Some(20);
+        assert_eq!(
+            manager.list(&query).unwrap()["runs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        query.offset = Some(0);
+        query.model = Some("model-a".into());
+        assert_eq!(manager.list(&query).unwrap()["total"], 13);
+        query.playground = Some(false);
+        assert_eq!(manager.list(&query).unwrap()["total"], 0);
+        query.playground = Some(true);
+        query.dataset_id = Some("cases".into());
+        query.status = Some("failed".into());
+        assert_eq!(manager.list(&query).unwrap()["total"], 4);
+        query.limit = Some(101);
+        assert!(manager.list(&query).is_err());
+        let legacy: ListQuery = serde_json::from_value(json!({"project_id":"default"})).unwrap();
+        assert_eq!(
+            manager.list(&legacy).unwrap()["runs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            25
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn only_single_input_playground_can_skip_metrics() {
         let mut request:Start=serde_json::from_value(json!({"dataset_id":"dataset","dataset_version":1,"settings":{"project_id":"default","provider":"local","model":"mock","mode":"chat","allow_writes":false},"prompt_template":"{{input}}","metrics":[]})).unwrap();
-        let mut snapshot=crate::evaluation::Store::draft_single("default","One",Sample{id:"input".into(),input:"Question".into(),expected_output:None,contexts:vec![],metadata:BTreeMap::new()}).unwrap();
-        assert!(validate(&request,&snapshot).is_err());request.playground=true;assert!(validate(&request,&snapshot).is_ok());assert!(serde_json::to_value(&request).unwrap().get("playground").is_none());snapshot.samples.push(snapshot.samples[0].clone());assert!(validate(&request,&snapshot).is_err());
+        let mut snapshot = crate::evaluation::Store::draft_single(
+            "default",
+            "One",
+            Sample {
+                id: "input".into(),
+                input: "Question".into(),
+                expected_output: None,
+                contexts: vec![],
+                metadata: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert!(validate(&request, &snapshot).is_err());
+        request.playground = true;
+        assert!(validate(&request, &snapshot).is_ok());
+        assert!(serde_json::to_value(&request)
+            .unwrap()
+            .get("playground")
+            .is_none());
+        snapshot.samples.push(snapshot.samples[0].clone());
+        assert!(validate(&request, &snapshot).is_err());
     }
     #[test]
     fn character_bigrams_preserve_adjacency_unicode_and_multiplicity() {

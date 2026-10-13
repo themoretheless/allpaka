@@ -6,8 +6,8 @@
 
 #[cfg(target_os = "macos")]
 use metal::{
-    BlitCommandEncoderRef, CommandBufferRef, ComputeCommandEncoderRef,
-    ComputePassDescriptorRef, MTLDispatchType,
+    BlitCommandEncoderRef, CommandBufferRef, ComputeCommandEncoderRef, ComputePassDescriptorRef,
+    MTLDispatchType,
 };
 
 #[cfg(target_os = "macos")]

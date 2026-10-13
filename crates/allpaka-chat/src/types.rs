@@ -263,13 +263,24 @@ pub struct Pending {
     pub settings: Settings,
 }
 
+/// Milestone status in a session's durable plan. The wire names match the
+/// `set_plan` JSON schema and `web/app.js` comparisons (`pending`, `in_progress`, `completed`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanItem {
     #[serde(default)]
     pub id: String,
     pub title: String,
-    pub status: String,
+    pub status: PlanStatus,
     #[serde(default)]
     pub acceptance: Vec<String>,
     #[serde(default)]
@@ -398,7 +409,7 @@ impl Session {
 
 #[cfg(test)]
 mod status_wire_tests {
-    use super::{MemberStatus, SessionStatus};
+    use super::{MemberStatus, PlanStatus, SessionStatus};
     use serde_json::json;
 
     /// `web/app.js` compares these words as strings, and `/history/export`
@@ -428,6 +439,17 @@ mod status_wire_tests {
             assert_eq!(json!(value), json!(word));
             assert_eq!(
                 serde_json::from_value::<MemberStatus>(json!(word)).unwrap(),
+                value
+            );
+        }
+        for (value, word) in [
+            (PlanStatus::Pending, "pending"),
+            (PlanStatus::InProgress, "in_progress"),
+            (PlanStatus::Completed, "completed"),
+        ] {
+            assert_eq!(json!(value), json!(word));
+            assert_eq!(
+                serde_json::from_value::<PlanStatus>(json!(word)).unwrap(),
                 value
             );
         }
@@ -461,5 +483,6 @@ mod status_wire_tests {
         // with no status word reads as - it must be "not started", not "done".
         assert_eq!(MemberStatus::default(), MemberStatus::Queued);
         assert_eq!(SessionStatus::default(), SessionStatus::Idle);
+        assert_eq!(PlanStatus::default(), PlanStatus::Pending);
     }
 }

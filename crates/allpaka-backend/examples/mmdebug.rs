@@ -25,7 +25,7 @@ fn main() {
     // CPU reference (f16 rounding of x like the kernel stages)
     let f16r = |v: f32| -> f32 {
         let b = v.to_bits();
-        let sign = ((b >> 16) & 0x8000) as u32;
+        let sign = (b >> 16) & 0x8000;
         let exp = ((b >> 23) & 0xff) as i32 - 127 + 15;
         let mant = (b >> 13) & 0x3ff;
         let h = if exp <= 0 {
@@ -101,7 +101,7 @@ fn main() {
     enc.set_bytes(5, 8, &wo as *const u64 as *const _);
     enc.set_bytes(6, 4, &mm as *const u32 as *const _);
     enc.dispatch_thread_groups(
-        MTLSize::new(n_out as u64 / 64, (m as u64 + 31) / 32, 1),
+        MTLSize::new(n_out as u64 / 64, (m as u64).div_ceil(32), 1),
         MTLSize::new(128, 1, 1),
     );
     enc.end_encoding();

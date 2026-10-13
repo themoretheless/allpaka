@@ -29,7 +29,10 @@ pub(crate) struct Origin {
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TemplateMessage {pub(crate) role:String,pub(crate) content:String}
+pub(crate) struct TemplateMessage {
+    pub(crate) role: String,
+    pub(crate) content: String,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Snapshot {
@@ -40,8 +43,8 @@ pub(crate) struct Snapshot {
     pub sha256: String,
     pub template: String,
     pub system: String,
-    #[serde(default,skip_serializing_if="Option::is_none")]
-    pub messages:Option<Vec<TemplateMessage>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Vec<TemplateMessage>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
 }
@@ -55,7 +58,7 @@ pub(crate) struct SavePrompt {
     #[serde(default)]
     template: String,
     #[serde(default)]
-    messages:Option<Vec<TemplateMessage>>,
+    messages: Option<Vec<TemplateMessage>>,
     #[serde(default = "default_system")]
     system: String,
     #[serde(default)]
@@ -82,10 +85,14 @@ fn digest(snapshot: &Snapshot) -> Result<String> {
         &snapshot.system,
     );
     // Keep hashes of pre-lineage snapshots stable.
-    let bytes = if let Some(messages)=&snapshot.messages {serde_json::to_vec(&(fields,&snapshot.origin,messages))?}else{match &snapshot.origin {
-        Some(origin) => serde_json::to_vec(&(fields, origin))?,
-        None => serde_json::to_vec(&fields)?,
-    }};
+    let bytes = if let Some(messages) = &snapshot.messages {
+        serde_json::to_vec(&(fields, &snapshot.origin, messages))?
+    } else {
+        match &snapshot.origin {
+            Some(origin) => serde_json::to_vec(&(fields, origin))?,
+            None => serde_json::to_vec(&fields)?,
+        }
+    };
     Ok(Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -108,14 +115,27 @@ fn validate(snapshot: &Snapshot) -> Result<()> {
     if snapshot.name.trim().is_empty()
         || snapshot.name.len() > 200
         || snapshot.template.len() > 16000
-        || (snapshot.messages.is_none()&&!snapshot.template.contains("{{input}}"))
+        || (snapshot.messages.is_none() && !snapshot.template.contains("{{input}}"))
         || snapshot.system.trim().is_empty()
         || snapshot.system.len() > 16000
     {
         bail!("Prompt needs a name, system instruction and a bounded template containing {{{{input}}}}");
     }
-    if let Some(messages)=&snapshot.messages {
-        if !snapshot.template.is_empty()||messages.is_empty()||messages.len()>15||messages.len()%2==0||messages.iter().enumerate().any(|(i,m)|m.role!=if i%2==0 {"user"}else{"assistant"}||m.content.trim().is_empty()||m.content.len()>16000)||messages.iter().map(|m|m.content.len()).sum::<usize>()>64000||!messages.last().unwrap().content.contains("{{input}}") {bail!("Chat prompt needs alternating User/Assistant messages ending with User containing {{{{input}}}}, at most 15 messages / 64 KiB");}
+    if let Some(messages) = &snapshot.messages {
+        if !snapshot.template.is_empty()
+            || messages.is_empty()
+            || messages.len() > 15
+            || messages.len() % 2 == 0
+            || messages.iter().enumerate().any(|(i, m)| {
+                m.role != if i % 2 == 0 { "user" } else { "assistant" }
+                    || m.content.trim().is_empty()
+                    || m.content.len() > 16000
+            })
+            || messages.iter().map(|m| m.content.len()).sum::<usize>() > 64000
+            || !messages.last().unwrap().content.contains("{{input}}")
+        {
+            bail!("Chat prompt needs alternating User/Assistant messages ending with User containing {{{{input}}}}, at most 15 messages / 64 KiB");
+        }
     }
     Ok(())
 }
@@ -259,7 +279,7 @@ impl Store {
             sha256: String::new(),
             template: input.template,
             system: input.system,
-            messages:input.messages,
+            messages: input.messages,
             origin,
         };
         validate(&snapshot)?;
@@ -397,47 +417,188 @@ pub(crate) async fn history(
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PreviewInput {pub(crate) project_id:String,pub(crate) input:String,#[serde(default)]pub(crate) contexts:Vec<String>}
-pub(crate) fn preview_receipt(prompt:&Snapshot,input:&PreviewInput)->Result<Value>{
-    verify(prompt)?;
-    if prompt.project_id!=input.project_id {bail!("Prompt preview project mismatch");}
-    if input.input.trim().is_empty()||input.input.len()>64*1024||input.contexts.len()>50||input.contexts.iter().any(|s|s.len()>64*1024){bail!("Prompt preview input exceeds bounds");}
-    let rendered=render_messages(prompt,&input.input,&input.contexts)?;
-    let mut messages=vec![json!({"role":"system","content":prompt.system})];messages.extend(rendered.into_iter().map(|m|json!({"role":m.role,"content":m.content})));
-    Ok(json!({"kind":"prompt_preview","project_id":prompt.project_id,"prompt_id":prompt.id,"prompt_version":prompt.version,"prompt_sha256":prompt.sha256,"messages":messages,"provider_calls":0,"saved":false}))
+pub(crate) struct PreviewInput {
+    pub(crate) project_id: String,
+    pub(crate) input: String,
+    #[serde(default)]
+    pub(crate) contexts: Vec<String>,
 }
-pub(crate) fn render_messages(prompt:&Snapshot,input:&str,contexts:&[String])->Result<Vec<TemplateMessage>>{
-    let contexts_len=contexts.iter().map(String::len).sum::<usize>()+contexts.len().saturating_sub(1)*2;
-    if contexts_len>1024*1024 {bail!("Prompt preview context exceeds 1 MiB");}
-    let contexts=contexts.join("\n\n");let legacy=vec![TemplateMessage{role:"user".into(),content:prompt.template.clone()}];let templates=prompt.messages.as_ref().unwrap_or(&legacy);let mut result=Vec::new();let mut total=0usize;
+pub(crate) fn preview_receipt(prompt: &Snapshot, input: &PreviewInput) -> Result<Value> {
+    verify(prompt)?;
+    if prompt.project_id != input.project_id {
+        bail!("Prompt preview project mismatch");
+    }
+    if input.input.trim().is_empty()
+        || input.input.len() > 64 * 1024
+        || input.contexts.len() > 50
+        || input.contexts.iter().any(|s| s.len() > 64 * 1024)
+    {
+        bail!("Prompt preview input exceeds bounds");
+    }
+    let rendered = render_messages(prompt, &input.input, &input.contexts)?;
+    let mut messages = vec![json!({"role":"system","content":prompt.system})];
+    messages.extend(
+        rendered
+            .into_iter()
+            .map(|m| json!({"role":m.role,"content":m.content})),
+    );
+    Ok(
+        json!({"kind":"prompt_preview","project_id":prompt.project_id,"prompt_id":prompt.id,"prompt_version":prompt.version,"prompt_sha256":prompt.sha256,"messages":messages,"provider_calls":0,"saved":false}),
+    )
+}
+pub(crate) fn render_messages(
+    prompt: &Snapshot,
+    input: &str,
+    contexts: &[String],
+) -> Result<Vec<TemplateMessage>> {
+    let contexts_len =
+        contexts.iter().map(String::len).sum::<usize>() + contexts.len().saturating_sub(1) * 2;
+    if contexts_len > 1024 * 1024 {
+        bail!("Prompt preview context exceeds 1 MiB");
+    }
+    let contexts = contexts.join("\n\n");
+    let legacy = vec![TemplateMessage {
+        role: "user".into(),
+        content: prompt.template.clone(),
+    }];
+    let templates = prompt.messages.as_ref().unwrap_or(&legacy);
+    let mut result = Vec::new();
+    let mut total = 0usize;
     for message in templates {
-        let mut rendered=String::new();
-        for(i,part)in message.content.split("{{input}}").enumerate(){
-            if i>0 {if total+rendered.len()+input.len()>1024*1024 {bail!("Rendered prompt exceeds 1 MiB");}rendered.push_str(input);}
-            for(j,text)in part.split("{{contexts}}").enumerate(){let extra=text.len()+if j>0{contexts.len()}else{0};if total+rendered.len()+extra>1024*1024 {bail!("Rendered prompt exceeds 1 MiB");}if j>0 {rendered.push_str(&contexts);}rendered.push_str(text);}
+        let mut rendered = String::new();
+        for (i, part) in message.content.split("{{input}}").enumerate() {
+            if i > 0 {
+                if total + rendered.len() + input.len() > 1024 * 1024 {
+                    bail!("Rendered prompt exceeds 1 MiB");
+                }
+                rendered.push_str(input);
+            }
+            for (j, text) in part.split("{{contexts}}").enumerate() {
+                let extra = text.len() + if j > 0 { contexts.len() } else { 0 };
+                if total + rendered.len() + extra > 1024 * 1024 {
+                    bail!("Rendered prompt exceeds 1 MiB");
+                }
+                if j > 0 {
+                    rendered.push_str(&contexts);
+                }
+                rendered.push_str(text);
+            }
         }
-        total+=rendered.len();result.push(TemplateMessage{role:message.role.clone(),content:rendered});
+        total += rendered.len();
+        result.push(TemplateMessage {
+            role: message.role.clone(),
+            content: rendered,
+        });
     }
     Ok(result)
 }
 
-pub(crate) async fn preview(State(app):State<crate::App>,Path((id,version)):Path<(String,u64)>,Json(input):Json<PreviewInput>)->crate::ApiResult<Value>{
-    project_exists(&app,&input.project_id).and_then(|_|app.prompts.load(&id,Some(version))).and_then(|prompt|preview_receipt(&prompt,&input)).map(Json).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))
+pub(crate) async fn preview(
+    State(app): State<crate::App>,
+    Path((id, version)): Path<(String, u64)>,
+    Json(input): Json<PreviewInput>,
+) -> crate::ApiResult<Value> {
+    project_exists(&app, &input.project_id)
+        .and_then(|_| app.prompts.load(&id, Some(version)))
+        .and_then(|prompt| preview_receipt(&prompt, &input))
+        .map(Json)
+        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn chat_templates_bind_roles_content_and_literal_rendering(){
-        let mut prompt=Snapshot{id:"prompt".into(),project_id:"default".into(),name:"Chat".into(),version:1,sha256:String::new(),template:String::new(),system:"System".into(),messages:Some(vec![TemplateMessage{role:"user".into(),content:"Example".into()},TemplateMessage{role:"assistant".into(),content:"Example answer".into()},TemplateMessage{role:"user".into(),content:"{{input}} / {{contexts}}".into()}]),origin:None};prompt.sha256=digest(&prompt).unwrap();verify(&prompt).unwrap();
-        let receipt=preview_receipt(&prompt,&PreviewInput{project_id:"default".into(),input:"Literal {{contexts}}".into(),contexts:vec!["Context {{input}}".into()]}).unwrap();assert_eq!(receipt["messages"].as_array().unwrap().len(),4);assert_eq!(receipt["messages"][2]["role"],"assistant");assert_eq!(receipt["messages"][3]["content"],"Literal {{contexts}} / Context {{input}}");
-        prompt.messages.as_mut().unwrap()[1].content="Changed answer".into();assert!(verify(&prompt).is_err());prompt.sha256=digest(&prompt).unwrap();verify(&prompt).unwrap();prompt.messages.as_mut().unwrap()[1].role="system".into();assert!(validate(&prompt).is_err());prompt.messages.as_mut().unwrap()[1].role="assistant".into();prompt.template="{{input}}".into();assert!(validate(&prompt).is_err());prompt.template.clear();prompt.messages.as_mut().unwrap().pop();assert!(validate(&prompt).is_err());
+    fn chat_templates_bind_roles_content_and_literal_rendering() {
+        let mut prompt = Snapshot {
+            id: "prompt".into(),
+            project_id: "default".into(),
+            name: "Chat".into(),
+            version: 1,
+            sha256: String::new(),
+            template: String::new(),
+            system: "System".into(),
+            messages: Some(vec![
+                TemplateMessage {
+                    role: "user".into(),
+                    content: "Example".into(),
+                },
+                TemplateMessage {
+                    role: "assistant".into(),
+                    content: "Example answer".into(),
+                },
+                TemplateMessage {
+                    role: "user".into(),
+                    content: "{{input}} / {{contexts}}".into(),
+                },
+            ]),
+            origin: None,
+        };
+        prompt.sha256 = digest(&prompt).unwrap();
+        verify(&prompt).unwrap();
+        let receipt = preview_receipt(
+            &prompt,
+            &PreviewInput {
+                project_id: "default".into(),
+                input: "Literal {{contexts}}".into(),
+                contexts: vec!["Context {{input}}".into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(receipt["messages"].as_array().unwrap().len(), 4);
+        assert_eq!(receipt["messages"][2]["role"], "assistant");
+        assert_eq!(
+            receipt["messages"][3]["content"],
+            "Literal {{contexts}} / Context {{input}}"
+        );
+        prompt.messages.as_mut().unwrap()[1].content = "Changed answer".into();
+        assert!(verify(&prompt).is_err());
+        prompt.sha256 = digest(&prompt).unwrap();
+        verify(&prompt).unwrap();
+        prompt.messages.as_mut().unwrap()[1].role = "system".into();
+        assert!(validate(&prompt).is_err());
+        prompt.messages.as_mut().unwrap()[1].role = "assistant".into();
+        prompt.template = "{{input}}".into();
+        assert!(validate(&prompt).is_err());
+        prompt.template.clear();
+        prompt.messages.as_mut().unwrap().pop();
+        assert!(validate(&prompt).is_err());
     }
     #[test]
-    fn preview_pins_messages_preserves_literals_and_bounds_expansion(){
-        let mut prompt=Snapshot{id:"prompt".into(),project_id:"default".into(),name:"Preview".into(),version:1,sha256:String::new(),template:"Q: {{input}} C: {{contexts}} Q2: {{input}}".into(),system:"System {{input}}".into(),messages:None,origin:None};prompt.sha256=digest(&prompt).unwrap();
-        let mut input=PreviewInput{project_id:"default".into(),input:"literal {{contexts}}".into(),contexts:vec!["one".into(),"two {{input}}".into()]};let receipt=preview_receipt(&prompt,&input).unwrap();assert_eq!(receipt["messages"][0]["content"],"System {{input}}");assert_eq!(receipt["messages"][1]["content"],"Q: literal {{contexts}} C: one\n\ntwo {{input}} Q2: literal {{contexts}}");assert_eq!(receipt["prompt_sha256"],prompt.sha256);assert_eq!(receipt["provider_calls"],0);
-        input.project_id="foreign".into();assert!(preview_receipt(&prompt,&input).is_err());input.project_id="default".into();input.input="x".repeat(64*1024);prompt.template="{{input}}".repeat(17);prompt.sha256=digest(&prompt).unwrap();assert!(preview_receipt(&prompt,&input).is_err());prompt.sha256="0".repeat(64);assert!(preview_receipt(&prompt,&input).is_err());
+    fn preview_pins_messages_preserves_literals_and_bounds_expansion() {
+        let mut prompt = Snapshot {
+            id: "prompt".into(),
+            project_id: "default".into(),
+            name: "Preview".into(),
+            version: 1,
+            sha256: String::new(),
+            template: "Q: {{input}} C: {{contexts}} Q2: {{input}}".into(),
+            system: "System {{input}}".into(),
+            messages: None,
+            origin: None,
+        };
+        prompt.sha256 = digest(&prompt).unwrap();
+        let mut input = PreviewInput {
+            project_id: "default".into(),
+            input: "literal {{contexts}}".into(),
+            contexts: vec!["one".into(), "two {{input}}".into()],
+        };
+        let receipt = preview_receipt(&prompt, &input).unwrap();
+        assert_eq!(receipt["messages"][0]["content"], "System {{input}}");
+        assert_eq!(
+            receipt["messages"][1]["content"],
+            "Q: literal {{contexts}} C: one\n\ntwo {{input}} Q2: literal {{contexts}}"
+        );
+        assert_eq!(receipt["prompt_sha256"], prompt.sha256);
+        assert_eq!(receipt["provider_calls"], 0);
+        input.project_id = "foreign".into();
+        assert!(preview_receipt(&prompt, &input).is_err());
+        input.project_id = "default".into();
+        input.input = "x".repeat(64 * 1024);
+        prompt.template = "{{input}}".repeat(17);
+        prompt.sha256 = digest(&prompt).unwrap();
+        assert!(preview_receipt(&prompt, &input).is_err());
+        prompt.sha256 = "0".repeat(64);
+        assert!(preview_receipt(&prompt, &input).is_err());
     }
     fn input(id: Option<String>, version: u64, text: &str) -> SavePrompt {
         SavePrompt {
@@ -445,7 +606,7 @@ mod tests {
             project_id: "default".into(),
             name: "Examples".into(),
             base_version: version,
-            messages:None,
+            messages: None,
             template: format!("{text} {{{{input}}}}"),
             system: default_system(),
             origin: None,

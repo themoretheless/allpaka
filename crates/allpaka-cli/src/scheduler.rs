@@ -29,11 +29,7 @@ pub struct ContinuousBatcher<T> {
 }
 
 impl<T> ContinuousBatcher<T> {
-    pub fn new(
-        max_queued: usize,
-        max_batch: usize,
-        max_batch_context_tokens: usize,
-    ) -> Self {
+    pub fn new(max_queued: usize, max_batch: usize, max_batch_context_tokens: usize) -> Self {
         Self {
             queues: BTreeMap::new(),
             max_queued,

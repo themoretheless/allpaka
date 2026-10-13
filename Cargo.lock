@@ -74,7 +74,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "themoretheless-tokenizer",
  "tokio",
 ]
 
@@ -120,7 +119,6 @@ dependencies = [
  "anyhow",
  "glob",
  "memmap2",
- "serde",
  "serde_json",
  "tempfile",
 ]
@@ -1804,11 +1802,6 @@ dependencies = [
  "rustix",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "themoretheless-tokenizer"
-version = "0.3.1"
-source = "git+https://github.com/themoretheless/tokenizer?tag=v0.3.1#67d01daa19bb55a86aa5ed8ae9c3a35fede1bd6f"
 
 [[package]]
 name = "thiserror"

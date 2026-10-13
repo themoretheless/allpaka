@@ -18,7 +18,11 @@ pub(super) fn start(
             if readers.fetch_add(1, Ordering::AcqRel) >= 16 {
                 readers.fetch_sub(1, Ordering::AcqRel);
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-                let _ = respond(&mut stream, 429, &json!({"error":"HTTP reader capacity exhausted"}));
+                let _ = respond(
+                    &mut stream,
+                    429,
+                    &json!({"error":"HTTP reader capacity exhausted"}),
+                );
                 continue;
             }
             let readers = Arc::clone(&readers);
@@ -28,28 +32,39 @@ pub(super) fn start(
             std::thread::spawn(move || {
                 struct ReaderLease(Arc<AtomicUsize>);
                 impl Drop for ReaderLease {
-                    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); }
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::AcqRel);
+                    }
                 }
                 let _lease = ReaderLease(readers);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
                 let mut error_stream = stream.try_clone().ok();
-                match prepare_connection(stream, &model, limits.max_batch_context_tokens, &registry) {
+                match prepare_connection(stream, &model, limits.max_batch_context_tokens, &registry)
+                {
                     Ok(Some(prepared)) => match sender.try_send(prepared) {
-                        Ok(()) => {},
+                        Ok(()) => {}
                         Err(TrySendError::Full((_, _, mut request))) => {
-                            let _ = respond(&mut request.stream, 429, &json!({"error":"inference queue full"}));
-                        },
+                            let _ = respond(
+                                &mut request.stream,
+                                429,
+                                &json!({"error":"inference queue full"}),
+                            );
+                        }
                         Err(TrySendError::Disconnected((_, _, mut request))) => {
-                            let _ = respond(&mut request.stream, 503, &json!({"error":"inference worker unavailable"}));
-                        },
+                            let _ = respond(
+                                &mut request.stream,
+                                503,
+                                &json!({"error":"inference worker unavailable"}),
+                            );
+                        }
                     },
-                    Ok(None) => {},
+                    Ok(None) => {}
                     Err(error) => {
                         if let Some(ref mut stream) = error_stream {
                             let _ = respond(stream, 400, &json!({"error":error.to_string()}));
                         }
-                    },
+                    }
                 }
             });
         }

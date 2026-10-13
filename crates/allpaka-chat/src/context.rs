@@ -139,7 +139,7 @@ mod tests {
             mime: "image/png".into(),
             data: "aGVsbG8=".into(),
         };
-        assert!(validate_images(&[image.clone()], "deepseek").is_err());
+        assert!(validate_images(std::slice::from_ref(&image), "deepseek").is_err());
         assert!(validate_images(&[image], "anthropic").is_ok());
     }
 }

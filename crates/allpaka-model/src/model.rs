@@ -156,6 +156,7 @@ impl SharedFfn<'_> {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Ffn<'a> {
     Dense {
         w_gate: QuantMat<'a>,
@@ -716,8 +717,8 @@ impl Session {
     /// Roll the session back to its first `keep` tokens.
     pub fn truncate(&mut self, keep: usize) {
         self.kv.truncate(keep);
-        if self.rope_cache_pairs > 0 {
-            let keep_pairs = keep.min(self.rope_cache.len() / self.rope_cache_pairs);
+        if let Some(pairs) = self.rope_cache.len().checked_div(self.rope_cache_pairs) {
+            let keep_pairs = keep.min(pairs);
             self.rope_cache.truncate(keep_pairs * self.rope_cache_pairs);
         }
     }
@@ -1843,16 +1844,10 @@ impl<'a> Model<'a> {
                     if logits.is_empty() {
                         // GPU routing: the attention block left the logits in
                         // y_arena; route_pick/scan/scatter build everything
-                        // below on-device at the head of the FFN buffer.
-                        // Softmax gating matches the CPU router exactly only
-                        // without a selection bias and with winner
-                        // renormalisation (qwen3moe); anything else keeps the
-                        // CPU readback.
-                        let gpu_ok = *n_used <= 8
-                            && match gating {
-                                Gating::Sigmoid => true,
-                                Gating::Softmax => *weights_norm && router_bias.is_none(),
-                            };
+                        // below on-device at the head of the FFN buffer,
+                        // including Softmax with or without selection bias or
+                        // winner renormalisation.
+                        let gpu_ok = *n_used <= 8;
                         if !gpu_ok {
                             return None;
                         }
@@ -2042,11 +2037,9 @@ impl<'a> Model<'a> {
             && std::env::var("ALLPAKA_SKIP_HOST_ROPE")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-        let rope_table = if skip_host_rope {
-            Vec::new()
-        } else {
-            s.rope_cache(&self.rope_inv_freq, pos, 1).to_vec()
-        };
+        if !skip_host_rope {
+            let _ = s.rope_cache(&self.rope_inv_freq, pos, 1);
+        }
         let Some(layers) = self.token_layers(s)? else {
             if dbg {
                 eprintln!("tokenbuf declined: token_layers");
@@ -2077,12 +2070,19 @@ impl<'a> Model<'a> {
             },
             None => None,
         };
-        let (embd_ty, embd_bytes) = self.embedding()?.raw();
-        let use_gpu_embed = allpaka_backend::gpu::prefer_gpu_embed();
+        let rope_table: &[[f32; 2]] = if skip_host_rope {
+            &[]
+        } else {
+            &s.rope_cache[pos * s.rope_cache_pairs..(pos + 1) * s.rope_cache_pairs]
+        };
+        let embd = self.embedding()?;
+        let (embd_ty, embd_bytes) = embd.raw();
+        let use_gpu_embed =
+            allpaka_backend::gpu::can_embed_on_gpu(embd_ty, embd_bytes, embd.n_in);
         let x_host = if use_gpu_embed {
             None
         } else {
-            Some(self.embedding()?.row(token as usize)?)
+            Some(embd.row(token as usize)?)
         };
         let x: &[f32] = x_host.as_deref().unwrap_or(&[]);
         let (out_ty, out_bytes) = self.output_head()?.raw();
@@ -2100,13 +2100,13 @@ impl<'a> Model<'a> {
             n_kv_heads: c.n_kv_heads as usize,
             pos,
             scale: 1.0 / (c.head_dim as f32).sqrt(),
-            rope: &rope_table,
+            rope: rope_table,
             rot_dim: c.rope_dim as usize,
             eps: c.rms_eps,
             output_norm: self.output_norm_raw,
             output: (out_ty, out_bytes, self.output_head()?.n_out),
             argmax,
-            embd: Some((embd_ty, embd_bytes, self.embedding()?.n_in)),
+            embd: Some((embd_ty, embd_bytes, embd.n_in)),
             token_id: Some(token),
         };
         match allpaka_backend::gpu::decode_token_checked(&request) {
@@ -2888,6 +2888,7 @@ impl<'a> Model<'a> {
 /// `q_group` and `out_group` are the group's `group_size * head_dim` slices
 /// of the q and output rows; `out_group` must arrive zeroed.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn attend_group(
     c: &Config,
     kv: &KvCache,
@@ -2976,6 +2977,7 @@ fn attend_one(
 /// The naive reference: one q head, one full pass, buffered softmax. Kept
 /// only to pin `attend_group` against an independently simple formulation.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn attend_head(
     c: &Config,
     kv: &KvCache,
@@ -3011,6 +3013,7 @@ fn attend_head(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod attention_tests {
     use super::*;
     use crate::config::RopeStyle;

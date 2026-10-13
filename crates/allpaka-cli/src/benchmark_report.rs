@@ -178,7 +178,10 @@ impl RegressionPolicy {
         }
         for measurement in [baseline, candidate] {
             if measurement.samples_tok_s.is_empty()
-                || measurement.samples_tok_s.iter().any(|rate| !rate.is_finite() || *rate <= 0.0)
+                || measurement
+                    .samples_tok_s
+                    .iter()
+                    .any(|rate| !rate.is_finite() || *rate <= 0.0)
                 || !measurement.summary.median.is_finite()
                 || measurement.summary.median <= 0.0
             {
@@ -215,10 +218,18 @@ mod tests {
         baseline.context_tokens = Some(480);
         let mut candidate = baseline.clone();
         candidate.context_tokens = Some(0);
-        assert!(!RegressionPolicy::default().evaluate(&baseline, &candidate).passed);
+        assert!(
+            !RegressionPolicy::default()
+                .evaluate(&baseline, &candidate)
+                .passed
+        );
         candidate = baseline.clone();
         candidate.samples_tok_s = vec![f64::NAN];
-        assert!(!RegressionPolicy::default().evaluate(&baseline, &candidate).passed);
+        assert!(
+            !RegressionPolicy::default()
+                .evaluate(&baseline, &candidate)
+                .passed
+        );
     }
 
     #[test]

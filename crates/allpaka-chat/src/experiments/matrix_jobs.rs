@@ -2,13 +2,20 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 const MAX_BYTES: usize = 2 * 1024 * 1024;
-const MAX_JOBS:usize=1000;
-const MAX_CATALOG_BYTES:usize=16*1024*1024;
+const MAX_JOBS: usize = 1000;
+const MAX_CATALOG_BYTES: usize = 16 * 1024 * 1024;
 // Includes 16 bounded run IDs, status and a 1000-character JSON-escaped error.
-const MUTABLE_RESERVE:usize=16*1024;
-fn reserved_size(job:&Job)->Result<usize>{
-    let mut fixed=job.clone();fixed.run_ids=vec![None;job.variants.len()];fixed.run_attempted=vec![false;job.variants.len()];fixed.status.clear();fixed.error=None;
-    serde_json::to_vec(&fixed)?.len().checked_add(MUTABLE_RESERVE).context("Matrix job capacity overflow")
+const MUTABLE_RESERVE: usize = 16 * 1024;
+fn reserved_size(job: &Job) -> Result<usize> {
+    let mut fixed = job.clone();
+    fixed.run_ids = vec![None; job.variants.len()];
+    fixed.run_attempted = vec![false; job.variants.len()];
+    fixed.status.clear();
+    fixed.error = None;
+    serde_json::to_vec(&fixed)?
+        .len()
+        .checked_add(MUTABLE_RESERVE)
+        .context("Matrix job capacity overflow")
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,12 +108,22 @@ impl Manager {
         let _lock = self.writes.lock().unwrap();
         let path = self.path(&job.id)?;
         if !path.try_exists()? {
-            let ids=self.ids()?;
-            if ids.len()>=MAX_JOBS {bail!("Matrix job retention limit reached; new job was not started");}
-            let mut reserved=reserved_size(job)?;
-            if reserved>MAX_BYTES {bail!("Matrix job leaves insufficient space for durable progress");}
-            for id in ids {reserved=reserved.checked_add(reserved_size(&self.load(&id)?)?).context("Matrix catalog capacity overflow")?;}
-            if reserved>MAX_CATALOG_BYTES {bail!("Matrix job storage capacity reached; new job was not started");}
+            let ids = self.ids()?;
+            if ids.len() >= MAX_JOBS {
+                bail!("Matrix job retention limit reached; new job was not started");
+            }
+            let mut reserved = reserved_size(job)?;
+            if reserved > MAX_BYTES {
+                bail!("Matrix job leaves insufficient space for durable progress");
+            }
+            for id in ids {
+                reserved = reserved
+                    .checked_add(reserved_size(&self.load(&id)?)?)
+                    .context("Matrix catalog capacity overflow")?;
+            }
+            if reserved > MAX_CATALOG_BYTES {
+                bail!("Matrix job storage capacity reached; new job was not started");
+            }
         }
         let temp = path.with_extension(format!("{}.tmp", crate::evaluation::new_id()));
         let result = (|| -> Result<()> {
@@ -185,7 +202,10 @@ impl Manager {
                 continue;
             }
             total += entry.metadata()?.len();
-            if ids.len() >= MAX_JOBS || total > MAX_CATALOG_BYTES as u64 || !entry.file_type()?.is_file() {
+            if ids.len() >= MAX_JOBS
+                || total > MAX_CATALOG_BYTES as u64
+                || !entry.file_type()?.is_file()
+            {
                 bail!("Matrix job scan bounds exceeded");
             }
             ids.push(
@@ -659,30 +679,99 @@ mod tests {
         (data, manager, job)
     }
     #[test]
-    fn full_catalog_rejects_admission_but_retains_updates(){
-        let(data,manager,mut job)=fixture();
-        for i in 0..MAX_JOBS {let mut existing=job.clone();existing.id=format!("{i:x}");std::fs::write(manager.path(&existing.id).unwrap(),serde_json::to_vec(&existing).unwrap()).unwrap();}
-        assert_eq!(manager.ids().unwrap().len(),MAX_JOBS);assert!(manager.save(&job).unwrap_err().to_string().contains("retention limit"));assert!(!manager.path(&job.id).unwrap().exists());
-        job.id="0".into();job.status="completed".into();manager.save(&job).unwrap();assert_eq!(manager.load("0").unwrap().status,"completed");assert_eq!(manager.ids().unwrap().len(),MAX_JOBS);
+    fn full_catalog_rejects_admission_but_retains_updates() {
+        let (data, manager, mut job) = fixture();
+        for i in 0..MAX_JOBS {
+            let mut existing = job.clone();
+            existing.id = format!("{i:x}");
+            std::fs::write(
+                manager.path(&existing.id).unwrap(),
+                serde_json::to_vec(&existing).unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(manager.ids().unwrap().len(), MAX_JOBS);
+        assert!(manager
+            .save(&job)
+            .unwrap_err()
+            .to_string()
+            .contains("retention limit"));
+        assert!(!manager.path(&job.id).unwrap().exists());
+        job.id = "0".into();
+        job.status = "completed".into();
+        manager.save(&job).unwrap();
+        assert_eq!(manager.load("0").unwrap().status, "completed");
+        assert_eq!(manager.ids().unwrap().len(), MAX_JOBS);
         std::fs::remove_dir_all(data).unwrap();
     }
     #[test]
-    fn competing_admissions_share_remaining_reserved_bytes(){
-        let(data,manager,mut job)=fixture();job.variants[0].request.prompt_template="x".repeat(1024*1024);let capacity=MAX_CATALOG_BYTES/reserved_size(&job).unwrap();
-        for i in 0..capacity-1 {let mut existing=job.clone();existing.id=format!("{i:x}");std::fs::write(manager.path(&existing.id).unwrap(),serde_json::to_vec(&existing).unwrap()).unwrap();}
-        let barrier=Arc::new(std::sync::Barrier::new(2));let threads:Vec<_>=(0..2).map(|_|{let manager=manager.clone();let mut job=job.clone();job.id=crate::evaluation::new_id();let barrier=barrier.clone();std::thread::spawn(move||{barrier.wait();manager.save(&job).is_ok()})}).collect();
-        assert_eq!(threads.into_iter().filter_map(|t|t.join().ok()).filter(|ok|*ok).count(),1);assert_eq!(manager.ids().unwrap().len(),capacity);
+    fn competing_admissions_share_remaining_reserved_bytes() {
+        let (data, manager, mut job) = fixture();
+        job.variants[0].request.prompt_template = "x".repeat(1024 * 1024);
+        let capacity = MAX_CATALOG_BYTES / reserved_size(&job).unwrap();
+        for i in 0..capacity - 1 {
+            let mut existing = job.clone();
+            existing.id = format!("{i:x}");
+            std::fs::write(
+                manager.path(&existing.id).unwrap(),
+                serde_json::to_vec(&existing).unwrap(),
+            )
+            .unwrap();
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let manager = manager.clone();
+                let mut job = job.clone();
+                job.id = crate::evaluation::new_id();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    manager.save(&job).is_ok()
+                })
+            })
+            .collect();
+        assert_eq!(
+            threads
+                .into_iter()
+                .filter_map(|t| t.join().ok())
+                .filter(|ok| *ok)
+                .count(),
+            1
+        );
+        assert_eq!(manager.ids().unwrap().len(), capacity);
         std::fs::remove_dir_all(data).unwrap();
     }
     #[test]
-    fn reserved_catalog_capacity_keeps_space_for_progress(){
-        let(data,manager,mut job)=fixture();
-        job.variants[0].request.prompt_template="x".repeat(1024*1024);
-        let weight=reserved_size(&job).unwrap();assert!(weight<MAX_BYTES);
-        let count=MAX_CATALOG_BYTES/weight;
-        for i in 0..count {let mut existing=job.clone();existing.id=format!("{i:x}");std::fs::write(manager.path(&existing.id).unwrap(),serde_json::to_vec(&existing).unwrap()).unwrap();}
-        assert!(manager.save(&job).unwrap_err().to_string().contains("storage capacity"));
-        job.id="0".into();let before=reserved_size(&job).unwrap();job.run_ids=vec![Some("a".repeat(80));2];job.error=Some("\u{0000}".repeat(1000));job.status="interrupted".into();assert_eq!(reserved_size(&job).unwrap(),before);assert!(serde_json::to_vec(&job).unwrap().len()<=before);manager.save(&job).unwrap();assert_eq!(manager.ids().unwrap().len(),count);
+    fn reserved_catalog_capacity_keeps_space_for_progress() {
+        let (data, manager, mut job) = fixture();
+        job.variants[0].request.prompt_template = "x".repeat(1024 * 1024);
+        let weight = reserved_size(&job).unwrap();
+        assert!(weight < MAX_BYTES);
+        let count = MAX_CATALOG_BYTES / weight;
+        for i in 0..count {
+            let mut existing = job.clone();
+            existing.id = format!("{i:x}");
+            std::fs::write(
+                manager.path(&existing.id).unwrap(),
+                serde_json::to_vec(&existing).unwrap(),
+            )
+            .unwrap();
+        }
+        assert!(manager
+            .save(&job)
+            .unwrap_err()
+            .to_string()
+            .contains("storage capacity"));
+        job.id = "0".into();
+        let before = reserved_size(&job).unwrap();
+        job.run_ids = vec![Some("a".repeat(80)); 2];
+        job.error = Some("\u{0000}".repeat(1000));
+        job.status = "interrupted".into();
+        assert_eq!(reserved_size(&job).unwrap(), before);
+        assert!(serde_json::to_vec(&job).unwrap().len() <= before);
+        manager.save(&job).unwrap();
+        assert_eq!(manager.ids().unwrap().len(), count);
         std::fs::remove_dir_all(data).unwrap();
     }
     #[test]

@@ -4,8 +4,8 @@
 //! durations at existing synchronization boundaries, so tracing does not add
 //! GPU waits or force command-buffer completion.
 
-use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -141,9 +141,8 @@ pub fn take_global() -> PhaseTrace {
     let mut trace = PhaseTrace::default();
     for phase in Phase::ALL {
         let index = phase as usize;
-        trace.durations[index] = Duration::from_nanos(
-            GLOBAL_DURATIONS_NS[index].swap(0, Ordering::Relaxed),
-        );
+        trace.durations[index] =
+            Duration::from_nanos(GLOBAL_DURATIONS_NS[index].swap(0, Ordering::Relaxed));
         trace.calls[index] = GLOBAL_CALLS[index].swap(0, Ordering::Relaxed);
     }
     trace

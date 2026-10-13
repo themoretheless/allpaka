@@ -1,10 +1,3 @@
-mod strict_json;
-mod guardrail_policies;
-mod judge;
-mod judge_runs;
-mod judge_presets;
-mod progress;
-mod plan;
 mod background;
 mod bookmarks;
 mod code_search;
@@ -16,22 +9,29 @@ mod data_lock;
 mod evaluation;
 mod experiments;
 mod feedback;
-mod review_queues;
+mod guardrail_policies;
 mod history;
+mod judge;
+mod judge_presets;
+mod judge_runs;
 mod mcp;
 mod memory;
 mod memory_extract;
+mod model_evaluators;
 mod observability;
 mod online_evaluation;
 mod online_sources;
-mod quality_jobs;
-mod model_evaluators;
+mod plan;
 mod plugins;
+mod progress;
 mod prompts;
 mod provider;
+mod quality_jobs;
 mod rag;
 mod remote_worker;
+mod review_queues;
 mod state_file;
+mod strict_json;
 mod swarm;
 mod tools;
 mod types;
@@ -139,7 +139,7 @@ async fn execute_command(cwd: &std::path::Path, args: &Value) -> Result<Value> {
     if command.trim().is_empty() {
         bail!("command must not be empty");
     }
-    let timeout_secs = args["timeout"].as_u64().unwrap_or(30).min(120).max(1);
+    let timeout_secs = args["timeout"].as_u64().unwrap_or(30).clamp(1, 120);
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
         tokio::process::Command::new("/bin/sh")
@@ -377,51 +377,165 @@ fn routes(app: App) -> Router {
         .route("/api/config", get(config))
         .route("/api/memory/notes", get(memory::list).post(memory::save))
         .route("/api/memory/expiry", get(memory::expiry))
-        .route("/api/memory/consolidation-input",post(memory::consolidation_input))
-        .route("/api/memory/consolidation-proposals",get(memory_extract::list_consolidations).post(memory_extract::consolidate))
-        .route("/api/memory/notes/:id/versions/:version/source-status",get(memory::source_status))
+        .route(
+            "/api/memory/consolidation-input",
+            post(memory::consolidation_input),
+        )
+        .route(
+            "/api/memory/consolidation-proposals",
+            get(memory_extract::list_consolidations).post(memory_extract::consolidate),
+        )
+        .route(
+            "/api/memory/notes/:id/versions/:version/source-status",
+            get(memory::source_status),
+        )
         .route(
             "/api/memory/notes/:id/versions/:version",
             get(memory::snapshot),
         )
         .route("/api/observability/traces", get(observability::list))
-        .route("/api/observability/online-jobs",get(online_evaluation::jobs_api))
-        .route("/api/observability/external-traces", post(observability::ingest))
-        .route("/api/observability/evaluations/summary", get(observability::evaluation_summary))
-        .route("/api/observability/trace-exports", post(observability::bulk_export))
+        .route(
+            "/api/observability/online-jobs",
+            get(online_evaluation::jobs_api),
+        )
+        .route(
+            "/api/observability/external-traces",
+            post(observability::ingest),
+        )
+        .route(
+            "/api/observability/evaluations/summary",
+            get(observability::evaluation_summary),
+        )
+        .route(
+            "/api/observability/trace-exports",
+            post(observability::bulk_export),
+        )
         .route("/api/observability/summary", get(observability::summary))
-        .route("/api/evaluation/datasets/:id/lifecycle", post(evaluation::lifecycle))
-        .route("/api/evaluation/datasets/:id/versions", get(evaluation::versions))
-        .route("/api/evaluation/datasets/:id/compare", get(evaluation::compare))
-        .route("/api/guardrail-policies", get(guardrail_policies::list_api).post(guardrail_policies::save_api))
-        .route("/api/guardrail-policies/create", post(guardrail_policies::create_api))
-        .route("/api/guardrail-policies/:hash/check", post(guardrail_policies::check_api))
-        .route("/api/observability/online-rules", get(online_evaluation::list_api).post(online_evaluation::save_api))
-        .route("/api/observability/online-rules/:hash", get(online_evaluation::get_api))
-        .route("/api/observability/online-rule-bindings", get(online_evaluation::binding_api).post(online_evaluation::bind_api))
-        .route("/api/observability/online-selections", get(online_evaluation::selection_archive_api).post(online_evaluation::select_api))
-        .route("/api/observability/online-model-evaluators",post(model_evaluators::save_api))
-        .route("/api/observability/online-model-evaluators/:hash",get(model_evaluators::read_api))
-        .route("/api/observability/online-quality-jobs",get(quality_jobs::list_api).post(quality_jobs::submit_api))
-        .route("/api/observability/online-quality-jobs/:id",get(quality_jobs::get_api))
-        .route("/api/observability/online-quality-sources",post(online_sources::save_api))
-        .route("/api/observability/online-quality-sources/:hash/judge",post(judge::judge_source))
-        .route("/api/observability/online-quality-sources/:hash",get(online_sources::read_api))
-        .route("/api/observability/online-assessments", post(online_evaluation::assess_api))
-        .route("/api/observability/online-jobs/drain", post(online_evaluation::drain_api))
-        .route("/api/guardrail-policies/:hash", get(guardrail_policies::get_api))
-        .route("/api/observability/time-series", get(observability::time_series))
+        .route(
+            "/api/evaluation/datasets/:id/lifecycle",
+            post(evaluation::lifecycle),
+        )
+        .route(
+            "/api/evaluation/datasets/:id/versions",
+            get(evaluation::versions),
+        )
+        .route(
+            "/api/evaluation/datasets/:id/compare",
+            get(evaluation::compare),
+        )
+        .route(
+            "/api/guardrail-policies",
+            get(guardrail_policies::list_api).post(guardrail_policies::save_api),
+        )
+        .route(
+            "/api/guardrail-policies/create",
+            post(guardrail_policies::create_api),
+        )
+        .route(
+            "/api/guardrail-policies/:hash/check",
+            post(guardrail_policies::check_api),
+        )
+        .route(
+            "/api/observability/online-rules",
+            get(online_evaluation::list_api).post(online_evaluation::save_api),
+        )
+        .route(
+            "/api/observability/online-rules/:hash",
+            get(online_evaluation::get_api),
+        )
+        .route(
+            "/api/observability/online-rule-bindings",
+            get(online_evaluation::binding_api).post(online_evaluation::bind_api),
+        )
+        .route(
+            "/api/observability/online-selections",
+            get(online_evaluation::selection_archive_api).post(online_evaluation::select_api),
+        )
+        .route(
+            "/api/observability/online-model-evaluators",
+            post(model_evaluators::save_api),
+        )
+        .route(
+            "/api/observability/online-model-evaluators/:hash",
+            get(model_evaluators::read_api),
+        )
+        .route(
+            "/api/observability/online-quality-jobs",
+            get(quality_jobs::list_api).post(quality_jobs::submit_api),
+        )
+        .route(
+            "/api/observability/online-quality-jobs/:id",
+            get(quality_jobs::get_api),
+        )
+        .route(
+            "/api/observability/online-quality-sources",
+            post(online_sources::save_api),
+        )
+        .route(
+            "/api/observability/online-quality-sources/:hash/judge",
+            post(judge::judge_source),
+        )
+        .route(
+            "/api/observability/online-quality-sources/:hash",
+            get(online_sources::read_api),
+        )
+        .route(
+            "/api/observability/online-assessments",
+            post(online_evaluation::assess_api),
+        )
+        .route(
+            "/api/observability/online-jobs/drain",
+            post(online_evaluation::drain_api),
+        )
+        .route(
+            "/api/guardrail-policies/:hash",
+            get(guardrail_policies::get_api),
+        )
+        .route(
+            "/api/observability/time-series",
+            get(observability::time_series),
+        )
         .route("/api/observability/traces/:id", get(observability::get))
-        .route("/api/observability/traces/:id/export", get(observability::export))
-        .route("/api/observability/traces/:id/remove", post(observability::remove))
-        .route("/api/observability/traces/:id/restore", post(observability::restore))
-        .route("/api/observability/review-queues", get(review_queues::list).post(review_queues::create))
-        .route("/api/observability/review-queues/:id", get(review_queues::detail))
-        .route("/api/observability/review-queues/:id/history", get(review_queues::history))
-        .route("/api/observability/review-queues/:id/assignments", post(review_queues::assign))
-        .route("/api/observability/review-queues/:id/completion", post(review_queues::complete))
-        .route("/api/observability/review-queues/:id/lifecycle", post(review_queues::lifecycle))
-        .route("/api/observability/traces/:id/feedback/versions", get(feedback::history))
+        .route(
+            "/api/observability/traces/:id/export",
+            get(observability::export),
+        )
+        .route(
+            "/api/observability/traces/:id/remove",
+            post(observability::remove),
+        )
+        .route(
+            "/api/observability/traces/:id/restore",
+            post(observability::restore),
+        )
+        .route(
+            "/api/observability/review-queues",
+            get(review_queues::list).post(review_queues::create),
+        )
+        .route(
+            "/api/observability/review-queues/:id",
+            get(review_queues::detail),
+        )
+        .route(
+            "/api/observability/review-queues/:id/history",
+            get(review_queues::history),
+        )
+        .route(
+            "/api/observability/review-queues/:id/assignments",
+            post(review_queues::assign),
+        )
+        .route(
+            "/api/observability/review-queues/:id/completion",
+            post(review_queues::complete),
+        )
+        .route(
+            "/api/observability/review-queues/:id/lifecycle",
+            post(review_queues::lifecycle),
+        )
+        .route(
+            "/api/observability/traces/:id/feedback/versions",
+            get(feedback::history),
+        )
         .route(
             "/api/observability/traces/:id/feedback",
             get(feedback::list).post(feedback::save),
@@ -438,8 +552,11 @@ fn routes(app: App) -> Router {
             "/api/evaluation/prompts/:id/versions/:version",
             get(prompts::snapshot),
         )
-        .route("/api/evaluation/playground",post(experiments::playground))
-        .route("/api/evaluation/prompts/:id/versions/:version/preview", post(prompts::preview))
+        .route("/api/evaluation/playground", post(experiments::playground))
+        .route(
+            "/api/evaluation/prompts/:id/versions/:version/preview",
+            post(prompts::preview),
+        )
         .route(
             "/api/evaluation/datasets",
             get(evaluation::list).post(evaluation::save),
@@ -449,34 +566,82 @@ fn routes(app: App) -> Router {
             get(experiments::list).post(experiments::start),
         )
         .route("/api/evaluation/experiments/:id", get(experiments::detail))
-        .route("/api/evaluation/experiments/:id/export", get(experiments::export))
+        .route(
+            "/api/evaluation/experiments/:id/export",
+            get(experiments::export),
+        )
         .route(
             "/api/evaluation/experiments/:id/cancel",
             post(experiments::cancel),
         )
-        .route("/api/evaluation/judge-runs", get(judge_runs::list).post(judge_runs::start))
+        .route(
+            "/api/evaluation/judge-runs",
+            get(judge_runs::list).post(judge_runs::start),
+        )
         .route("/api/evaluation/judge-runs/:id", get(judge_runs::get))
-        .route("/api/evaluation/judge-runs/:id/cancel", post(judge_runs::cancel))
-        .route("/api/evaluation/judge-runs/compare", post(judge_runs::compare))
+        .route(
+            "/api/evaluation/judge-runs/:id/cancel",
+            post(judge_runs::cancel),
+        )
+        .route(
+            "/api/evaluation/judge-runs/compare",
+            post(judge_runs::compare),
+        )
         .route("/api/evaluation/judge-presets", get(judge_presets::catalog))
         .route("/api/evaluation/judge-plans", post(judge::plan))
         .route("/api/evaluation/judge-plans/:id", get(judge::read_plan))
         .route("/api/evaluation/judge", post(judge::judge))
         .route("/api/evaluation/judge/:id", get(judge::read))
-        .route("/api/evaluation/score", post(experiments::offline_score).get(experiments::list_offline_scores))
-        .route("/api/evaluation/score/:id", get(experiments::read_offline_score))
-        .route("/api/evaluation/score/compare", post(experiments::compare_offline_scores))
+        .route(
+            "/api/evaluation/score",
+            post(experiments::offline_score).get(experiments::list_offline_scores),
+        )
+        .route(
+            "/api/evaluation/score/:id",
+            get(experiments::read_offline_score),
+        )
+        .route(
+            "/api/evaluation/score/compare",
+            post(experiments::compare_offline_scores),
+        )
         .route("/api/evaluation/metrics", get(experiments::metric_catalog))
         .route("/api/evaluation/compare", post(experiments::compare))
-        .route("/api/evaluation/comparisons/:id", get(experiments::read_comparison))
-        .route("/api/evaluation/comparisons", get(experiments::list_comparisons))
-        .route("/api/evaluation/matrices", post(experiments::save_matrix).get(experiments::list_matrices))
-        .route("/api/evaluation/matrices/:id", get(experiments::read_matrix))
-        .route("/api/evaluation/matrix-jobs", post(experiments::matrix_jobs::start).get(experiments::matrix_jobs::list))
-        .route("/api/evaluation/matrix-jobs/:id", get(experiments::matrix_jobs::detail))
-        .route("/api/evaluation/matrix-jobs/:id/cancel", post(experiments::matrix_jobs::cancel))
-        .route("/api/evaluation/matrix-jobs/:id/resume", post(experiments::matrix_jobs::resume))
-        .route("/api/evaluation/matrix-jobs/:id/retry", post(experiments::matrix_jobs::retry))
+        .route(
+            "/api/evaluation/comparisons/:id",
+            get(experiments::read_comparison),
+        )
+        .route(
+            "/api/evaluation/comparisons",
+            get(experiments::list_comparisons),
+        )
+        .route(
+            "/api/evaluation/matrices",
+            post(experiments::save_matrix).get(experiments::list_matrices),
+        )
+        .route(
+            "/api/evaluation/matrices/:id",
+            get(experiments::read_matrix),
+        )
+        .route(
+            "/api/evaluation/matrix-jobs",
+            post(experiments::matrix_jobs::start).get(experiments::matrix_jobs::list),
+        )
+        .route(
+            "/api/evaluation/matrix-jobs/:id",
+            get(experiments::matrix_jobs::detail),
+        )
+        .route(
+            "/api/evaluation/matrix-jobs/:id/cancel",
+            post(experiments::matrix_jobs::cancel),
+        )
+        .route(
+            "/api/evaluation/matrix-jobs/:id/resume",
+            post(experiments::matrix_jobs::resume),
+        )
+        .route(
+            "/api/evaluation/matrix-jobs/:id/retry",
+            post(experiments::matrix_jobs::retry),
+        )
         .route(
             "/api/evaluation/datasets/:id/versions/:version",
             get(evaluation::snapshot),
@@ -503,7 +668,10 @@ fn routes(app: App) -> Router {
             get(memory_extract::list).post(memory_extract::extract),
         )
         .route("/api/memory/proposals/:id", get(memory_extract::read))
-        .route("/api/memory/proposals/:id/source-status", get(memory_extract::source_status))
+        .route(
+            "/api/memory/proposals/:id/source-status",
+            get(memory_extract::source_status),
+        )
         .route("/api/sessions/:id/bookmarks", post(bookmarks::save))
         .route(
             "/api/sessions/:id/bookmarks/:index",
@@ -561,8 +729,15 @@ async fn config(State(app): State<App>) -> Json<Value> {
     )
 }
 fn validate_settings(s: &Settings, app: &App) -> Result<()> {
-    if let Some(selection)=&s.guardrails {
-        if matches!(s.mode,Mode::Swarm)&&s.swarm.members.iter().any(|member|!member.worker.is_empty()) {bail!("Guardrails for remote Swarm workers are not yet supported");}
+    if let Some(selection) = &s.guardrails {
+        if matches!(s.mode, Mode::Swarm)
+            && s.swarm
+                .members
+                .iter()
+                .any(|member| !member.worker.is_empty())
+        {
+            bail!("Guardrails for remote Swarm workers are not yet supported");
+        }
         selection.prepare(&guardrail_policies::Store::open(&app.data)?)?;
     }
     if !(4096..=1000000).contains(&s.compact_threshold) {
@@ -780,25 +955,68 @@ async fn background_action(
         .roots
         .first()
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "No project root available"))?;
-    execute_background(&app,&id,&root.path,&args)
+    execute_background(&app, &id, &root.path, &args)
         .await
         .map(Json)
         .map_err(|e| error(StatusCode::BAD_REQUEST, e))
 }
 
-async fn execute_background(app:&App,owner:&str,cwd:&std::path::Path,args:&Value)->Result<Value> {
-    let epoch=app.sessions.lock().unwrap().get(owner).map(|(session,_)|session.lock().unwrap().background_continuation_epoch).context("Conversation not found")?;
-    let result=app.background.execute(owner,cwd,args).await?;
-    if args["action"]=="start" {
-        if let (Some(text),Some(id))=(args["follow_up"].as_str(),result["id"].as_str()) {
-            let app=app.clone();let owner=owner.to_string();let id=id.to_string();let text=text.to_string();let cwd=cwd.to_path_buf();
+async fn execute_background(
+    app: &App,
+    owner: &str,
+    cwd: &std::path::Path,
+    args: &Value,
+) -> Result<Value> {
+    let epoch = app
+        .sessions
+        .lock()
+        .unwrap()
+        .get(owner)
+        .map(|(session, _)| session.lock().unwrap().background_continuation_epoch)
+        .context("Conversation not found")?;
+    let result = app.background.execute(owner, cwd, args).await?;
+    if args["action"] == "start" {
+        if let (Some(text), Some(id)) = (args["follow_up"].as_str(), result["id"].as_str()) {
+            let app = app.clone();
+            let owner = owner.to_string();
+            let id = id.to_string();
+            let text = text.to_string();
+            let cwd = cwd.to_path_buf();
             tokio::spawn(async move {
                 loop {
-                    let waited=app.background.execute(&owner,&cwd,&json!({"action":"wait","task_ids":[id],"wait_seconds":60})).await;
-                    let Ok(waited)=waited else {break;};
-                    if waited["tasks"][0]["status"]!="running" {
-                        let sender=app.sessions.lock().unwrap().get(&owner).map(|(_,sender)|sender.clone());
-                        if let Some(sender)=sender {let _=sender.send(Action{wake_epoch:Some(epoch),reply:None,images:vec![],kind:ActionKind::BackgroundDone,text:format!("Background task {id} terminated with status {}. {text}",waited["tasks"][0]["status"].as_str().unwrap_or("unknown")),settings:None}).await;}
+                    let waited = app
+                        .background
+                        .execute(
+                            &owner,
+                            &cwd,
+                            &json!({"action":"wait","task_ids":[id],"wait_seconds":60}),
+                        )
+                        .await;
+                    let Ok(waited) = waited else {
+                        break;
+                    };
+                    if waited["tasks"][0]["status"] != "running" {
+                        let sender = app
+                            .sessions
+                            .lock()
+                            .unwrap()
+                            .get(&owner)
+                            .map(|(_, sender)| sender.clone());
+                        if let Some(sender) = sender {
+                            let _ = sender
+                                .send(Action {
+                                    wake_epoch: Some(epoch),
+                                    reply: None,
+                                    images: vec![],
+                                    kind: ActionKind::BackgroundDone,
+                                    text: format!(
+                                        "Background task {id} terminated with status {}. {text}",
+                                        waited["tasks"][0]["status"].as_str().unwrap_or("unknown")
+                                    ),
+                                    settings: None,
+                                })
+                                .await;
+                        }
                         break;
                     }
                 }
@@ -837,11 +1055,15 @@ struct PlanInput {
     #[serde(default)]
     allow_reopen: bool,
 }
-async fn read_plan(State(app):State<App>,Path(id):Path<String>)->ApiResult<Value>{
-    let sessions=app.sessions.lock().unwrap();
-    let (shared,_)=sessions.get(&id).ok_or_else(||error(StatusCode::NOT_FOUND,"Conversation not found"))?;
-    let state=shared.lock().unwrap();
-    Ok(Json(json!({"session_id":state.id,"goal":state.goal,"revision":state.plan_revision,"steps":state.plan,"checkpoints":state.plan_checkpoints,"history_truncated":state.plan_checkpoints.first().is_some_and(|entry|entry.revision>1),"evidence_basis":"reported","reported_completion_ready":plan::reported_ready(&state),"automatic_replay":false})))
+async fn read_plan(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
+    let sessions = app.sessions.lock().unwrap();
+    let (shared, _) = sessions
+        .get(&id)
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
+    let state = shared.lock().unwrap();
+    Ok(Json(
+        json!({"session_id":state.id,"goal":state.goal,"revision":state.plan_revision,"steps":state.plan,"checkpoints":state.plan_checkpoints,"history_truncated":state.plan_checkpoints.first().is_some_and(|entry|entry.revision>1),"evidence_basis":"reported","reported_completion_ready":plan::reported_ready(&state),"automatic_replay":false}),
+    ))
 }
 async fn save_plan(
     State(app): State<App>,
@@ -855,9 +1077,6 @@ async fn save_plan(
         if step.title.trim().is_empty() || step.title.chars().count() > 300 {
             return Err(error(StatusCode::BAD_REQUEST, "Invalid plan step title"));
         }
-        if !["pending", "in_progress", "completed"].contains(&step.status.as_str()) {
-            return Err(error(StatusCode::BAD_REQUEST, "Invalid plan step status"));
-        }
     }
     let sessions = app.sessions.lock().unwrap();
     let (shared, _) = sessions
@@ -870,11 +1089,20 @@ async fn save_plan(
             "Conversation is archived or in trash; restore it first",
         ));
     }
-    let mut next=state.clone();
-    plan::update(&mut next,input.steps,input.base_revision,"user",input.allow_reopen).map_err(|e|error(StatusCode::CONFLICT,e))?;
+    let mut next = state.clone();
+    plan::update(
+        &mut next,
+        input.steps,
+        input.base_revision,
+        "user",
+        input.allow_reopen,
+    )
+    .map_err(|e| error(StatusCode::CONFLICT, e))?;
     save(&app, &next).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    *state=next;
-    Ok(Json(json!({"updated": true,"revision":state.plan_revision,"steps":state.plan,"evidence_basis":"reported"})))
+    *state = next;
+    Ok(Json(
+        json!({"updated": true,"revision":state.plan_revision,"steps":state.plan,"evidence_basis":"reported"}),
+    ))
 }
 async fn action(
     State(app): State<App>,
@@ -1027,7 +1255,7 @@ async fn cancel(task: &mut Option<JoinHandle<Result<TurnOutcome>>>, s: &SharedSe
         let _ = t.await;
     }
     let mut s = s.lock().unwrap();
-    s.background_continuation_epoch=s.background_continuation_epoch.wrapping_add(1);
+    s.background_continuation_epoch = s.background_continuation_epoch.wrapping_add(1);
     s.close_pending_tools();
     // A stopped swarm wave leaves reports that will never finish; say so instead
     // of showing a member that looks like it is still thinking.
@@ -1089,7 +1317,10 @@ async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Action>) {
                     }
                 }
                 persist(&app, &s);
-                if s.lock().unwrap().status == SessionStatus::Error { paused = true; continue; }
+                if s.lock().unwrap().status == SessionStatus::Error {
+                    paused = true;
+                    continue;
+                }
                 task = Some(tokio::spawn(turn(app.clone(), s.clone(), None)));
             }
         }
@@ -1200,12 +1431,29 @@ async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Resul
     result
 }
 
-fn enforce_guardrail(receipt:Value,trace:&observability::Trace,parent:usize)->Result<()> {
-    let passed=receipt["passed"].as_bool().context("Invalid guardrail outcome")?;
-    let blocked=receipt["blocked"].as_bool().context("Invalid guardrail block outcome")?;
-    let name=format!("guardrail.{}.{}.{}.{}",receipt["stage"].as_str().unwrap(),receipt["action"].as_str().unwrap(),if passed {"pass"}else{"fail"},receipt["policy_sha256"].as_str().unwrap());
-    let mut span=trace.span("tool",&name,Some(parent));span.finish(if blocked {"failed"}else{"completed"},&json!({"guardrail_receipt":receipt}));
-    if blocked {bail!("guardrail_blocked");}Ok(())
+fn enforce_guardrail(receipt: Value, trace: &observability::Trace, parent: usize) -> Result<()> {
+    let passed = receipt["passed"]
+        .as_bool()
+        .context("Invalid guardrail outcome")?;
+    let blocked = receipt["blocked"]
+        .as_bool()
+        .context("Invalid guardrail block outcome")?;
+    let name = format!(
+        "guardrail.{}.{}.{}.{}",
+        receipt["stage"].as_str().unwrap(),
+        receipt["action"].as_str().unwrap(),
+        if passed { "pass" } else { "fail" },
+        receipt["policy_sha256"].as_str().unwrap()
+    );
+    let mut span = trace.span("tool", &name, Some(parent));
+    span.finish(
+        if blocked { "failed" } else { "completed" },
+        &json!({"guardrail_receipt":receipt}),
+    );
+    if blocked {
+        bail!("guardrail_blocked");
+    }
+    Ok(())
 }
 
 async fn turn_traced(
@@ -1217,12 +1465,27 @@ async fn turn_traced(
 ) -> Result<TurnOutcome> {
     let mut settings = s.lock().unwrap().settings.clone();
     validate_settings(&settings, &app)?;
-    let guardrails=settings.guardrails.as_ref().map(|selection|selection.prepare(&guardrail_policies::Store::open(&app.data)?)).transpose()?;
-    settings.prepared_guardrails=guardrails.as_ref().map(|prepared|Arc::new(prepared.clone()));
-    let mut guarded_input=None;
-    if let Some(prepared)=&guardrails {
-        let text=s.lock().unwrap().messages.iter().rev().find(|message|message.role=="user").map(|message|message.content.clone()).unwrap_or_default();
-        enforce_guardrail(prepared.input(&text)?,trace,parent_span)?;guarded_input=Some(text);
+    let guardrails = settings
+        .guardrails
+        .as_ref()
+        .map(|selection| selection.prepare(&guardrail_policies::Store::open(&app.data)?))
+        .transpose()?;
+    settings.prepared_guardrails = guardrails
+        .as_ref()
+        .map(|prepared| Arc::new(prepared.clone()));
+    let mut guarded_input = None;
+    if let Some(prepared) = &guardrails {
+        let text = s
+            .lock()
+            .unwrap()
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        enforce_guardrail(prepared.input(&text)?, trace, parent_span)?;
+        guarded_input = Some(text);
     }
 
     let p = app
@@ -1350,14 +1613,16 @@ async fn turn_traced(
             None => swarm::run(&app, &s, &settings, &project, &system, trace, parent_span).await,
         };
     }
-    let mut failure_loop=progress::FailureLoop::default();
+    let mut failure_loop = progress::FailureLoop::default();
     let mut goal_continuation_revision = None;
     for step in 1..=settings.max_steps {
         compact::run(&app, &s, false, Some((trace, parent_span))).await?;
         let (history, index) = {
             let mut s = s.lock().unwrap();
             let steers = std::mem::take(&mut s.steering);
-            if !steers.is_empty(){failure_loop.reset();}
+            if !steers.is_empty() {
+                failure_loop.reset();
+            }
             for text in steers {
                 s.messages.push(Message::text(
                     "user",
@@ -1373,16 +1638,28 @@ async fn turn_traced(
         for message in &history {
             context::validate_images(&message.images, &settings.provider)?;
         }
-        if let Some(prepared)=&guardrails {
-            if let Some(user)=history.iter().rev().find(|message|message.role=="user") {if guarded_input.as_ref()!=Some(&user.content) {enforce_guardrail(prepared.input(&user.content)?,trace,parent_span)?;guarded_input=Some(user.content.clone());}}
+        if let Some(prepared) = &guardrails {
+            if let Some(user) = history.iter().rev().find(|message| message.role == "user") {
+                if guarded_input.as_ref() != Some(&user.content) {
+                    enforce_guardrail(prepared.input(&user.content)?, trace, parent_span)?;
+                    guarded_input = Some(user.content.clone());
+                }
+            }
         }
-        let buffer_output=guardrails.as_ref().is_some_and(|prepared|prepared.buffers_output());
+        let buffer_output = guardrails
+            .as_ref()
+            .is_some_and(|prepared| prepared.buffers_output());
         let copy = s.clone();
         let save_app = app.clone();
         let mut last_save = std::time::Instant::now();
         let mut model_span = trace.span("model", &settings.model, Some(parent_span));
         model_span.set_provider(&settings.provider);
-        let step_system=if settings.mode==Mode::Goal {let state=s.lock().unwrap();format!("{system}\nCurrent goal origin: {}. Original user objective: {}.\nDurable milestone plan revision: {}. Use this exact base_revision in set_plan. Keep milestone IDs. Completed milestones must not be removed or repeated. Acceptance and evidence are reported claims, not independent proof. Current milestones: {}",serde_json::to_string(&state.goal)?,serde_json::to_string(&state.goal.as_ref().and_then(|goal|state.messages.get(goal.message_index)).map(|message|message.content.as_str()))?,state.plan_revision,serde_json::to_string(&state.plan)?)} else {system.clone()};
+        let step_system = if settings.mode == Mode::Goal {
+            let state = s.lock().unwrap();
+            format!("{system}\nCurrent goal origin: {}. Original user objective: {}.\nDurable milestone plan revision: {}. Use this exact base_revision in set_plan. Keep milestone IDs. Completed milestones must not be removed or repeated. Acceptance and evidence are reported claims, not independent proof. Current milestones: {}",serde_json::to_string(&state.goal)?,serde_json::to_string(&state.goal.as_ref().and_then(|goal|state.messages.get(goal.message_index)).map(|message|message.content.as_str()))?,state.plan_revision,serde_json::to_string(&state.plan)?)
+        } else {
+            system.clone()
+        };
         let generated = provider::generate(
             &app.client,
             &p,
@@ -1391,7 +1668,9 @@ async fn turn_traced(
             &history,
             &schemas,
             move |text, reasoning| {
-                if buffer_output {return;}
+                if buffer_output {
+                    return;
+                }
                 {
                     let mut state = copy.lock().unwrap();
                     let message = &mut state.messages[index];
@@ -1424,9 +1703,17 @@ async fn turn_traced(
                 .unwrap_or(&Value::Null),
         );
         let (mut message, usage) = generated?;
-        if let Some(prepared)=&guardrails {
-            let result=enforce_guardrail(prepared.output(&message.content)?,trace,parent_span);
-            if result.is_err() {{let mut state=s.lock().unwrap();state.messages[index]=Message::text("assistant","");state.usage=usage.clone();}persist(&app,&s);result?;}
+        if let Some(prepared) = &guardrails {
+            let result = enforce_guardrail(prepared.output(&message.content)?, trace, parent_span);
+            if result.is_err() {
+                {
+                    let mut state = s.lock().unwrap();
+                    state.messages[index] = Message::text("assistant", "");
+                    state.usage = usage.clone();
+                }
+                persist(&app, &s);
+                result?;
+            }
         }
         message.provider = Some(settings.provider.clone());
         message.model = Some(settings.model.clone());
@@ -1478,7 +1765,7 @@ async fn turn_traced(
             }
             continue;
         }
-        let mut no_progress=false;
+        let mut no_progress = false;
         for call in calls {
             let mut tool_span = trace.span(
                 "tool",
@@ -1492,7 +1779,9 @@ async fn turn_traced(
                     json!({"cancelled":"User steering arrived; re-evaluate this tool after reading it"}),
                 )
             } else if no_progress {
-                Ok(json!({"cancelled":"Repeated tool failure paused this turn; this call was not executed"}))
+                Ok(
+                    json!({"cancelled":"Repeated tool failure paused this turn; this call was not executed"}),
+                )
             } else {
                 let name = call["function"]["name"]
                     .as_str()
@@ -1512,7 +1801,7 @@ async fn turn_traced(
                     } else {
                         let root = project.roots.first().context("No project root available")?;
                         let owner = s.lock().unwrap().id.clone();
-                        execute_background(&app,&owner, &root.path, &args).await
+                        execute_background(&app, &owner, &root.path, &args).await
                     }
                 } else if name == "memory_recall" {
                     app.memory.recall(&settings.project_id, &args)
@@ -1577,9 +1866,11 @@ async fn turn_traced(
                 },
                 &Value::Null,
             );
-            if steered{failure_loop.reset();}else if !no_progress{
-                let error=result.as_ref().err().map(ToString::to_string);
-                no_progress=failure_loop.observe(&call,error.as_deref());
+            if steered {
+                failure_loop.reset();
+            } else if !no_progress {
+                let error = result.as_ref().err().map(ToString::to_string);
+                no_progress = failure_loop.observe(&call, error.as_deref());
             }
             let value = match result {
                 Ok(v) => v,
@@ -1594,7 +1885,9 @@ async fn turn_traced(
             persist(&app, &s);
             tokio::task::yield_now().await;
         }
-        if no_progress&&s.lock().unwrap().steering.is_empty(){return Ok(TurnOutcome::NoProgress);}
+        if no_progress && s.lock().unwrap().steering.is_empty() {
+            return Ok(TurnOutcome::NoProgress);
+        }
     }
     if settings.mode == Mode::Goal && !plan::reported_ready(&s.lock().unwrap()) {
         return Ok(TurnOutcome::GoalIncomplete);

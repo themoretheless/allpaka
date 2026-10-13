@@ -1,5 +1,5 @@
 //! Durable milestone identities and reported acceptance evidence on the existing plan.
-use crate::types::{Mode, PlanCheckpoint, PlanItem, Session};
+use crate::types::{Mode, PlanCheckpoint, PlanItem, PlanStatus, Session};
 use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet};
 const MAX_HISTORY_BYTES: usize = 1024 * 1024;
@@ -21,10 +21,6 @@ pub(crate) fn validate_steps(steps: &[PlanItem]) -> Result<()> {
     for step in steps {
         if step.title.trim().is_empty()
             || step.title.len() > 500
-            || !matches!(
-                step.status.as_str(),
-                "pending" | "in_progress" | "completed"
-            )
             || !step.id.is_empty() && (!valid_id(&step.id) || !ids.insert(&step.id))
             || step.acceptance.len() > 4
             || step.evidence.len() > 4
@@ -177,7 +173,9 @@ pub(crate) fn restore(session: &mut Session) -> Result<()> {
 pub(crate) fn reported_ready(session: &Session) -> bool {
     !session.plan.is_empty()
         && session.plan.iter().all(|step| {
-            step.status == "completed" && !step.acceptance.is_empty() && !step.evidence.is_empty()
+            step.status == PlanStatus::Completed
+                && !step.acceptance.is_empty()
+                && !step.evidence.is_empty()
         })
 }
 
@@ -221,13 +219,13 @@ pub(crate) fn update(
                 && old.evidence == step.evidence
         });
         let explicit_reopen = allow_reopen
-            && old.is_some_and(|old| old.status == "completed")
-            && step.status == "pending";
+            && old.is_some_and(|old| old.status == PlanStatus::Completed)
+            && step.status == PlanStatus::Pending;
         if goal
             && !unchanged
             && !explicit_reopen
             && (step.acceptance.is_empty()
-                || step.status == "completed" && step.evidence.is_empty())
+                || step.status == PlanStatus::Completed && step.evidence.is_empty())
         {
             bail!("Goal milestones require acceptance criteria; completion requires reported evidence");
         }
@@ -235,11 +233,11 @@ pub(crate) fn update(
     validate_steps(&steps)?;
     if goal && !allow_reopen {
         for old in &session.plan {
-            if old.status == "completed" {
+            if old.status == PlanStatus::Completed {
                 let next = steps.iter().find(|step| step.id == old.id).ok_or_else(|| {
                     anyhow::anyhow!("Completed Goal milestones cannot be silently removed")
                 })?;
-                if next.status != "completed"
+                if next.status != PlanStatus::Completed
                     || next.title != old.title
                     || next.acceptance != old.acceptance
                     || next.evidence != old.evidence
@@ -256,12 +254,14 @@ pub(crate) fn update(
 mod tests {
     use super::*;
     fn step(title: &str, status: &str) -> PlanItem {
+        let parsed: PlanStatus =
+            serde_json::from_value(serde_json::Value::String(status.into())).unwrap();
         PlanItem {
             id: String::new(),
             title: title.into(),
-            status: status.into(),
+            status: parsed,
             acceptance: vec!["Acceptance criterion".into()],
-            evidence: if status == "completed" {
+            evidence: if parsed == PlanStatus::Completed {
                 vec!["Reported check result".into()]
             } else {
                 vec![]
@@ -322,7 +322,10 @@ mod tests {
             session.plan_checkpoints[0].goal_id.as_deref(),
             Some(first.as_str())
         );
-        assert_eq!(session.plan_checkpoints[0].steps[0].status, "completed");
+        assert_eq!(
+            session.plan_checkpoints[0].steps[0].status,
+            PlanStatus::Completed
+        );
         assert_eq!(
             session.plan_checkpoints[0]
                 .goal_origin
@@ -404,10 +407,13 @@ mod tests {
         incomplete.evidence.clear();
         assert!(update(&mut restored, vec![incomplete], Some(1), "agent", false).is_err());
         let mut next = session.plan.clone();
-        next[0].status = "pending".into();
+        next[0].status = PlanStatus::Pending;
         update(&mut session, next, Some(1), "user", true).unwrap();
         assert_eq!(session.plan_revision, 2);
-        assert_eq!(session.plan_checkpoints[0].steps[0].status, "completed");
+        assert_eq!(
+            session.plan_checkpoints[0].steps[0].status,
+            PlanStatus::Completed
+        );
     }
     #[test]
     fn legacy_goal_can_be_filled_incrementally_without_recertifying_old_completion() {
@@ -425,10 +431,10 @@ mod tests {
         update(&mut session, next, Some(1), "user", false).unwrap();
         assert!(session.plan[0].acceptance.is_empty());
         let mut reopened = session.plan.clone();
-        reopened[0].status = "pending".into();
+        reopened[0].status = PlanStatus::Pending;
         update(&mut session, reopened, Some(2), "user", true).unwrap();
         let mut invalid = session.plan.clone();
-        invalid[0].status = "completed".into();
+        invalid[0].status = PlanStatus::Completed;
         assert!(update(&mut session, invalid, Some(3), "agent", false).is_err());
     }
     #[test]
@@ -438,7 +444,7 @@ mod tests {
         restore(&mut session).unwrap();
         assert!(!session.plan[0].id.is_empty());
         assert_eq!(session.plan_revision, 1);
-        session.plan[0].status = "completed".into();
+        session.plan[0].status = PlanStatus::Completed;
         assert!(restore(&mut session).is_err());
     }
 }

@@ -608,8 +608,7 @@ pub fn measure_engine(
             let at = emitted.iter().zip(&plain).position(|(a, b)| a != b);
             anyhow::bail!("speculative stream DIVERGED from plain greedy at {at:?}");
         }
-    } else if model.config.nextn
-        && !std::env::var("ALLPAKA_BENCH_SKIP_MTP").is_ok_and(|v| v == "1")
+    } else if model.config.nextn && !std::env::var("ALLPAKA_BENCH_SKIP_MTP").is_ok_and(|v| v == "1")
     {
         // Native MTP speculation: the draft is the model's own nextn block,
         // no second model. Same harness as the draft path - the emitted
@@ -844,10 +843,9 @@ fn write_engine_report(
         report.measurements.iter().find(|m| m.name == "prefill"),
         report.measurements.iter().find(|m| m.name == "decode"),
     ) {
-        if let (Some(&prefill_rate), Some(&decode_rate)) = (
-            prefill.samples_tok_s.first(),
-            decode.samples_tok_s.first(),
-        ) {
+        if let (Some(&prefill_rate), Some(&decode_rate)) =
+            (prefill.samples_tok_s.first(), decode.samples_tok_s.first())
+        {
             crate::airbug::save_run(prefill_rate, prefill.tokens, decode_rate, decode.tokens);
         }
     }
@@ -892,10 +890,7 @@ fn report_phases(what: &str, secs: f64, tokens: usize) -> Vec<PhaseMetric> {
             per_token(*ns),
             *ns as f64 / (secs * 1e9) * 100.0
         );
-        crate::airbug::log(&format!(
-            "{what} {name} {:.1} ms/tok",
-            per_token(*ns)
-        ));
+        crate::airbug::log(&format!("{what} {name} {:.1} ms/tok", per_token(*ns)));
     }
     println!(
         "    {:<18} {:>7.1}  ({:>4.1}%)",

@@ -16,10 +16,12 @@ mod dequant;
 mod ffi;
 mod shapes;
 
-pub use container::{MlxSafetensors, TensorInfo};
+pub use container::{tensor_data, MlxSafetensors, TensorInfo};
 pub use dequant::{bf16_to_f32, dequant_mlx_q4_block, dequant_mlx_q8_block};
-pub use ffi::{free_mlx_blob, GgmlType, MlxBlob, mlx_dtype_t};
-pub use shapes::{flatten_for_matmul, MlxShape};
+pub use ffi::{
+    free_mlx_blob, mlx_dtype_t, mlx_load_tensor_sparse, mlx_repack_to_allpaka, GgmlType, MlxBlob,
+};
+pub use shapes::{flatten_for_matmul, is_3d_expert_shape, json_to_shape, MlxShape};
 
 /// A quantized tensor dtype in MLX's affine style. Matches GgmlType variants
 /// MlxQ4/MlxQ8 added in allpaka-gguf so we can repack into a single block and
@@ -42,7 +44,7 @@ impl MlxQuantType {
 
     pub fn bytes_per_block(self, group_size: usize) -> usize {
         let el = group_size;
-        let words_per_group = (el + self.elements_per_word() - 1) / self.elements_per_word();
+        let words_per_group = el.div_ceil(self.elements_per_word());
         words_per_group * 4 + 4 // u16 scale + u16 bias (stored as bf16)
     }
 

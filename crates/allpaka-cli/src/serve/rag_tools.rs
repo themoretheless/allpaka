@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use crate::rag_mcp::{DEFAULT_RAG_NOTES_DIR, RagMcp, RagMcpConfig};
+use crate::rag_mcp::{RagMcp, RagMcpConfig, DEFAULT_RAG_NOTES_DIR};
 
 const RAG_SEARCH_MAX_RESULTS: usize = 5;
 const RAG_SEARCH_MAX_LINES: usize = 6;

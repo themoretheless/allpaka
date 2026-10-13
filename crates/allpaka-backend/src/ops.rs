@@ -334,6 +334,7 @@ pub fn rope_neox(x: &mut [f32], pos: u32, freq_base: f32) {
 /// Conversion is one instruction per four values on aarch64. A scalar loop
 /// would give back more than the halved traffic wins - the same trap the
 /// scalar `dot` was.
+#[allow(clippy::incompatible_msrv)]
 pub mod f16 {
     /// Convert `src` to half, in place into `dst`. Lengths must match.
     pub fn from_f32(src: &[f32], dst: &mut [u16]) {
@@ -357,7 +358,6 @@ pub mod f16 {
             for (d, s) in dst[i..].iter_mut().zip(&src[i..]) {
                 *d = scalar_from_f32(*s);
             }
-            return;
         }
         #[cfg(not(target_arch = "aarch64"))]
         for (d, s) in dst.iter_mut().zip(src) {
@@ -373,20 +373,44 @@ pub mod f16 {
             use std::arch::aarch64::*;
             // Four independent accumulators for the same reason ops::dot has
             // eight: one would serialise the whole loop.
-            let mut acc = vdupq_n_f32(0.0);
+            let mut acc0 = vdupq_n_f32(0.0);
+            let mut acc1 = vdupq_n_f32(0.0);
+            let mut acc2 = vdupq_n_f32(0.0);
+            let mut acc3 = vdupq_n_f32(0.0);
             let mut i = 0;
+            while i + 16 <= n {
+                let h0: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
+                    b.as_ptr().add(i) as *const [u16; 4],
+                ));
+                let h1: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
+                    b.as_ptr().add(i + 4) as *const [u16; 4],
+                ));
+                let h2: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
+                    b.as_ptr().add(i + 8) as *const [u16; 4],
+                ));
+                let h3: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
+                    b.as_ptr().add(i + 12) as *const [u16; 4],
+                ));
+                acc0 = vfmaq_f32(acc0, vld1q_f32(a.as_ptr().add(i)), vcvt_f32_f16(h0));
+                acc1 = vfmaq_f32(acc1, vld1q_f32(a.as_ptr().add(i + 4)), vcvt_f32_f16(h1));
+                acc2 = vfmaq_f32(acc2, vld1q_f32(a.as_ptr().add(i + 8)), vcvt_f32_f16(h2));
+                acc3 = vfmaq_f32(acc3, vld1q_f32(a.as_ptr().add(i + 12)), vcvt_f32_f16(h3));
+                i += 16;
+            }
             while i + 4 <= n {
                 let h: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
                     b.as_ptr().add(i) as *const [u16; 4],
                 ));
-                acc = vfmaq_f32(acc, vld1q_f32(a.as_ptr().add(i)), vcvt_f32_f16(h));
+                acc0 = vfmaq_f32(acc0, vld1q_f32(a.as_ptr().add(i)), vcvt_f32_f16(h));
                 i += 4;
             }
-            let mut total = vaddvq_f32(acc);
+            let sum01 = vaddq_f32(acc0, acc1);
+            let sum23 = vaddq_f32(acc2, acc3);
+            let mut total = vaddvq_f32(vaddq_f32(sum01, sum23));
             for k in i..n {
                 total += a[k] * to_f32(b[k]);
             }
-            return total;
+            total
         }
         #[cfg(not(target_arch = "aarch64"))]
         {
@@ -406,6 +430,38 @@ pub mod f16 {
             use std::arch::aarch64::*;
             let pv = vdupq_n_f32(p);
             let mut i = 0;
+            while i + 16 <= n {
+                let h0: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
+                    v.as_ptr().add(i) as *const [u16; 4],
+                ));
+                let h1: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
+                    v.as_ptr().add(i + 4) as *const [u16; 4],
+                ));
+                let h2: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
+                    v.as_ptr().add(i + 8) as *const [u16; 4],
+                ));
+                let h3: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
+                    v.as_ptr().add(i + 12) as *const [u16; 4],
+                ));
+                let a0 = vld1q_f32(acc.as_ptr().add(i));
+                let a1 = vld1q_f32(acc.as_ptr().add(i + 4));
+                let a2 = vld1q_f32(acc.as_ptr().add(i + 8));
+                let a3 = vld1q_f32(acc.as_ptr().add(i + 12));
+                vst1q_f32(acc.as_mut_ptr().add(i), vfmaq_f32(a0, pv, vcvt_f32_f16(h0)));
+                vst1q_f32(
+                    acc.as_mut_ptr().add(i + 4),
+                    vfmaq_f32(a1, pv, vcvt_f32_f16(h1)),
+                );
+                vst1q_f32(
+                    acc.as_mut_ptr().add(i + 8),
+                    vfmaq_f32(a2, pv, vcvt_f32_f16(h2)),
+                );
+                vst1q_f32(
+                    acc.as_mut_ptr().add(i + 12),
+                    vfmaq_f32(a3, pv, vcvt_f32_f16(h3)),
+                );
+                i += 16;
+            }
             while i + 4 <= n {
                 let h: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
                     v.as_ptr().add(i) as *const [u16; 4],
@@ -417,7 +473,6 @@ pub mod f16 {
             for k in i..n {
                 acc[k] += p * to_f32(v[k]);
             }
-            return;
         }
         #[cfg(not(target_arch = "aarch64"))]
         for k in 0..n {
@@ -485,6 +540,7 @@ mod tests {
     /// zero. A wrong rounding here would be invisible in a benchmark and
     /// would quietly cost accuracy in every cached key.
     #[test]
+    #[allow(clippy::excessive_precision)]
     fn half_conversion_round_trips_through_the_gguf_reader() {
         let cases: Vec<f32> = vec![
             0.0,

@@ -60,14 +60,22 @@ impl<V> PrefixCache<V> {
 
     /// Declared payload bytes still alive, including evicted external leases.
     pub fn allocated_bytes(&self) -> usize {
-        self.resident_bytes.saturating_add(self.retired.iter()
-            .filter(|(value, _)| value.strong_count() > 0)
-            .map(|(_, bytes)| *bytes).sum::<usize>())
+        self.resident_bytes.saturating_add(
+            self.retired
+                .iter()
+                .filter(|(value, _)| value.strong_count() > 0)
+                .map(|(_, bytes)| *bytes)
+                .sum::<usize>(),
+        )
     }
 
     pub fn pinned_bytes(&self) -> usize {
-        let cached = self.entries.iter().filter(|entry| Arc::strong_count(&entry.value) > 1)
-            .map(|entry| entry.bytes).sum::<usize>();
+        let cached = self
+            .entries
+            .iter()
+            .filter(|entry| Arc::strong_count(&entry.value) > 1)
+            .map(|entry| entry.bytes)
+            .sum::<usize>();
         cached.saturating_add(self.allocated_bytes().saturating_sub(self.resident_bytes))
     }
 
@@ -121,13 +129,22 @@ impl<V> PrefixCache<V> {
             self.remove_entry(index);
         }
         while self.allocated_bytes().saturating_add(bytes) > self.budget_bytes {
-            let Some(index) = self.entries.iter().enumerate()
-                .min_by_key(|(_, entry)| entry.last_used).map(|(index, _)| index)
-            else { return };
+            let Some(index) = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(index, _)| index)
+            else {
+                return;
+            };
             self.remove_entry(index);
         }
         self.entries.push(Entry {
-            tokens: tokens.into(), value: Arc::new(value), bytes, last_used: self.clock,
+            tokens: tokens.into(),
+            value: Arc::new(value),
+            bytes,
+            last_used: self.clock,
         });
         self.resident_bytes += bytes;
     }
@@ -137,7 +154,8 @@ impl<V> PrefixCache<V> {
         self.resident_bytes -= removed.bytes;
         if Arc::strong_count(&removed.value) > 1 {
             // Conservatively retain the key charge until the value lease dies.
-            self.retired.push((Arc::downgrade(&removed.value), removed.bytes));
+            self.retired
+                .push((Arc::downgrade(&removed.value), removed.bytes));
         }
     }
 }

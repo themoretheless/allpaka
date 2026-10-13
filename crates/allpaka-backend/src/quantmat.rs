@@ -223,10 +223,7 @@ impl<'a> QuantMat<'a> {
         let acts: Vec<Option<Arc<Q8Acts>>> = items
             .iter()
             .map(|(mat, x)| {
-                let quantized = mat.quantized_acts(x);
-                let Some(quantized) = quantized else {
-                    return None;
-                };
+                let quantized = mat.quantized_acts(x)?;
                 let key = (x.as_ptr() as usize, x.len(), mat.n_in);
                 if let Some((_, _, _, acts)) = cached_acts
                     .iter()
@@ -249,8 +246,7 @@ impl<'a> QuantMat<'a> {
                         let xi = &x[i * mat.n_in..(i + 1) * mat.n_in];
                         let row_acts = acts.as_deref().map(|acts| acts.row(i, mat.n_in));
                         for j in 0..mat.n_out {
-                            y[i * mat.n_out + j] =
-                                mat.row_dot_dispatch(j, xi, row_acts.as_ref());
+                            y[i * mat.n_out + j] = mat.row_dot_dispatch(j, xi, row_acts.as_ref());
                         }
                     }
                     *slot = y;
@@ -972,7 +968,8 @@ mod tests {
         // The matvec path quantises activations to Q8, so the comparison
         // against the f32 reference carries that quantisation error too.
         assert!(
-            (fused - reference).abs() < q8_act_error_bound(&row, &x) + 1e-3 * (1.0 + reference.abs()),
+            (fused - reference).abs()
+                < q8_act_error_bound(&row, &x) + 1e-3 * (1.0 + reference.abs()),
             "{fused} vs {reference}"
         );
     }

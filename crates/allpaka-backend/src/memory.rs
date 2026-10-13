@@ -6,7 +6,11 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct Budget(Arc<Mutex<State>>);
-struct State { limit: u64, used: u64, peak: u64 }
+struct State {
+    limit: u64,
+    used: u64,
+    peak: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Snapshot {
@@ -16,35 +20,65 @@ pub struct Snapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Exhausted { pub requested: u64, pub available: u64 }
+pub struct Exhausted {
+    pub requested: u64,
+    pub available: u64,
+}
 impl std::fmt::Display for Exhausted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "memory admission rejected: requested {} bytes, available {} bytes", self.requested, self.available)
+        write!(
+            f,
+            "memory admission rejected: requested {} bytes, available {} bytes",
+            self.requested, self.available
+        )
     }
 }
 impl std::error::Error for Exhausted {}
 
 /// Not cloneable: one charge must be released exactly once. Share an owning
 /// resource through Arc instead when multiple commands retain the allocation.
-pub struct Lease { budget: Budget, bytes: u64 }
+pub struct Lease {
+    budget: Budget,
+    bytes: u64,
+}
 impl Budget {
     pub fn new(limit: u64) -> Self {
-        Self(Arc::new(Mutex::new(State { limit, used: 0, peak: 0 })))
+        Self(Arc::new(Mutex::new(State {
+            limit,
+            used: 0,
+            peak: 0,
+        })))
     }
     pub fn reserve(&self, bytes: u64) -> Result<Lease, Exhausted> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let available = state.limit - state.used;
-        if bytes > available { return Err(Exhausted { requested: bytes, available }); }
+        if bytes > available {
+            return Err(Exhausted {
+                requested: bytes,
+                available,
+            });
+        }
         state.used += bytes;
         state.peak = state.peak.max(state.used);
-        Ok(Lease { budget: self.clone(), bytes })
+        Ok(Lease {
+            budget: self.clone(),
+            bytes,
+        })
     }
     pub fn snapshot(&self) -> Snapshot {
         let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        Snapshot { limit_bytes: state.limit, reserved_bytes: state.used, peak_reserved_bytes: state.peak }
+        Snapshot {
+            limit_bytes: state.limit,
+            reserved_bytes: state.used,
+            peak_reserved_bytes: state.peak,
+        }
     }
 }
-impl Lease { pub fn budget(&self) -> Budget { self.budget.clone() } }
+impl Lease {
+    pub fn budget(&self) -> Budget {
+        self.budget.clone()
+    }
+}
 impl Drop for Lease {
     fn drop(&mut self) {
         let mut state = self.budget.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -76,15 +110,24 @@ mod tests {
     fn concurrent_reservations_cannot_overcommit() {
         let budget = Budget::new(100);
         let barrier = Arc::new(std::sync::Barrier::new(8));
-        let handles: Vec<_> = (0..8).map(|_| {
-            let budget = budget.clone(); let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                let lease = budget.reserve(60);
-                barrier.wait();
-                lease.is_ok()
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let budget = budget.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let lease = budget.reserve(60);
+                    barrier.wait();
+                    lease.is_ok()
+                })
             })
-        }).collect();
-        assert_eq!(handles.into_iter().map(|h| usize::from(h.join().unwrap())).sum::<usize>(), 1);
+            .collect();
+        assert_eq!(
+            handles
+                .into_iter()
+                .map(|h| usize::from(h.join().unwrap()))
+                .sum::<usize>(),
+            1
+        );
         assert_eq!(budget.snapshot().reserved_bytes, 0);
     }
     #[test]
