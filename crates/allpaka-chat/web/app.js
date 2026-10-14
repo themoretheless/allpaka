@@ -2844,9 +2844,13 @@ async function refreshModels(provider, {selectFirst=false}={}) {
   }
 }
 $('model').oninput=()=>{renderModelInfo();refreshContextModel();savePrefs();};
-async function renderPlugins(){
+let lastPluginSig='';
+async function renderPlugins(force=false){
   const data=await api('plugins');
   const items=data.plugins||[];
+  const sig=JSON.stringify(items);
+  if(!force&&sig===lastPluginSig)return;
+  lastPluginSig=sig;
   $('plugin-list').replaceChildren(...items.map(p=>{
     const row=node('div',undefined,'plugin-row');
     const kindBadge=p.kind==='skill'?'skill':'mcp';
@@ -2854,8 +2858,8 @@ async function renderPlugins(){
     if(p.error)row.append(node('p',p.error,'muted'));
     row.append(node('span',`${p.name} · [${kindBadge}] · ${status}`,'muted'));
     const actions=node('div',undefined,'key-actions');
-    if(p.kind!=='skill'){const reload=node('button','Переподключить');reload.onclick=async()=>{reload.disabled=true;try{await api(`plugins/${p.id}/reload`,{});await renderPlugins();}catch(e){notify(e.message);reload.disabled=false;}};actions.append(reload);}
-    const del=node('button','Удалить');del.onclick=async()=>{del.disabled=true;try{await api(`plugins/${p.id}/delete`,{});await renderPlugins();}catch(e){notify(e.message);del.disabled=false;}};actions.append(del);
+    if(p.kind!=='skill'){const reload=node('button','Переподключить');reload.onclick=async()=>{reload.disabled=true;try{await api(`plugins/${p.id}/reload`,{});await renderPlugins(true);}catch(e){notify(e.message);reload.disabled=false;}};actions.append(reload);}
+    const del=node('button','Удалить');del.onclick=async()=>{del.disabled=true;try{await api(`plugins/${p.id}/delete`,{});await renderPlugins(true);}catch(e){notify(e.message);del.disabled=false;}};actions.append(del);
     row.append(actions);
     return row;
   }));
@@ -2866,7 +2870,7 @@ async function showConnections(){
   doctorEpoch++;$('doctor-result').replaceChildren();
   $('doctor-provider').replaceChildren(...config.providers.map(provider=>{const option=node('option',provider.name);option.value=provider.id;return option;}));
   $('doctor-provider').value=$('provider').value;$('doctor-model').value=$('model').value.trim();
-  renderPlugins().catch(e=>notify(e.message));
+  renderPlugins(true).catch(e=>notify(e.message));
   $('key-fields').replaceChildren(...config.providers.filter(p=>p.id!=='local').map(p=>{
     const div=node('div',undefined,'key-row'),label=node('label',p.name+' · '+(p.key_env||'API key')),input=node('input');
     input.type='password';input.autocomplete='new-password';input.dataset.provider=p.id;input.placeholder=p.configured?'Введите новый ключ для замены':'API key';label.append(input);
@@ -2977,7 +2981,7 @@ $('prompt').addEventListener('paste',e=>{const files=[...e.clipboardData.files];
 $('messages').ondragover=e=>e.preventDefault();$('messages').ondrop=e=>{e.preventDefault();attachFiles(e.dataTransfer.files).catch(fail);};
 $('connections').onclick=()=>showConnections().catch(fail);$('new-project').onclick=()=>editProject(true);$('edit-project').onclick=()=>editProject();$('add-project').onclick=()=>editProject(true);$('manage-context').onclick=()=>editProject();$('add-root').onclick=()=>rootRow();
 $('add-custom-provider').onclick=async()=>{try{const name=$('custom-provider-name').value.trim();const base=$('custom-provider-base').value.trim();if(!name||!base)throw new Error('Укажите название и Base URL.');await api('providers',{name,base});$('custom-provider-name').value='';$('custom-provider-base').value='';await showConnections();notify('Провайдер добавлен');}catch(e){notify(e.message);}};
-$('add-plugin').onclick=async()=>{try{const kind=$('plugin-kind').value;const name=$('plugin-name').value.trim();const url=$('plugin-url').value.trim();const instructions=$('plugin-instructions').value.trim();const unlocks_tool=$('plugin-unlocks').value.trim()||undefined;if(!name)throw new Error('Укажите название.');if(kind==='mcp'&&!url)throw new Error('Укажите MCP URL.');if(kind==='skill'&&!instructions)throw new Error('Укажите инструкции.');await api('plugins',{name,kind,url,instructions,unlocks_tool});$('plugin-name').value='';$('plugin-url').value='';$('plugin-instructions').value='';$('plugin-unlocks').value='';await renderPlugins();notify('Плагин добавлен');}catch(e){notify(e.message);}};
+$('add-plugin').onclick=async()=>{try{const kind=$('plugin-kind').value;const name=$('plugin-name').value.trim();const url=$('plugin-url').value.trim();const instructions=$('plugin-instructions').value.trim();const unlocks_tool=$('plugin-unlocks').value.trim()||undefined;if(!name)throw new Error('Укажите название.');if(kind==='mcp'&&!url)throw new Error('Укажите MCP URL.');if(kind==='skill'&&!instructions)throw new Error('Укажите инструкции.');await api('plugins',{name,kind,url,instructions,unlocks_tool});$('plugin-name').value='';$('plugin-url').value='';$('plugin-instructions').value='';$('plugin-unlocks').value='';await renderPlugins(true);notify('Плагин добавлен');}catch(e){notify(e.message);}};
 $('plugin-kind').onchange=()=>{const kind=$('plugin-kind').value;$('plugin-url-label').hidden=kind==='skill';$('plugin-instructions-label').hidden=kind!=='skill';$('plugin-unlocks-label').hidden=kind!=='skill';};
 $('plan-add').onclick=()=>{
   if(!current)return;
@@ -3032,7 +3036,7 @@ $('delete-chat').onclick=()=>deleteChat(historyTarget).catch(e=>notify(e.message
 $('import-chat').onclick=()=>$('import-file').click();
 $('import-file').onchange=async e=>{try{const file=e.target.files[0];if(!file)return;if(file.size>9000000)throw new Error('Файл импорта должен быть меньше 9 MB.');let session;try{session=JSON.parse(await file.text());}catch{throw new Error(`Файл «${file.name}» не является корректным JSON.`);}if(!session||typeof session!=='object'||Array.isArray(session))throw new Error(`Файл «${file.name}» должен содержать объект разговора allpaka.`);const imported=await api('sessions/import',{session,project_id:$('project').value});$('search').value='';await openChat(imported.id);notify('Разговор импортирован отдельной копией');refreshFolderCounts().catch(()=>{});}catch(e){notify('Импорт не выполнен');fail(e);}finally{$('import-file').value='';}};
 $('export').onclick=()=>{if(!current)return;const url=URL.createObjectURL(new Blob([JSON.stringify(current,null,2)],{type:'application/json'}));const a=node('a');a.href=url;a.download=`allpaka-${current.id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
-(async()=>{await loadConfig();await listChats();refreshFolderCounts().catch(()=>{});bindSuggestions();modeHelp();refreshContextModel();refreshModels($('provider').value).catch(()=>{});setInterval(()=>poll().catch(fail),650);setInterval(()=>listChats('auto').catch(fail),5000);})().catch(fail);
+(async()=>{await loadConfig();await listChats();refreshFolderCounts().catch(()=>{});bindSuggestions();modeHelp();refreshContextModel();refreshModels($('provider').value).catch(()=>{});setInterval(()=>{if(!document.hidden)poll().catch(fail);},650);setInterval(()=>{if(!document.hidden)listChats('auto').catch(fail);},5000);document.addEventListener('visibilitychange',()=>{if(!document.hidden){poll().catch(fail);listChats('auto').catch(fail);}});})().catch(fail);
 
 const presentationKey='allpaka.studio.presentation.v1';
 try { const saved=JSON.parse(localStorage.getItem(presentationKey)||'{}');
@@ -3045,7 +3049,7 @@ $('analysis-display').onchange=()=>{savePresentation();document.querySelectorAll
 
 let pluginStatusPolling=false;
 setInterval(async()=>{
-  if(!$('connection-dialog').open || pluginStatusPolling)return;
+  if(!$('connection-dialog').open || document.hidden || pluginStatusPolling)return;
   pluginStatusPolling=true;
   try{await renderPlugins();}catch{}finally{pluginStatusPolling=false;}
 },1500);

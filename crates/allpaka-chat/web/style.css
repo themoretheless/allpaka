@@ -612,47 +612,6 @@ header {
   text-align: left;
 }
 
-/* Фирменный знак-«колонна»: три вертикали разной высоты, как на пьедестале */
-.mark {
-  display: flex;
-  align-items: flex-end;
-  gap: 5px;
-  height: 46px;
-  margin-bottom: 26px;
-}
-
-.mark i {
-  display: block;
-  width: 7px;
-  border-radius: 4px;
-  background: var(--accent);
-  animation: pillarGrow 620ms var(--ease-arena) both;
-}
-
-.mark i:nth-child(1) { height: 56%; animation-delay: 60ms; }
-.mark i:nth-child(2) { height: 100%; animation-delay: 140ms; }
-.mark i:nth-child(3) { height: 74%; animation-delay: 220ms; }
-
-@keyframes pillarGrow {
-  from { transform: scaleY(0); transform-origin: bottom; opacity: 0; }
-  to { transform: scaleY(1); transform-origin: bottom; opacity: 1; }
-}
-
-.welcome h2 {
-  font-family: var(--font-serif);
-  font-size: 44px;
-  line-height: 1.08;
-  letter-spacing: -0.5px;
-  font-weight: 500;
-  margin: 0 0 14px;
-  animation: riseIn 520ms var(--ease-arena) 120ms both;
-}
-
-.welcome h2 em {
-  font-style: italic;
-  color: var(--accent-text);
-}
-
 .welcome p {
   color: var(--muted);
   line-height: 1.75;
@@ -660,35 +619,6 @@ header {
   margin: 0;
   animation: riseIn 520ms var(--ease-arena) 220ms both;
 }
-
-.suggestions {
-  display: flex;
-  gap: 12px;
-  margin-top: 30px;
-  animation: riseIn 520ms var(--ease-arena) 320ms both;
-}
-
-.suggestions button {
-  font-size: 12.5px;
-  text-align: left;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  padding: 14px 18px;
-  border-radius: var(--radius-lg);
-  flex: 1;
-  transition: transform var(--transition-fast),
-              border-color var(--transition-fast),
-              box-shadow var(--transition-fast),
-              background-color var(--transition-fast);
-}
-
-.suggestions button:hover {
-  border-color: var(--accent);
-  box-shadow: var(--shadow-md);
-  transform: translateY(-2px);
-}
-
-.suggestions button:active { transform: translateY(0); }
 
 @keyframes riseIn {
   from { opacity: 0; transform: translateY(14px); }
@@ -1889,7 +1819,6 @@ dialog h2 {
   .composer-hint { display: none; }
 
   .welcome { margin-top: 6vh; }
-  .welcome h2 { font-size: 28px; }
 
   .send-options button { padding: 7px 8px; }
 
@@ -1913,7 +1842,6 @@ dialog h2 {
 
   .stream-caret { animation: none; opacity: 1; }
   .typing-dot { animation: none; opacity: 0.7; }
-  .mark i { animation: none; }
   .badge.running::before { animation: none; }
   .message-actions { opacity: 1; transform: none; }
 }
