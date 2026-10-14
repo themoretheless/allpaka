@@ -345,3 +345,199 @@ impl MtpSpeculator<'_> {
         })
     }
 }
+
+/// Find up to `max_k` draft continuation tokens by searching backwards through
+/// `prediction` (if provided) and `history` for the longest matching N-gram
+/// suffix ending with `next` (from `ngram_max` down to `ngram_min`).
+///
+/// The suffix matched against `source` is `[..history_tail, next]` of length `n`:
+/// - For `n == 1`, the suffix is `[next]`.
+/// - For `n > 1`, the suffix is `&history[history.len() - (n - 1)..]` followed by `next`.
+pub fn find_prompt_drafts(
+    history: &[u32],
+    prediction: &[u32],
+    next: u32,
+    max_k: usize,
+    ngram_min: usize,
+    ngram_max: usize,
+) -> Vec<u32> {
+    if max_k == 0 {
+        return Vec::new();
+    }
+    let min_n = ngram_min.max(1);
+    let max_n = ngram_max.max(min_n).min(history.len() + 1);
+
+    // Search helper over a token slice. Returns the continuation slice of up to `max_k` tokens.
+    let search_slice = |haystack: &[u32], n: usize| -> Option<Vec<u32>> {
+        if haystack.len() <= n {
+            return None;
+        }
+        let prefix = if n > 1 {
+            &history[history.len() - (n - 1)..]
+        } else {
+            &[][..]
+        };
+        let last_start = haystack.len() - n - 1;
+        for start in (0..=last_start).rev() {
+            if haystack[start + n - 1] == next && haystack[start..start + n - 1] == *prefix {
+                let cont_start = start + n;
+                let cont_end = (cont_start + max_k).min(haystack.len());
+                return Some(haystack[cont_start..cont_end].to_vec());
+            }
+        }
+        None
+    };
+
+    for n in (min_n..=max_n).rev() {
+        if !prediction.is_empty() {
+            if let Some(drafts) = search_slice(prediction, n) {
+                return drafts;
+            }
+        }
+        if let Some(drafts) = search_slice(history, n) {
+            return drafts;
+        }
+    }
+    Vec::new()
+}
+
+/// Prompt Lookup Decoding (PLD) + Predicted Outputs speculator.
+///
+/// Drafts up to `k` tokens directly from N-gram matches in the conversation
+/// history or an explicit `prediction` token sequence (OpenAI Predicted Outputs)
+/// with zero draft-model overhead, then verifies `[next, drafts..]` in a single
+/// batched target pass (`verify_tokens` / `forward_batch_full`).
+pub struct PromptLookupSpeculator<'a> {
+    pub model: &'a Model<'a>,
+    pub session: &'a mut Session,
+    pub k: usize,
+    pub ngram_min: usize,
+    pub ngram_max: usize,
+}
+
+impl PromptLookupSpeculator<'_> {
+    /// Verify `drafts` (proposed after `next`) in a single target pass.
+    ///
+    /// When `drafts` is empty, falls back to a single greedy step.
+    pub fn round_with_drafts(&mut self, next: u32, drafts: &[u32]) -> Result<Round> {
+        let model = self.model;
+        let s = &mut *self.session;
+        let start = s.pos();
+        let k = drafts.len();
+        if k == 0 {
+            if start + 1 > s.capacity() {
+                bail!("kv capacity exhausted for a decode step");
+            }
+            let new_next = model.forward_greedy(next, s)?;
+            return Ok(Round {
+                emitted: vec![next],
+                next: new_next,
+                drafted: 0,
+                accepted: 0,
+            });
+        }
+        if start + k + 1 > s.capacity() {
+            bail!("kv capacity exhausted for a speculative round");
+        }
+        if let Some(ssm) = s.ssm.as_mut() {
+            ssm.arm_slots(k + 1);
+        }
+
+        let mut batch = Vec::with_capacity(k + 1);
+        batch.push(next);
+        batch.extend_from_slice(drafts);
+
+        let row_argmax = match model.verify_tokens(&batch, s)? {
+            Some((am, _)) => am,
+            None => {
+                let all = model.forward_batch_full(&batch, s)?;
+                let vocab = model.config.vocab as usize;
+                (0..batch.len())
+                    .map(|i| argmax(&all[i * vocab..(i + 1) * vocab]))
+                    .collect()
+            }
+        };
+
+        let mut emitted = Vec::with_capacity(k + 1);
+        emitted.push(next);
+        let mut accepted = 0usize;
+        let mut new_next = 0u32;
+        for (i, &d) in drafts.iter().enumerate() {
+            let want = row_argmax[i];
+            if want == d {
+                emitted.push(d);
+                accepted += 1;
+            } else {
+                new_next = want;
+                break;
+            }
+        }
+        if accepted == k {
+            new_next = row_argmax[k];
+            if let Some(ssm) = s.ssm.as_mut() {
+                ssm.disarm_slots();
+            }
+        } else {
+            s.truncate(start + 1 + accepted);
+            if let Some(ssm) = s.ssm.as_mut() {
+                ssm.restore_slot(accepted);
+            }
+        }
+        debug_assert_eq!(s.pos(), start + 1 + accepted);
+        Ok(Round {
+            emitted,
+            next: new_next,
+            drafted: k,
+            accepted,
+        })
+    }
+
+    /// Draft up to `self.k` tokens from `prediction` / `history` and verify them.
+    pub fn round(&mut self, history: &[u32], prediction: &[u32], next: u32) -> Result<Round> {
+        let avail = self
+            .session
+            .capacity()
+            .saturating_sub(self.session.pos() + 1);
+        let max_k = self.k.min(avail);
+        let drafts = find_prompt_drafts(
+            history,
+            prediction,
+            next,
+            max_k,
+            self.ngram_min,
+            self.ngram_max,
+        );
+        self.round_with_drafts(next, &drafts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_prompt_drafts;
+
+    #[test]
+    fn prompt_lookup_prefers_longest_and_most_recent_ngram() {
+        // History has two occurrences of [10, 20]:
+        // first at 0..2 followed by [30, 40, 50],
+        // second at 5..7 followed by [31, 41, 51],
+        // plus a 3-gram [9, 10, 20] at 0..3 if history starts with 9.
+        let history = vec![9, 10, 20, 30, 40, 50, 10, 20, 31, 41, 51, 9, 10];
+        // Current suffix is [.., 9, 10] + next=20 -> 3-gram [9, 10, 20] matches index 0..3 -> [30, 40, 50]
+        let drafts = find_prompt_drafts(&history, &[], 20, 3, 2, 4);
+        assert_eq!(drafts, vec![30, 40, 50]);
+
+        // If suffix is [.., 99, 10] + next=20 -> 2-gram [10, 20] matches most recent at 6..8 -> [31, 41, 51]
+        let history2 = vec![9, 10, 20, 30, 40, 50, 10, 20, 31, 41, 51, 99, 10];
+        let drafts2 = find_prompt_drafts(&history2, &[], 20, 3, 2, 4);
+        assert_eq!(drafts2, vec![31, 41, 51]);
+    }
+
+    #[test]
+    fn prompt_lookup_prioritizes_explicit_prediction_tokens() {
+        let history = vec![1, 2, 3, 4, 5, 1, 2];
+        let prediction = vec![1, 2, 3, 90, 91, 92];
+        // Both have 3-gram [1, 2, 3], prediction wins and yields [90, 91, 92].
+        let drafts = find_prompt_drafts(&history, &prediction, 3, 4, 1, 4);
+        assert_eq!(drafts, vec![90, 91, 92]);
+    }
+}

@@ -139,10 +139,27 @@
   }
   form {
     display: flex; gap: 0.6rem; position: sticky; bottom: 0; background: var(--bg);
-    padding: 0.9rem 0 1.2rem; border-top: 1px solid var(--line); margin-top: auto;
+    padding: 0.5rem 0 1.2rem; border-top: 1px solid var(--line); margin-top: auto;
+    align-items: center;
+  }
+  .input-wrap {
+    position: relative; flex: 1; display: flex; align-items: center;
+  }
+  .ghost-layer {
+    position: absolute; inset: 0; pointer-events: none;
+    padding: 0.7rem 0.95rem; border: 1px solid transparent; border-radius: 999px;
+    font-size: 0.95rem; font-family: inherit; white-space: pre; overflow: hidden;
+    display: flex; align-items: center;
+  }
+  .ghost-prefix { color: transparent; }
+  .ghost-suffix { color: var(--muted); opacity: 0.65; }
+  .ghost-badge {
+    margin-left: 0.45rem; padding: 0.08rem 0.38rem; border-radius: 5px;
+    border: 1px solid var(--line); background: var(--inset); color: var(--muted);
+    font-size: 0.66rem; letter-spacing: 0.3px;
   }
   form input {
-    flex: 1; padding: 0.7rem 0.95rem; border-radius: 999px;
+    width: 100%; padding: 0.7rem 0.95rem; border-radius: 999px;
     border: 1px solid var(--strong-line); background: var(--surface); color: var(--text);
     font-size: 0.95rem; font-family: inherit; box-shadow: var(--shadow-sm);
     transition: border-color var(--transition-fast),
@@ -155,6 +172,18 @@
     transform: translateY(-1px);
   }
   form input::placeholder { color: var(--muted); }
+  #suggestions {
+    display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0 0 0.4rem;
+  }
+  .chip {
+    padding: 0.32rem 0.72rem; border-radius: 999px; border: 1px solid var(--line);
+    background: var(--surface); color: var(--secondary); font-size: 0.78rem;
+    cursor: pointer; transition: border-color var(--transition-fast), color var(--transition-fast), background-color var(--transition-fast);
+  }
+  .chip:hover {
+    border-color: var(--accent); color: var(--text); background: var(--user-bg);
+    transform: translateY(-1px);
+  }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation-duration: 0.01ms !important;
@@ -188,6 +217,9 @@
   <label>repeat
     <input id="repeat" type="number" min="0.5" max="2" step="0.05" value="1.1">
   </label>
+  <label title="Prompt Lookup Decoding: число предсказываемых черновых токенов из контекста (0 — выкл)">pld draft
+    <input id="prompt_lookup" type="number" min="0" max="16" step="1" value="4">
+  </label>
   <button type="button" id="launch">Запустить</button>
   <span id="launch-status"></span>
 </div>
@@ -202,18 +234,24 @@
   </div>
 </section>
 <div id="log"></div>
-<form id="f"><input id="q" placeholder="Спросите что-нибудь..." autofocus autocomplete="off">
-<button id="send">→</button></form>
+<div id="suggestions"></div>
+<form id="f">
+  <div class="input-wrap">
+    <input id="q" placeholder="Спросите что-нибудь... (Tab — принять предикшн)" autofocus autocomplete="off">
+    <div class="ghost-layer" id="ghost" aria-hidden="true"></div>
+  </div>
+  <button id="send">→</button>
+</form>
 <script>
 const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
 const log = document.getElementById('log');
 const history = [];
 const saved = JSON.parse(localStorage.getItem('allpaka-params') || '{}');
-for (const id of ['max_tokens', 'temperature', 'top_p', 'repeat']) {
+for (const id of ['max_tokens', 'temperature', 'top_p', 'repeat', 'prompt_lookup']) {
   if (saved[id] != null) document.getElementById(id).value = saved[id];
   document.getElementById(id).addEventListener('change', () => {
     const next = {};
-    for (const key of ['max_tokens', 'temperature', 'top_p', 'repeat']) {
+    for (const key of ['max_tokens', 'temperature', 'top_p', 'repeat', 'prompt_lookup']) {
       next[key] = document.getElementById(key).value;
     }
     localStorage.setItem('allpaka-params', JSON.stringify(next));
@@ -301,6 +339,113 @@ function dots() {
   return box;
 }
 let aborter = null;
+const qInput = document.getElementById('q');
+const ghostEl = document.getElementById('ghost');
+const suggBox = document.getElementById('suggestions');
+let ghostText = '';
+let predictTimer = null;
+const presetPrompts = [
+  'Объясни архитектуру этого проекта и ключевые модули',
+  'Напиши быстрый код на Rust с модульными тестами',
+  'Найди узкие места и точки оптимизации производительности',
+  'Разбери возможные граничные случаи и ошибки в коде',
+  'Приведи конкретный пример кода с объяснением',
+  'Сравни плюсы и минусы этого подхода'
+];
+function setGhost(prefix, suffix) {
+  ghostText = suffix || '';
+  ghostEl.replaceChildren();
+  if (!ghostText || !prefix) return;
+  const p = document.createElement('span');
+  p.className = 'ghost-prefix';
+  p.textContent = prefix;
+  const s = document.createElement('span');
+  s.className = 'ghost-suffix';
+  s.textContent = ghostText;
+  const b = document.createElement('span');
+  b.className = 'ghost-badge';
+  b.textContent = 'Tab';
+  ghostEl.append(p, s, b);
+}
+function localPredict(draft) {
+  if (!draft || draft.length < 2) return '';
+  const lower = draft.toLowerCase();
+  for (const item of presetPrompts) {
+    if (item.toLowerCase().startsWith(lower) && item.length > draft.length) {
+      return item.slice(draft.length);
+    }
+  }
+  const words = lower.trim().split(/\s+/);
+  const tail = words.slice(-2).join(' ');
+  if (tail.length >= 3) {
+    for (let i = history.length - 1; i >= 0; i--) {
+      const text = history[i].content || '';
+      const idx = text.toLowerCase().lastIndexOf(tail);
+      if (idx !== -1) {
+        const after = text.slice(idx + tail.length).split('\n')[0];
+        const cont = after.split(/(\s+)/).slice(0, 10).join('');
+        if (cont.trim().length > 0) return cont;
+      }
+    }
+  }
+  return '';
+}
+function renderSuggestions(items) {
+  suggBox.replaceChildren();
+  for (const text of (items || [])) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'chip';
+    chip.textContent = text;
+    chip.addEventListener('click', () => {
+      qInput.value = text;
+      setGhost('', '');
+      qInput.focus();
+    });
+    suggBox.appendChild(chip);
+  }
+}
+async function refreshPredictions(draft) {
+  if (aborter) return;
+  try {
+    const r = await fetch('/v1/prompt/predict', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({draft: draft || '', messages: history, max_tokens: 10})
+    });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j.suggestions && !history.length || !draft) {
+      renderSuggestions(j.suggestions);
+    }
+    if (draft && qInput.value === draft) {
+      setGhost(draft, j.completion || localPredict(draft));
+    }
+  } catch (_) {}
+}
+qInput.addEventListener('input', () => {
+  const val = qInput.value;
+  if (!val) {
+    setGhost('', '');
+    return;
+  }
+  setGhost(val, localPredict(val));
+  clearTimeout(predictTimer);
+  predictTimer = setTimeout(() => refreshPredictions(val), 120);
+});
+qInput.addEventListener('keydown', (e) => {
+  if (!ghostText) return;
+  if (e.key === 'Tab' || (e.key === 'ArrowRight' && qInput.selectionStart === qInput.value.length)) {
+    e.preventDefault();
+    qInput.value += ghostText;
+    setGhost('', '');
+    const nextVal = qInput.value;
+    setGhost(nextVal, localPredict(nextVal));
+  } else if (e.key === 'Escape') {
+    setGhost('', '');
+  }
+});
+refreshPredictions('');
 document.getElementById('f').addEventListener('submit', async (e) => {
   e.preventDefault();
   const q = document.getElementById('q');
@@ -309,6 +454,8 @@ document.getElementById('f').addEventListener('submit', async (e) => {
   const text = q.value.trim();
   if (!text) return;
   q.value = '';
+  setGhost('', '');
+  suggBox.replaceChildren();
   aborter = new AbortController();
   btn.textContent = '⏹';
   add('user', text);
@@ -338,6 +485,7 @@ document.getElementById('f').addEventListener('submit', async (e) => {
         temperature: num('temperature', 0.7),
         top_p: num('top_p', 0.95),
         repeat_penalty: num('repeat', 1.1),
+        prompt_lookup: Math.max(0, Math.min(16, Math.round(num('prompt_lookup', 4)))),
         stream: true
       })
     });
@@ -431,6 +579,7 @@ document.getElementById('f').addEventListener('submit', async (e) => {
   }
   aborter = null;
   btn.textContent = '→';
+  refreshPredictions('');
   q.focus();
 });
 function gib(mib) { return (mib / 1024).toFixed(1); }

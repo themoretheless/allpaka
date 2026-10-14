@@ -182,6 +182,8 @@ struct GenerationRequest<'a> {
     top_p: f64,
     repeat_penalty: f64,
     parse_tools: bool,
+    prediction_tokens: &'a [u32],
+    prompt_lookup_k: usize,
     stream: Option<&'a mut TcpStream>,
     emit_done: bool,
 }
@@ -210,6 +212,8 @@ fn run_inference(
         top_p,
         repeat_penalty,
         parse_tools,
+        prediction_tokens,
+        prompt_lookup_k,
         mut stream,
         emit_done,
     } = request;
@@ -358,8 +362,9 @@ fn run_inference(
     let mut emitted_len = 0usize;
     let mut finish = "length";
     let mut greedy_next: Option<u32> = None;
+    let use_pld = prompt_lookup_k > 0 && (greedy || !prediction_tokens.is_empty());
     crate::airbug::span("decode", || -> Result<()> {
-        for _ in 0..max_tokens {
+        while generated.len() < max_tokens {
             context.control.check()?;
             let next = match greedy_next.take() {
                 Some(t) => t,
@@ -368,6 +373,90 @@ fn run_inference(
             if stops.contains(&next) {
                 finish = "stop";
                 break;
+            }
+            if use_pld {
+                let remaining = max_tokens - generated.len();
+                let k = prompt_lookup_k.min(remaining.saturating_sub(1));
+                let mut spec = allpaka_model::speculate::PromptLookupSpeculator {
+                    model,
+                    session: &mut chat.session,
+                    k,
+                    ngram_min: if prediction_tokens.is_empty() { 2 } else { 1 },
+                    ngram_max: 4,
+                };
+                let round = spec.round(&chat.tokens, prediction_tokens, next)?;
+                let mut hit_stop = false;
+                let mut accepted_before_stop = 0usize;
+                for &emitted_tok in &round.emitted {
+                    if stops.contains(&emitted_tok) {
+                        finish = "stop";
+                        hit_stop = true;
+                        break;
+                    }
+                    accepted_before_stop += 1;
+                    generated.push(emitted_tok);
+                    tok.append_token_bytes(emitted_tok, &mut raw_bytes);
+                    chat.tokens.push(emitted_tok);
+                    if generated.len() >= max_tokens {
+                        break;
+                    }
+                }
+                if accepted_before_stop < round.emitted.len() {
+                    let valid_pos = chat.tokens.len();
+                    if chat.session.ssm.is_none() {
+                        chat.session.truncate(valid_pos);
+                    }
+                }
+                if streaming {
+                    match std::str::from_utf8(&raw_bytes[decoded_bytes..]) {
+                        Ok(valid) => {
+                            complete_buf.push_str(valid);
+                            decoded_bytes = raw_bytes.len();
+                        }
+                        Err(e) if e.error_len().is_none() => {
+                            let valid_len = e.valid_up_to();
+                            if valid_len > 0 {
+                                let valid = std::str::from_utf8(
+                                    &raw_bytes[decoded_bytes..decoded_bytes + valid_len],
+                                )
+                                .unwrap_or("");
+                                complete_buf.push_str(valid);
+                                decoded_bytes += valid_len;
+                            }
+                        }
+                        Err(_) => {
+                            let full = String::from_utf8_lossy(&raw_bytes);
+                            let trimmed = full.strip_suffix('\u{FFFD}').unwrap_or(&full);
+                            complete_buf.clear();
+                            complete_buf.push_str(trimmed);
+                            decoded_bytes = if full.ends_with('\u{FFFD}') {
+                                raw_bytes.len().saturating_sub(1)
+                            } else {
+                                raw_bytes.len()
+                            };
+                        }
+                    }
+                    let complete = if parse_tools {
+                        &complete_buf[..stream_safe_len(&complete_buf)]
+                    } else {
+                        complete_buf.as_str()
+                    };
+                    if complete.len() > emitted_len {
+                        let delta = &complete[emitted_len..];
+                        let chunk = json!({
+                            "object": "chat.completion.chunk",
+                            "choices": [{"index": 0, "delta": {"content": delta}}],
+                            "tokens_generated": generated.len(),
+                        });
+                        write_sse_event(stream.as_mut().unwrap(), &chunk)?;
+                        emitted_len = complete.len();
+                    }
+                }
+                if hit_stop || generated.len() >= max_tokens {
+                    break;
+                }
+                greedy_next = Some(round.next);
+                continue;
             }
             generated.push(next);
             tok.append_token_bytes(next, &mut raw_bytes);
@@ -1615,6 +1704,28 @@ fn handle(
     if request_line.starts_with("OPTIONS ") {
         return respond(&mut stream, 200, &json!({}));
     }
+    if request_line.starts_with("POST /v1/prompt/predict") {
+        let req: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
+        let draft = req["draft"].as_str().unwrap_or("");
+        let max_k = req["max_tokens"].as_u64().unwrap_or(12).clamp(1, 64) as usize;
+        let raw_messages = req["messages"].as_array().map_or(&[][..], Vec::as_slice);
+        let completion = predict_prompt_continuation(
+            context.inference.tok,
+            &context.inference.chat.tokens,
+            raw_messages,
+            draft,
+            max_k,
+        );
+        let suggestions = predict_followup_prompts(raw_messages);
+        return respond(
+            &mut stream,
+            200,
+            &json!({
+                "completion": completion,
+                "suggestions": suggestions,
+            }),
+        );
+    }
     if !request_line.starts_with("POST /v1/chat/completions") {
         return respond(&mut stream, 404, &json!({"error": "unknown route"}));
     }
@@ -1673,6 +1784,21 @@ fn handle(
     let top_p = req["top_p"].as_f64().unwrap_or(0.95);
     let repeat_penalty = req["repeat_penalty"].as_f64().unwrap_or(1.1);
     let streaming = req["stream"].as_bool().unwrap_or(false);
+    let prediction_text = extract_prediction_text(&req["prediction"]);
+    let prediction_tokens = if prediction_text.is_empty() {
+        Vec::new()
+    } else {
+        context
+            .inference
+            .tok
+            .encode(&prediction_text)
+            .unwrap_or_default()
+    };
+    let greedy = temperature <= 0.0 && repeat_penalty == 1.0;
+    let prompt_lookup_k = parse_prompt_lookup_k(
+        &req["prompt_lookup"],
+        greedy || !prediction_tokens.is_empty(),
+    );
 
     if streaming && (tools.is_none() || !rag.cfg.enabled) {
         run_inference(
@@ -1684,6 +1810,8 @@ fn handle(
                 top_p,
                 repeat_penalty,
                 parse_tools: false,
+                prediction_tokens: &prediction_tokens,
+                prompt_lookup_k,
                 stream: Some(&mut stream),
                 emit_done: true,
             },
@@ -1701,6 +1829,8 @@ fn handle(
                 top_p,
                 repeat_penalty,
                 parse_tools: false,
+                prediction_tokens: &prediction_tokens,
+                prompt_lookup_k,
                 stream: if streaming { Some(&mut stream) } else { None },
                 emit_done: !streaming,
             },
@@ -1715,6 +1845,8 @@ fn handle(
                 top_p,
                 repeat_penalty,
                 parse_tools: true,
+                prediction_tokens: &prediction_tokens,
+                prompt_lookup_k,
                 stream: if streaming { Some(&mut stream) } else { None },
                 emit_done: !streaming,
             },
@@ -1733,6 +1865,8 @@ fn handle(
                     top_p,
                     repeat_penalty,
                     parse_tools: true,
+                    prediction_tokens: &prediction_tokens,
+                    prompt_lookup_k,
                     stream: if streaming { Some(&mut stream) } else { None },
                     emit_done: !streaming,
                 },
@@ -1918,9 +2052,192 @@ fn respond_html(stream: &mut TcpStream, page: &str) -> Result<()> {
     Ok(())
 }
 
+/// Extract predicted text from an OpenAI `prediction` parameter:
+/// supports `"string"`, `{"type": "content", "content": "string"}`, or
+/// `{"type": "content", "content": [{"type": "text", "text": "..."}]}`.
+pub(crate) fn extract_prediction_text(prediction: &Value) -> String {
+    if let Some(s) = prediction.as_str() {
+        return s.to_string();
+    }
+    if prediction.is_object() {
+        return content_parts(&prediction["content"]).0;
+    }
+    String::new()
+}
+
+/// Resolve the number of prompt-lookup draft tokens per round (`0` disables PLD).
+pub(crate) fn parse_prompt_lookup_k(val: &Value, default_enabled: bool) -> usize {
+    if let Some(b) = val.as_bool() {
+        return if b { 4 } else { 0 };
+    }
+    if let Some(n) = val.as_u64() {
+        return (n as usize).min(16);
+    }
+    if default_enabled {
+        4
+    } else {
+        0
+    }
+}
+
+/// Predict inline ghost-text continuation for `draft` using conversation token
+/// N-grams and message text prefixes.
+pub(crate) fn predict_prompt_continuation(
+    tok: &Tokenizer,
+    context_tokens: &[u32],
+    raw_messages: &[Value],
+    draft: &str,
+    max_k: usize,
+) -> String {
+    if draft.is_empty() || max_k == 0 {
+        return String::new();
+    }
+
+    // 1. Token-level N-gram lookup against context_tokens + encoded messages.
+    if let Ok(draft_tokens) = tok.encode(draft) {
+        if let Some(&last_tok) = draft_tokens.last() {
+            let prefix_history = &draft_tokens[..draft_tokens.len() - 1];
+            let mut pool = Vec::with_capacity(context_tokens.len() + draft_tokens.len() + 256);
+            pool.extend_from_slice(context_tokens);
+            for m in raw_messages {
+                let text = content_parts(&m["content"]).0;
+                if !text.is_empty() {
+                    if let Ok(t) = tok.encode(&text) {
+                        pool.extend_from_slice(&t);
+                    }
+                }
+            }
+            // Append prefix_history at the tail of `pool` so `find_prompt_drafts`
+            // sees the draft's own preceding tokens as the suffix context.
+            let search_len = pool.len();
+            pool.extend_from_slice(prefix_history);
+            let min_n = if prefix_history.is_empty() { 1 } else { 2 };
+            let drafts = allpaka_model::speculate::find_prompt_drafts(
+                &pool,
+                &pool[..search_len],
+                last_tok,
+                max_k,
+                min_n,
+                4,
+            );
+            if !drafts.is_empty() {
+                let decoded = tok.decode(&drafts);
+                let clean = decoded
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('\u{FFFD}');
+                if !clean.is_empty() {
+                    return clean.to_string();
+                }
+            }
+        }
+    }
+
+    // 2. Fallback: case-insensitive substring/word-prefix continuation from raw messages.
+    let draft_lower = draft.to_lowercase();
+    let tail = draft_lower
+        .split_whitespace()
+        .rev()
+        .take(2)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if tail.len() >= 3 {
+        for m in raw_messages.iter().rev() {
+            let text = content_parts(&m["content"]).0;
+            let text_lower = text.to_lowercase();
+            if let Some(pos) = text_lower.rfind(&tail) {
+                let after_byte = pos + tail.len();
+                if text.is_char_boundary(after_byte) && after_byte < text.len() {
+                    let rest = &text[after_byte..];
+                    let line = rest.lines().next().unwrap_or("");
+                    let words: Vec<&str> =
+                        line.split_inclusive(char::is_whitespace).take(6).collect();
+                    let cont = words.concat();
+                    if !cont.trim().is_empty() {
+                        return cont;
+                    }
+                }
+            }
+        }
+    }
+
+    String::new()
+}
+
+/// Generate context-aware follow-up prompt suggestions for the chat UI.
+pub(crate) fn predict_followup_prompts(raw_messages: &[Value]) -> Vec<String> {
+    let Some(last) = raw_messages.last() else {
+        return vec![
+            "Объясни архитектуру этого проекта".into(),
+            "Напиши быстрый код на Rust с тестами".into(),
+            "Найди узкие места и точки оптимизации".into(),
+        ];
+    };
+    let text = content_parts(&last["content"]).0;
+    let lower = text.to_lowercase();
+    let mut out = Vec::with_capacity(4);
+    if text.contains("```") || lower.contains("fn ") || lower.contains("impl ") {
+        out.push("Напиши модульные тесты для этого кода".into());
+        out.push("Оптимизируй производительность и убери лишние аллокации".into());
+        out.push("Разбери возможные граничные случаи и ошибки".into());
+    } else if lower.contains("ошибк") || lower.contains("error") || lower.contains("bug") {
+        out.push("Предложи минимальный фикс и проверь тестами".into());
+        out.push("Почему возникла эта проблема?".into());
+        out.push("Как предотвратить подобные ошибки в будущем?".into());
+    } else {
+        out.push("Приведи конкретный пример кода".into());
+        out.push("Расскажи подробнее про внутреннее устройство".into());
+        out.push("Сравни плюсы и минусы этого подхода".into());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_prediction_supports_string_and_openai_object() {
+        assert_eq!(extract_prediction_text(&json!("fast draft")), "fast draft");
+        assert_eq!(
+            extract_prediction_text(&json!({
+                "type": "content",
+                "content": "predicted output"
+            })),
+            "predicted output"
+        );
+        assert_eq!(
+            extract_prediction_text(&json!({
+                "type": "content",
+                "content": [{"type": "text", "text": "part1 "}, {"type": "text", "text": "part2"}]
+            })),
+            "part1 part2"
+        );
+        assert_eq!(extract_prediction_text(&json!(null)), "");
+    }
+
+    #[test]
+    fn prompt_lookup_k_parses_bool_int_and_defaults() {
+        assert_eq!(parse_prompt_lookup_k(&json!(null), true), 4);
+        assert_eq!(parse_prompt_lookup_k(&json!(null), false), 0);
+        assert_eq!(parse_prompt_lookup_k(&json!(false), true), 0);
+        assert_eq!(parse_prompt_lookup_k(&json!(true), false), 4);
+        assert_eq!(parse_prompt_lookup_k(&json!(8), false), 8);
+        assert_eq!(parse_prompt_lookup_k(&json!(100), true), 16);
+    }
+
+    #[test]
+    fn followup_suggestions_adapt_to_conversation_context() {
+        let initial = predict_followup_prompts(&[]);
+        assert_eq!(initial.len(), 3);
+        let code_turn = vec![json!({"role": "assistant", "content": "```rust\nfn main() {}\n```"})];
+        let after_code = predict_followup_prompts(&code_turn);
+        assert!(after_code[0].contains("тесты"));
+    }
 
     #[test]
     fn array_content_keeps_its_text_and_counts_images() {
@@ -2100,7 +2417,6 @@ mod tests {
     }
 }
 
-/// The built-in chat page: zero dependencies, talks to this same server.
 /// The built-in chat page: zero dependencies, talks to this same server.
 /// Lives as a real .html file so editors and grep see it; embedded at compile
 /// time, so the served bytes are unchanged.
