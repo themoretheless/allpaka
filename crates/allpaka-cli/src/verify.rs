@@ -136,15 +136,15 @@ fn reference_top(addr: &str, tokens: &[u32], n: usize) -> Result<Vec<(u32, f64)>
 }
 
 fn log_partition_and_argmax(logits: &[f32]) -> (f64, usize) {
-    let mut max_val = f32::NEG_INFINITY;
+    let mut max = f64::NEG_INFINITY;
     let mut argmax = 0usize;
     for (i, &v) in logits.iter().enumerate() {
-        if v.total_cmp(&max_val).is_gt() {
-            max_val = v;
+        let vf = v as f64;
+        if vf.total_cmp(&max).is_gt() {
+            max = vf;
             argmax = i;
         }
     }
-    let max = max_val as f64;
     let sum: f64 = logits.iter().map(|&v| (v as f64 - max).exp()).sum();
     (max + sum.ln(), argmax)
 }

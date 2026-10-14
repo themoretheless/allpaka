@@ -248,7 +248,7 @@ pub(crate) async fn extract(
         if !directory.starts_with(app.data.as_ref()) {
             bail!("Proposal storage escapes Studio data");
         }
-        if serde_json::to_vec(&receipt)?.len() as u64 > PROPOSAL_MAX_BYTES {
+        if crate::evaluation::json_serialized_len(&receipt)? as u64 > PROPOSAL_MAX_BYTES {
             bail!("Proposal exceeds byte limit");
         }
         crate::evaluation::commit_new(&directory.join(format!("{proposal_id}.json")), &receipt)?;
@@ -385,7 +385,7 @@ pub(crate) async fn consolidate(
         if !directory.starts_with(app.data.as_ref()) {
             bail!("Proposal storage escapes Studio data");
         }
-        if serde_json::to_vec(&receipt)?.len() as u64 > PROPOSAL_MAX_BYTES {
+        if crate::evaluation::json_serialized_len(&receipt)? as u64 > PROPOSAL_MAX_BYTES {
             bail!("Proposal exceeds byte limit");
         }
         crate::evaluation::commit_new(&directory.join(format!("{proposal_id}.json")), &receipt)?;

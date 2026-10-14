@@ -178,9 +178,9 @@ struct InferenceContext<'a> {
 struct GenerationRequest<'a> {
     messages: &'a [(String, String)],
     max_tokens: usize,
-    temperature: f32,
-    top_p: f32,
-    repeat_penalty: f32,
+    temperature: f64,
+    top_p: f64,
+    repeat_penalty: f64,
     parse_tools: bool,
     stream: Option<&'a mut TcpStream>,
     emit_done: bool,
@@ -768,13 +768,13 @@ impl Template {
 /// A deliberately small sampler: greedy at temperature 0, otherwise
 /// repetition penalty, temperature scaling and nucleus (top-p) truncation.
 struct Sampler {
-    temperature: f32,
-    top_p: f32,
+    temperature: f64,
+    top_p: f64,
     /// llama.cpp-style repeat penalty over the recent window: positive
     /// logits of recent tokens are divided by it, negative multiplied.
     /// Without it a heavily quantised model happily locks into "либо-либо-
     /// либо" forever; 1.1 breaks such loops without visibly changing prose.
-    repeat_penalty: f32,
+    repeat_penalty: f64,
     state: u64,
 }
 
@@ -782,7 +782,7 @@ struct Sampler {
 const PENALTY_WINDOW: usize = 256;
 
 impl Sampler {
-    fn new(temperature: f32, top_p: f32, repeat_penalty: f32) -> Self {
+    fn new(temperature: f64, top_p: f64, repeat_penalty: f64) -> Self {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -796,12 +796,12 @@ impl Sampler {
         }
     }
 
-    fn next_f32(&mut self) -> f32 {
+    fn next_f64(&mut self) -> f64 {
         self.state = self
             .state
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
-        (self.state >> 40) as f32 / (1u64 << 24) as f32
+        (self.state >> 11) as f64 / (1u64 << 53) as f64
     }
 
     /// Candidates that survive the top-k preselect. Nucleus sampling never
@@ -816,6 +816,7 @@ impl Sampler {
         // selection, so a penalised token can fall out of the candidate set.
         let mut adjusted;
         let logits: &[f32] = if self.repeat_penalty != 1.0 && !recent.is_empty() {
+            let rp = self.repeat_penalty as f32;
             adjusted = logits.to_vec();
             let start = recent.len().saturating_sub(PENALTY_WINDOW);
             let mut window: Vec<u32> = recent[start..].to_vec();
@@ -824,9 +825,9 @@ impl Sampler {
             for t in window {
                 if let Some(v) = adjusted.get_mut(t as usize) {
                     if *v > 0.0 {
-                        *v /= self.repeat_penalty;
+                        *v /= rp;
                     } else {
-                        *v *= self.repeat_penalty;
+                        *v *= rp;
                     }
                 }
             }
@@ -868,12 +869,22 @@ impl Sampler {
         top.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         let inv_temp = 1.0 / self.temperature;
-        let mut scaled: Vec<f32> = top.iter().map(|&(_, v)| v * inv_temp).collect();
-        allpaka_backend::softmax(&mut scaled);
+        let max_scaled = top[0].1 as f64 * inv_temp;
+        let mut scaled = Vec::with_capacity(top.len());
+        let mut sum = 0.0f64;
+        for &(_, v) in &top {
+            let e = ((v as f64) * inv_temp - max_scaled).exp();
+            scaled.push(e);
+            sum += e;
+        }
+        let inv_sum = 1.0 / sum;
+        for p in &mut scaled {
+            *p *= inv_sum;
+        }
 
         // Nucleus: keep the smallest prefix whose mass reaches top_p.
         let mut kept = 0usize;
-        let mut mass = 0f32;
+        let mut mass = 0.0f64;
         for &p in &scaled {
             kept += 1;
             mass += p;
@@ -881,7 +892,7 @@ impl Sampler {
                 break;
             }
         }
-        let mut r = self.next_f32() * mass;
+        let mut r = self.next_f64() * mass;
         for (&(i, _), &p) in top[..kept].iter().zip(&scaled) {
             r -= p;
             if r <= 0.0 {
@@ -1658,9 +1669,9 @@ fn handle(
     }
     let messages = render_messages(raw_messages, tools);
     let max_tokens = req["max_tokens"].as_u64().unwrap_or(256) as usize;
-    let temperature = req["temperature"].as_f64().unwrap_or(0.7) as f32;
-    let top_p = req["top_p"].as_f64().unwrap_or(0.95) as f32;
-    let repeat_penalty = req["repeat_penalty"].as_f64().unwrap_or(1.1) as f32;
+    let temperature = req["temperature"].as_f64().unwrap_or(0.7);
+    let top_p = req["top_p"].as_f64().unwrap_or(0.95);
+    let repeat_penalty = req["repeat_penalty"].as_f64().unwrap_or(1.1);
     let streaming = req["stream"].as_bool().unwrap_or(false);
 
     if streaming && (tools.is_none() || !rag.cfg.enabled) {

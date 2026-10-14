@@ -55,9 +55,9 @@ pub fn matmul_f32(x: &[f32], w: &[f32], m: usize, k: usize, n: usize) -> Vec<f32
 pub fn rmsnorm(x: &mut [f32], weight: &[f32], eps: f32) {
     assert_eq!(x.len(), weight.len());
     let mean_sq = sum_sq_f64(x) / x.len() as f64;
-    let scale = (1.0 / (mean_sq + eps as f64).sqrt()) as f32;
+    let scale = 1.0 / (mean_sq + eps as f64).sqrt();
     for (v, w) in x.iter_mut().zip(weight) {
-        *v = *v * scale * w;
+        *v = (*v as f64 * scale) as f32 * w;
     }
 }
 
@@ -69,9 +69,9 @@ pub fn rmsnorm_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
     assert_eq!(src.len(), weight.len());
     assert_eq!(dst.len(), src.len());
     let mean_sq = sum_sq_f64(src) / src.len() as f64;
-    let scale = (1.0 / (mean_sq + eps as f64).sqrt()) as f32;
+    let scale = 1.0 / (mean_sq + eps as f64).sqrt();
     for ((d, &v), w) in dst.iter_mut().zip(src).zip(weight) {
-        *d = v * scale * w;
+        *d = (v as f64 * scale) as f32 * w;
     }
 }
 
