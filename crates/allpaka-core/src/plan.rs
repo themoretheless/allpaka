@@ -262,20 +262,105 @@ fn best_single_node(
 }
 
 /// Fastest feasible split, over every ordering of the machines.
+/// For a fixed ordering of nodes, stage compute cost is additive across stages
+/// and only depends on `(node_index, layer_count)`. We solve the optimal layer
+/// partition for each active subset of nodes in `O(N * L^2)` via dynamic programming.
 fn best_split(nodes: &[Node], model: &Model, fabric: &Fabric, req: &PlanRequest) -> Option<Plan> {
     if nodes.len() < 2 {
         return None;
     }
+    let total_layers = model.n_layers as usize;
+    // Precompute the maximum feasible layers each node can hold in memory,
+    // and the per-step compute cost for (node_idx, layer_count).
+    let max_layers_for_node: Vec<usize> = nodes
+        .iter()
+        .map(|node| {
+            (1..=total_layers)
+                .take_while(|&l| {
+                    let lc = l as u32;
+                    model.bytes_for_layers(lc) + model.kv_bytes(lc, req.context_tokens)
+                        <= node.usable_bytes
+                })
+                .last()
+                .unwrap_or(0)
+        })
+        .collect();
+
     let mut best: Option<Plan> = None;
     let mut order: Vec<usize> = (0..nodes.len()).collect();
 
     permute(&mut order, 0, &mut |order| {
-        let mut assignment = Vec::with_capacity(order.len());
-        enumerate_splits(order, 0, model.n_layers, &mut assignment, &mut |asg| {
-            let dense: Vec<(usize, u32)> = asg.iter().copied().filter(|(_, n)| *n > 0).collect();
-            if dense.len() < 2 {
-                return;
+        // Consider each prefix of `order` of length `m` (2..=order.len()) where all `m`
+        // nodes are active (each takes >= 1 layer). Because `permute` visits all
+        // permutations, every ordered sequence of `m` distinct active nodes appears as
+        // a prefix `&order[..m]`.
+        for m in 2..=order.len() {
+            let active = &order[..m];
+            // Quick capacity check: can these `m` nodes combined hold `total_layers`,
+            // and can each node hold at least 1 layer?
+            if active.iter().any(|&ni| max_layers_for_node[ni] == 0) {
+                continue;
             }
+            let cap_sum: usize = active.iter().map(|&ni| max_layers_for_node[ni]).sum();
+            if cap_sum < total_layers || total_layers < m {
+                continue;
+            }
+            // Verify all forward links and return link exist before running DP.
+            let links_ok = active
+                .windows(2)
+                .all(|w| fabric.between(w[0], w[1]).is_some())
+                && fabric.between(active[m - 1], active[0]).is_some();
+            if !links_ok {
+                continue;
+            }
+
+            // dp[s][l] = (min_compute_secs, take_on_stage_s) for assigning `l` layers
+            // across `active[0..=s]`, with each stage receiving >= 1 layer.
+            let mut dp = vec![vec![(f64::INFINITY, 0u32); total_layers + 1]; m];
+            let first_node = active[0];
+            let first_limit = max_layers_for_node[first_node].min(total_layers - (m - 1));
+            for (take, slot) in dp[0].iter_mut().enumerate().take(first_limit + 1).skip(1) {
+                let c = nodes[first_node]
+                    .stream_time(model.streamed_bytes_per_step(take as u32, req.context_tokens));
+                *slot = (c, take as u32);
+            }
+
+            for (s, &ni) in active.iter().enumerate().skip(1) {
+                let max_take = max_layers_for_node[ni];
+                let min_prev = s;
+                let max_curr = total_layers - (m - 1 - s);
+                for prev_l in min_prev..max_curr {
+                    let prev_cost = dp[s - 1][prev_l].0;
+                    if !prev_cost.is_finite() {
+                        continue;
+                    }
+                    let hi = max_take.min(max_curr - prev_l);
+                    for take in 1..=hi {
+                        let c = nodes[ni].stream_time(
+                            model.streamed_bytes_per_step(take as u32, req.context_tokens),
+                        );
+                        let cand = prev_cost + c;
+                        let next_l = prev_l + take;
+                        if cand < dp[s][next_l].0 {
+                            dp[s][next_l] = (cand, take as u32);
+                        }
+                    }
+                }
+            }
+
+            if !dp[m - 1][total_layers].0.is_finite() {
+                continue;
+            }
+
+            // Reconstruct optimal layer counts for `active`.
+            let mut dense = vec![(0usize, 0u32); m];
+            let mut rem = total_layers;
+            for s in (0..m).rev() {
+                let take = dp[s][rem].1;
+                dense[s] = (active[s], take);
+                rem -= take as usize;
+            }
+
             if let Some(p) = build_plan(&dense, nodes, model, fabric, req) {
                 if best
                     .as_ref()
@@ -284,7 +369,7 @@ fn best_split(nodes: &[Node], model: &Model, fabric: &Fabric, req: &PlanRequest)
                     best = Some(p);
                 }
             }
-        });
+        }
     });
     best
 }
@@ -299,29 +384,6 @@ fn permute(order: &mut Vec<usize>, k: usize, visit: &mut impl FnMut(&[usize])) {
         order.swap(k, i);
         permute(order, k + 1, visit);
         order.swap(k, i);
-    }
-}
-
-/// Walk every way of dividing `remaining` layers among `order[position..]`.
-fn enumerate_splits(
-    order: &[usize],
-    position: usize,
-    remaining: u32,
-    assignment: &mut Vec<(usize, u32)>,
-    visit: &mut impl FnMut(&[(usize, u32)]),
-) {
-    if position == order.len() {
-        if remaining == 0 {
-            visit(assignment);
-        }
-        return;
-    }
-    let last = position + 1 == order.len();
-    let lo = if last { remaining } else { 0 };
-    for take in lo..=remaining {
-        assignment.push((order[position], take));
-        enumerate_splits(order, position + 1, remaining - take, assignment, visit);
-        assignment.pop();
     }
 }
 

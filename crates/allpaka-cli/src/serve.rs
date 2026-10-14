@@ -938,11 +938,13 @@ pub(crate) fn render_messages(raw: &[Value], tools: Option<&[Value]>) -> Vec<(St
             if let Some(calls) = m["tool_calls"].as_array() {
                 for c in calls {
                     let name = c["function"]["name"].as_str().unwrap_or_default();
+                    let name_json =
+                        serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string());
                     // Arguments arrive as a JSON-encoded string per the
                     // OpenAI shape; embed them as the object Hermes expects.
                     let args = c["function"]["arguments"].as_str().unwrap_or("{}");
                     text.push_str(&format!(
-                        "\n<tool_call>\n{{\"name\": \"{name}\", \"arguments\": {args}}}\n</tool_call>"
+                        "\n<tool_call>\n{{\"name\": {name_json}, \"arguments\": {args}}}\n</tool_call>"
                     ));
                 }
             }
@@ -1252,9 +1254,11 @@ fn prepare_connection(
         request["request_id"].as_str(),
         std::time::Duration::from_millis(timeout_ms),
     )?;
-    let requested = serde_json::from_str::<Value>(&body)
-        .ok()
-        .and_then(|request| request["model"].as_str().map(ToOwned::to_owned))
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(timeout_ms)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(timeout_ms.max(30_000))));
+    let requested = request["model"]
+        .as_str()
+        .map(ToOwned::to_owned)
         .filter(|model| model != "allpaka")
         .unwrap_or_else(|| default_model.to_string());
     let context_tokens = body.len().div_ceil(4).clamp(1, max_context_tokens.max(1));
@@ -1377,6 +1381,7 @@ fn dispatch_connection(
     service
         .sessions
         .retain(|_, (_, used)| now.duration_since(*used).as_secs() < 600);
+    let mut had_existing_session = false;
     if is_chat {
         if session_id
             .as_ref()
@@ -1393,6 +1398,7 @@ fn dispatch_connection(
         let restored = session_id
             .as_ref()
             .and_then(|id| service.sessions.remove(id));
+        had_existing_session = restored.is_some();
         service.chat = match restored {
             Some((chat, _)) => chat,
             None => match ChatState::new(&service.model, &service.chat.memory.budget(), 1) {
@@ -1461,14 +1467,29 @@ fn dispatch_connection(
         }
     }
     if is_chat {
-        let empty = ChatState::new(&service.model, &service.chat.memory.budget(), 1)?;
-        let chat = std::mem::replace(&mut service.chat, empty);
-        if succeeded {
-            if let Some(id) = session_id {
+        if let Some(id) = session_id {
+            if succeeded || had_existing_session {
+                let empty = ChatState::new(&service.model, &service.chat.memory.budget(), 1)?;
+                let mut chat = std::mem::replace(&mut service.chat, empty);
+                if !succeeded && chat.session.pos() != chat.tokens.len() {
+                    if chat.session.ssm.is_some() {
+                        let cap = chat.session.capacity();
+                        chat.reset(&service.model, cap)?;
+                        chat.tokens.clear();
+                    } else {
+                        let valid = chat.tokens.len().min(chat.session.pos());
+                        chat.session.truncate(valid);
+                        chat.tokens.truncate(valid);
+                    }
+                }
                 service
                     .sessions
                     .insert(id, (chat, std::time::Instant::now()));
+            } else {
+                service.chat = ChatState::new(&service.model, &service.chat.memory.budget(), 1)?;
             }
+        } else {
+            service.chat = ChatState::new(&service.model, &service.chat.memory.budget(), 1)?;
         }
     }
     Ok(())

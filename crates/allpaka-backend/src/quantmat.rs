@@ -96,13 +96,53 @@ impl<'a> QuantMat<'a> {
         }]) {
             return Ok(y.into_iter().next().unwrap());
         }
-        // CPU reference: expand each row once, dot it with every batch row.
+        // CPU fallback: evaluate rows in parallel using fused f32 row_dot
+        // without allocating a Vec<f32> per weight row.
+        const PARALLEL_THRESHOLD_ELEMENTS: usize = 2 << 20;
         let mut y = vec![0f32; m * self.n_out];
-        for j in 0..self.n_out {
-            let w = self.row(j)?;
+        if m * self.n_out * self.n_in < PARALLEL_THRESHOLD_ELEMENTS {
             for i in 0..m {
                 let xi = &x[i * self.n_in..(i + 1) * self.n_in];
-                y[i * self.n_out + j] = dot(&w, xi);
+                let y_row = &mut y[i * self.n_out..(i + 1) * self.n_out];
+                for (j, out) in y_row.iter_mut().enumerate() {
+                    *out = self.row_dot(j, xi);
+                }
+            }
+            return Ok(y);
+        }
+
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        if m >= threads {
+            let rows_per = m.div_ceil(threads).max(1);
+            std::thread::scope(|scope| {
+                for (chunk_idx, y_chunk) in y.chunks_mut(rows_per * self.n_out).enumerate() {
+                    let first_i = chunk_idx * rows_per;
+                    scope.spawn(move || {
+                        for (local_i, y_row) in y_chunk.chunks_mut(self.n_out).enumerate() {
+                            let i = first_i + local_i;
+                            let xi = &x[i * self.n_in..(i + 1) * self.n_in];
+                            for (j, out) in y_row.iter_mut().enumerate() {
+                                *out = self.row_dot(j, xi);
+                            }
+                        }
+                    });
+                }
+            });
+        } else {
+            for i in 0..m {
+                let xi = &x[i * self.n_in..(i + 1) * self.n_in];
+                let y_row = &mut y[i * self.n_out..(i + 1) * self.n_out];
+                let cols_per = self.n_out.div_ceil(threads).max(1);
+                std::thread::scope(|scope| {
+                    for (chunk_idx, y_chunk) in y_row.chunks_mut(cols_per).enumerate() {
+                        let first_j = chunk_idx * cols_per;
+                        scope.spawn(move || {
+                            for (local_j, out) in y_chunk.iter_mut().enumerate() {
+                                *out = self.row_dot(first_j + local_j, xi);
+                            }
+                        });
+                    }
+                });
             }
         }
         Ok(y)
@@ -726,8 +766,12 @@ impl Q8Acts {
         for b in 0..blocks {
             let xs = &x[b * 32..b * 32 + 32];
             let amax = xs.iter().fold(0f32, |m, v| m.max(v.abs()));
-            let db = amax / 127.0;
-            let id = if db > 0.0 { 1.0 / db } else { 0.0 };
+            let db = if amax.is_finite() { amax / 127.0 } else { 0.0 };
+            let id = if db > 0.0 && db.is_finite() {
+                1.0 / db
+            } else {
+                0.0
+            };
             for (slot, v) in q[b * 32..b * 32 + 32].iter_mut().zip(xs) {
                 *slot = (v * id).round() as i8;
             }
@@ -762,8 +806,8 @@ fn dot_q8_0_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
     let mut total = 0f32;
     for (bi, block) in row.chunks_exact(34).enumerate() {
         let d = dequant::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
-        // SAFETY: i8 and u8 share size and alignment; bytes are reinterpreted.
-        let qw: &[i8] = unsafe { std::mem::transmute(&block[2..34]) };
+        // SAFETY: i8 and u8 share size and alignment; construct a 32-element i8 slice from pointer.
+        let qw: &[i8] = unsafe { std::slice::from_raw_parts(block[2..34].as_ptr() as *const i8, 32) };
         total += d * acts.d[bi] * dot_i8(qw, acts.block(bi)) as f32;
     }
     total

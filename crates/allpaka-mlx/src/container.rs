@@ -13,7 +13,7 @@ pub struct TensorInfo {
     pub name: String,
     pub shape: Vec<u64>,
     pub dtype: String,
-    pub offset: u64,  // relative to start of this file's data section
+    pub offset: u64,  // absolute byte offset within its shard mmap
     pub bytes: usize, // size in bytes
 }
 
@@ -23,12 +23,12 @@ pub struct TensorInfo {
 pub struct MlxSafetensors {
     tensors: Vec<TensorInfo>,
     mmaps: Vec<memmap2::Mmap>,
+    #[allow(dead_code)]
     data_starts: Vec<u64>,
 }
 
 /// Index.json maps each tensor name to the file it lives in and its byte range.
 struct ShardedIndex {
-    #[allow(dead_code)]
     map: HashMap<String, (String, u64, u64)>, // name -> (filename, offset, end)
 }
 
@@ -61,10 +61,16 @@ where
     let index_path = root.join("model.safetensors.index.json");
     let shard_files: Vec<String> = if index_path.is_file() {
         let idx_txt = std::fs::read_to_string(&index_path)?;
-        let _index = ShardedIndex::parse(&idx_txt)?; // validate presence
-                                                     // Collect matching shards from the directory
-        let pattern = format!("{}{}", root.display(), "/model-*.safetensors");
-        glob_pattern_to_paths(&pattern)
+        let index = ShardedIndex::parse(&idx_txt)?;
+        let mut files: Vec<String> = index.map.values().map(|(f, _, _)| f.clone()).collect();
+        files.sort();
+        files.dedup();
+        if files.is_empty() {
+            let pattern = root.join("model-*.safetensors").to_string_lossy().to_string();
+            glob_pattern_to_filenames(&pattern)
+        } else {
+            files
+        }
     } else {
         vec!["model.safetensors".into()]
     };
@@ -79,8 +85,10 @@ where
         mmaps.push(mm);
         data_starts.push(start);
         for mut t in info.tensors {
-            // Make offsets absolute relative to file data section
-            t.offset += start;
+            t.offset = t
+                .offset
+                .checked_add(start)
+                .ok_or_else(|| anyhow::anyhow!("tensor offset overflow for {}", t.name))?;
             t.name = format!("{}/{}/{}", i, fname, t.name);
             tensors.push(t);
         }
@@ -99,20 +107,24 @@ fn parse_safetensors_header(mm: &Mmap) -> anyhow::Result<FileInfo> {
     }
     let n_bytes = u64::from_le_bytes(mm[0..8].try_into()?);
     let h_start = 8u64;
-    let h_end = 8 + n_bytes;
+    let h_end = h_start
+        .checked_add(n_bytes)
+        .ok_or_else(|| anyhow::anyhow!("header size overflow"))?;
     if h_end > len {
         return Err(anyhow::anyhow!("header exceeds mmap"));
     }
     let hdr_txt = std::str::from_utf8(&mm[h_start as usize..h_end as usize])?;
     let hdr: serde_json::Value = serde_json::from_str(hdr_txt)?;
-    // Parse tensor metadata from __metadata__ or top-level keys
+    let hdr_obj = hdr
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("safetensors header must be a JSON object"))?;
     let empty_map = serde_json::Map::new();
-    let meta = hdr
+    let meta = hdr_obj
         .get("__metadata__")
         .and_then(|v| v.as_object())
         .unwrap_or(&empty_map);
     let mut tensors = Vec::new();
-    for (name, spec) in hdr.as_object().unwrap().iter() {
+    for (name, spec) in hdr_obj.iter() {
         if name == "__metadata__" {
             continue;
         }
@@ -145,9 +157,16 @@ fn parse_safetensors_header(mm: &Mmap) -> anyhow::Result<FileInfo> {
         }
     }
     // Data section starts after header + alignment padding (default 32)
-    let mut hdr_sz = (8 + n_bytes) as usize;
-    let align: usize = meta.get("alignment").and_then(|v| v.as_u64()).unwrap_or(32) as usize;
-    hdr_sz = hdr_sz.div_ceil(align) * align;
+    let mut hdr_sz = usize::try_from(h_end).map_err(|_| anyhow::anyhow!("header too large"))?;
+    let align: usize = meta
+        .get("alignment")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(32)
+        .max(1) as usize;
+    hdr_sz = hdr_sz
+        .div_ceil(align)
+        .checked_mul(align)
+        .ok_or_else(|| anyhow::anyhow!("header alignment overflow"))?;
     Ok(FileInfo {
         tensors,
         data_start: hdr_sz,
@@ -163,12 +182,12 @@ where
         .map_err(|e| anyhow::anyhow!("mmap fail {}: {}", path.as_ref().display(), e))
 }
 
-fn glob_pattern_to_paths(pattern: &str) -> Vec<String> {
+fn glob_pattern_to_filenames(pattern: &str) -> Vec<String> {
     use glob::glob;
     glob(pattern)
         .expect("invalid pattern")
         .filter_map(|r| r.ok())
-        .map(|p| p.to_string_lossy().to_string())
+        .filter_map(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
         .collect()
 }
 
@@ -178,22 +197,34 @@ struct FileInfo {
 }
 
 pub fn tensor_data<'a>(f: &'a MlxSafetensors, t: &TensorInfo) -> anyhow::Result<&'a [u8]> {
+    if f.mmaps.is_empty() {
+        return Err(anyhow::anyhow!("no mmaps loaded in container"));
+    }
     let part: usize = t.name.split('/').next().unwrap_or("0").parse().unwrap_or(0);
-    let file_offset = t.offset;
-    let end = file_offset + (t.bytes as u64);
-    let mm = &f.mmaps[part.min(f.mmaps.len() - 1)];
-    if end > mm.len() as u64 {
+    let shard_idx = part.min(f.mmaps.len() - 1);
+    let mm = &f.mmaps[shard_idx];
+    let off = usize::try_from(t.offset)
+        .map_err(|_| anyhow::anyhow!("tensor {} offset overflow", t.name))?;
+    let end = off
+        .checked_add(t.bytes)
+        .ok_or_else(|| anyhow::anyhow!("tensor {} size overflow", t.name))?;
+    if end > mm.len() {
         return Err(anyhow::anyhow!("tensor {} out of bounds", t.name));
     }
-    let off = (file_offset % f.data_starts[part.min(f.data_starts.len() - 1)]) as usize;
-    let len = t.bytes;
-    Ok(&mm[off..off + len])
+    Ok(&mm[off..end])
 }
 
 impl MlxSafetensors {
     /// Get a tensor by name from the loaded safetensors files.
+    /// Matches either the full prefixed name (`"{shard}/{file}/{name}"`) or the raw tensor name.
     pub fn tensor_by_name(&self, name: &str) -> Option<&TensorInfo> {
-        self.tensors.iter().find(|t| t.name == name)
+        self.tensors.iter().find(|t| {
+            t.name == name
+                || t.name
+                    .splitn(3, '/')
+                    .nth(2)
+                    .is_some_and(|raw_name| raw_name == name)
+        })
     }
 
     /// Get total number of tensors loaded.

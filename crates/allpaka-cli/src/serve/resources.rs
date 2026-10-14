@@ -159,36 +159,56 @@ fn sample() {
 }
 
 fn gpu_query() -> Option<(String, u64, u64, u32, i32, f64)> {
-    let mut cmd = std::process::Command::new("nvidia-smi");
-    cmd.args([
-        "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw",
-        "--format=csv,noheader,nounits",
-    ]);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
-    #[cfg(windows)]
+    #[cfg(target_os = "macos")]
     {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
+        None
     }
-    let out = cmd.output().ok()?;
-    if !out.status.success() {
-        return None;
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static NVIDIA_SMI_MISSING: AtomicBool = AtomicBool::new(false);
+        if NVIDIA_SMI_MISSING.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut cmd = std::process::Command::new("nvidia-smi");
+        cmd.args([
+            "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw",
+            "--format=csv,noheader,nounits",
+        ]);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        let out = match cmd.output() {
+            Ok(out) => out,
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    NVIDIA_SMI_MISSING.store(true, Ordering::Relaxed);
+                }
+                return None;
+            }
+        };
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text.lines().next()?.trim();
+        let parts: Vec<&str> = line.split(',').map(str::trim).collect();
+        if parts.len() < 6 {
+            return None;
+        }
+        Some((
+            parts[0].to_string(),
+            parts[1].parse().unwrap_or(0),
+            parts[2].parse().unwrap_or(0),
+            parts[3].parse().unwrap_or(0),
+            parts[4].parse().unwrap_or(0),
+            parts[5].parse().unwrap_or(0.0),
+        ))
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let line = text.lines().next()?.trim();
-    let parts: Vec<&str> = line.split(',').map(str::trim).collect();
-    if parts.len() < 6 {
-        return None;
-    }
-    Some((
-        parts[0].to_string(),
-        parts[1].parse().unwrap_or(0),
-        parts[2].parse().unwrap_or(0),
-        parts[3].parse().unwrap_or(0),
-        parts[4].parse().unwrap_or(0),
-        parts[5].parse().unwrap_or(0.0),
-    ))
 }
 
 fn memory_mib() -> (u64, u64, u64) {
@@ -196,10 +216,45 @@ fn memory_mib() -> (u64, u64, u64) {
     {
         windows_memory_mib()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_memory_mib()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         (0, 0, 0)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_memory_mib() -> (u64, u64, u64) {
+    let rss_mib = std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map(|pages| (pages * 4096) >> 20)
+        .unwrap_or(0);
+    let mut total_kib = 0u64;
+    let mut avail_kib = 0u64;
+    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+        for line in meminfo.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                total_kib = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+            } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                avail_kib = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+            }
+        }
+    }
+    let total_mib = total_kib >> 10;
+    let used_mib = total_kib.saturating_sub(avail_kib) >> 10;
+    (rss_mib, used_mib, total_mib)
 }
 
 #[cfg(windows)]

@@ -45,6 +45,7 @@ impl Speculator<'_> {
     /// the same strings in both models.
     pub fn compatible(target: &Model, draft: &Model) -> bool {
         target.config.vocab == draft.config.vocab
+            && target.config.architecture == draft.config.architecture
     }
 
     pub fn round(&mut self, next: u32) -> Result<Round> {

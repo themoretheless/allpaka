@@ -47,15 +47,15 @@ impl BackendCapabilities {
 
     /// Active accelerator profile for this build/host.
     pub fn current() -> Self {
+        if std::env::var_os("ALLPAKA_NO_GPU").is_some() {
+            return Self::new([]);
+        }
         #[cfg(target_os = "macos")]
         {
             Self::current_metal()
         }
         #[cfg(all(feature = "cuda", not(target_os = "macos")))]
         {
-            if crate::gpu::is_attached() {
-                return Self::current_cuda();
-            }
             Self::current_cuda()
         }
         #[cfg(not(any(target_os = "macos", feature = "cuda")))]

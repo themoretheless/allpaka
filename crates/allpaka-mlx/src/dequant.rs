@@ -26,52 +26,34 @@ pub fn bf16_to_f32(h: u16) -> f32 {
 ///
 /// Order is verified by golden fixtures against `mx.dequantize`.
 pub fn dequant_mlx_q4_block(block: &[u8], out: &mut Vec<f32>) {
-    debug_assert_eq!(block.len(), 36);
+    assert!(
+        block.len() >= 36,
+        "Q4Affine block requires at least 36 bytes, got {}",
+        block.len()
+    );
     let scale = bf16_to_f32(u16::from_le_bytes([block[32], block[33]]));
     let bias = bf16_to_f32(u16::from_le_bytes([block[34], block[35]]));
-    // Unroll eight words × eight nibbles = 64 outputs
-    const W0: usize = 0;
-    const W1: usize = 4;
-    const W2: usize = 8;
-    const W3: usize = 12;
-    const W4: usize = 16;
-    const W5: usize = 20;
-    const W6: usize = 24;
-    const W7: usize = 28;
-    let w0 = u32::from_le_bytes(block[W0..W0 + 4].try_into().unwrap());
-    let w1 = u32::from_le_bytes(block[W1..W1 + 4].try_into().unwrap());
-    let w2 = u32::from_le_bytes(block[W2..W2 + 4].try_into().unwrap());
-    let w3 = u32::from_le_bytes(block[W3..W3 + 4].try_into().unwrap());
-    let w4 = u32::from_le_bytes(block[W4..W4 + 4].try_into().unwrap());
-    let w5 = u32::from_le_bytes(block[W5..W5 + 4].try_into().unwrap());
-    let w6 = u32::from_le_bytes(block[W6..W6 + 4].try_into().unwrap());
-    let w7 = u32::from_le_bytes(block[W7..W7 + 4].try_into().unwrap());
-    // Helper macro-like unrolling
-    macro_rules! nib {
-        ($word:expr, $k:expr) => {
-            ((($word) >> (4 * ($k))) & 0xf) as f32 * scale + bias
-        };
-    }
     out.reserve(64);
-    for k in 0..8 {
-        out.push(nib!(w0, k));
-        out.push(nib!(w1, k));
-        out.push(nib!(w2, k));
-        out.push(nib!(w3, k));
-        out.push(nib!(w4, k));
-        out.push(nib!(w5, k));
-        out.push(nib!(w6, k));
-        out.push(nib!(w7, k));
+    for w in 0..8 {
+        let word = u32::from_le_bytes(block[w * 4..w * 4 + 4].try_into().unwrap());
+        for k in 0..8 {
+            let nib = ((word >> (k * 4)) & 0xf) as f32;
+            out.push(nib * scale + bias);
+        }
     }
 }
 
-/// Dequantise one Q8Affine block (68 bytes: sixteen little-endian u32 words? no — 64 bytes payload + b16 scale + b16 bias).
-/// Each element is an unsigned byte; x = q * scale + bias. The exact order
-/// (one byte per index or interleaved across 16×4 uint32) must match mx.dequantize.
+/// Dequantise one Q8Affine block (68 bytes: 64 bytes payload + b16 scale + b16 bias).
+/// Each element is an unsigned byte; x = q * scale + bias.
 pub fn dequant_mlx_q8_block(block: &[u8], out: &mut Vec<f32>) {
-    debug_assert_eq!(block.len(), 68);
+    assert!(
+        block.len() >= 68,
+        "Q8Affine block requires at least 68 bytes, got {}",
+        block.len()
+    );
     let scale = bf16_to_f32(u16::from_le_bytes([block[64], block[65]]));
     let bias = bf16_to_f32(u16::from_le_bytes([block[66], block[67]]));
+    out.reserve(64);
     for &b in block.iter().take(64) {
         out.push(b as f32 * scale + bias);
     }
@@ -109,6 +91,25 @@ mod tests {
         for v in out.iter() {
             assert_eq!(*v, 0.0);
         }
+    }
+
+    #[test]
+    fn test_q4_block_element_order() {
+        let mut block = [0u8; 36];
+        // scale = 1.0, bias = 0.0
+        block[32..34].copy_from_slice(&0x3f80u16.to_le_bytes());
+        block[34..36].copy_from_slice(&0u16.to_le_bytes());
+        // word 0 has nibbles 1, 2, 3, 4, 5, 6, 7, 8
+        let w0: u32 = 0x8765_4321;
+        block[0..4].copy_from_slice(&w0.to_le_bytes());
+        // word 1 has nibble 0 = 9
+        let w1: u32 = 0x0000_0009;
+        block[4..8].copy_from_slice(&w1.to_le_bytes());
+
+        let mut out = Vec::with_capacity(64);
+        dequant_mlx_q4_block(&block, &mut out);
+        assert_eq!(&out[0..8], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(out[8], 9.0);
     }
 
     #[test]

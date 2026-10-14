@@ -105,33 +105,56 @@ impl Tokenizer {
     }
 
     fn encode_segment(&self, segment: &str, out: &mut Vec<u32>) -> Result<()> {
-        // Bytes to the printable alphabet, one symbol per byte.
-        let mut symbols: Vec<String> = segment
-            .bytes()
-            .map(|b| self.byte_to_char[b as usize].to_string())
-            .collect();
+        if segment.is_empty() {
+            return Ok(());
+        }
+        // Build the mapped printable string once and record initial byte-symbol spans.
+        let mut mapped = String::with_capacity(segment.len() * 2);
+        let n = segment.len();
+        let mut starts = Vec::with_capacity(n);
+        let mut ends = Vec::with_capacity(n);
+        let mut next = Vec::with_capacity(n);
+        for (idx, b) in segment.bytes().enumerate() {
+            let start = mapped.len();
+            mapped.push(self.byte_to_char[b as usize]);
+            let end = mapped.len();
+            starts.push(start);
+            ends.push(end);
+            next.push(if idx + 1 < n { idx + 1 } else { usize::MAX });
+        }
 
-        // Greedy lowest-rank merging until no rule applies.
+        // Greedy lowest-rank merging over linked contiguous spans in `mapped`:
+        // merging adjacent spans `i` and `j = next[i]` simply sets `ends[i] = ends[j]`
+        // and `next[i] = next[j]` without any string reallocation or vector shifting!
         let mut pair_buf = String::with_capacity(32);
         loop {
-            let mut best: Option<(usize, usize)> = None; // (rank, index)
-            for i in 0..symbols.len().saturating_sub(1) {
+            let mut best: Option<(usize, usize)> = None; // (rank, left_idx)
+            let mut i = 0;
+            while i != usize::MAX {
+                let j = next[i];
+                if j == usize::MAX {
+                    break;
+                }
                 pair_buf.clear();
-                pair_buf.push_str(&symbols[i]);
+                pair_buf.push_str(&mapped[starts[i]..ends[i]]);
                 pair_buf.push(' ');
-                pair_buf.push_str(&symbols[i + 1]);
+                pair_buf.push_str(&mapped[starts[j]..ends[j]]);
                 if let Some(&rank) = self.ranks.get(pair_buf.as_str()) {
                     if best.is_none_or(|(r, _)| rank < r) {
                         best = Some((rank, i));
                     }
                 }
+                i = j;
             }
-            let Some((_, i)) = best else { break };
-            let right = symbols.remove(i + 1);
-            symbols[i].push_str(&right);
+            let Some((_, best_i)) = best else { break };
+            let best_j = next[best_i];
+            ends[best_i] = ends[best_j];
+            next[best_i] = next[best_j];
         }
 
-        for s in &symbols {
+        let mut i = 0;
+        while i != usize::MAX {
+            let s = &mapped[starts[i]..ends[i]];
             match self.ids.get(s) {
                 Some(&id) => out.push(id),
                 // A symbol not in the vocabulary decays to per-byte tokens.
@@ -147,6 +170,7 @@ impl Tokenizer {
                     }
                 }
             }
+            i = next[i];
         }
         Ok(())
     }

@@ -264,8 +264,14 @@ pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
     }
 
     // The data section starts at the next aligned position after the header.
+    if alignment == 0 {
+        bail!("invalid GGUF alignment 0");
+    }
     let here = r.stream_position()?;
-    let data_offset = here.div_ceil(alignment) * alignment;
+    let data_offset = here
+        .div_ceil(alignment)
+        .checked_mul(alignment)
+        .context("GGUF data_offset alignment overflow")?;
 
     Ok(Header {
         architecture,
@@ -406,13 +412,18 @@ fn skip_array(r: &mut (impl Read + Seek)) -> Result<()> {
     };
     match width {
         Some(w) => {
-            r.seek(SeekFrom::Current((len * w) as i64))?;
+            let skip_bytes = len
+                .checked_mul(w)
+                .and_then(|b| i64::try_from(b).ok())
+                .context("GGUF array skip size overflow")?;
+            r.seek(SeekFrom::Current(skip_bytes))?;
         }
         None if elem_type == 8 => {
             // Strings are length-prefixed, so each must be stepped over in turn.
             for _ in 0..len {
                 let n = read_u64(r)?;
-                r.seek(SeekFrom::Current(n as i64))?;
+                let skip_bytes = i64::try_from(n).context("GGUF string skip size overflow")?;
+                r.seek(SeekFrom::Current(skip_bytes))?;
             }
         }
         None if elem_type == 9 => {

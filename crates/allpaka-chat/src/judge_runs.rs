@@ -353,14 +353,18 @@ pub(crate) async fn get(State(app): State<App>, Path(id): Path<String>) -> crate
         }
         total += receipt["score"].as_f64().unwrap();
     }
-    if run["status"] == "completed"
-        && (run["items"].as_array().unwrap().len() != plan["samples"].as_array().unwrap().len()
-            || run["mean_score"] != json!(total / plan["samples"].as_array().unwrap().len() as f64))
-    {
-        return Err(crate::error(
-            StatusCode::BAD_REQUEST,
-            "Judge run completion mismatch",
-        ));
+    if run["status"] == "completed" {
+        let n_samples = plan["samples"].as_array().unwrap().len();
+        let expected_mean = total / n_samples as f64;
+        let mean_ok = run["mean_score"]
+            .as_f64()
+            .is_some_and(|actual| actual.is_finite() && (actual - expected_mean).abs() <= 1e-9);
+        if run["items"].as_array().unwrap().len() != n_samples || !mean_ok {
+            return Err(crate::error(
+                StatusCode::BAD_REQUEST,
+                "Judge run completion mismatch",
+            ));
+        }
     }
     Ok(Json(run))
 }

@@ -8,13 +8,13 @@
 pub type MlxShape = Vec<u64>;
 
 /// Flatten a multi-dimensional shape into 2D `(n_out, n_in)` for matmul purposes.
-/// For 3D expert tensors `[expert_ffn, n_in, n_expert]` this returns
-/// `(n_out * n_expert, n_in)`.
+///- For 2D `[n_in, n_out]` (GGML convention), returns `(n_out, n_in)`.
+///- For 3D expert tensors `[expert_count, out_dim, in_dim]`, returns `(expert_count * out_dim, in_dim)`.
 pub fn flatten_for_matmul(shape: &MlxShape) -> (usize, usize) {
     match shape.len() {
         2 => (shape[1] as usize, shape[0] as usize),
-        3 => (shape[1] as usize * shape[2] as usize, shape[0] as usize), // [batch/in, hidden, experts]? No: qwen3_moe uses [expert_count, out_dim, in_dim]
-        _ => (1, 1),                                                     // fallback
+        3 => (shape[0] as usize * shape[1] as usize, shape[2] as usize),
+        _ => (1, 1),
     }
 }
 

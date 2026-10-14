@@ -3399,10 +3399,9 @@ kernel void sigmoid_topk(
     }
 }
 
-// delta[h] = sum over slots of wts[s] * down[s * n + h]. When sig_last is
-// set the last slot's weight is the RAW logit of qwen35moe's shared-expert
-// gate and goes through a sigmoid first (every other slot is a finished
-// router weight).
+// delta[h] = sum over slots of wts[s] * down[s * n + h].
+// sig_last: 0 = all slots use wts[s], 1 = last slot uses sigmoid(wts[slots - 1]),
+// 2 = last slot uses weight 1.0 (unweighted shared expert).
 kernel void moe_combine(
     device const float* down [[buffer(0)]],
     device const float* wts [[buffer(1)]],
@@ -3413,8 +3412,8 @@ kernel void moe_combine(
     uint i [[thread_position_in_grid]])
 {
     if (i >= n) return;
-    float wl = 0.0f;
-    if (sig_last != 0) {
+    float wl = 1.0f;
+    if (sig_last == 1) {
         const float g = wts[slots - 1];
         wl = 1.0f / (1.0f + exp(-g));
     }
@@ -3446,8 +3445,8 @@ kernel void combine_resnorm(
     uint lane [[thread_index_in_simdgroup]])
 {
     threadgroup float partial[8];
-    float wl = 0.0f;
-    if (sig_last != 0) {
+    float wl = 1.0f;
+    if (sig_last == 1) {
         const float g = wts[slots - 1];
         wl = 1.0f / (1.0f + exp(-g));
     }
@@ -7901,6 +7900,15 @@ impl Gpu {
                 }
                 let queue = self.queue.as_ptr() as *mut Object;
                 let _: () = msg_send![queue, addResidencySet: set];
+                for arena in [
+                    &self.x_arena,
+                    &self.y_arena,
+                    &self.pf_x,
+                    &self.pf_hs,
+                    &self.route_buf,
+                ] {
+                    let _: () = msg_send![set, addAllocation: arena.as_ptr() as *mut Object];
+                }
                 self.residency = Some(set as usize);
             }
             if let Some(set) = self.residency {
@@ -8236,36 +8244,61 @@ impl Gpu {
             .position(|c| addr >= c.start && addr + len <= c.start + c.len)
     }
 
+    fn pin_buffer_in_residency(&mut self, buf: &Buffer) {
+        use objc::runtime::Object;
+        use objc::{msg_send, sel, sel_impl};
+        if let Some(set) = self.residency {
+            unsafe {
+                let set = set as *mut Object;
+                let _: () = msg_send![set, addAllocation: buf.as_ptr() as *mut Object];
+                let _: () = msg_send![set, commit];
+                let _: () = msg_send![set, requestResidency];
+            }
+        }
+    }
+
     fn ensure_prefill(&mut self, bytes: usize) {
         if bytes > self.pf_x_cap {
+            self.prefill_drain();
             let cap = bytes.next_power_of_two();
-            self.pf_x = self
+            let buf = self
                 .device
                 .new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
+            self.pin_buffer_in_residency(&buf);
+            self.pf_x = buf;
             self.pf_x_cap = cap;
         }
         if bytes > self.pf_hs_cap {
+            self.prefill_drain();
             let cap = bytes.next_power_of_two();
-            self.pf_hs = self
+            let buf = self
                 .device
                 .new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
+            self.pin_buffer_in_residency(&buf);
+            self.pf_hs = buf;
             self.pf_hs_cap = cap;
         }
     }
 
     fn ensure_arenas(&mut self, x_need: usize, y_need: usize) {
         if x_need > self.x_cap {
+            self.prefill_drain();
             let cap = x_need.next_power_of_two();
-            self.x_arena = self
+            let buf = self
                 .device
                 .new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
+            self.pin_buffer_in_residency(&buf);
+            self.x_arena = buf;
             self.x_cap = cap;
         }
         if y_need > self.y_cap {
+            self.prefill_drain();
             let cap = y_need.next_power_of_two();
-            self.y_arena = self
+            let buf = self
                 .device
                 .new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
+            self.pin_buffer_in_residency(&buf);
+            self.y_arena = buf;
             self.y_cap = cap;
         }
     }
@@ -8273,10 +8306,13 @@ impl Gpu {
     fn ensure_route(&mut self, words: usize) {
         let bytes = words * 4;
         if bytes > self.route_cap {
+            self.prefill_drain();
             let cap = bytes.next_power_of_two();
-            self.route_buf = self
+            let buf = self
                 .device
                 .new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
+            self.pin_buffer_in_residency(&buf);
+            self.route_buf = buf;
             self.route_cap = cap;
             self.route_staged = None;
         }
@@ -11089,7 +11125,13 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     down_tail,
                 } => {
                     let n_slots = *n_used + shared.is_some() as usize;
-                    let sig_last = shared_gate.is_some() as u32;
+                    let sig_last = if shared_gate.is_some() {
+                        1u32
+                    } else if shared.is_some() {
+                        2u32
+                    } else {
+                        0u32
+                    };
                     let mut ffn_dispatches = 0u64;
                     if !probe_skip("router") {
                         if moe_plain {
@@ -11774,6 +11816,9 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
                 shared,
                 shared_gate,
             } => {
+                if router.0 != GgmlType::F32 || router.2 > 256 || *n_used > 16 {
+                    return None;
+                }
                 max_ffn = max_ffn.max(*expert_ffn);
                 let n_expert = router.2;
                 max_expert = max_expert.max(n_expert);
@@ -11849,6 +11894,9 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
                 }
                 let shared_refs = match shared {
                     Some(sh) => {
+                        if sh[0].2 != *expert_ffn {
+                            return None;
+                        }
                         let smats = [
                             resolve(&gpu, sh[0].0, sh[0].1)?,
                             resolve(&gpu, sh[1].0, sh[1].1)?,
@@ -12520,7 +12568,13 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
                         ..
                     } => {
                         let n_slots = *n_used + shared.is_some() as usize;
-                        let sig_last = shared_gate.is_some() as u32;
+                        let sig_last = if shared_gate.is_some() {
+                            1u32
+                        } else if shared.is_some() {
+                            2u32
+                        } else {
+                            0u32
+                        };
                         if rtopk_fused() {
                             enc.set_compute_pipeline_state(&rtopk_state);
                             enc.set_buffer(0, Some(&gpu.chunks[router.chunk].buf), 0);
@@ -14906,200 +14960,118 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             }
             cstamp!(gpu, enc, "attend");
             split_here!("attend");
-
-            matmul(
-                enc,
-                &states[3],
-                &mats[3],
-                q_dim,
-                hidden,
-                &gpu.y_arena,
-                attn_at,
-                out_at,
-            );
-            cstamp!(gpu, enc, "wo");
-            split_here!("wo");
-            if let Some(f) = &fusion {
-                if !no_barrier() {
-                    enc.memory_barrier_with_resources(&[y]);
-                }
-                // xs += wo output, then the FFN norm - one fused pass - and the
-                // router matmul, all before the single wait.
-                norm_rows(enc, &f.ffn_norm, 1, out_at);
-                cstamp!(gpu, enc, "fnorm");
-                if !no_barrier() {
-                    enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
-                }
-                if let Some((router, router_state)) = &f.router {
-                    matmul(
-                        enc,
-                        router_state,
-                        router,
-                        hidden,
-                        f.n_expert,
-                        &gpu.pf_hs,
-                        0,
-                        router_at,
-                    );
-                    cstamp!(gpu, enc, "rmm");
-                }
-                split_here!("ffnnorm_router");
-            }
-            enc.end_encoding();
-            ENCODE_NS.fetch_add(t_encode.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-            let t_wait = std::time::Instant::now();
-            if onebuf {
-                // Nothing: the chunk commits once, in prefill_end.
-            } else if defer {
-                gpu.commit_chained(cmd);
-            } else {
-                cmd.commit();
-                cmd.wait_until_completed();
-                note_gpu_times(cmd);
-            }
-            WAIT_NS.fetch_add(t_wait.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            if !defer && !onebuf && std::env::var_os("ALLPAKA_FFN_TIME").is_some() {
-                use objc::{msg_send, sel, sel_impl};
-                let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
-                let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
-                eprintln!("attbuf: {:.3} ms", (ge - gs) * 1e3);
-            }
-            if !onebuf {
-                CALLS.fetch_add(1, Ordering::Relaxed);
-            }
-            DISPATCHES.fetch_add(6, Ordering::Relaxed);
-
-            if fusion.is_some() && gpu_route() {
-                PF_ROUTER_AT.store(router_at as u64, Ordering::Relaxed);
-                return Vec::new();
-            }
-            let (src_at, out_len) = if fusion.is_some() {
-                (router_at, req.m * n_expert)
-            } else {
-                (out_at, req.m * hidden)
-            };
-            let mut out = vec![0f32; out_len];
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    (gpu.y_arena.contents() as *const f32).add(src_at),
-                    out.as_mut_ptr(),
-                    out.len(),
-                );
-            }
-            return out;
-        }
-
-        enc.set_compute_pipeline_state(&prep_state);
-        enc.set_buffer(0, Some(y), e(q_at));
-        enc.set_buffer(1, Some(y), e(k_at));
-        enc.set_buffer(2, Some(y), e(v_at));
-        enc.set_buffer(3, Some(&req.cache.buf), 0);
-        let args = QkPrepArgs {
-            n_heads: req.n_heads as u32,
-            n_kv_heads: req.n_kv_heads as u32,
-            head_dim: hd as u32,
-            kv_dim: req.kv_dim as u32,
-            eps: req.eps,
-            pos: req.base as u32,
-            has_qk_norm: req.q_norm.is_some() as u32,
-            rot_dim: req.rot_dim as u32,
-            k_base: req.k_off as u64,
-            v_base: req.v_off as u64,
-            has_bias: req.attn_bias.is_some() as u32,
-            pad2: 0,
-        };
-        enc.set_bytes(
-            4,
-            std::mem::size_of::<QkPrepArgs>() as u64,
-            &args as *const QkPrepArgs as *const _,
-        );
-        let ones = [1.0f32; ATTN_HEAD_DIM];
-        let qw = req.q_norm.unwrap_or(&ones);
-        let kw = req.k_norm.unwrap_or(&ones);
-        enc.set_bytes(5, (hd * 4) as u64, qw.as_ptr() as *const _);
-        enc.set_bytes(6, (hd * 4) as u64, kw.as_ptr() as *const _);
-        enc.set_buffer(7, Some(&gpu.x_arena), e(ropes_at));
-        // Bias buffers: resolved F32 regions for GLM, any valid buffer
-        // otherwise (the kernel skips them on has_bias == 0).
-        match &bias_refs {
-            Some((qb, kb, vb)) => {
-                enc.set_buffer(8, Some(&gpu.chunks[qb.chunk].buf), qb.w_off);
-                enc.set_buffer(9, Some(&gpu.chunks[kb.chunk].buf), kb.w_off);
-                enc.set_buffer(10, Some(&gpu.chunks[vb.chunk].buf), vb.w_off);
-            }
-            None => {
-                for index in 8u64..=10 {
-                    enc.set_buffer(index, Some(&req.cache.buf), 0);
-                }
-            }
-        }
-        enc.dispatch_thread_groups(
-            MTLSize::new((req.n_heads + 2 * req.n_kv_heads) as u64, req.m as u64, 1),
-            MTLSize::new(32, 1, 1),
-        );
-        cstamp!(gpu, enc, "prep");
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
-        }
-        split_here!("prep");
-
-        // Causal attention over every row in ONE dispatch: rows in grid.y,
-        // each over its own prefix.
-        enc.set_compute_pipeline_state(&attend_state);
-        enc.set_buffer(0, Some(&req.cache.buf), 0);
-        enc.set_buffer(1, Some(&req.cache.buf), 0);
-        enc.set_buffer(2, Some(y), e(q_at));
-        enc.set_buffer(3, Some(y), e(attn_at));
-        for (index, value) in [
-            (4u64, req.kv_dim as u32),
-            (5, hd as u32),
-            (6, req.base as u32),
-            (7, (req.n_heads / req.n_kv_heads.max(1)) as u32),
-        ] {
-            enc.set_bytes(index, 4, &value as *const u32 as *const _);
-        }
-        enc.set_bytes(8, 4, &req.scale as *const f32 as *const _);
-        for (index, value) in [(9u64, req.k_off as u64), (10, req.v_off as u64)] {
-            enc.set_bytes(index, 8, &value as *const u64 as *const _);
-        }
-        let heads32 = req.n_heads as u32;
-        enc.set_bytes(11, 4, &heads32 as *const u32 as *const _);
-        if attend_mm() {
-            // MMA tiles: same bindings as attend_rows, 8 rows per
-            // threadgroup.
-            enc.set_compute_pipeline_state(&gpu.pipelines[&("attend_mm", 1, 1)]);
-            let rows32 = req.m as u32;
-            enc.set_bytes(12, 4, &rows32 as *const u32 as *const _);
-            enc.dispatch_thread_groups(
-                MTLSize::new(req.n_heads as u64, (req.m as u64).div_ceil(8), 1),
-                MTLSize::new(128, 1, 1),
-            );
         } else {
-            let tile = match attend_rows_kernel() {
-                "attend_rows_t8" => 8u64,
-                "attend_rows_t4" => 4,
-                _ => 1,
+            enc.set_compute_pipeline_state(&prep_state);
+            enc.set_buffer(0, Some(y), e(q_at));
+            enc.set_buffer(1, Some(y), e(k_at));
+            enc.set_buffer(2, Some(y), e(v_at));
+            enc.set_buffer(3, Some(&req.cache.buf), 0);
+            let args = QkPrepArgs {
+                n_heads: req.n_heads as u32,
+                n_kv_heads: req.n_kv_heads as u32,
+                head_dim: hd as u32,
+                kv_dim: req.kv_dim as u32,
+                eps: req.eps,
+                pos: req.base as u32,
+                has_qk_norm: req.q_norm.is_some() as u32,
+                rot_dim: req.rot_dim as u32,
+                k_base: req.k_off as u64,
+                v_base: req.v_off as u64,
+                has_bias: req.attn_bias.is_some() as u32,
+                pad2: 0,
             };
-            if tile > 1 {
+            enc.set_bytes(
+                4,
+                std::mem::size_of::<QkPrepArgs>() as u64,
+                &args as *const QkPrepArgs as *const _,
+            );
+            let ones = [1.0f32; ATTN_HEAD_DIM];
+            let qw = req.q_norm.unwrap_or(&ones);
+            let kw = req.k_norm.unwrap_or(&ones);
+            enc.set_bytes(5, (hd * 4) as u64, qw.as_ptr() as *const _);
+            enc.set_bytes(6, (hd * 4) as u64, kw.as_ptr() as *const _);
+            enc.set_buffer(7, Some(&gpu.x_arena), e(ropes_at));
+            // Bias buffers: resolved F32 regions for GLM, any valid buffer
+            // otherwise (the kernel skips them on has_bias == 0).
+            match &bias_refs {
+                Some((qb, kb, vb)) => {
+                    enc.set_buffer(8, Some(&gpu.chunks[qb.chunk].buf), qb.w_off);
+                    enc.set_buffer(9, Some(&gpu.chunks[kb.chunk].buf), kb.w_off);
+                    enc.set_buffer(10, Some(&gpu.chunks[vb.chunk].buf), vb.w_off);
+                }
+                None => {
+                    for index in 8u64..=10 {
+                        enc.set_buffer(index, Some(&req.cache.buf), 0);
+                    }
+                }
+            }
+            enc.dispatch_thread_groups(
+                MTLSize::new((req.n_heads + 2 * req.n_kv_heads) as u64, req.m as u64, 1),
+                MTLSize::new(32, 1, 1),
+            );
+            cstamp!(gpu, enc, "prep");
+            if !no_barrier() {
+                enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
+            }
+            split_here!("prep");
+
+            // Causal attention over every row in ONE dispatch: rows in grid.y,
+            // each over its own prefix.
+            enc.set_compute_pipeline_state(&attend_state);
+            enc.set_buffer(0, Some(&req.cache.buf), 0);
+            enc.set_buffer(1, Some(&req.cache.buf), 0);
+            enc.set_buffer(2, Some(y), e(q_at));
+            enc.set_buffer(3, Some(y), e(attn_at));
+            for (index, value) in [
+                (4u64, req.kv_dim as u32),
+                (5, hd as u32),
+                (6, req.base as u32),
+                (7, (req.n_heads / req.n_kv_heads.max(1)) as u32),
+            ] {
+                enc.set_bytes(index, 4, &value as *const u32 as *const _);
+            }
+            enc.set_bytes(8, 4, &req.scale as *const f32 as *const _);
+            for (index, value) in [(9u64, req.k_off as u64), (10, req.v_off as u64)] {
+                enc.set_bytes(index, 8, &value as *const u64 as *const _);
+            }
+            let heads32 = req.n_heads as u32;
+            enc.set_bytes(11, 4, &heads32 as *const u32 as *const _);
+            if attend_mm() {
+                // MMA tiles: same bindings as attend_rows, 8 rows per
+                // threadgroup.
+                enc.set_compute_pipeline_state(&gpu.pipelines[&("attend_mm", 1, 1)]);
                 let rows32 = req.m as u32;
                 enc.set_bytes(12, 4, &rows32 as *const u32 as *const _);
                 enc.dispatch_thread_groups(
-                    MTLSize::new(req.n_heads as u64, (req.m as u64).div_ceil(tile), 1),
+                    MTLSize::new(req.n_heads as u64, (req.m as u64).div_ceil(8), 1),
                     MTLSize::new(128, 1, 1),
                 );
             } else {
-                enc.dispatch_thread_groups(
-                    MTLSize::new(req.n_heads as u64, req.m as u64, 1),
-                    MTLSize::new(128, 1, 1),
-                );
+                let tile = match attend_rows_kernel() {
+                    "attend_rows_t8" => 8u64,
+                    "attend_rows_t4" => 4,
+                    _ => 1,
+                };
+                if tile > 1 {
+                    let rows32 = req.m as u32;
+                    enc.set_bytes(12, 4, &rows32 as *const u32 as *const _);
+                    enc.dispatch_thread_groups(
+                        MTLSize::new(req.n_heads as u64, (req.m as u64).div_ceil(tile), 1),
+                        MTLSize::new(128, 1, 1),
+                    );
+                } else {
+                    enc.dispatch_thread_groups(
+                        MTLSize::new(req.n_heads as u64, req.m as u64, 1),
+                        MTLSize::new(128, 1, 1),
+                    );
+                }
             }
+            if !no_barrier() {
+                enc.memory_barrier_with_resources(&[y]);
+            }
+            cstamp!(gpu, enc, "attend");
+            split_here!("attend");
         }
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[y]);
-        }
-        cstamp!(gpu, enc, "attend");
-        split_here!("attend");
 
         matmul(
             enc,

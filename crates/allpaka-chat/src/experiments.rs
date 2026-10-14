@@ -227,7 +227,17 @@ pub(crate) async fn read_offline_score(
                 *means.entry(metric).or_default() += value / snapshot.samples.len() as f64;
             }
         }
-        if receipt["mean_scores"] != serde_json::to_value(means)? {
+        let Some(stored_means) = receipt["mean_scores"].as_object() else {
+            bail!("Offline mean integrity failure");
+        };
+        if stored_means.len() != means.len()
+            || means.iter().any(|(metric, expected)| {
+                stored_means
+                    .get(metric)
+                    .and_then(|v| v.as_f64())
+                    .is_none_or(|actual| !actual.is_finite() || (actual - expected).abs() > 1e-9)
+            })
+        {
             bail!("Offline mean integrity failure");
         }
         Ok(receipt)
@@ -1455,7 +1465,13 @@ fn verify_run(run: &Run, snapshot: &Snapshot) -> Result<()> {
             *means.entry(name.clone()).or_default() += value / run.items.len() as f64;
         }
     }
-    if run.mean_scores != means {
+    if run.mean_scores.len() != means.len()
+        || means.iter().any(|(name, expected)| {
+            run.mean_scores
+                .get(name)
+                .is_none_or(|actual| !actual.is_finite() || (actual - expected).abs() > 1e-9)
+        })
+    {
         bail!("Run mean metric receipt does not match its rows");
     }
     Ok(())

@@ -130,6 +130,7 @@ impl Store {
     fn write_locked(&self, queue: &Queue, bytes: &[u8]) -> Result<()> {
         let final_path = self.root.join(format!("{}.json", queue.id));
         let temp = self.root.join(format!("{}.tmp", queue.id));
+        let _ = std::fs::remove_file(&temp);
         let result = (|| -> Result<()> {
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create_new(true);

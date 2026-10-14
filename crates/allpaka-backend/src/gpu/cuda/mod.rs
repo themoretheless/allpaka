@@ -45,14 +45,15 @@ pub fn set_rope_inv_freq(inv_freq: &[f32]) -> bool {
         return false;
     }
     with_gpu(|gpu| {
-        if gpu.d_rope_freq_n == inv_freq.len() && gpu.d_rope_freq.is_some() {
-            return Some(true);
+        if gpu.d_rope_freq_n != inv_freq.len() || gpu.d_rope_freq.is_none() {
+            let buf = gpu.stream.alloc_zeros::<f32>(inv_freq.len()).ok()?;
+            gpu.d_rope_freq = Some(buf);
+            gpu.d_rope_freq_n = inv_freq.len();
         }
-        let mut buf = gpu.stream.alloc_zeros::<f32>(inv_freq.len()).ok()?;
-        gpu.stream.memcpy_htod(inv_freq, &mut buf).ok()?;
-        gpu.d_rope_freq = Some(buf);
-        gpu.d_rope_freq_n = inv_freq.len();
-        // Rope inputs changed shape relative to table path — drop graphs.
+        if let Some(buf) = gpu.d_rope_freq.as_mut() {
+            gpu.stream.memcpy_htod(inv_freq, buf).ok()?;
+        }
+        // Rope inputs changed — drop graphs.
         gpu.decode_graph = None;
         gpu.decode_fa_graphs = None;
         gpu.decode_fa_attn = None;
@@ -1306,6 +1307,15 @@ fn decode_token_one_fused(
         while fa_bucket < need {
             fa_bucket *= 2;
         }
+        let cache_id = req.cache as *const SharedRegion as usize as u64;
+        let ssm_id = req
+            .ssm
+            .map_or(0u64, |s| s as *const SharedRegion as usize as u64);
+        let w0_id = req
+            .layers
+            .first()
+            .map_or(0u64, |l| l.wq.1.as_ptr() as usize as u64);
+        let out_id = req.output.1.as_ptr() as usize as u64;
         for &v in &[
             req.layers.len() as u64,
             hidden as u64,
@@ -1316,6 +1326,10 @@ fn decode_token_one_fused(
             req.kv_dim as u64,
             hd as u64,
             fa_bucket,
+            cache_id,
+            ssm_id,
+            w0_id,
+            out_id,
         ] {
             h ^= v;
             h = h.wrapping_mul(0x100000001b3);
@@ -3229,7 +3243,7 @@ fn decode_token_one(
                 n_used,
                 sigmoid,
                 shared,
-                shared_gate: _,
+                shared_gate,
             } => {
                 if router.0 != GgmlType::F32 || *n_used == 0 {
                     return None;
@@ -3315,8 +3329,15 @@ fn decode_token_one(
                     let mut act = g;
                     crate::ops::swiglu(&mut act, &u);
                     let d = matvec(sh[2].0, sh[2].1, sh[0].2, hidden, &act)?;
+                    let sh_scale = match shared_gate {
+                        Some(sg_bytes) => {
+                            let sg_logit = matvec(GgmlType::F32, sg_bytes, hidden, 1, &h)?;
+                            1.0 / (1.0 + (-sg_logit[0]).exp())
+                        }
+                        None => 1.0,
+                    };
                     for (a, b) in acc.iter_mut().zip(&d) {
-                        *a += *b;
+                        *a += sh_scale * *b;
                     }
                 }
                 acc
@@ -3330,7 +3351,18 @@ fn decode_token_one(
     let out_w = norm_f32_bytes(req.output_norm, hidden)?;
     crate::ops::rmsnorm(&mut x, &out_w, req.eps);
     let logits = matvec(req.output.0, req.output.1, hidden, req.output.2, &x)?;
-    if req.argmax {
+    if req.m > 1 {
+        let idx = logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i as u32)
+            .unwrap_or(0);
+        Some(TokenOut::Rows {
+            argmax: vec![idx],
+            hidden: x,
+        })
+    } else if req.argmax {
         let idx = logits
             .iter()
             .enumerate()

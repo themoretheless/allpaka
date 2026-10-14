@@ -112,7 +112,11 @@ pub struct TensorInfo {
 
 impl TensorInfo {
     pub fn elements(&self) -> u64 {
-        self.dims.iter().product()
+        self.dims
+            .iter()
+            .copied()
+            .try_fold(1u64, u64::checked_mul)
+            .unwrap_or(u64::MAX)
     }
 
     /// Bytes this tensor occupies on disk, or an error for a dtype this crate
@@ -129,7 +133,12 @@ impl TensorInfo {
                 self.ggml_type
             ),
         };
-        let elements = self.elements();
+        let elements = self
+            .dims
+            .iter()
+            .copied()
+            .try_fold(1u64, u64::checked_mul)
+            .with_context(|| format!("tensor {:?}: element count overflows u64", self.name))?;
         if elements % be != 0 {
             bail!(
                 "tensor {:?}: {} elements is not a whole number of {}-element blocks",
@@ -138,7 +147,9 @@ impl TensorInfo {
                 be
             );
         }
-        Ok(elements / be * bb)
+        (elements / be)
+            .checked_mul(bb)
+            .with_context(|| format!("tensor {:?}: byte size overflows u64", self.name))
     }
 }
 

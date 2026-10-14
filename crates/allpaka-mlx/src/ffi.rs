@@ -103,8 +103,8 @@ pub enum GgmlType {
     Q5_1 = 7,
     Q8_0 = 8,
     Q6_K = 14,
-    MlxQ4 = 99,  // MLX affine 4-bit
-    MlxQ8 = 100, // MLX affine 8-bit
+    MlxQ4 = 100, // MLX affine 4-bit
+    MlxQ8 = 101, // MLX affine 8-bit
 }
 
 impl From<GgmlType> for mlx_dtype_t {

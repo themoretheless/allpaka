@@ -489,19 +489,16 @@ impl Store {
         trace_hash: &str,
     ) -> Result<Option<serde_json::Value>> {
         let mut active = false;
-        for offset in (0..1000).step_by(100) {
-            let catalog = self.list(project, offset, 100)?;
-            for row in catalog["rules"].as_array().unwrap() {
-                let id = row["rule"]["id"].as_str().unwrap();
-                if self
-                    .binding(project, id)?
-                    .is_some_and(|binding| binding.active)
-                {
-                    active = true;
-                    break;
-                }
+        let mut seen = std::collections::BTreeSet::new();
+        for snapshot in self.project_snapshots(project)? {
+            if !seen.insert(snapshot.rule.id.clone()) {
+                continue;
             }
-            if active || catalog["has_more"] == false {
+            if self
+                .binding(project, &snapshot.rule.id)?
+                .is_some_and(|binding| binding.active)
+            {
+                active = true;
                 break;
             }
         }
@@ -787,14 +784,8 @@ impl Store {
             }
         }
         let mut identities = std::collections::BTreeSet::new();
-        for offset in (0..1000).step_by(100) {
-            let catalog = self.list(project, offset, 100)?;
-            for row in catalog["rules"].as_array().unwrap() {
-                identities.insert(row["rule"]["id"].as_str().unwrap().to_owned());
-            }
-            if catalog["has_more"] == false {
-                break;
-            }
+        for snapshot in self.project_snapshots(project)? {
+            identities.insert(snapshot.rule.id);
         }
         let mut decisions = Vec::new();
         for identity in identities {
@@ -883,11 +874,11 @@ impl Store {
         }
         Ok(())
     }
-    fn list(&self, project: &str, offset: usize, limit: usize) -> Result<serde_json::Value> {
-        if !technical(project) || offset > 1000 || !(1..=100).contains(&limit) {
+    fn project_snapshots(&self, project: &str) -> Result<Vec<Snapshot>> {
+        if !technical(project) {
             bail!("Invalid online rule page");
         }
-        let mut rows = Vec::new();
+        let mut snapshots = Vec::new();
         let mut count = 0;
         for entry in std::fs::read_dir(&self.directory)? {
             let entry = entry?;
@@ -907,14 +898,24 @@ impl Store {
             if snapshot.rule.project_id != project {
                 continue;
             }
-            rows.push(serde_json::json!({"rule_sha256":snapshot.rule_sha256,"rule":snapshot.rule}));
+            snapshots.push(snapshot);
         }
-        rows.sort_by(|a, b| a["rule_sha256"].as_str().cmp(&b["rule_sha256"].as_str()));
-        let total = rows.len();
-        let rules = rows
+        snapshots.sort_by(|a, b| a.rule_sha256.cmp(&b.rule_sha256));
+        Ok(snapshots)
+    }
+    fn list(&self, project: &str, offset: usize, limit: usize) -> Result<serde_json::Value> {
+        if !technical(project) || offset > 1000 || !(1..=100).contains(&limit) {
+            bail!("Invalid online rule page");
+        }
+        let snapshots = self.project_snapshots(project)?;
+        let total = snapshots.len();
+        let rules = snapshots
             .into_iter()
             .skip(offset)
             .take(limit)
+            .map(|snapshot| {
+                serde_json::json!({"rule_sha256":snapshot.rule_sha256,"rule":snapshot.rule})
+            })
             .collect::<Vec<_>>();
         Ok(
             serde_json::json!({"kind":"online_evaluation_rule_catalog","project_id":project,"offset":offset,"limit":limit,"total":total,"has_more":offset+rules.len()<total,"order":"rule_sha256_ascending","rules":rules,"provider_calls":0,"automatic_execution":false}),

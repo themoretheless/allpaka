@@ -78,6 +78,13 @@ mod integration_tests {
         assert_eq!(q4.bytes, 68);
         let raw = allpaka_mlx::tensor_data(&container, q4).unwrap();
         assert_eq!(raw.len(), 68);
+        assert!(raw.iter().all(|&b| b == 0));
+
+        // Verify bare tensor name lookup and exact byte contents of second tensor
+        let w_f32 = container.tensor_by_name("weights.f32").unwrap();
+        assert_eq!(w_f32.bytes, 4);
+        let w_raw = allpaka_mlx::tensor_data(&container, w_f32).unwrap();
+        assert_eq!(w_raw, &[0, 0x3f, 0x00, 0x00]);
     }
 
     #[test]
@@ -125,8 +132,8 @@ mod integration_tests {
 
         let shape_3d_expert = vec![8, 2048, 512]; // [expert_count, intermediate, hidden]
         let (n_out, n_in) = allpaka_mlx::flatten_for_matmul(&shape_3d_expert);
-        assert_eq!(n_out, 2048 * 512);
-        assert_eq!(n_in, 8);
+        assert_eq!(n_out, 8 * 2048);
+        assert_eq!(n_in, 512);
     }
 
     #[test]

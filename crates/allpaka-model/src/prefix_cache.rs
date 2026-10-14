@@ -129,16 +129,30 @@ impl<V> PrefixCache<V> {
             self.remove_entry(index);
         }
         while self.allocated_bytes().saturating_add(bytes) > self.budget_bytes {
-            let Some(index) = self
+            // Prefer evicting an unpinned entry first (which actually frees budget bytes).
+            let unpinned_lru = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| Arc::strong_count(&entry.value) == 1)
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(index, _)| index);
+            if let Some(index) = unpinned_lru {
+                self.remove_entry(index);
+                continue;
+            }
+            // Only pinned entries remain in `self.entries`. Retiring them will not reduce
+            // `allocated_bytes()`, so retire the oldest pinned entry and abort insertion.
+            if let Some(index) = self
                 .entries
                 .iter()
                 .enumerate()
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(index, _)| index)
-            else {
-                return;
-            };
-            self.remove_entry(index);
+            {
+                self.remove_entry(index);
+            }
+            return;
         }
         self.entries.push(Entry {
             tokens: tokens.into(),

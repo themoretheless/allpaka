@@ -142,12 +142,17 @@ impl SsmCache {
         self.conv_elems + self.state_elems
     }
 
-    /// Allocate (once) and arm the rollback slots for a speculative verify.
-    /// The buffer is `slots` whole-region copies; re-arming a smaller count
-    /// reuses it.
+    /// Allocate (or grow) and arm the rollback slots for a speculative verify.
+    /// The buffer is `slots` whole-region copies; re-arming a smaller or equal
+    /// count reuses the existing allocation.
     pub fn arm_slots(&mut self, slots: usize) {
-        if self.slot_store.is_none() {
-            let store = Region::zeroed(slots * self.total_elems() * 2);
+        let needed_elems = slots * self.total_elems() * 2;
+        let needs_alloc = self
+            .slot_store
+            .as_ref()
+            .is_none_or(|store| store.as_slice().len() < needed_elems);
+        if needs_alloc {
+            let store = Region::zeroed(needed_elems);
             self.slot_shared = allpaka_backend::gpu::wrap_region(store.as_bytes());
             self.slot_store = Some(store);
         }
@@ -199,6 +204,10 @@ impl SsmCache {
             let sp = self.slot(i).as_ptr();
             let dp = self.store.as_mut_slice().as_mut_ptr() as *mut f32;
             std::ptr::copy_nonoverlapping(sp, dp, n);
+        }
+        if let Some(sh) = self.shared.as_mut() {
+            let bytes = self.store.as_bytes();
+            allpaka_backend::gpu::upload_region_range(sh, 0, bytes);
         }
         self.slots_armed = false;
     }
@@ -299,6 +308,10 @@ impl SsmCache {
             "ssm snapshot shape mismatch"
         );
         self.floats_mut()[..snap.len()].copy_from_slice(snap);
+        if let Some(sh) = self.shared.as_mut() {
+            let bytes = self.store.as_bytes();
+            allpaka_backend::gpu::upload_region_range(sh, 0, bytes);
+        }
     }
 
     /// This layer's conv window rows, `(d_conv - 1) * conv_channels`.

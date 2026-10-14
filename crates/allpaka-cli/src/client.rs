@@ -58,35 +58,44 @@ fn request_within(
 
     let mut response = Vec::new();
     stream.read_to_end(&mut response)?;
-    let text = String::from_utf8_lossy(&response);
-    let (head, rest) = text
-        .split_once("\r\n\r\n")
+    let split_pos = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
         .with_context(|| format!("malformed HTTP response from {path}"))?;
+    let head = String::from_utf8_lossy(&response[..split_pos]);
+    let rest_bytes = &response[split_pos + 4..];
     let status = head.lines().next().unwrap_or("");
     if !status.contains("200") {
-        bail!("{path} returned {status}: {}", &rest[..rest.len().min(300)]);
+        let rest_preview = String::from_utf8_lossy(&rest_bytes[..rest_bytes.len().min(300)]);
+        bail!("{path} returned {status}: {rest_preview}");
     }
-    let body_text = if head
+    let body_bytes = if head
         .to_ascii_lowercase()
         .contains("transfer-encoding: chunked")
     {
-        dechunk(rest)?
+        dechunk(rest_bytes)?
     } else {
-        rest.to_string()
+        rest_bytes.to_vec()
     };
-    serde_json::from_str(&body_text).with_context(|| format!("parsing {path} response as JSON"))
+    serde_json::from_slice(&body_bytes).with_context(|| format!("parsing {path} response as JSON"))
 }
 
-fn dechunk(raw: &str) -> Result<String> {
-    let mut out = String::new();
+fn dechunk(raw: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
     let mut rest = raw;
     loop {
-        let (size_line, tail) = rest.split_once("\r\n").context("truncated chunk header")?;
-        let size = usize::from_str_radix(size_line.trim(), 16).context("bad chunk size")?;
+        let crlf = rest
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .context("truncated chunk header")?;
+        let size_line = std::str::from_utf8(&rest[..crlf]).context("non-UTF8 chunk header")?;
+        let size_hex = size_line.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_hex, 16).context("bad chunk size")?;
+        let tail = &rest[crlf + 2..];
         if size == 0 {
             return Ok(out);
         }
-        out.push_str(tail.get(..size).context("truncated chunk body")?);
+        out.extend_from_slice(tail.get(..size).context("truncated chunk body")?);
         rest = tail.get(size + 2..).context("truncated chunk trailer")?;
     }
 }

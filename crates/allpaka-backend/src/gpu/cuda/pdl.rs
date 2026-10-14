@@ -137,8 +137,8 @@ pub unsafe fn launch_pdl_inner(
         return launch.launch(cfg);
     }
 
-    let stream_ptr = TLS_STREAM.with(|c| c.get());
-    let f = TLS_CU.with(|c| c.get());
+    let stream_ptr = TLS_STREAM.with(|c| c.replace(std::ptr::null()));
+    let f = TLS_CU.with(|c| c.replace(std::ptr::null_mut()));
     if stream_ptr.is_null() || f.is_null() {
         return launch.launch(cfg);
     }
@@ -163,22 +163,7 @@ pub unsafe fn launch_pdl_inner(
         }
     }
 
-    // One-shot scan if fixed offset failed (cudarc layout drift).
-    const OFFS: &[usize] = &[64, 72, 80, 88, 56, 48, 40, 96];
-    for &try_off in OFFS {
-        let Some(args) = args_vec(launch, try_off) else {
-            continue;
-        };
-        if launch_ex(stream, f, cfg, args.as_mut_slice(), false).is_err() {
-            continue;
-        }
-        ARGS_OFF.store(try_off, Ordering::Relaxed);
-        USE_PDL_ATTR.store(true, Ordering::Relaxed);
-        eprintln!("cuda: PDL args offset calibrated to {try_off}");
-        return Ok(None);
-    }
-
-    eprintln!("cuda: PDL calibration failed; disabling PDL");
+    eprintln!("cuda: PDL launch failed; disabling PDL and falling back to cudarc launch");
     PDL_DEAD.store(true, Ordering::Relaxed);
     launch.launch(cfg)
 }
