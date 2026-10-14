@@ -509,6 +509,115 @@ impl PromptLookupSpeculator<'_> {
         );
         self.round_with_drafts(next, &drafts)
     }
+
+    /// Draft up to `self.k` tokens from `prediction` / `history` and verify them
+    /// using a caller-supplied sampling/arbitration closure `pick(row_logits, recent_tokens) -> u32`.
+    ///
+    /// When `drafts` is empty, returns `emitted: vec![next]` and advances the
+    /// session by 1 step using `model.forward`.
+    pub fn round_with_sampler<F>(
+        &mut self,
+        history: &[u32],
+        prediction: &[u32],
+        next: u32,
+        mut pick: F,
+    ) -> Result<(Round, Vec<f32>)>
+    where
+        F: FnMut(&[f32], &[u32]) -> u32,
+    {
+        let avail = self
+            .session
+            .capacity()
+            .saturating_sub(self.session.pos() + 1);
+        let max_k = self.k.min(avail);
+        let drafts = find_prompt_drafts(
+            history,
+            prediction,
+            next,
+            max_k,
+            self.ngram_min,
+            self.ngram_max,
+        );
+        let model = self.model;
+        let s = &mut *self.session;
+        let start = s.pos();
+        let k = drafts.len();
+        if k == 0 {
+            if start + 1 > s.capacity() {
+                bail!("kv capacity exhausted for a decode step");
+            }
+            let logits = model.forward(next, s)?;
+            let mut recent = Vec::with_capacity(history.len() + 1);
+            recent.extend_from_slice(history);
+            recent.push(next);
+            let new_next = pick(&logits, &recent);
+            return Ok((
+                Round {
+                    emitted: vec![next],
+                    next: new_next,
+                    drafted: 0,
+                    accepted: 0,
+                },
+                logits,
+            ));
+        }
+        if start + k + 1 > s.capacity() {
+            bail!("kv capacity exhausted for a speculative round");
+        }
+        if let Some(ssm) = s.ssm.as_mut() {
+            ssm.arm_slots(k + 1);
+        }
+
+        let mut batch = Vec::with_capacity(k + 1);
+        batch.push(next);
+        batch.extend_from_slice(&drafts);
+        let all = model.forward_batch_full(&batch, s)?;
+        let vocab = model.config.vocab as usize;
+
+        let mut emitted = Vec::with_capacity(k + 1);
+        emitted.push(next);
+        let mut recent = Vec::with_capacity(history.len() + k + 1);
+        recent.extend_from_slice(history);
+        recent.push(next);
+
+        let mut accepted = 0usize;
+        let mut new_next = 0u32;
+        for (i, &d) in drafts.iter().enumerate() {
+            let row_logits = &all[i * vocab..(i + 1) * vocab];
+            let want = pick(row_logits, &recent);
+            if want == d {
+                emitted.push(d);
+                recent.push(d);
+                accepted += 1;
+            } else {
+                new_next = want;
+                break;
+            }
+        }
+        if accepted == k {
+            let last_logits = &all[k * vocab..(k + 1) * vocab];
+            new_next = pick(last_logits, &recent);
+            if let Some(ssm) = s.ssm.as_mut() {
+                ssm.disarm_slots();
+            }
+        } else {
+            s.truncate(start + 1 + accepted);
+            if let Some(ssm) = s.ssm.as_mut() {
+                ssm.restore_slot(accepted);
+            }
+        }
+        debug_assert_eq!(s.pos(), start + 1 + accepted);
+        let committed_logits = all[accepted * vocab..(accepted + 1) * vocab].to_vec();
+        Ok((
+            Round {
+                emitted,
+                next: new_next,
+                drafted: k,
+                accepted,
+            },
+            committed_logits,
+        ))
+    }
 }
 
 #[cfg(test)]

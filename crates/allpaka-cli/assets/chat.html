@@ -339,11 +339,14 @@ function dots() {
   return box;
 }
 let aborter = null;
+const sessionId = 'chat-' + Math.random().toString(36).slice(2, 10);
 const qInput = document.getElementById('q');
 const ghostEl = document.getElementById('ghost');
 const suggBox = document.getElementById('suggestions');
 let ghostText = '';
 let predictTimer = null;
+let prewarmTimer = null;
+let lastPrewarmed = '';
 const presetPrompts = [
   'Объясни архитектуру этого проекта и ключевые модули',
   'Напиши быстрый код на Rust с модульными тестами',
@@ -400,9 +403,33 @@ function renderSuggestions(items) {
     chip.addEventListener('click', () => {
       qInput.value = text;
       setGhost('', '');
+      schedulePrewarm(text);
       qInput.focus();
     });
     suggBox.appendChild(chip);
+  }
+}
+async function prewarmDraft(draft) {
+  const clean = (draft || '').trim();
+  if (aborter || clean.length < 4 || clean === lastPrewarmed) return;
+  lastPrewarmed = clean;
+  try {
+    await fetch('/v1/prompt/prewarm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        session_id: sessionId,
+        messages: history,
+        draft: clean,
+        max_tokens: num('max_tokens', 1024)
+      })
+    });
+  } catch (_) {}
+}
+function schedulePrewarm(draft) {
+  clearTimeout(prewarmTimer);
+  if (draft && draft.trim().length >= 4) {
+    prewarmTimer = setTimeout(() => prewarmDraft(draft), 420);
   }
 }
 async function refreshPredictions(draft) {
@@ -411,7 +438,7 @@ async function refreshPredictions(draft) {
     const r = await fetch('/v1/prompt/predict', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({draft: draft || '', messages: history, max_tokens: 10})
+      body: JSON.stringify({session_id: sessionId, draft: draft || '', messages: history, max_tokens: 10})
     });
     if (!r.ok) return;
     const j = await r.json();
@@ -427,11 +454,13 @@ qInput.addEventListener('input', () => {
   const val = qInput.value;
   if (!val) {
     setGhost('', '');
+    clearTimeout(prewarmTimer);
     return;
   }
   setGhost(val, localPredict(val));
   clearTimeout(predictTimer);
   predictTimer = setTimeout(() => refreshPredictions(val), 120);
+  schedulePrewarm(val);
 });
 qInput.addEventListener('keydown', (e) => {
   if (!ghostText) return;
@@ -441,6 +470,7 @@ qInput.addEventListener('keydown', (e) => {
     setGhost('', '');
     const nextVal = qInput.value;
     setGhost(nextVal, localPredict(nextVal));
+    schedulePrewarm(nextVal);
   } else if (e.key === 'Escape') {
     setGhost('', '');
   }
@@ -455,6 +485,7 @@ document.getElementById('f').addEventListener('submit', async (e) => {
   if (!text) return;
   q.value = '';
   setGhost('', '');
+  clearTimeout(prewarmTimer);
   suggBox.replaceChildren();
   aborter = new AbortController();
   btn.textContent = '⏹';
@@ -480,6 +511,7 @@ document.getElementById('f').addEventListener('submit', async (e) => {
       headers: {'Content-Type': 'application/json'},
       signal: aborter.signal,
       body: JSON.stringify({
+        session_id: sessionId,
         messages: history,
         max_tokens: num('max_tokens', 1024),
         temperature: num('temperature', 0.7),

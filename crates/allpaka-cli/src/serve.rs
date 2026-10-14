@@ -194,6 +194,117 @@ struct ServeRequestContext<'a> {
     rag: &'a RagTools,
 }
 
+/// Speculatively prefill `messages` into the active session and `PrefixCache`
+/// while the user is still typing, reducing Time-To-First-Token (TTFT) on submit.
+fn prewarm_prompt(
+    context: &mut InferenceContext<'_>,
+    messages: &[(String, String)],
+    reserve_tokens: usize,
+) -> Result<(usize, usize)> {
+    context.control.check()?;
+    let model = context.model;
+    let tok = context.tok;
+    let template = context.template;
+    let chat = &mut *context.chat;
+    let prefixes = &mut *context.prefixes;
+    let prefix_namespace = context.prefix_namespace;
+    let prompt = template.prompt(tok, messages)?;
+    let max_tokens = reserve_tokens.min(MAX_NEW_TOKENS);
+    if prompt.is_empty()
+        || prompt.len().saturating_add(max_tokens).saturating_add(1) > SESSION_TOKENS
+    {
+        return Ok((0, 0));
+    }
+
+    let mut common = chat
+        .tokens
+        .iter()
+        .zip(&prompt)
+        .take_while(|(a, b)| **a == **b)
+        .count();
+    let mut logits: Vec<f32> = Vec::new();
+    let mut skip_prefill = false;
+
+    if prompt.len() + max_tokens + 1 > chat.session.capacity() {
+        chat.reset(model, prompt.len() + max_tokens + 1)?;
+        chat.tokens.clear();
+        common = 0;
+    } else if chat.session.ssm.is_some() {
+        if common < chat.tokens.len() {
+            match exact_prefix_snapshot(prefixes, prefix_namespace, &prompt[..common]) {
+                Some(snap) => {
+                    let state = snap
+                        .ssm_state
+                        .as_ref()
+                        .expect("SSM prefix snapshot must contain recurrent state");
+                    chat.session
+                        .ssm
+                        .as_mut()
+                        .expect("ssm session")
+                        .restore(state);
+                    chat.session.truncate(common);
+                    chat.tokens.truncate(common);
+                    if common == prompt.len() {
+                        logits = snap.logits.clone();
+                        skip_prefill = true;
+                    }
+                }
+                None => {
+                    chat.reset(model, prompt.len() + max_tokens + 1)?;
+                    chat.tokens.clear();
+                    common = 0;
+                }
+            }
+        } else if common == prompt.len() {
+            if let Some(snap) = exact_prefix_snapshot(prefixes, prefix_namespace, &prompt) {
+                logits = snap.logits.clone();
+                skip_prefill = true;
+            } else {
+                return Ok((0, common));
+            }
+        }
+    } else {
+        if common == prompt.len() {
+            if let Some(snap) = exact_prefix_snapshot(prefixes, prefix_namespace, &prompt) {
+                logits = snap.logits.clone();
+                skip_prefill = true;
+            } else {
+                common = common.saturating_sub(1);
+            }
+        }
+        chat.session.truncate(common);
+        chat.tokens.truncate(common);
+    }
+
+    let prefill_chunk = allpaka_model::Model::prefill_chunk();
+    if !skip_prefill {
+        for chunk in prompt[common..].chunks(prefill_chunk) {
+            context.control.check()?;
+            logits = model.forward_batch(chunk, &mut chat.session)?;
+            chat.tokens.extend_from_slice(chunk);
+        }
+    }
+
+    if !logits.is_empty() {
+        let ssm_state = chat.session.ssm.as_ref().map(|ssm| ssm.snapshot());
+        let value_bytes = logits.len() * size_of::<f32>()
+            + ssm_state
+                .as_ref()
+                .map_or(0, |state| state.len() * size_of::<f32>());
+        prefixes.insert(
+            prefix_key(prefix_namespace, &prompt),
+            PrefixSnap {
+                tokens: prompt.len(),
+                ssm_state,
+                logits,
+            },
+            value_bytes,
+        );
+    }
+
+    Ok((prompt.len().saturating_sub(common), common))
+}
+
 fn run_inference(
     context: &mut InferenceContext<'_>,
     request: GenerationRequest<'_>,
@@ -362,7 +473,7 @@ fn run_inference(
     let mut emitted_len = 0usize;
     let mut finish = "length";
     let mut greedy_next: Option<u32> = None;
-    let use_pld = prompt_lookup_k > 0 && (greedy || !prediction_tokens.is_empty());
+    let use_pld = prompt_lookup_k > 0;
     crate::airbug::span("decode", || -> Result<()> {
         while generated.len() < max_tokens {
             context.control.check()?;
@@ -384,7 +495,18 @@ fn run_inference(
                     ngram_min: if prediction_tokens.is_empty() { 2 } else { 1 },
                     ngram_max: 4,
                 };
-                let round = spec.round(&chat.tokens, prediction_tokens, next)?;
+                let round = if greedy {
+                    spec.round(&chat.tokens, prediction_tokens, next)?
+                } else {
+                    let (r, committed_logits) = spec.round_with_sampler(
+                        &chat.tokens,
+                        prediction_tokens,
+                        next,
+                        |l, rec| sampler.pick(l, rec),
+                    )?;
+                    logits = committed_logits;
+                    r
+                };
                 let mut hit_stop = false;
                 let mut accepted_before_stop = 0usize;
                 for &emitted_tok in &round.emitted {
@@ -1501,7 +1623,10 @@ fn dispatch_connection(
         .map_err(|_| anyhow::anyhow!("model service lock poisoned: {model_name}"))?;
     let is_chat = connection
         .request_line
-        .starts_with("POST /v1/chat/completions");
+        .starts_with("POST /v1/chat/completions")
+        || connection
+            .request_line
+            .starts_with("POST /v1/prompt/prewarm");
     let request: Value = serde_json::from_str(&connection.body).unwrap_or(Value::Null);
     let session_id = request
         .get("session_id")
@@ -1723,6 +1848,33 @@ fn handle(
             &json!({
                 "completion": completion,
                 "suggestions": suggestions,
+            }),
+        );
+    }
+    if request_line.starts_with("POST /v1/prompt/prewarm") {
+        let req: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
+        let raw_messages = req["messages"].as_array().map_or(&[][..], Vec::as_slice);
+        let draft = req["draft"].as_str().unwrap_or("").trim();
+        let reserve_tokens = req["max_tokens"].as_u64().unwrap_or(1024) as usize;
+        let mut turns = render_messages(raw_messages, None);
+        if !draft.is_empty() {
+            turns.push(("user".into(), draft.to_string()));
+        }
+        if turns.is_empty() {
+            return respond(
+                &mut stream,
+                200,
+                &json!({"prewarmed_tokens": 0, "cached_tokens": 0}),
+            );
+        }
+        let (prewarmed, cached) = prewarm_prompt(&mut context.inference, &turns, reserve_tokens)?;
+        return respond(
+            &mut stream,
+            200,
+            &json!({
+                "prewarmed_tokens": prewarmed,
+                "cached_tokens": cached,
+                "context_used": context.inference.chat.tokens.len(),
             }),
         );
     }
