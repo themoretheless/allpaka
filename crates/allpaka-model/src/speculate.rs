@@ -79,7 +79,8 @@ impl Speculator<'_> {
             .forward_batch_full(&batch, self.target_session)?;
         let vocab = self.target.config.vocab as usize;
 
-        let mut emitted = vec![next];
+        let mut emitted = Vec::with_capacity(k + 1);
+        emitted.push(next);
         let mut accepted = 0;
         let mut new_next = 0u32;
         for (i, &d) in drafts.iter().enumerate() {
@@ -140,6 +141,18 @@ fn argmax(logits: &[f32]) -> u32 {
     best_idx as u32
 }
 
+#[inline]
+fn mtp_debug_enabled() -> bool {
+    static DBG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DBG.get_or_init(|| std::env::var_os("ALLPAKA_MTP_DEBUG").is_some())
+}
+
+#[inline]
+fn verify_parity_enabled() -> bool {
+    static PARITY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PARITY.get_or_init(|| std::env::var_os("ALLPAKA_VERIFY_PARITY").is_some())
+}
+
 /// MTP (nextn) speculation: the draft is the target model's own MTP block,
 /// not a second model. Both draft and verify share one session (the draft
 /// writes only the MTP layer's KV slot at explicit positions, the trunk's
@@ -167,8 +180,8 @@ impl MtpSpeculator<'_> {
         let k = self.k.max(1);
         let model = self.model;
         let s = &mut *self.session;
-        let dbg = std::env::var_os("ALLPAKA_MTP_DEBUG").is_some();
-        let t0 = std::time::Instant::now();
+        let dbg = mtp_debug_enabled();
+        let t0 = dbg.then(std::time::Instant::now);
         let start = s.pos();
         if start + k + 1 > s.capacity() {
             bail!("kv capacity exhausted for a speculative round");
@@ -180,7 +193,7 @@ impl MtpSpeculator<'_> {
         if let Some(ssm) = s.ssm.as_mut() {
             ssm.arm_slots(k + 1);
         }
-        if dbg {
+        if let Some(t0) = t0 {
             eprintln!("mtp round @{start}: arm {:?}", t0.elapsed());
         }
 
@@ -190,9 +203,9 @@ impl MtpSpeculator<'_> {
         let mut drafts = Vec::with_capacity(k);
         let mut feed = next;
         for i in 0..k {
-            let ts = std::time::Instant::now();
+            let ts = dbg.then(std::time::Instant::now);
             let (logits, h) = model.mtp_step(&self.h, feed, start + i, s)?;
-            if dbg {
+            if let Some(ts) = ts {
                 eprintln!("  draft step {i}: {:?}", ts.elapsed());
             }
             let t = argmax(&logits);
@@ -200,7 +213,7 @@ impl MtpSpeculator<'_> {
             self.h = h;
             feed = t;
         }
-        if dbg {
+        if let Some(t0) = t0 {
             eprintln!("  draft total: {:?}\n  drafts: {drafts:?}", t0.elapsed());
         }
 
@@ -214,10 +227,10 @@ impl MtpSpeculator<'_> {
         let mut batch = Vec::with_capacity(k + 1);
         batch.push(next);
         batch.extend_from_slice(&drafts);
-        let tv = std::time::Instant::now();
+        let tv = dbg.then(std::time::Instant::now);
         let hidden = model.config.hidden as usize;
-        let parity = std::env::var_os("ALLPAKA_VERIFY_PARITY").is_some();
-        let gpu0 = allpaka_backend::gpu::stats();
+        let parity = verify_parity_enabled();
+        let gpu0 = dbg.then(allpaka_backend::gpu::stats);
         let (row_argmax, hidden_rows) = if parity {
             let (all, h) = model.forward_batch_full_hn(&batch, s)?;
             let vocab = model.config.vocab as usize;
@@ -247,7 +260,7 @@ impl MtpSpeculator<'_> {
                 }
             }
         };
-        if dbg {
+        if let (Some(tv), Some(gpu0)) = (tv, gpu0) {
             let gpu1 = allpaka_backend::gpu::stats();
             eprintln!(
                 "  verify {} tok: {:?} ({} dispatches, wait {:.1} ms)",
@@ -258,7 +271,8 @@ impl MtpSpeculator<'_> {
             );
         }
 
-        let mut emitted = vec![next];
+        let mut emitted = Vec::with_capacity(k + 1);
+        emitted.push(next);
         let mut accepted = 0;
         let mut new_next = 0u32;
         for (i, &d) in drafts.iter().enumerate() {
@@ -300,22 +314,26 @@ impl MtpSpeculator<'_> {
             if let Some(ssm) = s.ssm.as_mut() {
                 ssm.disarm_slots();
             }
-            self.h = hidden_rows[k * hidden..(k + 1) * hidden].to_vec();
+            self.h.resize(hidden, 0.0);
+            self.h
+                .copy_from_slice(&hidden_rows[k * hidden..(k + 1) * hidden]);
         } else {
             // Roll back to the accepted row: KV truncates to the committed
             // prefix, the SSM state restores from that row's slot - one
             // contiguous copy, no replay.
-            let tr = std::time::Instant::now();
+            let tr = dbg.then(std::time::Instant::now);
             s.truncate(start + 1 + accepted);
             if let Some(ssm) = s.ssm.as_mut() {
                 ssm.restore_slot(accepted);
             }
-            if dbg {
+            if let Some(tr) = tr {
                 eprintln!("  restore slot {accepted}: {:?}", tr.elapsed());
             }
-            self.h = hidden_rows[accepted * hidden..(accepted + 1) * hidden].to_vec();
+            self.h.resize(hidden, 0.0);
+            self.h
+                .copy_from_slice(&hidden_rows[accepted * hidden..(accepted + 1) * hidden]);
         }
-        if dbg {
+        if let Some(t0) = t0 {
             eprintln!("  round total: {:?}\n", t0.elapsed());
         }
         debug_assert_eq!(s.pos(), start + 1 + accepted);

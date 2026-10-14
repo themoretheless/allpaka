@@ -165,6 +165,7 @@ pub struct GgufFile {
     mmaps: Vec<Mmap>,
     data_offsets: Vec<u64>,
     merged: Vec<TensorInfo>,
+    tensor_index: std::collections::HashMap<String, usize>,
 }
 
 impl GgufFile {
@@ -175,7 +176,7 @@ impl GgufFile {
         let mut header = None;
         for (pi, p) in split_paths(path)?.into_iter().enumerate() {
             let file = File::open(&p).with_context(|| format!("opening {}", p.display()))?;
-            let h = parse(&mut BufReader::new(&file))
+            let mut h = parse(&mut BufReader::new(&file))
                 .with_context(|| format!("parsing {}", p.display()))?;
             // Safety: the map is read-only; a concurrent writer to the file would
             // be undefined behaviour, which is the standard mmap trade every
@@ -183,7 +184,7 @@ impl GgufFile {
             let mmap = unsafe { Mmap::map(&file) }
                 .with_context(|| format!("memory-mapping {}", p.display()))?;
             data_offsets.push(h.data_offset);
-            for mut t in h.tensors.clone() {
+            for mut t in std::mem::take(&mut h.tensors) {
                 t.part = pi;
                 merged.push(t);
             }
@@ -193,11 +194,16 @@ impl GgufFile {
             mmaps.push(mmap);
         }
         let header = header.context("no split parts")?;
+        let mut tensor_index = std::collections::HashMap::with_capacity(merged.len());
+        for (idx, t) in merged.iter().enumerate() {
+            tensor_index.entry(t.name.clone()).or_insert(idx);
+        }
         Ok(Self {
             header,
             mmaps,
             data_offsets,
             merged,
+            tensor_index,
         })
     }
 
@@ -256,7 +262,7 @@ impl GgufFile {
     }
 
     pub fn tensor(&self, name: &str) -> Option<&TensorInfo> {
-        self.merged.iter().find(|t| t.name == name)
+        self.tensor_index.get(name).map(|&idx| &self.merged[idx])
     }
 
     /// The raw bytes of one tensor, straight out of the mapping.

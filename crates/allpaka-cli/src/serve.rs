@@ -839,19 +839,35 @@ impl Sampler {
                 .max_by(|&a, &b| logits[a].total_cmp(&logits[b]))
                 .unwrap_or(0) as u32;
         }
-        // O(n) partition to the top candidates, then softmax and nucleus over
-        // just those. The probability mass beyond the top 256 tokens is far
-        // below any top_p in practical use.
-        let mut order: Vec<usize> = (0..logits.len()).collect();
-        let kth = Self::TOP_K.min(order.len()) - 1;
-        order.select_nth_unstable_by(kth, |&a, &b| logits[b].total_cmp(&logits[a]));
-        order.truncate(kth + 1);
-        order.sort_unstable_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+        // Maintain a fixed top-K buffer on the stack/small Vec instead of
+        // allocating and partitioning a 152k-element `Vec<usize>` on every token.
+        let k = Self::TOP_K.min(logits.len());
+        let mut top: Vec<(usize, f32)> = logits[..k].iter().copied().enumerate().collect();
+        let mut min_pos = 0usize;
+        let mut min_val = top[0].1;
+        for (idx, &(_, v)) in top.iter().enumerate().skip(1) {
+            if v.total_cmp(&min_val).is_lt() {
+                min_val = v;
+                min_pos = idx;
+            }
+        }
+        for (i, &v) in logits.iter().enumerate().skip(k) {
+            if v.total_cmp(&min_val).is_gt() {
+                top[min_pos] = (i, v);
+                min_pos = 0;
+                min_val = top[0].1;
+                for (idx, &(_, tv)) in top.iter().enumerate().skip(1) {
+                    if tv.total_cmp(&min_val).is_lt() {
+                        min_val = tv;
+                        min_pos = idx;
+                    }
+                }
+            }
+        }
+        top.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-        let mut scaled: Vec<f32> = order
-            .iter()
-            .map(|&i| logits[i] / self.temperature)
-            .collect();
+        let inv_temp = 1.0 / self.temperature;
+        let mut scaled: Vec<f32> = top.iter().map(|&(_, v)| v * inv_temp).collect();
         allpaka_backend::softmax(&mut scaled);
 
         // Nucleus: keep the smallest prefix whose mass reaches top_p.
@@ -865,13 +881,13 @@ impl Sampler {
             }
         }
         let mut r = self.next_f32() * mass;
-        for (&i, &p) in order[..kept].iter().zip(&scaled) {
+        for (&(i, _), &p) in top[..kept].iter().zip(&scaled) {
             r -= p;
             if r <= 0.0 {
                 return i as u32;
             }
         }
-        order[kept - 1] as u32
+        top[kept - 1].0 as u32
     }
 }
 
@@ -902,7 +918,24 @@ fn content_parts(content: &Value) -> (String, usize) {
 
 /// Image parts anywhere in the request, across all messages.
 pub(crate) fn image_part_count(raw: &[Value]) -> usize {
-    raw.iter().map(|m| content_parts(&m["content"]).1).sum()
+    raw.iter()
+        .map(|m| {
+            m["content"]
+                .as_array()
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter(|part| {
+                            matches!(
+                                part["type"].as_str(),
+                                Some("image_url" | "input_image" | "image")
+                            )
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+        .sum()
 }
 
 /// Convert an OpenAI-shape message list (+ optional `tools`) into plain
@@ -1255,7 +1288,9 @@ fn prepare_connection(
         std::time::Duration::from_millis(timeout_ms),
     )?;
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(timeout_ms)));
-    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(timeout_ms.max(30_000))));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(
+        timeout_ms.max(30_000),
+    )));
     let requested = request["model"]
         .as_str()
         .map(ToOwned::to_owned)
@@ -1776,7 +1811,9 @@ fn max_body_bytes_from(configured: Option<&str>) -> usize {
 }
 
 fn max_body_bytes() -> usize {
-    max_body_bytes_from(std::env::var("ALLPAKA_MAX_BODY_MIB").ok().as_deref())
+    static MAX_BODY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX_BODY
+        .get_or_init(|| max_body_bytes_from(std::env::var("ALLPAKA_MAX_BODY_MIB").ok().as_deref()))
 }
 
 pub(crate) fn read_request(stream: &mut TcpStream) -> Result<(String, String)> {

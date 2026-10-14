@@ -57,6 +57,95 @@ pub fn set_trace_hook(hook: fn(&str)) {
     let _ = TRACE_HOOK.set(hook);
 }
 
+#[inline]
+fn trace_enabled() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("ALLPAKA_TRACE").is_some())
+}
+
+#[inline]
+fn gdn_zero_enabled() -> bool {
+    static Z: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *Z.get_or_init(|| std::env::var_os("ALLPAKA_GDN_ZERO").is_some())
+}
+
+#[inline]
+fn cpu_attn_enabled() -> bool {
+    static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *C.get_or_init(|| std::env::var_os("ALLPAKA_CPU_ATTN").is_some())
+}
+
+#[inline]
+fn no_tokenbuf_enabled() -> bool {
+    static N: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var_os("ALLPAKA_NO_TOKENBUF").is_some())
+}
+
+#[inline]
+fn no_argmax_enabled() -> bool {
+    static N: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var_os("ALLPAKA_NO_ARGMAX").is_some())
+}
+
+#[inline]
+fn prefuse_enabled() -> bool {
+    static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *P.get_or_init(|| std::env::var("ALLPAKA_PREFUSE").map_or(true, |v| v != "0"))
+}
+
+#[inline]
+fn attn_zero_enabled() -> bool {
+    static Z: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *Z.get_or_init(|| std::env::var_os("ALLPAKA_ATTN_ZERO").is_some())
+}
+
+#[inline]
+fn moe_zero_enabled() -> bool {
+    static Z: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *Z.get_or_init(|| std::env::var_os("ALLPAKA_MOE_ZERO").is_some())
+}
+
+#[inline]
+fn tokenbuf_debug_enabled() -> bool {
+    static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *D.get_or_init(|| std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some())
+}
+
+#[inline]
+fn skip_host_rope_enabled() -> bool {
+    static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *S.get_or_init(|| {
+        std::env::var("ALLPAKA_SKIP_HOST_ROPE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+#[inline]
+fn greedy_chain_enabled() -> bool {
+    #[cfg(test)]
+    {
+        std::env::var("ALLPAKA_GREEDY_CHAIN")
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true)
+    }
+    #[cfg(not(test))]
+    {
+        static G: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *G.get_or_init(|| {
+            std::env::var("ALLPAKA_GREEDY_CHAIN")
+                .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+                .unwrap_or(true)
+        })
+    }
+}
+
+#[inline]
+fn cpu_threads() -> usize {
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
 /// The gated-delta-net branch of one linear-attention layer (qwen35moe).
 /// Dims from the model: key_dim = n_group*d_state (2048),
 /// value_dim = dt_rank*d_state (4096), conv covers key_dim*2+value_dim (8192).
@@ -66,7 +155,7 @@ pub fn set_trace_hook(hook: fn(&str)) {
 /// prints the first row's first 3 and the last row's last 3 values, matching
 /// llama-eval-callback's head/tail printout of a {hidden, m} tensor.
 fn trace(name: &str, li: usize, v: &[f32]) {
-    if std::env::var_os("ALLPAKA_TRACE").is_some() {
+    if trace_enabled() {
         let sum: f64 = v.iter().map(|&x| x as f64).sum();
         let head: Vec<String> = v.iter().take(3).map(|x| format!("{x:.6}")).collect();
         let tail: Vec<String> = v
@@ -135,7 +224,7 @@ impl SharedFfn<'_> {
                 // The gate is one sigmoid scalar PER TOKEN (hidden -> 1); it
                 // scales that token's whole shared-expert row.
                 let g = w.matmul(hs, m)?;
-                if std::env::var_os("ALLPAKA_TRACE").is_some() {
+                if trace_enabled() {
                     static L: std::sync::atomic::AtomicUsize =
                         std::sync::atomic::AtomicUsize::new(0);
                     let li = L.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -235,7 +324,7 @@ impl Ffn<'_> {
         };
         // The shared expert runs for every token, unweighted; it is
         // independent of the routing below, so it lands first.
-        let trace_on = std::env::var_os("ALLPAKA_TRACE").is_some();
+        let trace_on = trace_enabled();
         let li = if trace_on {
             static L: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             L.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -269,7 +358,7 @@ impl Ffn<'_> {
         // Per-token routing is independent: softmax + top-k spread over
         // cores, the group build stays serial (it is just pushes).
         let routed: Vec<Vec<(usize, f32)>> = {
-            let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let threads = cpu_threads();
             let per = m.div_ceil(threads).max(1);
             let mut routed: Vec<Vec<(usize, f32)>> = vec![Vec::new(); m];
             std::thread::scope(|scope| {
@@ -366,7 +455,7 @@ impl Ffn<'_> {
                     hits[i].push((row0 + row_idx, weight));
                 }
             }
-            let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let threads = cpu_threads();
             let per = m.div_ceil(threads).max(1);
             let flat_ref = &flat;
             std::thread::scope(|scope| {
@@ -717,10 +806,8 @@ impl Session {
     /// Roll the session back to its first `keep` tokens.
     pub fn truncate(&mut self, keep: usize) {
         self.kv.truncate(keep);
-        if let Some(pairs) = self.rope_cache.len().checked_div(self.rope_cache_pairs) {
-            let keep_pairs = keep.min(pairs);
-            self.rope_cache.truncate(keep_pairs * self.rope_cache_pairs);
-        }
+        // RoPE sin/cos depends only on position and rope_inv_freq, not on token content,
+        // so keeping already-computed positions in `rope_cache` avoids recomputation.
     }
 
     fn rope_cache(&mut self, rope_inv_freq: &[f32], start: usize, count: usize) -> &[[f32; 2]] {
@@ -1074,7 +1161,7 @@ impl<'a> Model<'a> {
         let c = &self.config;
         // Debug kill switch: zero the GDN branch entirely to isolate
         // attention/MoE bugs from deltanet bugs.
-        if std::env::var_os("ALLPAKA_GDN_ZERO").is_some() {
+        if gdn_zero_enabled() {
             return Ok(vec![0f32; m * c.hidden as usize]);
         }
         let ssm = c.ssm.as_ref().expect("gdn layer without ssm config");
@@ -1111,6 +1198,8 @@ impl<'a> Model<'a> {
         let state = &mut state_all[li * n_state..(li + 1) * n_state];
         let mut out = vec![0f32; m * value_dim];
         let mut c_out = vec![0f32; channels];
+        let mut beta_i = vec![0f32; heads_v];
+        let mut gate_i = vec![0f32; heads_v];
         for i in 0..m {
             // Depthwise causal conv: out[c] = sum_j w[c*d_conv + j] *
             // window[j][c], with the window being the cached d_conv-1 prior
@@ -1139,16 +1228,17 @@ impl<'a> Model<'a> {
             for h in k.chunks_mut(d_state) {
                 ops::l2_norm(h, eps);
             }
-            let beta_i: Vec<f32> = beta[i * heads_v..(i + 1) * heads_v]
-                .iter()
-                .map(|&v| 1.0 / (1.0 + (-v).exp()))
-                .collect();
-            let gate_i: Vec<f32> = alpha[i * heads_v..(i + 1) * heads_v]
-                .iter()
+            for (dst, &v) in beta_i.iter_mut().zip(&beta[i * heads_v..(i + 1) * heads_v]) {
+                *dst = 1.0 / (1.0 + (-v).exp());
+            }
+            for (((dst, &x), &dt), &a) in gate_i
+                .iter_mut()
+                .zip(&alpha[i * heads_v..(i + 1) * heads_v])
                 .zip(&g.dt)
                 .zip(&g.a)
-                .map(|((&x, &dt), &a)| ops::softplus(x + dt) * a)
-                .collect();
+            {
+                *dst = ops::softplus(x + dt) * a;
+            }
             ops::gated_deltanet_step(
                 state,
                 q,
@@ -1211,11 +1301,14 @@ impl<'a> Model<'a> {
     /// unit of work; `ALLPAKA_PREFILL_CHUNK` overrides it for a machine where
     /// that memory is tight.
     pub fn prefill_chunk() -> usize {
-        std::env::var("ALLPAKA_PREFILL_CHUNK")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(512)
+        static CHUNK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *CHUNK.get_or_init(|| {
+            std::env::var("ALLPAKA_PREFILL_CHUNK")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(512)
+        })
     }
 
     pub fn forward_batch(&self, tokens: &[u32], s: &mut Session) -> Result<Vec<f32>> {
@@ -1382,15 +1475,16 @@ impl<'a> Model<'a> {
         let base = s.pos();
 
         let embed_span = profile::span(profile::Phase::Embed);
-        let mut xs = Vec::with_capacity(m * hidden);
-        for &t in tokens {
-            xs.extend_from_slice(&self.embedding()?.row(t as usize)?);
+        let embd = self.embedding()?;
+        let mut xs = vec![0.0f32; m * hidden];
+        for (i, &t) in tokens.iter().enumerate() {
+            embd.row_into(t as usize, &mut xs[i * hidden..(i + 1) * hidden])?;
         }
         let rope_flat = s.rope_cache(&self.rope_inv_freq, base, m).to_vec();
         let half = c.rope_dim as usize / 2;
         let prefill_fused_ok = matches!(c.rope_style, RopeStyle::Neox)
-            && std::env::var_os("ALLPAKA_CPU_ATTN").is_none()
-            && std::env::var_os("ALLPAKA_NO_TOKENBUF").is_none();
+            && !cpu_attn_enabled()
+            && !no_tokenbuf_enabled();
         drop(embed_span);
 
         // The fully fused prefill: xs lives on the GPU for the whole chunk,
@@ -1399,7 +1493,7 @@ impl<'a> Model<'a> {
         // of each layer. Any decline falls back to the per-layer path below
         // with the ORIGINAL xs - every cache write is recomputed
         // identically, so a mid-chunk decline costs time, not correctness.
-        if prefill_fused_ok && std::env::var("ALLPAKA_PREFUSE").map_or(true, |v| v != "0") {
+        if prefill_fused_ok && prefuse_enabled() {
             if let Some(done) = self.forward_batch_fused(&xs, &rope_flat, m, base, s) {
                 s.kv.commit(base + m);
                 return Ok(done);
@@ -1582,7 +1676,7 @@ impl<'a> Model<'a> {
             let scale = 1.0 / (head_dim as f32).sqrt();
             let mut attn_out = vec![0f32; m * c.q_dim()];
             let q_ref = &q;
-            let cpu_only = std::env::var_os("ALLPAKA_CPU_ATTN").is_some();
+            let cpu_only = cpu_attn_enabled();
             let on_gpu = {
                 let kv = &mut s.kv;
                 kv.gpu_view(li)
@@ -1612,7 +1706,7 @@ impl<'a> Model<'a> {
                     }
                 }
                 None => {
-                    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+                    let threads = cpu_threads();
                     let rows_per = m.div_ceil(threads).max(1);
                     let kv = &s.kv;
                     std::thread::scope(|scope| {
@@ -1649,7 +1743,7 @@ impl<'a> Model<'a> {
             {
                 let _s = profile::span(profile::Phase::AttnOut);
                 let mut projected = aw.wo.matmul(&attn_out, m)?;
-                if std::env::var_os("ALLPAKA_ATTN_ZERO").is_some() {
+                if attn_zero_enabled() {
                     projected.iter_mut().for_each(|v| *v = 0.0);
                 }
                 trace("attn_output", li, &projected[..hidden]);
@@ -1666,7 +1760,7 @@ impl<'a> Model<'a> {
                 trace("attn_post_norm", li, &hs_scratch[..hidden]);
                 &hs_scratch
             };
-            let down = if std::env::var_os("ALLPAKA_MOE_ZERO").is_some() {
+            let down = if moe_zero_enabled() {
                 vec![0f32; m * hidden]
             } else {
                 layer.ffn.forward_batch(hs, m, hidden)?
@@ -2024,7 +2118,7 @@ impl<'a> Model<'a> {
     ) -> Result<Option<allpaka_backend::gpu::TokenOut>> {
         use allpaka_backend::gpu::TokenReq;
         let c = &self.config;
-        let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
+        let dbg = tokenbuf_debug_enabled();
         if self.output_norm_raw.is_empty() {
             if dbg {
                 eprintln!("tokenbuf declined: output norm not raw F32");
@@ -2033,10 +2127,8 @@ impl<'a> Model<'a> {
         }
         // Keep host rope table by default; skip only when explicitly opted in.
         // Device freq rope still used inside CUDA when d_rope_freq is set.
-        let skip_host_rope = allpaka_backend::gpu::has_device_rope_freq()
-            && std::env::var("ALLPAKA_SKIP_HOST_ROPE")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+        let skip_host_rope =
+            allpaka_backend::gpu::has_device_rope_freq() && skip_host_rope_enabled();
         if !skip_host_rope {
             let _ = s.rope_cache(&self.rope_inv_freq, pos, 1);
         }
@@ -2077,8 +2169,7 @@ impl<'a> Model<'a> {
         };
         let embd = self.embedding()?;
         let (embd_ty, embd_bytes) = embd.raw();
-        let use_gpu_embed =
-            allpaka_backend::gpu::can_embed_on_gpu(embd_ty, embd_bytes, embd.n_in);
+        let use_gpu_embed = allpaka_backend::gpu::can_embed_on_gpu(embd_ty, embd_bytes, embd.n_in);
         let x_host = if use_gpu_embed {
             None
         } else {
@@ -2129,10 +2220,10 @@ impl<'a> Model<'a> {
         s: &mut Session,
     ) -> Result<Option<(Vec<u32>, Vec<f32>)>> {
         use allpaka_backend::gpu::{TokenOut, TokenReq};
-        let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
+        let dbg = tokenbuf_debug_enabled();
         let c = &self.config;
         let m = tokens.len();
-        if m == 0 || m > 8 || std::env::var_os("ALLPAKA_NO_TOKENBUF").is_some() {
+        if m == 0 || m > 8 || no_tokenbuf_enabled() {
             return Ok(None);
         }
         if self.output_norm_raw.is_empty() {
@@ -2160,12 +2251,14 @@ impl<'a> Model<'a> {
             Some(ssm) => ssm.regions_for_gpu(),
             None => (None, None),
         };
-        let mut x = Vec::with_capacity(m * c.hidden as usize);
-        for &t in tokens {
+        let hidden_dim = c.hidden as usize;
+        let mut x = vec![0.0f32; m * hidden_dim];
+        let embd = self.embedding()?;
+        for (ti, &t) in tokens.iter().enumerate() {
             if t >= c.vocab {
                 bail!("token {t} out of vocabulary {}", c.vocab);
             }
-            x.extend_from_slice(&self.embedding()?.row(t as usize)?);
+            embd.row_into(t as usize, &mut x[ti * hidden_dim..(ti + 1) * hidden_dim])?;
         }
         let (out_ty, out_bytes) = self.output_head()?.raw();
         let request = TokenReq {
@@ -2216,7 +2309,7 @@ impl<'a> Model<'a> {
     ) -> Result<Option<Vec<allpaka_backend::gpu::TokenLayer<'_>>>> {
         use allpaka_backend::gpu::{TokenFfn, TokenGdn, TokenLayer};
         let c = &self.config;
-        let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
+        let dbg = tokenbuf_debug_enabled();
         let ssm_offsets: Option<Vec<(usize, usize)>> = s.ssm.as_ref().map(|ssm| {
             (0..self.layers.len())
                 .map(|li| (ssm.conv_off(li), ssm.state_off(li)))
@@ -2402,10 +2495,10 @@ impl<'a> Model<'a> {
         // which remains the reference this path is tested against.
         if matches!(c.rope_style, RopeStyle::Neox)
             && pos < s.kv.capacity()
-            && std::env::var_os("ALLPAKA_CPU_ATTN").is_none()
-            && std::env::var_os("ALLPAKA_NO_TOKENBUF").is_none()
+            && !cpu_attn_enabled()
+            && !no_tokenbuf_enabled()
         {
-            let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
+            let dbg = tokenbuf_debug_enabled();
             if let Some(allpaka_backend::gpu::TokenOut::Logits(logits)) =
                 self.forward_token_gpu(token, s, pos, false)?
             {
@@ -2456,7 +2549,7 @@ impl<'a> Model<'a> {
         let pos = s.pos();
         let mut x = hidden.to_vec();
         let rope_pairs = s.rope_cache(&self.rope_inv_freq, pos, 1).to_vec();
-        let cpu_attn = std::env::var_os("ALLPAKA_CPU_ATTN").is_some();
+        let cpu_attn = cpu_attn_enabled();
 
         for (li, layer) in self
             .layers
@@ -2607,7 +2700,6 @@ impl<'a> Model<'a> {
             }
 
             let scale = 1.0 / (head_dim as f32).sqrt();
-            let mut attn_out = vec![0f32; c.q_dim()];
             // One thread per kv head: each streams its K/V exactly once for
             // the whole GQA group, so parallelism never multiplies traffic.
             let kv = &s.kv;
@@ -2625,9 +2717,8 @@ impl<'a> Model<'a> {
                 None
             } else {
                 let _s = profile::span(profile::Phase::Attend);
-                let cpu_only = std::env::var_os("ALLPAKA_CPU_ATTN").is_some();
                 kv.gpu_view_ref(li)
-                    .filter(|_| !cpu_only)
+                    .filter(|_| !cpu_attn)
                     .and_then(|(cache, k_off, v_off)| {
                         aw.wo.attend_project(&allpaka_backend::gpu::AttnReq {
                             cache,
@@ -2646,6 +2737,7 @@ impl<'a> Model<'a> {
             let projected = match fused {
                 Some(projected) => projected,
                 None => {
+                    let mut attn_out = vec![0f32; c.q_dim()];
                     {
                         let _s = profile::span(profile::Phase::Attend);
                         std::thread::scope(|scope| {
@@ -2679,7 +2771,7 @@ impl<'a> Model<'a> {
                 }
             };
             let mut projected = projected;
-            if std::env::var_os("ALLPAKA_ATTN_ZERO").is_some() {
+            if attn_zero_enabled() {
                 projected.iter_mut().for_each(|v| *v = 0.0);
             }
             for (a, b) in x.iter_mut().zip(&projected) {
@@ -2693,7 +2785,7 @@ impl<'a> Model<'a> {
                 ops::rmsnorm(&mut h, &layer.ffn_norm, c.rms_eps);
                 h
             };
-            let down = if std::env::var_os("ALLPAKA_MOE_ZERO").is_some() {
+            let down = if moe_zero_enabled() {
                 vec![0f32; h.len()]
             } else {
                 layer.ffn.forward(&h)?
@@ -2731,9 +2823,9 @@ impl<'a> Model<'a> {
         if token < c.vocab
             && matches!(c.rope_style, RopeStyle::Neox)
             && pos < s.kv.capacity()
-            && std::env::var_os("ALLPAKA_CPU_ATTN").is_none()
-            && std::env::var_os("ALLPAKA_NO_TOKENBUF").is_none()
-            && std::env::var_os("ALLPAKA_NO_ARGMAX").is_none()
+            && !cpu_attn_enabled()
+            && !no_tokenbuf_enabled()
+            && !no_argmax_enabled()
         {
             if let Some(allpaka_backend::gpu::TokenOut::Argmax(next)) =
                 self.forward_token_gpu(token, s, pos, true)?
@@ -2755,10 +2847,7 @@ impl<'a> Model<'a> {
         if n == 0 {
             return Ok(Vec::new());
         }
-        let chain = std::env::var("ALLPAKA_GREEDY_CHAIN")
-            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-            .unwrap_or(true);
-        if chain && n > 1 {
+        if greedy_chain_enabled() && n > 1 {
             if let Some(out) = self.try_forward_greedy_chain(token, s, n)? {
                 return Ok(out);
             }
@@ -2783,9 +2872,9 @@ impl<'a> Model<'a> {
         if token >= c.vocab
             || !matches!(c.rope_style, RopeStyle::Neox)
             || pos + n > s.kv.capacity()
-            || std::env::var_os("ALLPAKA_CPU_ATTN").is_some()
-            || std::env::var_os("ALLPAKA_NO_TOKENBUF").is_some()
-            || std::env::var_os("ALLPAKA_NO_ARGMAX").is_some()
+            || cpu_attn_enabled()
+            || no_tokenbuf_enabled()
+            || no_argmax_enabled()
         {
             return Ok(None);
         }
@@ -2800,7 +2889,7 @@ impl<'a> Model<'a> {
             return Ok(Some(vec![first]));
         }
         // Remaining tokens stay on GPU: embed(d_argmax) + d_pos++ + graph.
-        let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
+        let dbg = tokenbuf_debug_enabled();
         if self.output_norm_raw.is_empty() {
             return Ok(None);
         }
@@ -2904,8 +2993,17 @@ fn attend_group(
     debug_assert_eq!(q_group.len(), group * head_dim);
     debug_assert_eq!(out_group.len(), group * head_dim);
 
-    let mut maxes = vec![f32::NEG_INFINITY; group];
-    let mut denoms = vec![0f32; group];
+    let mut stack_maxes = [f32::NEG_INFINITY; 32];
+    let mut stack_denoms = [0f32; 32];
+    let mut heap_maxes;
+    let mut heap_denoms;
+    let (maxes, denoms): (&mut [f32], &mut [f32]) = if group <= 32 {
+        (&mut stack_maxes[..group], &mut stack_denoms[..group])
+    } else {
+        heap_maxes = vec![f32::NEG_INFINITY; group];
+        heap_denoms = vec![0f32; group];
+        (&mut heap_maxes, &mut heap_denoms)
+    };
 
     for t in 0..=pos {
         let kt = kv.k_at(layer, t, kv_head, head_dim);
@@ -2937,11 +3035,11 @@ fn attend_group(
         }
     }
 
-    for h in 0..group {
-        let d = denoms[h].max(f32::MIN_POSITIVE);
+    for (h, &denom) in denoms.iter().enumerate() {
+        let inv_d = 1.0 / denom.max(f32::MIN_POSITIVE);
         let acc = &mut out_group[h * head_dim..(h + 1) * head_dim];
         for a in acc.iter_mut() {
-            *a /= d;
+            *a *= inv_d;
         }
     }
 }

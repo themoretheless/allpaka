@@ -78,9 +78,9 @@ impl<T> ContinuousBatcher<T> {
         let model = self
             .queues
             .iter()
-            .filter_map(|(model, queue)| queue.front().map(|head| (model.clone(), head.queued_at)))
+            .filter_map(|(model, queue)| queue.front().map(|head| (model.as_str(), head.queued_at)))
             .min_by_key(|(_, queued_at)| *queued_at)
-            .map(|(model, _)| model);
+            .map(|(model, _)| model.to_owned());
         let Some(model) = model else {
             return Vec::new();
         };

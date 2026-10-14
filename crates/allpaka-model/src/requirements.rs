@@ -23,9 +23,9 @@ pub struct ModelRequirements {
 
 impl ModelRequirements {
     pub fn for_architecture(architecture: &str) -> Option<Self> {
-        let normalized = architecture.to_ascii_lowercase();
-        let (family, required, optional) = match normalized.as_str() {
-            "qwen2" => (
+        let a = architecture;
+        let (family, required, optional) = if a.eq_ignore_ascii_case("qwen2") {
+            (
                 ModelFamily::Qwen3,
                 vec![
                     Feature::DenseFfn,
@@ -33,8 +33,9 @@ impl ModelRequirements {
                     Feature::StandardKv,
                 ],
                 vec![Feature::PagedKv, Feature::QkNorm],
-            ),
-            "qwen3" => (
+            )
+        } else if a.eq_ignore_ascii_case("qwen3") {
+            (
                 ModelFamily::Qwen3,
                 vec![
                     Feature::DenseFfn,
@@ -43,8 +44,9 @@ impl ModelRequirements {
                     Feature::StandardKv,
                 ],
                 vec![Feature::PagedKv],
-            ),
-            "qwen3moe" | "qwen3_moe" => (
+            )
+        } else if a.eq_ignore_ascii_case("qwen3moe") || a.eq_ignore_ascii_case("qwen3_moe") {
+            (
                 ModelFamily::Qwen3Moe,
                 vec![
                     Feature::SparseMoe,
@@ -53,8 +55,12 @@ impl ModelRequirements {
                     Feature::StandardKv,
                 ],
                 vec![Feature::PagedKv],
-            ),
-            "qwen35moe" | "qwen3.5moe" | "qwen3_5_moe" => (
+            )
+        } else if a.eq_ignore_ascii_case("qwen35moe")
+            || a.eq_ignore_ascii_case("qwen3.5moe")
+            || a.eq_ignore_ascii_case("qwen3_5_moe")
+        {
+            (
                 ModelFamily::Qwen35Moe,
                 vec![
                     Feature::SparseMoe,
@@ -64,8 +70,9 @@ impl ModelRequirements {
                     Feature::GatedDeltaNet,
                 ],
                 vec![Feature::PagedKv],
-            ),
-            "llama" | "llama3" => (
+            )
+        } else if a.eq_ignore_ascii_case("llama") || a.eq_ignore_ascii_case("llama3") {
+            (
                 ModelFamily::Llama3,
                 vec![
                     Feature::DenseFfn,
@@ -73,8 +80,9 @@ impl ModelRequirements {
                     Feature::StandardKv,
                 ],
                 vec![Feature::PagedKv],
-            ),
-            "mistral" => (
+            )
+        } else if a.eq_ignore_ascii_case("mistral") {
+            (
                 ModelFamily::Mistral,
                 vec![
                     Feature::DenseFfn,
@@ -82,8 +90,12 @@ impl ModelRequirements {
                     Feature::StandardKv,
                 ],
                 vec![Feature::PagedKv],
-            ),
-            "glm4moe" | "glm4_moe" | "glm_moe" => (
+            )
+        } else if a.eq_ignore_ascii_case("glm4moe")
+            || a.eq_ignore_ascii_case("glm4_moe")
+            || a.eq_ignore_ascii_case("glm_moe")
+        {
+            (
                 ModelFamily::Glm4Moe,
                 vec![
                     Feature::SparseMoe,
@@ -91,13 +103,18 @@ impl ModelRequirements {
                     Feature::StandardKv,
                 ],
                 vec![Feature::PagedKv],
-            ),
-            "deepseek" | "deepseek2" | "deepseek_mla" => (
+            )
+        } else if a.eq_ignore_ascii_case("deepseek")
+            || a.eq_ignore_ascii_case("deepseek2")
+            || a.eq_ignore_ascii_case("deepseek_mla")
+        {
+            (
                 ModelFamily::DeepSeekMla,
                 vec![Feature::SparseMoe, Feature::MlaAttention, Feature::F16Kv],
                 vec![Feature::PagedKv],
-            ),
-            _ => return None,
+            )
+        } else {
+            return None;
         };
         Some(Self {
             family,

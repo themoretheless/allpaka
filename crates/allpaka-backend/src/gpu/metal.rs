@@ -275,6 +275,9 @@ struct IdxArgs {
 // SIMD group, but with LPR a power of two the halving stops before a fold
 // would cross into the neighbouring row's lanes.
 inline float lane_sum(float v) {
+    if (LPR == 32) {
+        return simd_sum(v);
+    }
     for (uint off = LPR / 2; off > 0; off >>= 1) {
         v += simd_shuffle_down(v, off);
     }
@@ -282,8 +285,7 @@ inline float lane_sum(float v) {
 }
 
 inline float half_at(device const uchar* p) {
-    ushort u = (ushort)p[0] | ((ushort)p[1] << 8);
-    return (float)as_type<half>(u);
+    return (float)(*(device const half*)p);
 }
 
 kernel void matvec_q8_0(
@@ -499,11 +501,13 @@ kernel void matvec_q5_0(
         uint qh = as_type<uint>(uchar4(blk[2], blk[3], blk[4], blk[5]));
         device const uchar* qs = blk + 6;
         float s[MAXT] = {0};
-        for (uint jj = 0; jj < 32; jj++) {
-            uint nib = jj < 16 ? (qs[jj] & 0xF) : (qs[jj - 16] >> 4);
-            int q = (int)(nib | (((qh >> jj) & 1) << 4)) - 16;
+        for (uint jj = 0; jj < 16; jj++) {
+            uchar qbyte = qs[jj];
+            int q0 = (int)((qbyte & 0xF) | (((qh >> jj) & 1) << 4)) - 16;
+            int q1 = (int)((qbyte >> 4) | (((qh >> (jj + 16)) & 1) << 4)) - 16;
             for (uint i = 0; i < TILE; i++) {
-                s[i] += float(q) * x[i * n_in + b * 32 + jj];
+                device const float* xi = x + i * n_in + b * 32;
+                s[i] += float(q0) * xi[jj] + float(q1) * xi[jj + 16];
             }
         }
         for (uint i = 0; i < TILE; i++) total[i] += d * s[i];
@@ -7657,7 +7661,8 @@ pub fn can_embed_on_gpu(ty: GgmlType, bytes: &[u8], n_in: usize) -> bool {
     let Ok(gpu) = cell.lock() else {
         return false;
     };
-    gpu.chunk_for(bytes.as_ptr() as usize, bytes.len()).is_some()
+    gpu.chunk_for(bytes.as_ptr() as usize, bytes.len())
+        .is_some()
 }
 
 pub fn prefill_replay(_xs: &[f32]) -> Option<Vec<f32>> {
@@ -9635,7 +9640,10 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     };
     let hd = req.head_dim;
     // 128 everywhere; 256 on qwen35moe's full-attention layers (own kernels).
-    why!(hd != 128 && hd != 256 || hidden == 0 || hidden % 4 != 0, "shape");
+    why!(
+        hd != 128 && hd != 256 || hidden == 0 || hidden % 4 != 0,
+        "shape"
+    );
     // Full rotary, GLM-style half rotary, qwen35moe's quarter rotary at 256.
     why!(req.rope.len() != m * req.rot_dim / 2, "rope table");
     why!(

@@ -66,7 +66,10 @@ where
         files.sort();
         files.dedup();
         if files.is_empty() {
-            let pattern = root.join("model-*.safetensors").to_string_lossy().to_string();
+            let pattern = root
+                .join("model-*.safetensors")
+                .to_string_lossy()
+                .to_string();
             glob_pattern_to_filenames(&pattern)
         } else {
             files

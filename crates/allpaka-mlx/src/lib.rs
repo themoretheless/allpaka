@@ -17,7 +17,10 @@ mod ffi;
 mod shapes;
 
 pub use container::{tensor_data, MlxSafetensors, TensorInfo};
-pub use dequant::{bf16_to_f32, dequant_mlx_q4_block, dequant_mlx_q8_block};
+pub use dequant::{
+    bf16_to_f32, dequant_mlx_q4_block, dequant_mlx_q4_block_slice, dequant_mlx_q8_block,
+    dequant_mlx_q8_block_slice,
+};
 pub use ffi::{
     free_mlx_blob, mlx_dtype_t, mlx_load_tensor_sparse, mlx_repack_to_allpaka, GgmlType, MlxBlob,
 };

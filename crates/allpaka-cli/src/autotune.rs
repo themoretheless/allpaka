@@ -197,12 +197,18 @@ pub fn apply_cached(model_path: &Path, cache_path: Option<&Path>) -> Result<bool
     if std::env::var_os("ALLPAKA_PROFILE").is_some() {
         return Ok(false);
     }
-    let file = allpaka_gguf::GgufFile::open(model_path)?;
-    let key = key_for(model_path, &file);
     let cache_path = cache_path
         .map(ToOwned::to_owned)
         .unwrap_or_else(default_cache_path);
+    if !cache_path.exists() {
+        return Ok(false);
+    }
     let cache = AutotuneCache::load(&cache_path)?;
+    if cache.entries.is_empty() {
+        return Ok(false);
+    }
+    let file = allpaka_gguf::GgufFile::open(model_path)?;
+    let key = key_for(model_path, &file);
     let Some(hit) = cache.get(&key) else {
         return Ok(false);
     };

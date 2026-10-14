@@ -2,14 +2,15 @@
 //!
 //! Reserve before allocating. Keep the lease alongside the allocation and,
 //! for asynchronous devices, until the last command using it has completed.
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 #[derive(Clone)]
-pub struct Budget(Arc<Mutex<State>>);
+pub struct Budget(Arc<State>);
 struct State {
     limit: u64,
-    used: u64,
-    peak: u64,
+    used: AtomicU64,
+    peak: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,46 +44,60 @@ pub struct Lease {
 }
 impl Budget {
     pub fn new(limit: u64) -> Self {
-        Self(Arc::new(Mutex::new(State {
+        Self(Arc::new(State {
             limit,
-            used: 0,
-            peak: 0,
-        })))
+            used: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
+        }))
     }
+    #[inline]
     pub fn reserve(&self, bytes: u64) -> Result<Lease, Exhausted> {
-        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let available = state.limit - state.used;
-        if bytes > available {
-            return Err(Exhausted {
-                requested: bytes,
-                available,
-            });
+        let mut current = self.0.used.load(Ordering::Relaxed);
+        loop {
+            let available = self.0.limit - current;
+            if bytes > available {
+                return Err(Exhausted {
+                    requested: bytes,
+                    available,
+                });
+            }
+            let next = current + bytes;
+            match self.0.used.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    self.0.peak.fetch_max(next, Ordering::Relaxed);
+                    return Ok(Lease {
+                        budget: self.clone(),
+                        bytes,
+                    });
+                }
+                Err(actual) => current = actual,
+            }
         }
-        state.used += bytes;
-        state.peak = state.peak.max(state.used);
-        Ok(Lease {
-            budget: self.clone(),
-            bytes,
-        })
     }
+    #[inline]
     pub fn snapshot(&self) -> Snapshot {
-        let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         Snapshot {
-            limit_bytes: state.limit,
-            reserved_bytes: state.used,
-            peak_reserved_bytes: state.peak,
+            limit_bytes: self.0.limit,
+            reserved_bytes: self.0.used.load(Ordering::Acquire),
+            peak_reserved_bytes: self.0.peak.load(Ordering::Relaxed),
         }
     }
 }
 impl Lease {
+    #[inline]
     pub fn budget(&self) -> Budget {
         self.budget.clone()
     }
 }
 impl Drop for Lease {
+    #[inline]
     fn drop(&mut self) {
-        let mut state = self.budget.0.lock().unwrap_or_else(|e| e.into_inner());
-        state.used -= self.bytes;
+        self.budget.0.used.fetch_sub(self.bytes, Ordering::Release);
     }
 }
 

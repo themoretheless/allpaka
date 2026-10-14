@@ -86,10 +86,21 @@ impl RuntimeProfile {
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
+    let s = value.trim();
+    if s == "1"
+        || s.eq_ignore_ascii_case("true")
+        || s.eq_ignore_ascii_case("yes")
+        || s.eq_ignore_ascii_case("on")
+    {
+        Some(true)
+    } else if s == "0"
+        || s.eq_ignore_ascii_case("false")
+        || s.eq_ignore_ascii_case("no")
+        || s.eq_ignore_ascii_case("off")
+    {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -97,13 +108,22 @@ impl FromStr for RuntimeProfile {
     type Err = UnknownRuntimeProfile;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "safe" => Ok(Self::Safe),
-            "balanced" => Ok(Self::Balanced),
-            "max-performance" | "max_performance" | "max" => Ok(Self::MaxPerformance),
-            "deterministic" => Ok(Self::Deterministic),
-            _ => Err(UnknownRuntimeProfile(value.to_string())),
+        let s = value.trim();
+        if s.eq_ignore_ascii_case("auto") {
+            Ok(Self::Auto)
+        } else if s.eq_ignore_ascii_case("safe") {
+            Ok(Self::Safe)
+        } else if s.eq_ignore_ascii_case("balanced") {
+            Ok(Self::Balanced)
+        } else if s.eq_ignore_ascii_case("max-performance")
+            || s.eq_ignore_ascii_case("max_performance")
+            || s.eq_ignore_ascii_case("max")
+        {
+            Ok(Self::MaxPerformance)
+        } else if s.eq_ignore_ascii_case("deterministic") {
+            Ok(Self::Deterministic)
+        } else {
+            Err(UnknownRuntimeProfile(value.to_string()))
         }
     }
 }

@@ -1,54 +1,62 @@
 //! Backend feature coverage, independent of model-name matching.
 
-use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
 pub enum Feature {
-    DenseFfn,
-    SparseMoe,
-    GqaAttention,
-    QkNorm,
-    StandardKv,
-    GatedDeltaNet,
-    MlaAttention,
-    F16Kv,
-    PagedKv,
+    DenseFfn = 0,
+    SparseMoe = 1,
+    GqaAttention = 2,
+    QkNorm = 3,
+    StandardKv = 4,
+    GatedDeltaNet = 5,
+    MlaAttention = 6,
+    F16Kv = 7,
+    PagedKv = 8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackendCapabilities {
-    features: BTreeSet<Feature>,
+    bits: u16,
 }
 
 impl BackendCapabilities {
+    #[inline]
     pub fn new(features: impl IntoIterator<Item = Feature>) -> Self {
-        Self {
-            features: features.into_iter().collect(),
+        let mut bits = 0u16;
+        for f in features {
+            bits |= 1u16 << (f as u8);
         }
+        Self { bits }
     }
 
-    pub fn current_metal() -> Self {
-        Self::new([
-            Feature::DenseFfn,
-            Feature::SparseMoe,
-            Feature::GqaAttention,
-            Feature::QkNorm,
-            Feature::StandardKv,
-            Feature::GatedDeltaNet,
-            Feature::F16Kv,
-        ])
+    #[inline]
+    pub const fn current_metal() -> Self {
+        Self {
+            bits: (1u16 << (Feature::DenseFfn as u8))
+                | (1u16 << (Feature::SparseMoe as u8))
+                | (1u16 << (Feature::GqaAttention as u8))
+                | (1u16 << (Feature::QkNorm as u8))
+                | (1u16 << (Feature::StandardKv as u8))
+                | (1u16 << (Feature::GatedDeltaNet as u8))
+                | (1u16 << (Feature::F16Kv as u8)),
+        }
     }
 
     /// CUDA runtime coverage (Windows/Linux). Matches Metal for the dense /
     /// MoE / GQA / GDN surface the engine exposes through `gpu::`.
-    pub fn current_cuda() -> Self {
+    #[inline]
+    pub const fn current_cuda() -> Self {
         Self::current_metal()
     }
 
     /// Active accelerator profile for this build/host.
+    #[inline]
     pub fn current() -> Self {
-        if std::env::var_os("ALLPAKA_NO_GPU").is_some() {
-            return Self::new([]);
+        static NO_GPU: OnceLock<bool> = OnceLock::new();
+        if *NO_GPU.get_or_init(|| std::env::var_os("ALLPAKA_NO_GPU").is_some()) {
+            return Self { bits: 0 };
         }
         #[cfg(target_os = "macos")]
         {
@@ -60,12 +68,13 @@ impl BackendCapabilities {
         }
         #[cfg(not(any(target_os = "macos", feature = "cuda")))]
         {
-            Self::new([])
+            Self { bits: 0 }
         }
     }
 
-    pub fn supports(&self, feature: Feature) -> bool {
-        self.features.contains(&feature)
+    #[inline]
+    pub const fn supports(&self, feature: Feature) -> bool {
+        (self.bits & (1u16 << (feature as u8))) != 0
     }
 
     pub fn coverage(&self, required: &[Feature]) -> CapabilityCoverage {

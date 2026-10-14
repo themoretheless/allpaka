@@ -1,19 +1,19 @@
 //! Explicit policy for resolving acceleration declines.
 
 use crate::accel::{AccelOutcome, DeclineReason};
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(usize)]
 pub enum Operation {
-    Embed,
-    Norm,
-    Matmul,
-    Attention,
-    Router,
-    Experts,
-    KvUpdate,
-    TokenDecode,
-    Prefill,
+    Embed = 0,
+    Norm = 1,
+    Matmul = 2,
+    Attention = 3,
+    Router = 4,
+    Experts = 5,
+    KvUpdate = 6,
+    TokenDecode = 7,
+    Prefill = 8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,37 +23,41 @@ pub enum FallbackAction {
     CpuLayer,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecutionPolicy {
     default: FallbackAction,
-    overrides: BTreeMap<Operation, FallbackAction>,
+    overrides: [Option<FallbackAction>; 9],
 }
 
 impl ExecutionPolicy {
-    pub fn fail_closed() -> Self {
+    #[inline]
+    pub const fn fail_closed() -> Self {
         Self {
             default: FallbackAction::Fail,
-            overrides: BTreeMap::new(),
+            overrides: [None; 9],
         }
     }
 
-    pub fn interactive() -> Self {
+    #[inline]
+    pub const fn interactive() -> Self {
         Self {
             default: FallbackAction::CpuOperation,
-            overrides: BTreeMap::new(),
+            overrides: [None; 9],
         }
     }
 
-    pub fn with_override(mut self, operation: Operation, action: FallbackAction) -> Self {
-        self.overrides.insert(operation, action);
+    #[inline]
+    pub const fn with_override(mut self, operation: Operation, action: FallbackAction) -> Self {
+        self.overrides[operation as usize] = Some(action);
         self
     }
 
-    pub fn action(&self, operation: Operation) -> FallbackAction {
-        self.overrides
-            .get(&operation)
-            .copied()
-            .unwrap_or(self.default)
+    #[inline]
+    pub const fn action(&self, operation: Operation) -> FallbackAction {
+        match self.overrides[operation as usize] {
+            Some(action) => action,
+            None => self.default,
+        }
     }
 
     pub fn resolve<T>(

@@ -84,6 +84,9 @@ impl<T> ModelRegistry<T> {
         mut projected_bytes: u128,
         protected_name: Option<&str>,
     ) -> Result<(), RegistryError> {
+        if projected_bytes <= u128::from(self.budget_bytes) {
+            return Ok(());
+        }
         let mut candidates: Vec<_> = self
             .entries
             .iter()

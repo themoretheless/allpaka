@@ -286,8 +286,21 @@ fn best_split(nodes: &[Node], model: &Model, fabric: &Fabric, req: &PlanRequest)
         })
         .collect();
 
+    // Precompute stream_time(node_idx, layer_count) once instead of inside the O(N! * N * L^2) loop.
+    let stride = total_layers + 1;
+    let mut node_layer_costs = vec![f64::INFINITY; nodes.len() * stride];
+    for (ni, node) in nodes.iter().enumerate() {
+        let max_l = max_layers_for_node[ni];
+        for l in 1..=max_l {
+            node_layer_costs[ni * stride + l] =
+                node.stream_time(model.streamed_bytes_per_step(l as u32, req.context_tokens));
+        }
+    }
+
     let mut best: Option<Plan> = None;
     let mut order: Vec<usize> = (0..nodes.len()).collect();
+    let mut dp = vec![(f64::INFINITY, 0u32); nodes.len() * stride];
+    let mut dense = Vec::with_capacity(nodes.len());
 
     permute(&mut order, 0, &mut |order| {
         // Consider each prefix of `order` of length `m` (2..=order.len()) where all `m`
@@ -314,49 +327,48 @@ fn best_split(nodes: &[Node], model: &Model, fabric: &Fabric, req: &PlanRequest)
                 continue;
             }
 
-            // dp[s][l] = (min_compute_secs, take_on_stage_s) for assigning `l` layers
+            // dp[s * stride + l] = (min_compute_secs, take_on_stage_s) for assigning `l` layers
             // across `active[0..=s]`, with each stage receiving >= 1 layer.
-            let mut dp = vec![vec![(f64::INFINITY, 0u32); total_layers + 1]; m];
+            dp[..m * stride].fill((f64::INFINITY, 0u32));
             let first_node = active[0];
             let first_limit = max_layers_for_node[first_node].min(total_layers - (m - 1));
-            for (take, slot) in dp[0].iter_mut().enumerate().take(first_limit + 1).skip(1) {
-                let c = nodes[first_node]
-                    .stream_time(model.streamed_bytes_per_step(take as u32, req.context_tokens));
-                *slot = (c, take as u32);
+            for take in 1..=first_limit {
+                dp[take] = (node_layer_costs[first_node * stride + take], take as u32);
             }
 
             for (s, &ni) in active.iter().enumerate().skip(1) {
                 let max_take = max_layers_for_node[ni];
                 let min_prev = s;
                 let max_curr = total_layers - (m - 1 - s);
+                let prev_row = (s - 1) * stride;
+                let curr_row = s * stride;
+                let cost_row = ni * stride;
                 for prev_l in min_prev..max_curr {
-                    let prev_cost = dp[s - 1][prev_l].0;
+                    let prev_cost = dp[prev_row + prev_l].0;
                     if !prev_cost.is_finite() {
                         continue;
                     }
                     let hi = max_take.min(max_curr - prev_l);
                     for take in 1..=hi {
-                        let c = nodes[ni].stream_time(
-                            model.streamed_bytes_per_step(take as u32, req.context_tokens),
-                        );
-                        let cand = prev_cost + c;
+                        let cand = prev_cost + node_layer_costs[cost_row + take];
                         let next_l = prev_l + take;
-                        if cand < dp[s][next_l].0 {
-                            dp[s][next_l] = (cand, take as u32);
+                        if cand < dp[curr_row + next_l].0 {
+                            dp[curr_row + next_l] = (cand, take as u32);
                         }
                     }
                 }
             }
 
-            if !dp[m - 1][total_layers].0.is_finite() {
+            if !dp[(m - 1) * stride + total_layers].0.is_finite() {
                 continue;
             }
 
             // Reconstruct optimal layer counts for `active`.
-            let mut dense = vec![(0usize, 0u32); m];
+            dense.clear();
+            dense.resize(m, (0usize, 0u32));
             let mut rem = total_layers;
             for s in (0..m).rev() {
-                let take = dp[s][rem].1;
+                let take = dp[s * stride + rem].1;
                 dense[s] = (active[s], take);
                 rem -= take as usize;
             }

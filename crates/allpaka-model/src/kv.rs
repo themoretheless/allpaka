@@ -206,7 +206,7 @@ impl SsmCache {
             std::ptr::copy_nonoverlapping(sp, dp, n);
         }
         if let Some(sh) = self.shared.as_mut() {
-            let bytes = self.store.as_bytes();
+            let bytes = &self.store.as_bytes()[..n * 4];
             allpaka_backend::gpu::upload_region_range(sh, 0, bytes);
         }
         self.slots_armed = false;
@@ -309,7 +309,7 @@ impl SsmCache {
         );
         self.floats_mut()[..snap.len()].copy_from_slice(snap);
         if let Some(sh) = self.shared.as_mut() {
-            let bytes = self.store.as_bytes();
+            let bytes = &self.store.as_bytes()[..snap.len() * 4];
             allpaka_backend::gpu::upload_region_range(sh, 0, bytes);
         }
     }

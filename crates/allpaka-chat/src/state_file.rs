@@ -21,14 +21,20 @@ where
     T: DeserializeOwned,
 {
     let path = data.join(format!("{file}.state"));
-    if !path.exists() {
-        return Ok(Vec::new());
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    if meta.len() > MAX_STATE_BYTES as u64 {
+        bail!("Invalid {label} file");
     }
     let bytes = std::fs::read(&path)?;
     if bytes.len() > MAX_STATE_BYTES {
         bail!("Invalid {label} file");
     }
-    let list: Vec<T> = serde_json::from_slice(&bytes).context(format!("Invalid {label} file"))?;
+    let list: Vec<T> =
+        serde_json::from_slice(&bytes).with_context(|| format!("Invalid {label} file"))?;
     for item in &list {
         validate(item)?;
     }

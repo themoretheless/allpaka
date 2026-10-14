@@ -48,22 +48,40 @@ pub const NAMES: [&str; 13] = [
     "output proj",
 ];
 
+#[repr(align(64))]
+struct AlignedSlot {
+    ns: AtomicU64,
+    calls: AtomicU64,
+}
+
+impl AlignedSlot {
+    const fn new() -> Self {
+        Self {
+            ns: AtomicU64::new(0),
+            calls: AtomicU64::new(0),
+        }
+    }
+}
+
 #[allow(clippy::declare_interior_mutable_const)]
-const ZERO: AtomicU64 = AtomicU64::new(0);
-static NS: [AtomicU64; NAMES.len()] = [ZERO; NAMES.len()];
-static CALLS: [AtomicU64; NAMES.len()] = [ZERO; NAMES.len()];
+const ZERO_SLOT: AlignedSlot = AlignedSlot::new();
+static SLOTS: [AlignedSlot; NAMES.len()] = [ZERO_SLOT; NAMES.len()];
 
 /// A running phase; adds its elapsed time when dropped.
 pub struct Span(usize, Instant);
 
 impl Drop for Span {
+    #[inline]
     fn drop(&mut self) {
-        NS[self.0].fetch_add(self.1.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        CALLS[self.0].fetch_add(1, Ordering::Relaxed);
+        let slot = &SLOTS[self.0];
+        slot.ns
+            .fetch_add(self.1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        slot.calls.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// Start timing `phase` until the returned value goes out of scope.
+#[inline]
 pub fn span(phase: Phase) -> Span {
     Span(phase as usize, Instant::now())
 }
@@ -77,21 +95,17 @@ pub fn take() -> [u64; NAMES.len()] {
 pub fn take_with_counts() -> ([u64; NAMES.len()], [u64; NAMES.len()]) {
     let mut out = [0u64; NAMES.len()];
     let mut calls = [0u64; NAMES.len()];
-    for (o, n) in out.iter_mut().zip(NS.iter()) {
-        *o = n.load(Ordering::Relaxed);
-    }
-    for (o, n) in calls.iter_mut().zip(CALLS.iter()) {
-        *o = n.load(Ordering::Relaxed);
+    for (i, slot) in SLOTS.iter().enumerate() {
+        out[i] = slot.ns.load(Ordering::Relaxed);
+        calls[i] = slot.calls.load(Ordering::Relaxed);
     }
     (out, calls)
 }
 
 pub fn reset() {
-    for n in NS.iter() {
-        n.store(0, Ordering::Relaxed);
-    }
-    for n in CALLS.iter() {
-        n.store(0, Ordering::Relaxed);
+    for slot in SLOTS.iter() {
+        slot.ns.store(0, Ordering::Relaxed);
+        slot.calls.store(0, Ordering::Relaxed);
     }
 }
 

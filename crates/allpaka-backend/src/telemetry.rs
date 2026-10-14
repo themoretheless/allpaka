@@ -114,24 +114,33 @@ impl PhaseTrace {
     }
 }
 
-static GLOBAL_DURATIONS_NS: [AtomicU64; Phase::ALL.len()] =
-    [const { AtomicU64::new(0) }; Phase::ALL.len()];
-static GLOBAL_CALLS: [AtomicU64; Phase::ALL.len()] =
-    [const { AtomicU64::new(0) }; Phase::ALL.len()];
+#[repr(align(64))]
+struct AlignedPhaseSlot {
+    duration_ns: AtomicU64,
+    calls: AtomicU64,
+}
+
+static GLOBAL_SLOTS: [AlignedPhaseSlot; Phase::ALL.len()] = [const {
+    AlignedPhaseSlot {
+        duration_ns: AtomicU64::new(0),
+        calls: AtomicU64::new(0),
+    }
+}; Phase::ALL.len()];
 
 /// Record a completed backend phase without introducing a lock or a new
 /// synchronization point. GPU callers use this only after an existing wait.
+#[inline]
 pub fn record_global(phase: Phase, duration: Duration) {
-    let index = phase as usize;
+    let slot = &GLOBAL_SLOTS[phase as usize];
     let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
-    GLOBAL_DURATIONS_NS[index].fetch_add(nanos, Ordering::Relaxed);
-    GLOBAL_CALLS[index].fetch_add(1, Ordering::Relaxed);
+    slot.duration_ns.fetch_add(nanos, Ordering::Relaxed);
+    slot.calls.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn reset_global() {
-    for index in 0..Phase::ALL.len() {
-        GLOBAL_DURATIONS_NS[index].store(0, Ordering::Relaxed);
-        GLOBAL_CALLS[index].store(0, Ordering::Relaxed);
+    for slot in &GLOBAL_SLOTS {
+        slot.duration_ns.store(0, Ordering::Relaxed);
+        slot.calls.store(0, Ordering::Relaxed);
     }
 }
 
@@ -141,9 +150,9 @@ pub fn take_global() -> PhaseTrace {
     let mut trace = PhaseTrace::default();
     for phase in Phase::ALL {
         let index = phase as usize;
-        trace.durations[index] =
-            Duration::from_nanos(GLOBAL_DURATIONS_NS[index].swap(0, Ordering::Relaxed));
-        trace.calls[index] = GLOBAL_CALLS[index].swap(0, Ordering::Relaxed);
+        let slot = &GLOBAL_SLOTS[index];
+        trace.durations[index] = Duration::from_nanos(slot.duration_ns.swap(0, Ordering::Relaxed));
+        trace.calls[index] = slot.calls.swap(0, Ordering::Relaxed);
     }
     trace
 }

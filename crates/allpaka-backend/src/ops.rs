@@ -5,6 +5,29 @@
 //! silent-wrong-variant failure mode produces plausible garbage that only a
 //! logit comparison catches.
 
+#[inline]
+fn cpu_threads() -> usize {
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| std::thread::available_parallelism().map_or(1, |t| t.get()))
+}
+
+#[inline]
+fn sum_sq_f64(x: &[f32]) -> f64 {
+    let mut acc = [0.0f64; 4];
+    let mut chunks = x.chunks_exact(4);
+    for c in &mut chunks {
+        acc[0] += (c[0] as f64) * (c[0] as f64);
+        acc[1] += (c[1] as f64) * (c[1] as f64);
+        acc[2] += (c[2] as f64) * (c[2] as f64);
+        acc[3] += (c[3] as f64) * (c[3] as f64);
+    }
+    let mut total = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+    for &v in chunks.remainder() {
+        total += (v as f64) * (v as f64);
+    }
+    total
+}
+
 /// `y = x · Wᵀ` over plain f32, shapes `x: [m, k]`, `w: [n, k]`, `y: [m, n]`.
 ///
 /// For quantised weights use [`crate::QuantMat::matmul`]; this exists for the
@@ -16,13 +39,10 @@ pub fn matmul_f32(x: &[f32], w: &[f32], m: usize, k: usize, n: usize) -> Vec<f32
     let mut y = vec![0f32; m * n];
     for i in 0..m {
         let xi = &x[i * k..(i + 1) * k];
-        for j in 0..n {
+        let y_row = &mut y[i * n..(i + 1) * n];
+        for (j, out) in y_row.iter_mut().enumerate() {
             let wj = &w[j * k..(j + 1) * k];
-            let mut sum = 0.0f32;
-            for l in 0..k {
-                sum += xi[l] * wj[l];
-            }
-            y[i * n + j] = sum;
+            *out = dot(xi, wj);
         }
     }
     y
@@ -34,7 +54,7 @@ pub fn matmul_f32(x: &[f32], w: &[f32], m: usize, k: usize, n: usize) -> Vec<f32
 /// accumulation loses enough bits to show up in logit comparisons.
 pub fn rmsnorm(x: &mut [f32], weight: &[f32], eps: f32) {
     assert_eq!(x.len(), weight.len());
-    let mean_sq = x.iter().map(|&v| v as f64 * v as f64).sum::<f64>() / x.len() as f64;
+    let mean_sq = sum_sq_f64(x) / x.len() as f64;
     let scale = 1.0 / (mean_sq + eps as f64).sqrt();
     for (v, w) in x.iter_mut().zip(weight) {
         *v = (*v as f64 * scale) as f32 * w;
@@ -48,7 +68,7 @@ pub fn rmsnorm(x: &mut [f32], weight: &[f32], eps: f32) {
 pub fn rmsnorm_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
     assert_eq!(src.len(), weight.len());
     assert_eq!(dst.len(), src.len());
-    let mean_sq = src.iter().map(|&v| v as f64 * v as f64).sum::<f64>() / src.len() as f64;
+    let mean_sq = sum_sq_f64(src) / src.len() as f64;
     let scale = 1.0 / (mean_sq + eps as f64).sqrt();
     for ((d, &v), w) in dst.iter_mut().zip(src).zip(weight) {
         *d = (v as f64 * scale) as f32 * w;
@@ -62,9 +82,7 @@ pub fn rmsnorm_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
 pub fn rmsnorm_rows_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
     let n = weight.len();
     let rows = src.len() / n;
-    let threads = std::thread::available_parallelism()
-        .map_or(1, |t| t.get())
-        .min(rows.max(1));
+    let threads = cpu_threads().min(rows.max(1));
     if threads <= 1 || rows < 4 {
         for (d, s) in dst.chunks_mut(n).zip(src.chunks(n)) {
             rmsnorm_into(d, s, weight, eps);
@@ -87,8 +105,8 @@ pub fn rmsnorm_rows_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32)
 /// over the same hundreds-of-rows batches as the norms.
 pub fn add_assign_par(a: &mut [f32], b: &[f32]) {
     assert_eq!(a.len(), b.len());
-    let threads = std::thread::available_parallelism().map_or(1, |t| t.get());
-    let per = a.len().div_ceil(threads).max(1 << 14);
+    let threads = cpu_threads();
+    let per = a.len().div_ceil(threads).max(1 << 16);
     if a.len() <= per {
         for (x, y) in a.iter_mut().zip(b) {
             *x += y;
@@ -115,19 +133,21 @@ pub fn softmax(x: &mut [f32]) {
         *v = (*v - max).exp();
         sum += *v;
     }
+    let inv_sum = 1.0 / sum;
     for v in x.iter_mut() {
-        *v /= sum;
+        *v *= inv_sum;
     }
 }
 
 /// SiLU: `x * sigmoid(x)`.
+#[inline]
 pub fn silu(x: f32) -> f32 {
     x / (1.0 + (-x).exp())
 }
 
 /// L2 normalisation to unit norm, like `ggml_l2_norm`: `x / sqrt(sum(x^2) + eps)`.
 pub fn l2_norm(x: &mut [f32], eps: f32) {
-    let s: f32 = x.iter().map(|v| v * v).sum();
+    let s = dot(x, x);
     let inv = 1.0 / (s + eps).sqrt();
     for v in x.iter_mut() {
         *v *= inv;
@@ -135,6 +155,7 @@ pub fn l2_norm(x: &mut [f32], eps: f32) {
 }
 
 /// `ln(1 + e^x)`, the delta-net's dt activation.
+#[inline]
 pub fn softplus(x: f32) -> f32 {
     if x > 20.0 {
         x
@@ -175,21 +196,25 @@ pub fn gated_deltanet_step(
         let kh = h % heads_k;
         let g = gate[h].exp();
         let b = beta[h];
+        let k_h = &k[kh * d..(kh + 1) * d];
+        let q_h = &q[kh * d..(kh + 1) * d];
+        let v_h = &v[h * d..(h + 1) * d];
+        let out_h = &mut out[h * d..(h + 1) * d];
         let s = &mut state[h * d * d..(h + 1) * d * d];
         for i in 0..d {
             let row = &mut s[i * d..(i + 1) * d];
             let mut sk = 0.0f32;
-            for j in 0..d {
-                row[j] *= g;
-                sk += row[j] * k[kh * d + j];
+            for (rj, &kj) in row.iter_mut().zip(k_h) {
+                *rj *= g;
+                sk += *rj * kj;
             }
-            let delta = (v[h * d + i] - sk) * b;
+            let delta = (v_h[i] - sk) * b;
             let mut y = 0.0f32;
-            for j in 0..d {
-                row[j] += k[kh * d + j] * delta;
-                y += row[j] * q[kh * d + j];
+            for ((rj, &kj), &qj) in row.iter_mut().zip(k_h).zip(q_h) {
+                *rj += kj * delta;
+                y += *rj * qj;
             }
-            out[h * d + i] = y * scale;
+            out_h[i] = y * scale;
         }
     }
 }
@@ -790,6 +815,9 @@ mod tests {
 /// reference, the F32 router, and attention's q-dot-k.
 #[inline(always)]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    let a = &a[..n];
+    let b = &b[..n];
     // Eight running sums, not one. A single accumulator is a serial
     // dependency chain that the compiler may not reassociate - f32 addition
     // is not associative, so it is not allowed to - and the loop stays

@@ -34,20 +34,24 @@ impl<'de> Deserialize<'de> for Unique {
                 Ok(Unique(Value::Null))
             }
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Unique, A::Error> {
-                let mut values = Vec::new();
+                let mut values = Vec::with_capacity(seq.size_hint().unwrap_or(0));
                 while let Some(Unique(value)) = seq.next_element()? {
                     values.push(value);
                 }
                 Ok(Unique(Value::Array(values)))
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Unique, A::Error> {
-                let mut values = serde_json::Map::new();
+                let mut values = serde_json::Map::with_capacity(map.size_hint().unwrap_or(0));
                 while let Some(key) = map.next_key::<String>()? {
-                    if values.contains_key(&key) {
-                        return Err(de::Error::custom("Duplicate JSON key"));
+                    match values.entry(key) {
+                        serde_json::map::Entry::Occupied(_) => {
+                            return Err(de::Error::custom("Duplicate JSON key"));
+                        }
+                        serde_json::map::Entry::Vacant(vacant) => {
+                            let Unique(value) = map.next_value()?;
+                            vacant.insert(value);
+                        }
                     }
-                    let Unique(value) = map.next_value()?;
-                    values.insert(key, value);
                 }
                 Ok(Unique(Value::Object(values)))
             }

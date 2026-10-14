@@ -99,7 +99,7 @@ impl Tokenizer {
     pub fn encode(&self, text: &str) -> Result<Vec<u32>> {
         let mut out = Vec::new();
         for segment in segments(text) {
-            self.encode_segment(&segment, &mut out)?;
+            self.encode_segment(segment, &mut out)?;
         }
         Ok(out)
     }
@@ -192,7 +192,10 @@ impl Tokenizer {
                 bytes.extend_from_slice(pb);
             }
         }
-        String::from_utf8_lossy(&bytes).into_owned()
+        match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+        }
     }
 
     /// Round-trip sanity used by loading code: encode must invert decode on
@@ -209,24 +212,23 @@ impl Tokenizer {
 
 /// Split text into BPE segments: a run of whitespace is attached to the word
 /// that follows it, which is how the GPT-2 alphabet expects spaces to travel.
-fn segments(text: &str) -> Vec<String> {
+fn segments(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    let mut current = String::new();
+    let mut seg_start = 0;
     let mut in_word = false;
-    for ch in text.chars() {
+    for (idx, ch) in text.char_indices() {
         if ch.is_whitespace() {
-            if in_word && !current.is_empty() {
-                out.push(std::mem::take(&mut current));
+            if in_word && idx > seg_start {
+                out.push(&text[seg_start..idx]);
+                seg_start = idx;
             }
             in_word = false;
-            current.push(ch);
         } else {
             in_word = true;
-            current.push(ch);
         }
     }
-    if !current.is_empty() {
-        out.push(current);
+    if seg_start < text.len() {
+        out.push(&text[seg_start..]);
     }
     out
 }

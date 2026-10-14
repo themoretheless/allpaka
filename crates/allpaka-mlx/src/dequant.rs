@@ -25,7 +25,7 @@ pub fn bf16_to_f32(h: u16) -> f32 {
 /// and x = val * scale + bias.
 ///
 /// Order is verified by golden fixtures against `mx.dequantize`.
-pub fn dequant_mlx_q4_block(block: &[u8], out: &mut Vec<f32>) {
+pub fn dequant_mlx_q4_block_slice(block: &[u8], out: &mut [f32; 64]) {
     assert!(
         block.len() >= 36,
         "Q4Affine block requires at least 36 bytes, got {}",
@@ -33,19 +33,25 @@ pub fn dequant_mlx_q4_block(block: &[u8], out: &mut Vec<f32>) {
     );
     let scale = bf16_to_f32(u16::from_le_bytes([block[32], block[33]]));
     let bias = bf16_to_f32(u16::from_le_bytes([block[34], block[35]]));
-    out.reserve(64);
     for w in 0..8 {
         let word = u32::from_le_bytes(block[w * 4..w * 4 + 4].try_into().unwrap());
-        for k in 0..8 {
+        let dst = &mut out[w * 8..w * 8 + 8];
+        for (k, d) in dst.iter_mut().enumerate() {
             let nib = ((word >> (k * 4)) & 0xf) as f32;
-            out.push(nib * scale + bias);
+            *d = nib.mul_add(scale, bias);
         }
     }
 }
 
+pub fn dequant_mlx_q4_block(block: &[u8], out: &mut Vec<f32>) {
+    let mut tmp = [0.0f32; 64];
+    dequant_mlx_q4_block_slice(block, &mut tmp);
+    out.extend_from_slice(&tmp);
+}
+
 /// Dequantise one Q8Affine block (68 bytes: 64 bytes payload + b16 scale + b16 bias).
 /// Each element is an unsigned byte; x = q * scale + bias.
-pub fn dequant_mlx_q8_block(block: &[u8], out: &mut Vec<f32>) {
+pub fn dequant_mlx_q8_block_slice(block: &[u8], out: &mut [f32; 64]) {
     assert!(
         block.len() >= 68,
         "Q8Affine block requires at least 68 bytes, got {}",
@@ -53,10 +59,15 @@ pub fn dequant_mlx_q8_block(block: &[u8], out: &mut Vec<f32>) {
     );
     let scale = bf16_to_f32(u16::from_le_bytes([block[64], block[65]]));
     let bias = bf16_to_f32(u16::from_le_bytes([block[66], block[67]]));
-    out.reserve(64);
-    for &b in block.iter().take(64) {
-        out.push(b as f32 * scale + bias);
+    for (d, &b) in out.iter_mut().zip(&block[..64]) {
+        *d = (b as f32).mul_add(scale, bias);
     }
+}
+
+pub fn dequant_mlx_q8_block(block: &[u8], out: &mut Vec<f32>) {
+    let mut tmp = [0.0f32; 64];
+    dequant_mlx_q8_block_slice(block, &mut tmp);
+    out.extend_from_slice(&tmp);
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@
 
 use std::sync::OnceLock;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimePolicy {
     pub normflag: bool,
     pub attention_split: Option<usize>,
@@ -18,6 +18,7 @@ pub struct RuntimePolicy {
 }
 
 impl Default for RuntimePolicy {
+    #[inline]
     fn default() -> Self {
         Self {
             normflag: true,
@@ -49,6 +50,7 @@ impl RuntimePolicy {
 
 static POLICY: OnceLock<RuntimePolicy> = OnceLock::new();
 
+#[inline]
 pub fn get() -> &'static RuntimePolicy {
     POLICY.get_or_init(RuntimePolicy::from_env)
 }

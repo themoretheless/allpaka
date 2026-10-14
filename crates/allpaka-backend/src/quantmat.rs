@@ -52,11 +52,25 @@ impl<'a> QuantMat<'a> {
 
     /// One weight row dequantised to f32.
     pub fn row(&self, j: usize) -> Result<Vec<f32>> {
+        let mut out = vec![0.0f32; self.n_in];
+        self.row_into(j, &mut out)?;
+        Ok(out)
+    }
+
+    /// Dequantise weight row `j` directly into `dst` without allocating a new `Vec<f32>`.
+    pub fn row_into(&self, j: usize, dst: &mut [f32]) -> Result<()> {
         if j >= self.n_out {
             bail!("row {j} out of {}", self.n_out);
         }
+        if dst.len() != self.n_in {
+            bail!(
+                "row_into destination has {} elements, expected {}",
+                dst.len(),
+                self.n_in
+            );
+        }
         let bytes = &self.data[j * self.row_bytes..(j + 1) * self.row_bytes];
-        dequant::dequant(self.ty, bytes, self.n_in)
+        dequant::dequant_into(self.ty, bytes, dst)
     }
 
     /// A contiguous band of rows as its own matrix, borrowing the same bytes.
@@ -111,7 +125,7 @@ impl<'a> QuantMat<'a> {
             return Ok(y);
         }
 
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let threads = cpu_threads();
         if m >= threads {
             let rows_per = m.div_ceil(threads).max(1);
             std::thread::scope(|scope| {
@@ -179,7 +193,7 @@ impl<'a> QuantMat<'a> {
             return y;
         }
 
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let threads = cpu_threads();
         let mut y = vec![0f32; self.n_out];
         let rows_per = self.n_out.div_ceil(threads).max(1);
 
@@ -564,9 +578,14 @@ impl<'a> QuantMat<'a> {
         let bytes = &self.data[j * self.row_bytes..(j + 1) * self.row_bytes];
         match self.ty {
             GgmlType::Q8_0 => dot_q8_0(bytes, x),
+            GgmlType::Q5_0 => dot_q5_0(bytes, x),
             GgmlType::Q2K => dot_q2_k(bytes, x),
+            GgmlType::Q3K => dot_q3_k(bytes, x),
             GgmlType::Q4K => dot_q4_k(bytes, x),
+            GgmlType::Q5K => dot_q5_k(bytes, x),
             GgmlType::Q6K => dot_q6_k(bytes, x),
+            GgmlType::F16 => dot_f16(bytes, x),
+            GgmlType::BF16 => dot_bf16(bytes, x),
             // The router of every MoE layer is F32, and it is on the decode
             // hot path: unpacking it a byte quadruple at a time cost more
             // than the whole routed FFN's CPU share.
@@ -585,6 +604,132 @@ impl<'a> QuantMat<'a> {
             }
         }
     }
+}
+
+#[inline]
+fn cpu_threads() -> usize {
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
+#[inline(always)]
+fn dot_f16(row: &[u8], x: &[f32]) -> f32 {
+    row.chunks_exact(2)
+        .zip(x)
+        .map(|(c, &xv)| dequant::f16_to_f32(u16::from_le_bytes([c[0], c[1]])) * xv)
+        .sum()
+}
+
+#[inline(always)]
+fn dot_bf16(row: &[u8], x: &[f32]) -> f32 {
+    row.chunks_exact(2)
+        .zip(x)
+        .map(|(c, &xv)| dequant::bf16_to_f32(u16::from_le_bytes([c[0], c[1]])) * xv)
+        .sum()
+}
+
+#[inline(always)]
+fn dot_q5_0(row: &[u8], x: &[f32]) -> f32 {
+    let mut total = 0f32;
+    for (bi, block) in row.chunks_exact(22).enumerate() {
+        let d = dequant::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        let qh = u32::from_le_bytes(block[2..6].try_into().unwrap());
+        let qs = &block[6..22];
+        let xs = &x[bi * 32..bi * 32 + 32];
+        let mut s = 0f32;
+        for j in 0..16 {
+            let x0 = ((qs[j] & 0x0f) as u32 | (((qh >> j) & 1) << 4)) as i32 - 16;
+            let x1 = ((qs[j] >> 4) as u32 | (((qh >> (j + 16)) & 1) << 4)) as i32 - 16;
+            s += x0 as f32 * xs[j] + x1 as f32 * xs[j + 16];
+        }
+        total += d * s;
+    }
+    total
+}
+
+#[inline(always)]
+fn dot_q3_k(row: &[u8], x: &[f32]) -> f32 {
+    let mut total = 0f32;
+    for (bi, block) in row.chunks_exact(110).enumerate() {
+        let hmask = &block[0..32];
+        let qs = &block[32..96];
+        let packed = &block[96..108];
+        let d_all = dequant::f16_to_f32(u16::from_le_bytes([block[108], block[109]]));
+        let xb = &x[bi * 256..bi * 256 + 256];
+
+        let mut scales = [0i32; 16];
+        for (i, s) in scales.iter_mut().enumerate() {
+            let lo = if i < 8 {
+                packed[i] & 0xf
+            } else {
+                packed[i - 8] >> 4
+            };
+            let hi = (packed[8 + i % 4] >> (2 * (i / 4))) & 3;
+            *s = ((lo | (hi << 4)) as i32) - 32;
+        }
+
+        let mut is = 0;
+        let mut m: u8 = 1;
+        let mut pos = 0;
+        for half in 0..2 {
+            let q = &qs[half * 32..half * 32 + 32];
+            for shift in [0u8, 2, 4, 6] {
+                for group in 0..2 {
+                    let dl = d_all * scales[is] as f32;
+                    let mut sub = 0f32;
+                    for l in 0..16 {
+                        let idx = group * 16 + l;
+                        let quant = ((q[idx] >> shift) & 3) as i32
+                            - if hmask[idx] & m != 0 { 0 } else { 4 };
+                        sub += quant as f32 * xb[pos + l];
+                    }
+                    total += dl * sub;
+                    pos += 16;
+                    is += 1;
+                }
+                m <<= 1;
+            }
+        }
+    }
+    total
+}
+
+#[inline(always)]
+fn dot_q5_k(row: &[u8], x: &[f32]) -> f32 {
+    let mut total = 0f32;
+    for (bi, block) in row.chunks_exact(176).enumerate() {
+        let d = dequant::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        let dmin = dequant::f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+        let packed = &block[4..16];
+        let qh = &block[16..48];
+        let qs = &block[48..176];
+        let xb = &x[bi * 256..bi * 256 + 256];
+
+        for pair in 0..4 {
+            let q = &qs[pair * 32..pair * 32 + 32];
+            let x_lo = &xb[pair * 64..pair * 64 + 32];
+            let x_hi = &xb[pair * 64 + 32..pair * 64 + 64];
+            let (sc1, mn1) = dequant::scale_min_k4(pair * 2, packed);
+            let (sc2, mn2) = dequant::scale_min_k4(pair * 2 + 1, packed);
+            let bit1 = 1u8 << (pair * 2);
+            let bit2 = 1u8 << (pair * 2 + 1);
+            let mut dot_lo = 0f32;
+            let mut sum_lo = 0f32;
+            let mut dot_hi = 0f32;
+            let mut sum_hi = 0f32;
+            for l in 0..32 {
+                let hi1 = if qh[l] & bit1 != 0 { 16 } else { 0 };
+                let hi2 = if qh[l] & bit2 != 0 { 16 } else { 0 };
+                dot_lo += ((q[l] & 0xf) + hi1) as f32 * x_lo[l];
+                sum_lo += x_lo[l];
+                dot_hi += ((q[l] >> 4) + hi2) as f32 * x_hi[l];
+                sum_hi += x_hi[l];
+            }
+            total += d * sc1 * dot_lo - dmin * mn1 * sum_lo;
+            total += d * sc2 * dot_hi - dmin * mn2 * sum_hi;
+        }
+    }
+    total
 }
 
 /// Fused Q8_0 dot product: `Σ_blocks d * Σ q_i * x_i`, straight off the
@@ -807,7 +952,8 @@ fn dot_q8_0_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
     for (bi, block) in row.chunks_exact(34).enumerate() {
         let d = dequant::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
         // SAFETY: i8 and u8 share size and alignment; construct a 32-element i8 slice from pointer.
-        let qw: &[i8] = unsafe { std::slice::from_raw_parts(block[2..34].as_ptr() as *const i8, 32) };
+        let qw: &[i8] =
+            unsafe { std::slice::from_raw_parts(block[2..34].as_ptr() as *const i8, 32) };
         total += d * acts.d[bi] * dot_i8(qw, acts.block(bi)) as f32;
     }
     total
