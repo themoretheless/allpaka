@@ -42,10 +42,13 @@ fn post(addr: &str, path: &str, body: &Value) -> Result<Value> {
     }
     // With Connection: close the body is everything after the headers, but a
     // chunked response needs its framing stripped.
-    let body_bytes = if head
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked")
-    {
+    let is_chunked = head.lines().skip(1).any(|line| {
+        line.split_once(':').is_some_and(|(k, v)| {
+            k.trim().eq_ignore_ascii_case("transfer-encoding")
+                && v.trim().eq_ignore_ascii_case("chunked")
+        })
+    });
+    let body_bytes = if is_chunked {
         dechunk(rest_bytes)?
     } else {
         rest_bytes.to_vec()
@@ -132,10 +135,22 @@ fn reference_top(addr: &str, tokens: &[u32], n: usize) -> Result<Vec<(u32, f64)>
     Ok(out)
 }
 
-fn log_softmax(logits: &[f32]) -> Vec<f64> {
-    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+fn log_partition_and_argmax(logits: &[f32]) -> (f64, usize) {
+    let mut max_val = f32::NEG_INFINITY;
+    let mut argmax = 0usize;
+    for (i, &v) in logits.iter().enumerate() {
+        if v.total_cmp(&max_val).is_gt() {
+            max_val = v;
+            argmax = i;
+        }
+    }
+    let max = max_val as f64;
     let sum: f64 = logits.iter().map(|&v| (v as f64 - max).exp()).sum();
-    let log_z = max + sum.ln();
+    (max + sum.ln(), argmax)
+}
+
+fn log_softmax(logits: &[f32]) -> Vec<f64> {
+    let (log_z, _) = log_partition_and_argmax(logits);
     logits.iter().map(|&v| v as f64 - log_z).collect()
 }
 
@@ -203,10 +218,7 @@ pub fn run(
         tokens.len(),
         t0.elapsed().as_secs_f64()
     );
-    let ours = log_softmax(&logits);
-    let our_argmax = (0..ours.len())
-        .max_by(|&a, &b| ours[a].total_cmp(&ours[b]))
-        .unwrap();
+    let (log_z, our_argmax) = log_partition_and_argmax(&logits);
 
     // Reference side.
     let theirs = reference_top(addr, &tokens, top)?;
@@ -218,7 +230,9 @@ pub fn run(
     );
     let mut max_diff = 0f64;
     for &(id, ref_lp) in &theirs {
-        let our_lp = ours.get(id as usize).copied().unwrap_or(f64::NEG_INFINITY);
+        let our_lp = logits
+            .get(id as usize)
+            .map_or(f64::NEG_INFINITY, |&v| v as f64 - log_z);
         let diff = (our_lp - ref_lp).abs();
         max_diff = max_diff.max(diff);
         println!("{id:>6}  {ref_lp:>12.4}  {our_lp:>12.4}  {diff:>9.4}");
@@ -261,16 +275,16 @@ pub fn run(
     let mut logits = logits;
     let mut worst = 0f64;
     for step in 0..decode {
-        let ours = log_softmax(&logits);
-        let our_argmax = (0..ours.len())
-            .max_by(|&a, &b| ours[a].total_cmp(&ours[b]))
-            .unwrap() as u32;
+        let (step_log_z, step_argmax) = log_partition_and_argmax(&logits);
+        let our_argmax = step_argmax as u32;
         let theirs = reference_top(addr, &context, top)?;
         let (ref_argmax, ref_top_lp) = *theirs.first().context("reference returned nothing")?;
 
         let mut step_diff = 0f64;
         for &(id, ref_lp) in &theirs {
-            let our_lp = ours.get(id as usize).copied().unwrap_or(f64::NEG_INFINITY);
+            let our_lp = logits
+                .get(id as usize)
+                .map_or(f64::NEG_INFINITY, |&v| v as f64 - step_log_z);
             step_diff = step_diff.max((our_lp - ref_lp).abs());
         }
         worst = worst.max(step_diff);

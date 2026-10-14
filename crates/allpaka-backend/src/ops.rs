@@ -55,9 +55,9 @@ pub fn matmul_f32(x: &[f32], w: &[f32], m: usize, k: usize, n: usize) -> Vec<f32
 pub fn rmsnorm(x: &mut [f32], weight: &[f32], eps: f32) {
     assert_eq!(x.len(), weight.len());
     let mean_sq = sum_sq_f64(x) / x.len() as f64;
-    let scale = 1.0 / (mean_sq + eps as f64).sqrt();
+    let scale = (1.0 / (mean_sq + eps as f64).sqrt()) as f32;
     for (v, w) in x.iter_mut().zip(weight) {
-        *v = (*v as f64 * scale) as f32 * w;
+        *v = *v * scale * w;
     }
 }
 
@@ -69,9 +69,9 @@ pub fn rmsnorm_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
     assert_eq!(src.len(), weight.len());
     assert_eq!(dst.len(), src.len());
     let mean_sq = sum_sq_f64(src) / src.len() as f64;
-    let scale = 1.0 / (mean_sq + eps as f64).sqrt();
+    let scale = (1.0 / (mean_sq + eps as f64).sqrt()) as f32;
     for ((d, &v), w) in dst.iter_mut().zip(src).zip(weight) {
-        *d = (v as f64 * scale) as f32 * w;
+        *d = v * scale * w;
     }
 }
 
@@ -369,14 +369,18 @@ pub mod f16 {
             let mut i = 0;
             unsafe {
                 use std::arch::aarch64::*;
+                while i + 8 <= src.len() {
+                    let v0 = vld1q_f32(src.as_ptr().add(i));
+                    let v1 = vld1q_f32(src.as_ptr().add(i + 4));
+                    let h0: uint16x4_t = std::mem::transmute(vcvt_f16_f32(v0));
+                    let h1: uint16x4_t = std::mem::transmute(vcvt_f16_f32(v1));
+                    vst1q_u16(dst.as_mut_ptr().add(i), vcombine_u16(h0, h1));
+                    i += 8;
+                }
                 while i + 4 <= src.len() {
                     let v = vld1q_f32(src.as_ptr().add(i));
-                    let h = vcvt_f16_f32(v);
-                    std::ptr::copy_nonoverlapping(
-                        &h as *const _ as *const u16,
-                        dst.as_mut_ptr().add(i),
-                        4,
-                    );
+                    let h: uint16x4_t = std::mem::transmute(vcvt_f16_f32(v));
+                    vst1_u16(dst.as_mut_ptr().add(i), h);
                     i += 4;
                 }
             }
@@ -404,18 +408,12 @@ pub mod f16 {
             let mut acc3 = vdupq_n_f32(0.0);
             let mut i = 0;
             while i + 16 <= n {
-                let h0: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
-                    b.as_ptr().add(i) as *const [u16; 4],
-                ));
-                let h1: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
-                    b.as_ptr().add(i + 4) as *const [u16; 4],
-                ));
-                let h2: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
-                    b.as_ptr().add(i + 8) as *const [u16; 4],
-                ));
-                let h3: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
-                    b.as_ptr().add(i + 12) as *const [u16; 4],
-                ));
+                let u01 = vld1q_u16(b.as_ptr().add(i));
+                let u23 = vld1q_u16(b.as_ptr().add(i + 8));
+                let h0: float16x4_t = std::mem::transmute(vget_low_u16(u01));
+                let h1: float16x4_t = std::mem::transmute(vget_high_u16(u01));
+                let h2: float16x4_t = std::mem::transmute(vget_low_u16(u23));
+                let h3: float16x4_t = std::mem::transmute(vget_high_u16(u23));
                 acc0 = vfmaq_f32(acc0, vld1q_f32(a.as_ptr().add(i)), vcvt_f32_f16(h0));
                 acc1 = vfmaq_f32(acc1, vld1q_f32(a.as_ptr().add(i + 4)), vcvt_f32_f16(h1));
                 acc2 = vfmaq_f32(acc2, vld1q_f32(a.as_ptr().add(i + 8)), vcvt_f32_f16(h2));
@@ -423,9 +421,7 @@ pub mod f16 {
                 i += 16;
             }
             while i + 4 <= n {
-                let h: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
-                    b.as_ptr().add(i) as *const [u16; 4],
-                ));
+                let h: float16x4_t = std::mem::transmute(vld1_u16(b.as_ptr().add(i)));
                 acc0 = vfmaq_f32(acc0, vld1q_f32(a.as_ptr().add(i)), vcvt_f32_f16(h));
                 i += 4;
             }
@@ -456,18 +452,12 @@ pub mod f16 {
             let pv = vdupq_n_f32(p);
             let mut i = 0;
             while i + 16 <= n {
-                let h0: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
-                    v.as_ptr().add(i) as *const [u16; 4],
-                ));
-                let h1: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
-                    v.as_ptr().add(i + 4) as *const [u16; 4],
-                ));
-                let h2: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
-                    v.as_ptr().add(i + 8) as *const [u16; 4],
-                ));
-                let h3: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
-                    v.as_ptr().add(i + 12) as *const [u16; 4],
-                ));
+                let u01 = vld1q_u16(v.as_ptr().add(i));
+                let u23 = vld1q_u16(v.as_ptr().add(i + 8));
+                let h0: float16x4_t = std::mem::transmute(vget_low_u16(u01));
+                let h1: float16x4_t = std::mem::transmute(vget_high_u16(u01));
+                let h2: float16x4_t = std::mem::transmute(vget_low_u16(u23));
+                let h3: float16x4_t = std::mem::transmute(vget_high_u16(u23));
                 let a0 = vld1q_f32(acc.as_ptr().add(i));
                 let a1 = vld1q_f32(acc.as_ptr().add(i + 4));
                 let a2 = vld1q_f32(acc.as_ptr().add(i + 8));
@@ -488,9 +478,7 @@ pub mod f16 {
                 i += 16;
             }
             while i + 4 <= n {
-                let h: float16x4_t = std::mem::transmute(std::ptr::read_unaligned(
-                    v.as_ptr().add(i) as *const [u16; 4],
-                ));
+                let h: float16x4_t = std::mem::transmute(vld1_u16(v.as_ptr().add(i)));
                 let a = vld1q_f32(acc.as_ptr().add(i));
                 vst1q_f32(acc.as_mut_ptr().add(i), vfmaq_f32(a, pv, vcvt_f32_f16(h)));
                 i += 4;
@@ -816,27 +804,54 @@ mod tests {
 #[inline(always)]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().min(b.len());
-    let a = &a[..n];
-    let b = &b[..n];
-    // Eight running sums, not one. A single accumulator is a serial
-    // dependency chain that the compiler may not reassociate - f32 addition
-    // is not associative, so it is not allowed to - and the loop stays
-    // scalar. Independent lanes give it something it can vectorise, at the
-    // cost of a different (not worse) summation order.
-    const LANES: usize = 8;
-    let mut acc = [0f32; LANES];
-    let mut ac = a.chunks_exact(LANES);
-    let mut bc = b.chunks_exact(LANES);
-    for (x, y) in ac.by_ref().zip(bc.by_ref()) {
-        for l in 0..LANES {
-            acc[l] += x[l] * y[l];
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let mut acc0 = vdupq_n_f32(0.0);
+        let mut acc1 = vdupq_n_f32(0.0);
+        let mut acc2 = vdupq_n_f32(0.0);
+        let mut acc3 = vdupq_n_f32(0.0);
+        let mut i = 0;
+        let ap = a.as_ptr();
+        let bp = b.as_ptr();
+        while i + 16 <= n {
+            acc0 = vfmaq_f32(acc0, vld1q_f32(ap.add(i)), vld1q_f32(bp.add(i)));
+            acc1 = vfmaq_f32(acc1, vld1q_f32(ap.add(i + 4)), vld1q_f32(bp.add(i + 4)));
+            acc2 = vfmaq_f32(acc2, vld1q_f32(ap.add(i + 8)), vld1q_f32(bp.add(i + 8)));
+            acc3 = vfmaq_f32(acc3, vld1q_f32(ap.add(i + 12)), vld1q_f32(bp.add(i + 12)));
+            i += 16;
         }
+        while i + 4 <= n {
+            acc0 = vfmaq_f32(acc0, vld1q_f32(ap.add(i)), vld1q_f32(bp.add(i)));
+            i += 4;
+        }
+        let sum01 = vaddq_f32(acc0, acc1);
+        let sum23 = vaddq_f32(acc2, acc3);
+        let mut total = vaddvq_f32(vaddq_f32(sum01, sum23));
+        for k in i..n {
+            total += a[k] * b[k];
+        }
+        total
     }
-    let mut total: f32 = acc.iter().sum();
-    for (x, y) in ac.remainder().iter().zip(bc.remainder()) {
-        total += x * y;
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let a = &a[..n];
+        let b = &b[..n];
+        const LANES: usize = 8;
+        let mut acc = [0f32; LANES];
+        let mut ac = a.chunks_exact(LANES);
+        let mut bc = b.chunks_exact(LANES);
+        for (x, y) in ac.by_ref().zip(bc.by_ref()) {
+            for l in 0..LANES {
+                acc[l] += x[l] * y[l];
+            }
+        }
+        let mut total: f32 = acc.iter().sum();
+        for (x, y) in ac.remainder().iter().zip(bc.remainder()) {
+            total += x * y;
+        }
+        total
     }
-    total
 }
 
 #[cfg(test)]

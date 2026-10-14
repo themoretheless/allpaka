@@ -239,6 +239,9 @@ fn search(
     best: &mut FleetPlan,
 ) {
     if model_index == options.len() {
+        if current.len() < best.placements.len() {
+            return;
+        }
         let mut placements = current.clone();
         // Co-residency is a property of the whole assignment, not of one pair,
         // so it can only be charged once the candidate is complete.
@@ -250,6 +253,12 @@ fn search(
         if candidate.better_than(best) {
             *best = candidate;
         }
+        return;
+    }
+
+    // Prune branch if even placing all remaining models cannot beat best.placements.len()
+    let remaining = options.len() - model_index;
+    if current.len() + remaining < best.placements.len() {
         return;
     }
 
@@ -280,13 +289,14 @@ fn search(
 /// fast it ran. So one division reproduces what recomputing from
 /// [`Node::contended_stream_time`] would give.
 fn charge_co_residency(placements: &mut [Placement], nodes: &[Node]) {
-    let hosts: Vec<&str> = placements.iter().map(|p| p.host.as_str()).collect();
-    let indices: Vec<usize> = placements.iter().map(|p| p.node_index).collect();
-    let scales = crate::cost::co_residency_scale(&hosts, &indices, nodes);
-    for (p, scale) in placements.iter_mut().zip(scales) {
-        if let Some(s) = scale {
-            p.co_resident = true;
-            p.secs_per_token = crate::cost::contended(p.secs_per_token, s);
+    for i in 0..placements.len() {
+        let shared =
+            (0..placements.len()).any(|j| j != i && placements[j].host == placements[i].host);
+        if shared {
+            let scale = nodes[placements[i].node_index].contention.clamp(0.0, 1.0);
+            placements[i].co_resident = true;
+            placements[i].secs_per_token =
+                crate::cost::contended(placements[i].secs_per_token, scale);
         }
     }
 }

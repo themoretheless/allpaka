@@ -76,7 +76,13 @@ impl<V> PrefixCache<V> {
             .filter(|entry| Arc::strong_count(&entry.value) > 1)
             .map(|entry| entry.bytes)
             .sum::<usize>();
-        cached.saturating_add(self.allocated_bytes().saturating_sub(self.resident_bytes))
+        let retired_bytes = self
+            .retired
+            .iter()
+            .filter(|(value, _)| value.strong_count() > 0)
+            .map(|(_, bytes)| *bytes)
+            .sum::<usize>();
+        cached.saturating_add(retired_bytes)
     }
 
     pub fn len(&self) -> usize {
@@ -119,16 +125,34 @@ impl<V> PrefixCache<V> {
         if self.budget_bytes == 0 || bytes > self.budget_bytes {
             return;
         }
-        self.retired.retain(|(value, _)| value.strong_count() > 0);
+        let mut retired_bytes = 0usize;
+        self.retired.retain(|(value, b)| {
+            let alive = value.strong_count() > 0;
+            if alive {
+                retired_bytes = retired_bytes.saturating_add(*b);
+            }
+            alive
+        });
         self.clock = self.clock.wrapping_add(1);
         if let Some(index) = self
             .entries
             .iter()
             .position(|entry| entry.tokens.as_ref() == tokens.as_slice())
         {
-            self.remove_entry(index);
+            let removed = self.entries.swap_remove(index);
+            self.resident_bytes -= removed.bytes;
+            if Arc::strong_count(&removed.value) > 1 {
+                self.retired
+                    .push((Arc::downgrade(&removed.value), removed.bytes));
+                retired_bytes = retired_bytes.saturating_add(removed.bytes);
+            }
         }
-        while self.allocated_bytes().saturating_add(bytes) > self.budget_bytes {
+        while self
+            .resident_bytes
+            .saturating_add(retired_bytes)
+            .saturating_add(bytes)
+            > self.budget_bytes
+        {
             // Prefer evicting an unpinned entry first (which actually frees budget bytes).
             let unpinned_lru = self
                 .entries
@@ -138,7 +162,8 @@ impl<V> PrefixCache<V> {
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(index, _)| index);
             if let Some(index) = unpinned_lru {
-                self.remove_entry(index);
+                let removed = self.entries.swap_remove(index);
+                self.resident_bytes -= removed.bytes;
                 continue;
             }
             // Only pinned entries remain in `self.entries`. Retiring them will not reduce
@@ -150,7 +175,12 @@ impl<V> PrefixCache<V> {
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(index, _)| index)
             {
-                self.remove_entry(index);
+                let removed = self.entries.swap_remove(index);
+                self.resident_bytes -= removed.bytes;
+                if Arc::strong_count(&removed.value) > 1 {
+                    self.retired
+                        .push((Arc::downgrade(&removed.value), removed.bytes));
+                }
             }
             return;
         }
@@ -161,16 +191,6 @@ impl<V> PrefixCache<V> {
             last_used: self.clock,
         });
         self.resident_bytes += bytes;
-    }
-
-    fn remove_entry(&mut self, index: usize) {
-        let removed = self.entries.swap_remove(index);
-        self.resident_bytes -= removed.bytes;
-        if Arc::strong_count(&removed.value) > 1 {
-            // Conservatively retain the key charge until the value lease dies.
-            self.retired
-                .push((Arc::downgrade(&removed.value), removed.bytes));
-        }
     }
 }
 

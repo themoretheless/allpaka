@@ -43,7 +43,7 @@ fn run_reservation(run: &Run) -> Result<usize> {
         item.duration_ms = None;
         item.error = None;
     }
-    let size = serde_json::to_vec(&fixed)?.len()
+    let size = crate::evaluation::json_serialized_len(&fixed)?
         + PROGRESS_RESERVE
         + fixed.items.len() * (MAX_OUTPUT_JSON_BYTES + PROGRESS_RESERVE);
     if size > MAX_RUN_BYTES {
@@ -58,7 +58,7 @@ fn bound_output(mut output: String) -> Result<(String, bool)> {
         end -= 1;
     }
     output.truncate(end);
-    if serde_json::to_vec(&output)?.len() > MAX_OUTPUT_JSON_BYTES {
+    if crate::evaluation::json_serialized_len(&output)? > MAX_OUTPUT_JSON_BYTES {
         let (mut low, mut high) = (0, output.len());
         while low < high {
             let mid = (low + high).div_ceil(2);
@@ -66,7 +66,8 @@ fn bound_output(mut output: String) -> Result<(String, bool)> {
             while !output.is_char_boundary(boundary) {
                 boundary -= 1;
             }
-            if serde_json::to_vec(&output[..boundary])?.len() <= MAX_OUTPUT_JSON_BYTES {
+            if crate::evaluation::json_serialized_len(&output[..boundary])? <= MAX_OUTPUT_JSON_BYTES
+            {
                 low = mid;
             } else {
                 high = mid - 1;

@@ -84,6 +84,50 @@ pub(crate) fn new_id() -> String {
         NEXT.fetch_add(1, Ordering::Relaxed)
     )
 }
+pub(crate) struct DigestWriter(pub(crate) Sha256);
+
+impl Write for DigestWriter {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn hex_sha256(hasher: Sha256) -> String {
+    use std::fmt::Write as _;
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+pub(crate) struct CountWriter(pub(crate) usize);
+
+impl Write for CountWriter {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn json_serialized_len<T: Serialize + ?Sized>(value: &T) -> Result<usize> {
+    let mut w = CountWriter(0);
+    serde_json::to_writer(&mut w, value)?;
+    Ok(w.0)
+}
+
 fn digest(snapshot: &Snapshot) -> Result<String> {
     let fields = (
         &snapshot.id,
@@ -92,14 +136,12 @@ fn digest(snapshot: &Snapshot) -> Result<String> {
         snapshot.version,
         &snapshot.samples,
     );
-    let bytes = match &snapshot.origin {
-        Some(origin) => serde_json::to_vec(&(fields, origin))?,
-        None => serde_json::to_vec(&fields)?,
-    };
-    Ok(Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    let mut w = DigestWriter(Sha256::new());
+    match &snapshot.origin {
+        Some(origin) => serde_json::to_writer(&mut w, &(fields, origin))?,
+        None => serde_json::to_writer(&mut w, &fields)?,
+    }
+    Ok(hex_sha256(w.0))
 }
 fn validate(snapshot: &Snapshot) -> Result<()> {
     if !valid_id(&snapshot.id) || !valid_id(&snapshot.project_id) || snapshot.version == 0 {
@@ -122,7 +164,7 @@ fn validate(snapshot: &Snapshot) -> Result<()> {
     {
         bail!("Dataset needs a name and 1–2000 samples");
     }
-    let mut ids = HashSet::new();
+    let mut ids = HashSet::with_capacity(snapshot.samples.len());
     for sample in &snapshot.samples {
         if !valid_id(&sample.id) || !ids.insert(&sample.id) {
             bail!("Sample IDs must be valid and unique");
@@ -135,12 +177,12 @@ fn validate(snapshot: &Snapshot) -> Result<()> {
                 .is_some_and(|s| s.len() > 64 * 1024)
             || sample.contexts.len() > 50
             || sample.contexts.iter().any(|s| s.len() > 64 * 1024)
-            || serde_json::to_vec(&sample.metadata)?.len() > 64 * 1024
+            || json_serialized_len(&sample.metadata)? > 64 * 1024
         {
             bail!("Sample content exceeds its bounds");
         }
     }
-    if serde_json::to_vec(snapshot)?.len() > MAX_BYTES {
+    if json_serialized_len(snapshot)? > MAX_BYTES {
         bail!("Dataset exceeds 8 MiB");
     }
     Ok(())

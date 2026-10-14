@@ -614,6 +614,13 @@ fn cpu_threads() -> usize {
 
 #[inline(always)]
 fn dot_f16(row: &[u8], x: &[f32]) -> f32 {
+    #[cfg(target_endian = "little")]
+    {
+        let (head, mid, tail) = unsafe { row.align_to::<u16>() };
+        if head.is_empty() && tail.is_empty() {
+            return crate::ops::f16::dot(x, mid);
+        }
+    }
     row.chunks_exact(2)
         .zip(x)
         .map(|(c, &xv)| dequant::f16_to_f32(u16::from_le_bytes([c[0], c[1]])) * xv)
@@ -910,7 +917,32 @@ impl Q8Acts {
         let mut q = vec![0i8; x.len()];
         for b in 0..blocks {
             let xs = &x[b * 32..b * 32 + 32];
-            let amax = xs.iter().fold(0f32, |m, v| m.max(v.abs()));
+            #[cfg(target_arch = "aarch64")]
+            let (amax, block_sum) = unsafe {
+                use std::arch::aarch64::*;
+                let mut vmax0 = vdupq_n_f32(0.0);
+                let mut vmax1 = vdupq_n_f32(0.0);
+                let mut vsum0 = vdupq_n_f32(0.0);
+                let mut vsum1 = vdupq_n_f32(0.0);
+                let xp = xs.as_ptr();
+                for k in (0..32).step_by(8) {
+                    let v0 = vld1q_f32(xp.add(k));
+                    let v1 = vld1q_f32(xp.add(k + 4));
+                    vmax0 = vmaxq_f32(vmax0, vabsq_f32(v0));
+                    vmax1 = vmaxq_f32(vmax1, vabsq_f32(v1));
+                    vsum0 = vaddq_f32(vsum0, v0);
+                    vsum1 = vaddq_f32(vsum1, v1);
+                }
+                (
+                    vmaxvq_f32(vmaxq_f32(vmax0, vmax1)),
+                    vaddvq_f32(vaddq_f32(vsum0, vsum1)),
+                )
+            };
+            #[cfg(not(target_arch = "aarch64"))]
+            let (amax, block_sum) = (
+                xs.iter().fold(0f32, |m, v| m.max(v.abs())),
+                xs.iter().sum::<f32>(),
+            );
             let db = if amax.is_finite() { amax / 127.0 } else { 0.0 };
             let id = if db > 0.0 && db.is_finite() {
                 1.0 / db
@@ -921,7 +953,7 @@ impl Q8Acts {
                 *slot = (v * id).round() as i8;
             }
             d[b] = db;
-            sum[b] = xs.iter().sum();
+            sum[b] = block_sum;
         }
         Self { d, sum, q }
     }
@@ -977,6 +1009,27 @@ fn dot_q4_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
 
             let mut lo = [0i8; 32];
             let mut hi = [0i8; 32];
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                use std::arch::aarch64::*;
+                let mask = vdupq_n_u8(0x0f);
+                let q0 = vld1q_u8(q.as_ptr());
+                let q1 = vld1q_u8(q.as_ptr().add(16));
+                vst1q_s8(lo.as_mut_ptr(), vreinterpretq_s8_u8(vandq_u8(q0, mask)));
+                vst1q_s8(
+                    lo.as_mut_ptr().add(16),
+                    vreinterpretq_s8_u8(vandq_u8(q1, mask)),
+                );
+                vst1q_s8(
+                    lo_or_hi_ptr(&mut hi, 0),
+                    vreinterpretq_s8_u8(vshrq_n_u8(q0, 4)),
+                );
+                vst1q_s8(
+                    lo_or_hi_ptr(&mut hi, 16),
+                    vreinterpretq_s8_u8(vshrq_n_u8(q1, 4)),
+                );
+            }
+            #[cfg(not(target_arch = "aarch64"))]
             for l in 0..32 {
                 lo[l] = (q[l] & 0xf) as i8;
                 hi[l] = (q[l] >> 4) as i8;
@@ -990,6 +1043,12 @@ fn dot_q4_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
         }
     }
     total
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn lo_or_hi_ptr(buf: &mut [i8; 32], offset: usize) -> *mut i8 {
+    buf.as_mut_ptr().add(offset)
 }
 
 /// Q6_K × Q8 activations. Scales cover 16 elements, so each quarter's
@@ -1010,6 +1069,48 @@ fn dot_q6_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
             let sc = &scales[half * 8..half * 8 + 8];
 
             let mut quarters = [[0i8; 32]; 4];
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                use std::arch::aarch64::*;
+                let mask_0f = vdupq_n_u8(0x0f);
+                let mask_30 = vdupq_n_u8(0x30);
+                let bias_32 = vdupq_n_s8(32);
+                for seg in [0usize, 16] {
+                    let ql_lo = vld1q_u8(ql.as_ptr().add(seg));
+                    let ql_hi = vld1q_u8(ql.as_ptr().add(32 + seg));
+                    let qh_v = vld1q_u8(qh.as_ptr().add(seg));
+
+                    let q0_u = vorrq_u8(
+                        vandq_u8(ql_lo, mask_0f),
+                        vandq_u8(vshlq_n_u8(qh_v, 4), mask_30),
+                    );
+                    let q1_u = vorrq_u8(
+                        vandq_u8(ql_hi, mask_0f),
+                        vandq_u8(vshlq_n_u8(qh_v, 2), mask_30),
+                    );
+                    let q2_u = vorrq_u8(vshrq_n_u8(ql_lo, 4), vandq_u8(qh_v, mask_30));
+                    let q3_u =
+                        vorrq_u8(vshrq_n_u8(ql_hi, 4), vandq_u8(vshrq_n_u8(qh_v, 2), mask_30));
+
+                    vst1q_s8(
+                        quarters[0].as_mut_ptr().add(seg),
+                        vsubq_s8(vreinterpretq_s8_u8(q0_u), bias_32),
+                    );
+                    vst1q_s8(
+                        quarters[1].as_mut_ptr().add(seg),
+                        vsubq_s8(vreinterpretq_s8_u8(q1_u), bias_32),
+                    );
+                    vst1q_s8(
+                        quarters[2].as_mut_ptr().add(seg),
+                        vsubq_s8(vreinterpretq_s8_u8(q2_u), bias_32),
+                    );
+                    vst1q_s8(
+                        quarters[3].as_mut_ptr().add(seg),
+                        vsubq_s8(vreinterpretq_s8_u8(q3_u), bias_32),
+                    );
+                }
+            }
+            #[cfg(not(target_arch = "aarch64"))]
             for l in 0..32 {
                 quarters[0][l] = (((ql[l] & 0xf) | ((qh[l] & 3) << 4)) as i8) - 32;
                 quarters[1][l] = (((ql[l + 32] & 0xf) | (((qh[l] >> 2) & 3) << 4)) as i8) - 32;

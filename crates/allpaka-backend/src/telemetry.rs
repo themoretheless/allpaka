@@ -62,13 +62,14 @@ pub struct PhaseSample {
     pub calls: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct PhaseTrace {
     durations: [Duration; Phase::ALL.len()],
     calls: [u64; Phase::ALL.len()],
 }
 
 impl Default for PhaseTrace {
+    #[inline]
     fn default() -> Self {
         Self {
             durations: [Duration::ZERO; Phase::ALL.len()],
@@ -78,12 +79,14 @@ impl Default for PhaseTrace {
 }
 
 impl PhaseTrace {
+    #[inline]
     pub fn add(&mut self, phase: Phase, duration: Duration) {
         let index = phase as usize;
         self.durations[index] += duration;
         self.calls[index] += 1;
     }
 
+    #[inline]
     pub fn measure<T>(&mut self, phase: Phase, operation: impl FnOnce() -> T) -> T {
         let started = Instant::now();
         let value = operation();
@@ -91,6 +94,7 @@ impl PhaseTrace {
         value
     }
 
+    #[inline]
     pub fn merge(&mut self, other: &Self) {
         for index in 0..Phase::ALL.len() {
             self.durations[index] += other.durations[index];
@@ -109,6 +113,7 @@ impl PhaseTrace {
         })
     }
 
+    #[inline]
     pub fn accounted(&self) -> Duration {
         self.durations.iter().copied().sum()
     }

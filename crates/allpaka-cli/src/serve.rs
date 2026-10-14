@@ -681,11 +681,12 @@ impl Template {
                 think,
                 force_think,
             } => {
+                let nl = tok.encode("\n")?;
                 for (role, content) in messages {
                     ids.push(*im_start);
                     ids.extend(tok.encode(&format!("{role}\n{content}"))?);
                     ids.push(*im_end);
-                    ids.extend(tok.encode("\n")?);
+                    ids.extend_from_slice(&nl);
                 }
                 ids.push(*im_start);
                 ids.extend(tok.encode("assistant\n")?);
@@ -695,7 +696,7 @@ impl Template {
                     match think {
                         Some(t) => {
                             ids.push(*t);
-                            ids.extend(tok.encode("\n")?);
+                            ids.extend_from_slice(&nl);
                         }
                         None => ids.extend(tok.encode("<think>\n")?),
                     }

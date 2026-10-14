@@ -47,15 +47,19 @@ impl Rule {
         }
         // Independent of scan order, execution timing and process restart.
         // Evaluator revisions intentionally receive distinct samples.
-        let key = serde_json::to_vec(&(
-            "allpaka-online-evaluation-v1",
-            &self.project_id,
-            &self.id,
-            &self.evaluator_id,
-            self.evaluator_version,
-            trace_id,
-        ))?;
-        let digest = Sha256::digest(key);
+        let mut w = crate::evaluation::DigestWriter(Sha256::new());
+        serde_json::to_writer(
+            &mut w,
+            &(
+                "allpaka-online-evaluation-v1",
+                &self.project_id,
+                &self.id,
+                &self.evaluator_id,
+                self.evaluator_version,
+                trace_id,
+            ),
+        )?;
+        let digest = w.0.finalize();
         let bucket = u64::from_be_bytes(digest[..8].try_into().unwrap()) >> 11;
         Ok((bucket as f64) / ((1u64 << 53) as f64) < self.sample_rate)
     }
@@ -71,10 +75,9 @@ pub(crate) struct Snapshot {
 impl Snapshot {
     fn new(rule: Rule) -> Result<Self> {
         rule.validate()?;
-        let hash = Sha256::digest(serde_json::to_vec(&rule)?)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let mut w = crate::evaluation::DigestWriter(Sha256::new());
+        serde_json::to_writer(&mut w, &rule)?;
+        let hash = crate::evaluation::hex_sha256(w.0);
         Ok(Self {
             kind: "online_evaluation_rule".into(),
             schema_version: 1,
@@ -83,10 +86,13 @@ impl Snapshot {
         })
     }
     fn validate(&self) -> Result<()> {
-        let expected = Self::new(self.rule.clone())?;
-        if self.kind != expected.kind
+        self.rule.validate()?;
+        let mut w = crate::evaluation::DigestWriter(Sha256::new());
+        serde_json::to_writer(&mut w, &self.rule)?;
+        let expected_hash = crate::evaluation::hex_sha256(w.0);
+        if self.kind != "online_evaluation_rule"
             || self.schema_version != 1
-            || self.rule_sha256 != expected.rule_sha256
+            || self.rule_sha256 != expected_hash
         {
             bail!("Online evaluation rule integrity mismatch");
         }
@@ -106,17 +112,19 @@ struct Binding {
 }
 impl Binding {
     fn hash(&self) -> Result<String> {
-        Ok(Sha256::digest(serde_json::to_vec(&(
-            &self.kind,
-            &self.project_id,
-            &self.rule_id,
-            &self.rule_sha256,
-            self.version,
-            self.active,
-        ))?)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+        let mut w = crate::evaluation::DigestWriter(Sha256::new());
+        serde_json::to_writer(
+            &mut w,
+            &(
+                &self.kind,
+                &self.project_id,
+                &self.rule_id,
+                &self.rule_sha256,
+                self.version,
+                self.active,
+            ),
+        )?;
+        Ok(crate::evaluation::hex_sha256(w.0))
     }
 }
 #[derive(Deserialize)]
@@ -175,10 +183,9 @@ impl Store {
         if !technical(project) || !technical(rule) {
             bail!("Invalid binding identity");
         }
-        let key = Sha256::digest(serde_json::to_vec(&(project, rule))?)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let mut w = crate::evaluation::DigestWriter(Sha256::new());
+        serde_json::to_writer(&mut w, &(project, rule))?;
+        let key = crate::evaluation::hex_sha256(w.0);
         let parent = self.directory.join("bindings");
         if parent.exists() && !parent.canonicalize()?.starts_with(&self.directory) {
             bail!("Binding directory escapes rule storage");

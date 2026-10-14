@@ -74,7 +74,7 @@ fn valid_id(id: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
-use crate::evaluation::{commit_new, new_id, project_exists};
+use crate::evaluation::{commit_new, hex_sha256, new_id, project_exists, DigestWriter};
 fn digest(snapshot: &Snapshot) -> Result<String> {
     let fields = (
         &snapshot.id,
@@ -85,18 +85,16 @@ fn digest(snapshot: &Snapshot) -> Result<String> {
         &snapshot.system,
     );
     // Keep hashes of pre-lineage snapshots stable.
-    let bytes = if let Some(messages) = &snapshot.messages {
-        serde_json::to_vec(&(fields, &snapshot.origin, messages))?
+    let mut w = DigestWriter(Sha256::new());
+    if let Some(messages) = &snapshot.messages {
+        serde_json::to_writer(&mut w, &(fields, &snapshot.origin, messages))?;
     } else {
         match &snapshot.origin {
-            Some(origin) => serde_json::to_vec(&(fields, origin))?,
-            None => serde_json::to_vec(&fields)?,
+            Some(origin) => serde_json::to_writer(&mut w, &(fields, origin))?,
+            None => serde_json::to_writer(&mut w, &fields)?,
         }
-    };
-    Ok(Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    }
+    Ok(hex_sha256(w.0))
 }
 fn validate(snapshot: &Snapshot) -> Result<()> {
     if !valid_id(&snapshot.id) || !valid_id(&snapshot.project_id) || snapshot.version == 0 {

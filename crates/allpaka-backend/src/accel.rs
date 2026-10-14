@@ -72,6 +72,7 @@ pub enum AccelOutcome<T> {
 }
 
 impl<T> AccelOutcome<T> {
+    #[inline]
     pub fn executed(self) -> Option<T> {
         match self {
             Self::Executed(value) => Some(value),
@@ -79,6 +80,7 @@ impl<T> AccelOutcome<T> {
         }
     }
 
+    #[inline]
     pub fn decline_reason(&self) -> Option<&DeclineReason> {
         match self {
             Self::Executed(_) => None,
@@ -88,6 +90,7 @@ impl<T> AccelOutcome<T> {
 
     /// Select an explicit fallback without discarding why acceleration was
     /// declined. The fallback is never evaluated for an executed fast path.
+    #[inline]
     pub fn fallback<U>(self, fallback: impl FnOnce(DeclineReason) -> U) -> Result<T, U> {
         match self {
             Self::Executed(value) => Ok(value),

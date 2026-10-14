@@ -110,10 +110,9 @@ fn parse(message: &Message) -> Result<Verdict> {
     Ok(verdict)
 }
 fn hash(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    crate::evaluation::hex_sha256(hasher)
 }
 pub(crate) async fn judge(
     State(app): State<App>,

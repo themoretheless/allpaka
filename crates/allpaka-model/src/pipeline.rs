@@ -34,12 +34,15 @@ enum Response {
     Error(String),
 }
 fn send<T: Serialize>(stream: &mut TcpStream, value: &T) -> Result<()> {
-    let bytes = serde_json::to_vec(value)?;
-    if bytes.len() > MAX_FRAME {
+    let mut frame = Vec::with_capacity(256);
+    frame.extend_from_slice(&[0u8; 4]);
+    serde_json::to_writer(&mut frame, value)?;
+    let payload_len = frame.len() - 4;
+    if payload_len > MAX_FRAME {
         bail!("pipeline frame too large");
     }
-    stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
-    stream.write_all(&bytes)?;
+    frame[..4].copy_from_slice(&(payload_len as u32).to_be_bytes());
+    stream.write_all(&frame)?;
     Ok(())
 }
 fn receive<T: DeserializeOwned>(stream: &mut TcpStream) -> Result<T> {
@@ -212,6 +215,7 @@ impl Pipeline {
             token,
         };
         let mut values = Vec::new();
+        let num_stages = self.streams.len();
         for (index, stream) in self.streams.iter_mut().enumerate() {
             send(stream, &request)?;
             values = match receive::<Response>(stream)? {
@@ -219,7 +223,8 @@ impl Pipeline {
                 Response::Error(error) => bail!("pipeline stage {index}: {error}"),
                 _ => bail!("unexpected pipeline response"),
             };
-            let expected = if index + 1 == self.infos.len() {
+            let is_last = index + 1 == num_stages;
+            let expected = if is_last {
                 self.infos[0].vocab as usize
             } else {
                 self.infos[0].hidden
@@ -227,10 +232,12 @@ impl Pipeline {
             if values.len() != expected || values.iter().any(|v| !v.is_finite()) {
                 bail!("invalid stage output");
             }
-            request = Request::Hidden {
-                position: self.position,
-                values: values.clone(),
-            };
+            if !is_last {
+                request = Request::Hidden {
+                    position: self.position,
+                    values: std::mem::take(&mut values),
+                };
+            }
         }
         Ok(values)
     }
