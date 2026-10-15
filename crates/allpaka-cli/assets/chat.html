@@ -4,7 +4,8 @@
 <title>allpaka chat</title>
 <style>
   /* Та же «песочная» палитра и моторика, что в студии: harena — песок,
-     светлая тема — страница блокнота, тёмная — кожаный переплёт. */
+     светлая тема — страница блокнота, тёмная — кожаный переплёт.
+     Макет — боковая панель (модель, параметры, ресурсы) и колонка чата. */
   :root {
     color-scheme: light;
     --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -12,40 +13,47 @@
     --ease-arena: cubic-bezier(0.22, 1, 0.36, 1);
     --transition-fast: 140ms var(--ease-arena);
     --transition-normal: 260ms var(--ease-arena);
-    --bg: #f7f2e5; --surface: #fffdf3; --inset: #ede4cf;
+    --bg: #f4eedf; --surface: #fffdf5; --inset: #efe6d0; --sidebar: #fbf7eb;
     --text: #2b2419; --muted: #8d8170; --secondary: #5f5747;
     --line: #e4dac3; --strong-line: #d2c5a4;
-    --accent: #9c6a13; --accent-on: #fffdf3; --accent-hover: #83570d;
-    --user-bg: #f3ead2; --selected: #ecdfc0;
+    --accent: #9c6a13; --accent-on: #fffdf5; --accent-hover: #83570d;
+    --user-bg: #f0e7cf; --selected: #ecdfc0;
     --arena-red: #b5452c; --arena-green: #4f7a3d; --arena-teal: #2f7a70;
-    --radius-sm: 8px; --radius-lg: 16px; --radius-xl: 22px;
+    --radius-sm: 9px; --radius-md: 12px; --radius-lg: 16px; --radius-xl: 18px;
     --shadow-sm: 0 1px 2px rgba(74, 58, 30, 0.05);
-    --shadow-md: 0 4px 16px rgba(74, 58, 30, 0.08);
+    --shadow-md: 0 6px 24px rgba(74, 58, 30, 0.08);
   }
   @media (prefers-color-scheme: dark) {
     :root {
       color-scheme: dark;
-      --bg: #17130e; --surface: #1f1a13; --inset: #231d15;
-      --text: #eae0c8; --muted: #a4937a; --secondary: #b3a488;
+      --bg: #16110b; --surface: #241d13; --inset: #2a2215; --sidebar: #1e180f;
+      --text: #ede3cb; --muted: #a4937a; --secondary: #cdbd9b;
       --line: #3a3126; --strong-line: #4a3f2e;
       --accent: #dfa83e; --accent-on: #1a1409; --accent-hover: #eebb5c;
-      --user-bg: #2c2317; --selected: #33291a;
+      --user-bg: #2a2215; --selected: #33291a;
       --arena-red: #e0735e; --arena-green: #8fc97e; --arena-teal: #5fb8a8;
       --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
-      --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
+      --shadow-md: 0 6px 24px rgba(0, 0, 0, 0.4);
     }
   }
   * { box-sizing: border-box; }
-  html, body { background: var(--bg); color: var(--text); }
+  html, body { height: 100%; }
   body {
+    margin: 0; background: var(--bg); color: var(--text);
     font-family: var(--font-sans);
-    max-width: 780px; margin: 0 auto; padding: 1.6rem 1.2rem 0;
-    min-height: 100dvh; display: flex; flex-direction: column;
+    display: flex; min-height: 100dvh;
   }
   ::selection { background: var(--selected); color: var(--text); }
+
+  /* ===== Боковая панель ===== */
+  .side {
+    flex: 0 0 300px; min-width: 0; display: flex; flex-direction: column; gap: 22px;
+    padding: 22px 20px; background: var(--sidebar); border-right: 1px solid var(--line);
+    overflow-y: auto;
+  }
   h1 {
-    font-family: var(--font-serif); font-size: 1.3rem; font-weight: 600;
-    display: flex; align-items: center; gap: 0.6rem; margin: 0 0 1.1rem;
+    font-family: var(--font-serif); font-size: 1.25rem; font-weight: 600;
+    display: flex; align-items: center; gap: 0.6rem; margin: 0;
   }
   /* Фирменный знак-«колонна»: три вертикали разной высоты */
   .mark { display: inline-flex; align-items: flex-end; gap: 3px; height: 20px; }
@@ -58,28 +66,29 @@
     from { transform: scaleY(0); transform-origin: bottom; opacity: 0; }
     to { transform: scaleY(1); transform-origin: bottom; opacity: 1; }
   }
-  #stats {
-    display: flex; align-items: center; gap: 0.8rem; font-size: 0.78rem;
-    color: var(--secondary); margin-bottom: 1rem; flex-wrap: wrap;
+  .side .eyebrow {
+    font-size: 0.68rem; letter-spacing: 1px; text-transform: uppercase;
+    color: var(--secondary);
   }
-  #ctxbar { width: 160px; height: 6px; border-radius: 3px; background: var(--inset); overflow: hidden; }
-  #ctxfill { height: 100%; width: 0%; background: var(--accent); border-radius: 3px; transition: width 0.3s var(--ease-arena); }
-  .launch { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: flex-end; margin-bottom: 1rem; }
+  .launch { display: flex; flex-direction: column; gap: 0.7rem; }
   .launch label {
-    display: flex; flex-direction: column; gap: 0.25rem; color: var(--secondary);
-    font-size: 0.68rem; letter-spacing: 0.6px; text-transform: uppercase;
+    display: flex; flex-direction: column; gap: 0.3rem; color: var(--secondary);
+    font-size: 0.74rem;
+  }
+  .launch .grid {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem;
   }
   .launch input, .launch select {
-    padding: 0.4rem 0.55rem; border-radius: var(--radius-sm);
-    border: 1px solid var(--line); font-size: 0.85rem;
-    background: var(--surface); color: var(--text); max-width: 100%;
+    padding: 0.5rem 0.65rem; border-radius: var(--radius-sm);
+    border: 1px solid var(--strong-line); font-size: 0.85rem;
+    background: var(--surface); color: var(--text); max-width: 100%; width: 100%;
     font-family: inherit;
   }
   .launch input:focus, .launch select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
-  #launch-status { color: var(--muted); align-self: center; font-size: 0.78rem; }
+  #launch-status { color: var(--muted); font-size: 0.78rem; min-height: 1em; }
   button {
-    padding: 0.55rem 1.1rem; border-radius: 999px; border: 1px solid var(--accent);
-    background: var(--accent); color: var(--accent-on); font-size: 0.9rem;
+    padding: 0.6rem 1.1rem; border-radius: var(--radius-sm); border: 1px solid var(--accent);
+    background: var(--accent); color: var(--accent-on); font-size: 0.9rem; font-weight: 600;
     font-family: inherit; cursor: pointer;
     transition: background-color var(--transition-fast),
                 border-color var(--transition-fast),
@@ -88,34 +97,57 @@
   button:hover { background: var(--accent-hover); border-color: var(--accent-hover); transform: translateY(-1px); }
   button:active { transform: translateY(0); }
   button:disabled { opacity: 0.5; cursor: wait; transform: none; }
-  .res {
-    margin: 0 0 1.2rem; padding: 0.9rem 1rem; background: var(--surface);
-    border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm);
+  .res { margin-top: auto; display: flex; flex-direction: column; gap: 0.6rem; }
+  .res h2 {
+    font-size: 0.68rem; letter-spacing: 1px; text-transform: uppercase;
+    margin: 0; color: var(--secondary); font-weight: 600;
   }
-  .res h2 { font-family: var(--font-serif); font-size: 0.95rem; margin: 0 0 0.5rem; color: var(--text); font-weight: 600; }
-  .meters { display: flex; flex-wrap: wrap; gap: 0.35rem 0.9rem; font-size: 0.76rem; color: var(--secondary); margin-bottom: 0.6rem; }
+  .meters {
+    display: flex; flex-wrap: wrap; gap: 0.3rem 0.8rem; font-size: 0.74rem;
+    color: var(--secondary);
+  }
   .meters b { font-weight: 600; color: var(--text); }
-  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.6rem; }
-  .charts figure { margin: 0; }
-  .charts figcaption { font-size: 0.68rem; color: var(--muted); margin-bottom: 0.2rem; letter-spacing: 0.3px; }
-  .charts canvas { width: 100%; height: 76px; background: var(--inset); border-radius: var(--radius-sm); display: block; }
-  #log { display: flex; flex-direction: column; gap: 0.9rem; margin-bottom: 1.2rem; flex: 1; }
+  .charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.55rem; }
+  .charts figure { margin: 0; min-width: 0; }
+  .charts figcaption { font-size: 0.66rem; color: var(--muted); margin-bottom: 0.2rem; letter-spacing: 0.3px; }
+  .charts canvas { width: 100%; height: 56px; background: var(--inset); border-radius: var(--radius-sm); display: block; }
+
+  /* ===== Колонка чата ===== */
+  main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+  #stats {
+    display: flex; align-items: center; gap: 0.8rem; font-size: 0.78rem;
+    color: var(--secondary); flex-wrap: wrap;
+    padding: 0.85rem 1.6rem; border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--sidebar) 70%, transparent);
+  }
+  #ctxbar { width: 140px; height: 6px; border-radius: 3px; background: var(--inset); overflow: hidden; }
+  #ctxfill { height: 100%; width: 0%; background: var(--accent); border-radius: 3px; transition: width 0.3s var(--ease-arena); }
+  .thread {
+    flex: 1 1 auto; overflow-y: auto; display: flex; flex-direction: column;
+  }
+  .thread-inner {
+    width: 100%; max-width: 860px; margin: 0 auto; flex: 1;
+    display: flex; flex-direction: column; padding: 1.6rem 1.4rem 0.8rem;
+  }
+  #log { display: flex; flex-direction: column; gap: 1rem; flex: 1; }
   .msg {
-    padding: 0.65rem 0.95rem; border-radius: var(--radius-lg);
+    padding: 0.7rem 1rem; border-radius: var(--radius-lg);
     line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere;
+    font-size: 0.95rem;
     animation: messageIn 420ms var(--ease-arena) backwards;
   }
   .msg.user {
     background: var(--user-bg); border: 1px solid var(--strong-line);
-    align-self: flex-end; max-width: 85%; border-radius: var(--radius-xl);
+    align-self: flex-end; max-width: 78%;
+    border-radius: var(--radius-xl) var(--radius-xl) 4px var(--radius-xl);
     box-shadow: var(--shadow-sm);
   }
-  .msg.bot { align-self: flex-start; max-width: 100%; padding-left: 0; padding-right: 0; }
+  .msg.bot { align-self: flex-start; max-width: 100%; padding-left: 0; padding-right: 0; line-height: 1.7; }
   .msg.thinking { opacity: 0.55; font-style: italic; }
-  .meta { opacity: 0.75; font-size: 0.72rem; align-self: flex-start; color: var(--muted); }
+  .meta { opacity: 0.8; font-size: 0.72rem; align-self: flex-start; color: var(--muted); }
   details { font-size: 0.85rem; color: var(--secondary); }
   details summary { cursor: pointer; }
-  details > div { background: var(--inset); border-radius: var(--radius-sm); padding: 0.5rem 0.7rem; margin-top: 0.3rem; white-space: pre-wrap; }
+  details > div { background: var(--inset); border-radius: var(--radius-sm); padding: 0.55rem 0.8rem; margin-top: 0.3rem; white-space: pre-wrap; }
   @keyframes messageIn {
     from { opacity: 0; transform: translateY(10px); filter: blur(3px); }
     to { opacity: 1; transform: translateY(0); filter: blur(0); }
@@ -137,17 +169,30 @@
     0%, 55%, 100% { transform: translateY(0); opacity: 0.45; }
     28% { transform: translateY(-5px); opacity: 1; }
   }
-  form {
-    display: flex; gap: 0.6rem; position: sticky; bottom: 0; background: var(--bg);
-    padding: 0.5rem 0 1.2rem; border-top: 1px solid var(--line); margin-top: auto;
-    align-items: center;
+
+  /* ===== Композер ===== */
+  .composer {
+    border-top: 1px solid var(--line);
+    background: color-mix(in srgb, var(--sidebar) 85%, transparent);
+    padding: 0.8rem 1.4rem 1.2rem;
   }
-  .input-wrap {
-    position: relative; flex: 1; display: flex; align-items: center;
+  .composer-inner { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 0.55rem; }
+  #suggestions { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+  #suggestions:empty { display: none; }
+  .chip {
+    padding: 0.34rem 0.8rem; border-radius: 999px; border: 1px solid var(--line);
+    background: var(--surface); color: var(--secondary); font-size: 0.78rem; font-weight: 400;
+    cursor: pointer; transition: border-color var(--transition-fast), color var(--transition-fast), background-color var(--transition-fast);
   }
+  .chip:hover {
+    border-color: var(--accent); color: var(--text); background: var(--user-bg);
+    transform: translateY(-1px);
+  }
+  form { display: flex; gap: 0.6rem; align-items: center; }
+  .input-wrap { position: relative; flex: 1; display: flex; align-items: center; }
   .ghost-layer {
     position: absolute; inset: 0; pointer-events: none;
-    padding: 0.7rem 0.95rem; border: 1px solid transparent; border-radius: 999px;
+    padding: 0.75rem 1.1rem; border: 1px solid transparent; border-radius: var(--radius-xl);
     font-size: 0.95rem; font-family: inherit; white-space: pre; overflow: hidden;
     display: flex; align-items: center;
   }
@@ -159,7 +204,7 @@
     font-size: 0.66rem; letter-spacing: 0.3px;
   }
   form input {
-    width: 100%; padding: 0.7rem 0.95rem; border-radius: 999px;
+    width: 100%; padding: 0.75rem 1.1rem; border-radius: var(--radius-xl);
     border: 1px solid var(--strong-line); background: var(--surface); color: var(--text);
     font-size: 0.95rem; font-family: inherit; box-shadow: var(--shadow-sm);
     transition: border-color var(--transition-fast),
@@ -172,17 +217,21 @@
     transform: translateY(-1px);
   }
   form input::placeholder { color: var(--muted); }
-  #suggestions {
-    display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0 0 0.4rem;
+  #send {
+    flex: none; width: 44px; height: 44px; padding: 0;
+    border-radius: var(--radius-md);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 1.1rem; font-weight: 400;
   }
-  .chip {
-    padding: 0.32rem 0.72rem; border-radius: 999px; border: 1px solid var(--line);
-    background: var(--surface); color: var(--secondary); font-size: 0.78rem;
-    cursor: pointer; transition: border-color var(--transition-fast), color var(--transition-fast), background-color var(--transition-fast);
+  .foot {
+    text-align: center; font-size: 0.68rem; color: var(--muted);
   }
-  .chip:hover {
-    border-color: var(--accent); color: var(--text); background: var(--user-bg);
-    transform: translateY(-1px);
+
+  @media (max-width: 860px) {
+    body { flex-direction: column; }
+    .side { flex: none; width: 100%; border-right: 0; border-bottom: 1px solid var(--line); overflow: visible; }
+    .res { display: none; }
+    main { min-height: 60dvh; }
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
@@ -194,54 +243,70 @@
     .typing-dot { animation: none; opacity: 0.7; }
   }
 </style></head><body>
-<h1><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>allpaka · собственный движок · чат</h1>
-<div id="stats">
-  <span id="s-model">…</span>
-  <span>контекст: <span id="s-ctx">0 / 0</span></span>
-  <div id="ctxbar"><div id="ctxfill"></div></div>
-  <span id="s-speed"></span>
-</div>
-<div class="launch">
-  <label>модель
-    <select id="model"></select>
-  </label>
-  <label>max tokens
-    <input id="max_tokens" type="number" min="1" max="512000" value="1024">
-  </label>
-  <label>temperature
-    <input id="temperature" type="number" min="0" max="2" step="0.05" value="0.7">
-  </label>
-  <label>top_p
-    <input id="top_p" type="number" min="0" max="1" step="0.05" value="0.95">
-  </label>
-  <label>repeat
-    <input id="repeat" type="number" min="0.5" max="2" step="0.05" value="1.1">
-  </label>
-  <label title="Prompt Lookup Decoding: число предсказываемых черновых токенов из контекста (0 — выкл)">pld draft
-    <input id="prompt_lookup" type="number" min="0" max="16" step="1" value="4">
-  </label>
-  <button type="button" id="launch">Запустить</button>
-  <span id="launch-status"></span>
-</div>
-<section class="res">
-  <h2 id="res-title">ресурсы</h2>
-  <div class="meters" id="meters">собираю…</div>
-  <div class="charts">
-    <figure><figcaption>видеопамять, МиБ</figcaption><canvas id="c-vram" width="320" height="76"></canvas></figure>
-    <figure><figcaption>загрузка GPU, %</figcaption><canvas id="c-util" width="320" height="76"></canvas></figure>
-    <figure><figcaption>процесс, МиБ</figcaption><canvas id="c-rss" width="320" height="76"></canvas></figure>
-    <figure><figcaption>генерация, tok/s</figcaption><canvas id="c-tok" width="320" height="76"></canvas></figure>
+<aside class="side">
+  <h1><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>allpaka</h1>
+  <div class="launch">
+    <span class="eyebrow">Модель</span>
+    <label>модель
+      <select id="model"></select>
+    </label>
+    <div class="grid">
+      <label>max tokens
+        <input id="max_tokens" type="number" min="1" max="512000" value="1024">
+      </label>
+      <label>temperature
+        <input id="temperature" type="number" min="0" max="2" step="0.05" value="0.7">
+      </label>
+      <label>top_p
+        <input id="top_p" type="number" min="0" max="1" step="0.05" value="0.95">
+      </label>
+      <label>repeat
+        <input id="repeat" type="number" min="0.5" max="2" step="0.05" value="1.1">
+      </label>
+      <label title="Prompt Lookup Decoding: число предсказываемых черновых токенов из контекста (0 — выкл)">pld draft
+        <input id="prompt_lookup" type="number" min="0" max="16" step="1" value="4">
+      </label>
+    </div>
+    <button type="button" id="launch">Запустить</button>
+    <span id="launch-status"></span>
   </div>
-</section>
-<div id="log"></div>
-<div id="suggestions"></div>
-<form id="f">
-  <div class="input-wrap">
-    <input id="q" placeholder="Спросите что-нибудь... (Tab — принять предикшн)" autofocus autocomplete="off">
-    <div class="ghost-layer" id="ghost" aria-hidden="true"></div>
+  <section class="res">
+    <h2 id="res-title">ресурсы</h2>
+    <div class="meters" id="meters">собираю…</div>
+    <div class="charts">
+      <figure><figcaption>видеопамять, МиБ</figcaption><canvas id="c-vram" width="320" height="56"></canvas></figure>
+      <figure><figcaption>загрузка GPU, %</figcaption><canvas id="c-util" width="320" height="56"></canvas></figure>
+      <figure><figcaption>процесс, МиБ</figcaption><canvas id="c-rss" width="320" height="56"></canvas></figure>
+      <figure><figcaption>генерация, tok/s</figcaption><canvas id="c-tok" width="320" height="56"></canvas></figure>
+    </div>
+  </section>
+</aside>
+<main>
+  <div id="stats">
+    <span id="s-model">…</span>
+    <span>контекст: <span id="s-ctx">0 / 0</span></span>
+    <div id="ctxbar"><div id="ctxfill"></div></div>
+    <span id="s-speed"></span>
   </div>
-  <button id="send">→</button>
-</form>
+  <div class="thread">
+    <div class="thread-inner">
+      <div id="log"></div>
+    </div>
+  </div>
+  <div class="composer">
+    <div class="composer-inner">
+      <div id="suggestions"></div>
+      <form id="f">
+        <div class="input-wrap">
+          <input id="q" placeholder="Спросите что-нибудь... (Tab — принять предикшн)" autofocus autocomplete="off">
+          <div class="ghost-layer" id="ghost" aria-hidden="true"></div>
+        </div>
+        <button id="send" aria-label="Отправить">→</button>
+      </form>
+      <div class="foot">локальный движок · данные не покидают машину</div>
+    </div>
+  </div>
+</main>
 <script>
 const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
 const log = document.getElementById('log');

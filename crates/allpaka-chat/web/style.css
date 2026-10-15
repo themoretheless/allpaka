@@ -10,7 +10,7 @@
   color: var(--text);
   background: var(--bg);
 
-  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-serif: "Martina Plantjin", "Plantin", Georgia, "Times New Roman", serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
 
@@ -20,27 +20,27 @@
   --transition-normal: 260ms var(--ease-arena);
 
   --text: #2b2419;
-  --bg: #f7f2e5;
+  --bg: #f4eedf;
   --line: #e4dac3;
   --muted: #8d8170;
   --accent: #9c6a13;
-  --accent-on: #fffdf3;
+  --accent-on: #fffdf5;
   --accent-hover: #83570d;
   --accent-text: #8a5f16;
   --accent-deep: #6b4a10;
-  --soft: #f1ead6;
+  --soft: #f5efdd;
   --focus: #d8b35c;
   --secondary: #5f5747;
-  --sidebar: #f0e9d5;
+  --sidebar: #fbf7eb;
   --brand: #7c5710;
   --strong-line: #d2c5a4;
-  --surface: #fffdf3;
-  --selected: #ecdfc0;
-  --inset: #ede4cf;
-  --user-bg: #f3ead2;
-  --tool-bg: #f6efdf;
+  --surface: #fffdf5;
+  --selected: #f0e7cf;
+  --inset: #efe6d0;
+  --user-bg: #f0e7cf;
+  --tool-bg: #f8f3e4;
   --tool-line: #ddd2b6;
-  --panel: #f3ecdb;
+  --panel: #fbf7eb;
   --error-bg: #f6e3d9;
   --error-text: #9c3b22;
   --toast: #4a3a1c;
@@ -1918,33 +1918,35 @@ dialog h2 {
   .message-actions { opacity: 1; transform: none; }
 }
 
-/* ===== Редизайн: тёплый графит, рейл, одна колонка чата =====
-   Видно только то, что меняется от сообщения к сообщению; остальное — в поповерах. */
+/* ===== Редизайн: тёплый песок, рейл, одна колонка чата =====
+   Видно только то, что меняется от сообщения к сообщению; остальное — в поповерах.
+   Тёмная тема — та же песочная гамма, что в светлой: кожаный переплёт,
+   янтарный акцент, без холодного графита. */
 :root[data-theme="dark"] {
-  --text: #ece9e4;
-  --bg: #111010;
-  --line: #2c2a28;
-  --muted: #a9a49c;
-  --accent: #f0b45a;
-  --accent-on: #111010;
-  --accent-hover: #f6c677;
-  --accent-text: #f0b45a;
-  --accent-deep: #f0b45a;
-  --soft: #201f1d;
-  --focus: #f0b45a;
-  --secondary: #b8b3ab;
-  --sidebar: #141312;
-  --brand: #f0b45a;
-  --strong-line: #3a3836;
-  --surface: #1a1918;
-  --selected: #262422;
-  --inset: #161514;
-  --user-bg: #262422;
-  --tool-bg: #161514;
-  --tool-line: #2c2a28;
-  --panel: #161514;
-  --toast: #262422;
-  --diff-hunk: #201f1d;
+  --text: #ede3cb;
+  --bg: #16110b;
+  --line: #3a3126;
+  --muted: #a4937a;
+  --accent: #dfa83e;
+  --accent-on: #1a1409;
+  --accent-hover: #eebb5c;
+  --accent-text: #e6c37c;
+  --accent-deep: #e6c37c;
+  --soft: #241d13;
+  --focus: #8a6a2a;
+  --secondary: #cdbd9b;
+  --sidebar: #1e180f;
+  --brand: #e6c37c;
+  --strong-line: #4a3f2e;
+  --surface: #241d13;
+  --selected: #33291a;
+  --inset: #2a2215;
+  --user-bg: #2a2215;
+  --tool-bg: #211c14;
+  --tool-line: #3b3226;
+  --panel: #1e180f;
+  --toast: #3a2f1c;
+  --diff-hunk: #262014;
 }
 
 body { grid-template-columns: 56px 264px minmax(420px, 1fr); }
@@ -1953,15 +1955,16 @@ body.nav-collapsed .sidebar { display: none; }
 
 .rail {
   display: flex; flex-direction: column; align-items: center; gap: 8px;
-  padding: 14px 0; border-right: 1px solid var(--line); background: var(--bg);
+  padding: 14px 0; border-right: 1px solid var(--line); background: var(--inset);
 }
 .rail-mark {
   width: 32px; height: 32px; margin-bottom: 10px; border-radius: 9px;
   background: var(--accent); color: var(--accent-on); font-weight: 700;
+  font-family: var(--font-serif);
   display: flex; align-items: center; justify-content: center; text-decoration: none;
 }
-.rail-btn { width: 44px; height: 44px; padding: 0; border-color: transparent; font-size: 18px; color: var(--muted); }
-.rail-btn:hover { color: var(--text); }
+.rail-btn { width: 44px; height: 44px; padding: 0; border-color: transparent; border-radius: var(--radius-md); font-size: 18px; color: var(--muted); }
+.rail-btn:hover { color: var(--text); background: var(--selected); }
 .rail-bottom { margin-top: auto; }
 .sidebar .brand, .sidebar .history-controls #history-sort { max-width: 100%; }
 .sidebar-bottom #connections, .sidebar-bottom #new-project { display: none; }
@@ -2104,3 +2107,44 @@ header .eyebrow { display: none; }
 
 #quality-capture-dialog{box-sizing:border-box;max-width:min(720px,calc(100vw - 32px));width:100%;}
 #quality-capture-dialog textarea{min-height:90px;}
+
+/* ===== Редизайн-2: формы из макета =====
+   Серифный заголовок, «речевой» угол у сообщения пользователя, спокойные
+   строки истории без постоянных рамок, капсула композера 18px. */
+h1, .header-title h1 { font-family: var(--font-serif); font-weight: 600; letter-spacing: 0.2px; }
+
+.message.user {
+  background: var(--user-bg);
+  border-color: var(--strong-line);
+  border-radius: var(--radius-xl) var(--radius-xl) 4px var(--radius-xl);
+}
+
+.chat-row {
+  border-color: transparent;
+  background: transparent;
+}
+.chat-row:hover { background: var(--soft); border-color: var(--line); transform: none; }
+.chat-row.active {
+  background: var(--user-bg);
+  border: 1px solid var(--strong-line);
+  box-shadow: none;
+}
+
+.composer { border-radius: var(--radius-xl); box-shadow: var(--shadow-md); }
+.composer textarea { border-radius: var(--radius-xl) var(--radius-xl) 0 0; min-height: 72px; }
+.primary { border-radius: var(--radius-md); }
+
+#search { border-radius: var(--radius-md); background: var(--surface); border: 1px solid var(--line); }
+
+.new-chat {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-on);
+  font-weight: 600;
+  border-radius: var(--radius-md);
+}
+.new-chat:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--accent-on); }
+
+.seg button.on { background: var(--user-bg); color: var(--accent-deep); }
+
+dialog { background: var(--sidebar); }
