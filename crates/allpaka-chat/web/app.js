@@ -3061,7 +3061,7 @@ setInterval(async()=>{
   function syncShell(){
     seg.querySelectorAll('button').forEach(b=>{const on=b.dataset.mode===modeSel.value;b.classList.toggle('on',on);b.setAttribute('aria-pressed',on);});
     const model=$('model').value.trim();
-    $('model-chip').textContent=(model?`${providerName($('provider').value)} · ${model}`:'Выбрать модель')+' ⌄';
+    $('model-chip').textContent=model?`${providerName($('provider').value)} · ${model}`:'Выбрать модель';
   }
   setInterval(syncShell,600);syncShell();
   $('model').addEventListener('input',syncShell);$('provider').addEventListener('change',syncShell);

@@ -2148,3 +2148,41 @@ h1, .header-title h1 { font-family: var(--font-serif); font-weight: 600; letter-
 .seg button.on { background: var(--user-bg); color: var(--accent-deep); }
 
 dialog { background: var(--sidebar); }
+
+/* Единый размер всех контролов нижней строки композера: одна высота,
+   один радиус, один кегль — ничего не «пляшет». */
+.compose-options .pop > summary,
+.compose-options .attach,
+.compose-options > button,
+.compose-options .seg {
+  box-sizing: border-box;
+  min-height: 34px;
+  height: 34px;
+  padding: 0 13px;
+  display: inline-flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+}
+.compose-options .seg { padding: 2px; gap: 2px; }
+.seg button { padding: 4px 11px; border-radius: 999px; }
+.compose-options .attach { color: var(--secondary); flex-direction: row; justify-content: center; gap: 0; }
+.send-options .primary { min-height: 34px; padding: 0 16px; display: inline-flex; align-items: center; }
+.send-options button { min-height: 34px; }
+
+/* Шеврон раскрытия — рисованный, по центру строки, вместо текстового «⌄»,
+   который проваливается под базовую линию. */
+.pop > summary::after {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-left: 8px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translate(-1px, -1px);
+  transition: transform var(--transition-fast);
+}
+.pop[open] > summary::after { transform: rotate(225deg) translate(-1px, -1px); }
