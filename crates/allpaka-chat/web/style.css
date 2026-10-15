@@ -2186,3 +2186,15 @@ dialog { background: var(--sidebar); }
   transition: transform var(--transition-fast);
 }
 .pop[open] > summary::after { transform: rotate(225deg) translate(-1px, -1px); }
+
+/* Выпадающие списки нативных селектов: тёплая поверхность темы вместо
+   системного белого с голубым выделением. */
+select { background-color: var(--surface); }
+select option {
+  background-color: var(--surface);
+  color: var(--text);
+}
+select option:checked {
+  background-color: var(--selected);
+  color: var(--text);
+}
