@@ -1,10 +1,25 @@
 'use strict';
 const $ = id => document.getElementById(id);
+// Векторная иконка-штрих: один path в сетке 16×16, цвет — currentColor.
+function svgIcon(d, size = 14, strokeWidth = 1.6) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', size); svg.setAttribute('height', size);
+  svg.setAttribute('viewBox', '0 0 16 16'); svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor'); svg.setAttribute('stroke-width', strokeWidth);
+  svg.setAttribute('stroke-linecap', 'round'); svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS(ns, 'path');
+  path.setAttribute('d', d); svg.append(path);
+  return svg;
+}
+const ICON_SUN = 'M8 5.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6M8 1.5v1.4M8 13.1v1.4M1.5 8h1.4M13.1 8h1.4M3.3 3.3l1 1M11.7 11.7l1 1M12.7 3.3l-1 1M4.3 11.7l-1 1';
+const ICON_MOON = 'M13.5 9.5A6 6 0 0 1 6.5 2.5a6 6 0 1 0 7 7Z';
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   const dark = theme === 'dark';
   const label = dark ? 'Включить светлую тему' : 'Включить тёмную тему';
-  $('theme-toggle').textContent = dark ? '☀' : '☾';
+  $('theme-toggle').replaceChildren(svgIcon(dark ? ICON_SUN : ICON_MOON, 15), document.createTextNode(' Тема'));
   $('theme-toggle').title = label;
   $('theme-toggle').setAttribute('aria-label', label);
 }
@@ -382,7 +397,7 @@ function bindSuggestions() {document.querySelectorAll('[data-prompt]').forEach(b
 function renderStatus(status) {
   $('manage-chat').disabled=!active;const archived=!!(current&&current.folder&&current.folder!=='active');$('send').disabled=archived;$('resume').disabled=archived;
   const running=status==='running';$('compact').disabled=!active||running||archived;$('export').disabled=!active;$('status').textContent=stateNames[status]||status;$('status').className='badge '+status;
-  $('send').textContent=running?'В очередь ↑':'Отправить ↑';$('send').title=archived?'Восстановите разговор из архива или корзины':'Отправить сообщение';$('steer').hidden=!running;$('send-now').hidden=!running;$('stop').hidden=!running;$('resume').hidden=!['paused','error'].includes(status);
+  $('send').replaceChildren(document.createTextNode(running?'В очередь ':'Отправить '),svgIcon('M8 13V3M3.5 7.5 8 3l4.5 4.5',13,1.8));$('send').title=archived?'Восстановите разговор из архива или корзины':'Отправить сообщение';$('steer').hidden=!running;$('send-now').hidden=!running;$('stop').hidden=!running;$('resume').hidden=!['paused','error'].includes(status);
 }
 async function openChat(id) {
   active=id;lastMessages='';messageCache=[];pendingSend=null;pendingRev++;const s=await api('sessions/'+id);if(active!==id)return;
@@ -3187,14 +3202,26 @@ setInterval(async()=>{
 
 /* ===== Редизайн: рейл, сегменты режима, чип модели, поповеры ===== */
 (function redesignShell(){
-  const modeSel=$('mode'),seg=$('mode-seg');
-  [['chat','Chat'],['plan','Plan'],['auto','Auto'],['goal','Goal'],['swarm','Swarm']].forEach(([value,label])=>{
-    const b=node('button',label);b.type='button';b.dataset.mode=value;
-    b.onclick=()=>{modeSel.value=value;modeSel.dispatchEvent(new Event('change'));syncShell();};
-    seg.append(b);
+  // Режим — дропдаун с одним видимым значением, как чип модели: пять
+  // сегментов не влезали в композер и ломали строку.
+  const modeSel=$('mode'),modeMenu=$('mode-menu');
+  const MODES=[
+    ['chat','Chat','чтение контекста и ответы'],
+    ['plan','Plan','исследование и план, без записи'],
+    ['auto','Auto','инструменты до результата или лимита'],
+    ['goal','Goal','автономная работа к цели'],
+    ['swarm','Swarm','волна агентов и сводный итог']
+  ];
+  MODES.forEach(([value,label,desc])=>{
+    const b=node('button',undefined,'mode-item');b.type='button';b.dataset.mode=value;
+    b.append(node('span',label,'cmd'),node('span',desc,'desc'));
+    b.onclick=()=>{modeSel.value=value;modeSel.dispatchEvent(new Event('change'));$('mode-pop').open=false;syncShell();};
+    modeMenu.append(b);
   });
   function syncShell(){
-    seg.querySelectorAll('button').forEach(b=>{const on=b.dataset.mode===modeSel.value;b.classList.toggle('on',on);b.setAttribute('aria-pressed',on);});
+    const mode=MODES.find(m=>m[0]===modeSel.value)||MODES[0];
+    $('mode-chip').textContent=mode[1];
+    modeMenu.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.mode===modeSel.value));
     const model=$('model').value.trim();
     $('model-chip').textContent=model?`${providerName($('provider').value)} · ${model}`:'Выбрать модель';
   }

@@ -2199,6 +2199,20 @@ select option:checked {
   color: var(--text);
 }
 
+/* ===== Иконки-штрихи в контролах ===== */
+button svg, summary svg, .attach svg { vertical-align: -2px; }
+.rail-btn svg { vertical-align: middle; }
+.compose-options .attach { width: 34px; padding: 0; justify-content: center; }
+.mode-pop .pop-body { width: 300px; padding: 6px; gap: 2px; }
+.mode-item {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  text-align: left; border-color: transparent; padding: 8px 12px; width: 100%;
+  border-radius: var(--radius-sm);
+}
+.mode-item .cmd { font-weight: 600; font-size: 13px; }
+.mode-item .desc { color: var(--muted); font-size: 11px; }
+.mode-item.on { background: var(--selected); }
+
 /* ===== Призрачный предикшн в композере (Tab принимает) ===== */
 .prompt-wrap { position: relative; width: 100%; }
 .prompt-ghost {
