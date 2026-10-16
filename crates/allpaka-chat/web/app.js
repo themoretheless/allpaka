@@ -392,7 +392,7 @@ async function refreshFolderCounts(){
   for(const [f,n] of results)folderCounts[f]=n;
   updateFolderOptions();
 }
-function resetChat() {renderPlanCheckpoints(null);renderBackgroundLauncher(null);$('background-tasks').hidden=true;$('conversation-bookmarks').replaceChildren();$('context-statistics-title').textContent=contextHeadline(null);$('context-statistics-body').replaceChildren();$('usage').textContent='';$('compact-summary').textContent='Контекст ещё не сжат.';$('branch-origin').hidden=true;active=null;current=null;lastMessages='';messageCache=[];lastPlan='';pendingSend=null;pendingRev++;$('plan-add').hidden=true;$('messages').innerHTML=welcome;$('title').textContent='Новый разговор';$('error').hidden=true;$('notice').hidden=true;$('queue').replaceChildren();$('plan').replaceChildren(node('li','План появится во время работы','muted'));$('history-folder').value='active';renderStatus('idle');listChats().catch(fail);refreshFolderCounts().catch(()=>{});bindSuggestions();}
+function resetChat() {renderContextRing(null);renderPlanCheckpoints(null);renderBackgroundLauncher(null);$('background-tasks').hidden=true;$('conversation-bookmarks').replaceChildren();$('context-statistics-title').textContent=contextHeadline(null);$('context-statistics-body').replaceChildren();$('usage').textContent='';$('compact-summary').textContent='Контекст ещё не сжат.';$('branch-origin').hidden=true;active=null;current=null;lastMessages='';messageCache=[];lastPlan='';pendingSend=null;pendingRev++;$('plan-add').hidden=true;$('messages').innerHTML=welcome;$('title').textContent='Новый разговор';$('error').hidden=true;$('notice').hidden=true;$('queue').replaceChildren();$('plan').replaceChildren(node('li','План появится во время работы','muted'));$('history-folder').value='active';renderStatus('idle');listChats().catch(fail);refreshFolderCounts().catch(()=>{});bindSuggestions();}
 function bindSuggestions() {document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>{$('prompt').value=b.dataset.prompt;$('mode').value=b.dataset.mode;modeHelp();$('prompt').focus();});}
 function renderStatus(status) {
   $('manage-chat').disabled=!active;const archived=!!(current&&current.folder&&current.folder!=='active');$('send').disabled=archived;$('resume').disabled=archived;
@@ -405,9 +405,21 @@ async function openChat(id) {
   savePrefs();
   renderModelInfo();renderContext();modeHelp();render(s);await listChats();
 }
+// Кольцо заполнения контекста в шапке: доля окна модели, занятая историей.
+function renderContextRing(stats){
+  const fill=$('ctx-ring-fill'),pct=$('ctx-pct');
+  const circumference=2*Math.PI*8;
+  const share=stats&&stats.context_window?Math.min(1,stats.estimated_history_tokens/stats.context_window):null;
+  if(share==null){fill.setAttribute('stroke-dasharray','0 '+circumference.toFixed(2));pct.hidden=true;return;}
+  fill.setAttribute('stroke-dasharray',(circumference*share).toFixed(2)+' '+circumference.toFixed(2));
+  fill.style.stroke=share>0.85?'var(--arena-red)':share>0.6?'var(--arena-yellow)':'var(--accent)';
+  pct.textContent=Math.round(share*100)+'%';
+  pct.hidden=false;
+}
 function renderContextStatistics(s){
   const stats=s.context_stats;
   $('context-statistics-title').textContent=contextHeadline(stats||null);
+  renderContextRing(stats||null);
   if(!stats){$('context-statistics-body').replaceChildren();return;}
   const fmt=n=>Number(n).toLocaleString('ru-RU');
   const usage=s.usage||{}, actual=usage.prompt_tokens??usage.input_tokens;

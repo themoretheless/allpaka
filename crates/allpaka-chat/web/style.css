@@ -2199,6 +2199,17 @@ select option:checked {
   color: var(--text);
 }
 
+/* ===== Кольцо контекста в шапке ===== */
+#context-toggle { display: inline-flex; align-items: center; gap: 6px; }
+.ctx-ring { flex: none; }
+.ctx-ring-track { fill: none; stroke: var(--inset); stroke-width: 3; }
+.ctx-ring-fill {
+  fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round;
+  transform: rotate(-90deg); transform-origin: center;
+  transition: stroke-dasharray 0.3s var(--ease-arena);
+}
+#ctx-pct { font-variant-numeric: tabular-nums; color: var(--secondary); }
+
 /* ===== Иконки-штрихи в контролах ===== */
 button svg, summary svg, .attach svg { vertical-align: -2px; }
 .rail-btn svg { vertical-align: middle; }
