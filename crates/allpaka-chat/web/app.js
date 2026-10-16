@@ -478,9 +478,18 @@ function renderSingleMessage(s,m,index,openKey,detailState){
     details.dataset.openKey=toolKey;
     details.open=detailState.get(toolKey)??false;
     const summary=node('summary');
-    summary.append(node('span',ok?'✓':'✗',ok?'tool-ok':'tool-err'),document.createTextNode(' '+name));
+    summary.append(node('span',ok?'✓':'✗',ok?'tool-ok':'tool-err'),document.createTextNode(' '+(call?toolLabel(call):name)));
     if(typeof result?.diff==='string'){const {add,del}=diffLineStats(result.diff);if(add||del)summary.append(node('span',` +${add} −${del}`,'diff-count'));}
     details.append(summary);
+    // Запрос и ответ — в одной карточке, разделены подписями: не нужно
+    // сопоставлять две соседние секции глазами.
+    if(call?.function?.arguments){
+      details.append(node('div','Запрос','tool-io-label'));
+      let argsText=call.function.arguments;
+      try{argsText=JSON.stringify(JSON.parse(argsText),null,2);}catch{}
+      details.append(node('pre',argsText));
+    }
+    details.append(node('div','Ответ','tool-io-label'));
     if(typeof result?.diff==='string'){const {diff,...info}=result;details.append(node('pre',JSON.stringify(info,null,2)));if(diff)details.append(StudioContent.render('```diff\n'+diff+'\n```'));}else details.append(StudioContent.render(m.content));
     div.append(details);
   }else{
@@ -529,7 +538,9 @@ function renderSingleMessage(s,m,index,openKey,detailState){
   if(m.truncated)div.append(node('div','Неполный ответ · достигнут лимит токенов','muted'));
   for(const call of m.incomplete_tool_calls||[]){const d=node('details');const dk=openKey();d.dataset.openKey=dk;d.open=detailState.get(dk)??false;d.append(node('summary','Незавершённый вызов · не выполнен'),node('pre',JSON.stringify(call,null,2)));div.append(d);}
   for(const i of m.images||[]){const img=document.createElement('img');img.alt=i.name;img.src=`data:${i.mime};base64,${i.data}`;div.append(img);}
-  for(const call of m.tool_calls||[]){const d=node('details');const ck=openKey();d.dataset.openKey=ck;d.open=detailState.get(ck)??false;d.append(node('summary',toolLabel(call)),node('pre',call.function?.arguments||''));div.append(d);}
+  // Вызов с полученным результатом не дублируется: его запрос показан в
+  // карточке результата. Отдельный блок остаётся только у вызовов без ответа.
+  for(const call of m.tool_calls||[]){if(s.messages.some(x=>x.role==='tool'&&x.tool_call_id===call.id))continue;const d=node('details');const ck=openKey();d.dataset.openKey=ck;d.open=detailState.get(ck)??false;d.append(node('summary',toolLabel(call)),node('pre',call.function?.arguments||''));div.append(d);}
   if(s.status!=='running') {
     const actions=node('div',undefined,'message-actions');
     if(m.role==='user'||m.role==='assistant'){
@@ -2808,6 +2819,13 @@ async function attachFiles(files){
 function renderModelInfo() {
   const id=$('model').value.trim();
   const model=(catalogs.get($('provider').value)||[]).find(m=>m.id===id);
+  const advertisedLimit=Number(model?.max_output_tokens||model?.top_provider?.max_completion_tokens);
+  const limit=Number.isFinite(advertisedLimit)&&advertisedLimit>0?advertisedLimit:393216;
+  $('output-tokens').max=String(limit);
+  if(Number($('output-tokens').value)>limit){
+    $('output-tokens').value=String(limit);savePrefs();
+    notify(`Лимит ответа для ${model?.name||id}: ${limit.toLocaleString('ru')} токенов`);
+  }
   $('model-info').hidden=!model&&!id;
   if(!model){
     $('model-info').textContent=id?`Модель чата: ${selectedModelLabel()}. Сведения о контексте, цене и инструментах появятся после «Обновить список».`:'';
@@ -2853,6 +2871,7 @@ async function renderPlugins(){
     const status=p.kind==='skill'?(p.enabled?'активен':'выключен'):(p.connected?`● ${p.tools} инструментов`:p.enabled?'подключение…':'выключен');
     if(p.error)row.append(node('p',p.error,'muted'));
     row.append(node('span',`${p.name} · [${kindBadge}] · ${status}`,'muted'));
+    if(p.id==='anthropic'){const workspaceLabel=node('label','Claude Workspace ID (для ключа на несколько workspace)'),workspace=node('input');workspace.dataset.workspace=p.id;workspace.value=p.workspace_id||'';workspace.placeholder='wrkspc_…';workspace.autocomplete='off';workspaceLabel.append(workspace);div.append(workspaceLabel);}
     const actions=node('div',undefined,'key-actions');
     if(p.kind!=='skill'){const reload=node('button','Переподключить');reload.onclick=async()=>{reload.disabled=true;try{await api(`plugins/${p.id}/reload`,{});await renderPlugins();}catch(e){notify(e.message);reload.disabled=false;}};actions.append(reload);}
     const del=node('button','Удалить');del.onclick=async()=>{del.disabled=true;try{await api(`plugins/${p.id}/delete`,{});await renderPlugins();}catch(e){notify(e.message);del.disabled=false;}};actions.append(del);
@@ -2873,7 +2892,7 @@ async function showConnections(){
     const sources={environment:'Из переменной окружения',system:'Из системного хранилища',memory:'Только в памяти',none:'Ключ не задан'};
     div.append(label,node('small',(sources[p.key_source]||'')+(p.saved?' · сохранён для перезапуска':'')));
     if(p.key_error)div.append(node('p',p.key_error,'muted'));
-    const storage=node('label'),persist=node('input');persist.type='checkbox';persist.dataset.persist=p.id;persist.checked=p.saved;persist.disabled=!config.credential_storage;
+    const storage=node('label'),persist=node('input');persist.type='checkbox';persist.dataset.persist=p.id;persist.checked=p.saved||(!p.configured&&config.credential_storage);persist.disabled=!config.credential_storage;
     storage.append(persist,node('span',config.credential_storage?'Системное хранилище (без отметки — только память, сохранённый ключ удаляется)':'Системное хранилище недоступно; используйте ENV'));div.append(storage);
     const actions=node('div',undefined,'key-actions');
     if(config.credential_storage&&p.configured){const save=node('button','Сохранить ключ в системном хранилище');save.onclick=async()=>{save.disabled=true;try{const replacement=input.value.trim();await api(`providers/${p.id}/key`,replacement?{key:replacement,persist:true}:{key:'',persist:true,use_current:true});await showConnections();notify('Ключ сохранён в системном хранилище');}catch(e){notify(e.message);save.disabled=false;}};actions.append(save);}
@@ -2925,7 +2944,23 @@ function editProject(fresh=false){const p=fresh?{id:'',name:'',instructions:'',r
 $('context-toggle').onclick=()=>document.querySelector('.context-panel').classList.toggle('open');
 $('menu-toggle').onclick=()=>document.querySelector('.sidebar').classList.toggle('open');
 $('save-project').onclick=async()=>{try{const roots=[...$('root-editor').children].map(d=>({alias:d.querySelector('[data-field=alias]').value.trim(),path:d.querySelector('[data-field=path]').value.trim(),writable:d.querySelector('[data-field=writable]').checked}));const p=await api('projects',{id:editingProject,name:$('project-title').value.trim(),instructions:$('project-instructions').value,roots});await loadConfig();$('project').value=p.id;renderContext();$('project-dialog').close();if(current&&current.settings.project_id!==p.id)resetChat();else await listChats();notify('Контекст проекта сохранён');}catch(e){notify(e.message);}};
-$('save-keys').onclick=async()=>{const button=$('save-keys');button.disabled=true;try{for(const input of $('key-fields').querySelectorAll('input[data-provider]'))if(input.value.trim()){const persist=[...$('key-fields').querySelectorAll('input[data-persist]')].find(p=>p.dataset.persist===input.dataset.provider).checked;await api(`providers/${input.dataset.provider}/key`,{key:input.value.trim(),persist});input.value='';}$('key-fields').replaceChildren();$('connection-dialog').close();await loadConfig();notify('Ключи сохранены с выбранными настройками');}catch(e){notify(e.message);}finally{button.disabled=false;}};
+$('save-keys').onclick=async()=>{
+  const button=$('save-keys');button.disabled=true;
+  try{
+    for(const input of $('key-fields').querySelectorAll('input[data-provider]')){
+      const p=config.providers.find(p=>p.id===input.dataset.provider);
+      const workspace=$('key-fields').querySelector(`input[data-workspace="${input.dataset.provider}"]`);
+      const workspaceChanged=workspace&&workspace.value.trim()!==(p.workspace_id||'');
+      if(!input.value.trim()&&!workspaceChanged)continue;
+      const persist=[...$('key-fields').querySelectorAll('input[data-persist]')].find(p=>p.dataset.persist===input.dataset.provider).checked;
+      const body={key:input.value.trim(),persist};
+      if(workspace)body.workspace_id=workspace.value.trim();
+      if(!body.key&&p.configured)body.use_current=true;
+      await api(`providers/${input.dataset.provider}/key`,body);input.value='';
+    }
+    $('key-fields').replaceChildren();$('connection-dialog').close();await loadConfig();notify('Ключи сохранены с выбранными настройками');
+  }catch(e){notify(e.message);}finally{button.disabled=false;}
+};
 $('load-models').onclick=async()=>{try{const models=await refreshModels($('provider').value);if(models)notify(`${models.length} моделей. Выберите Model ID.`);}catch(e){fail(e);}};
 $('provider').onchange=()=>{$('model').value='';$('models').replaceChildren();renderModelInfo();refreshContextModel();savePrefs();refreshModels($('provider').value,{selectFirst:true}).catch(()=>{});};
 $('project').onchange=()=>{clearTraceBulk();renderContext();resetChat();savePrefs();};
