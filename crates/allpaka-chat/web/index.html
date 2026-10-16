@@ -67,6 +67,7 @@
       <h1 id="title">Новый разговор</h1>
     </div>
     <div class="header-actions">
+      <button id="review-toggle">Ревью</button>
       <button id="context-toggle">Контекст</button>
       <span id="status" class="badge idle">Готов</span>
       <details class="menu" id="header-menu">
@@ -103,7 +104,10 @@
     <div id="queue"></div>
 
     <div class="composer">
-      <textarea id="prompt" rows="3" placeholder="Задача, вопрос или уточнение…" aria-label="Сообщение"></textarea>
+      <div class="prompt-wrap">
+        <textarea id="prompt" rows="3" placeholder="Задача, вопрос или уточнение…" aria-label="Сообщение"></textarea>
+        <div class="prompt-ghost" id="prompt-ghost" aria-hidden="true"></div>
+      </div>
       <div id="command-menu" hidden></div>
       <div class="composer-bottom">
         <div class="compose-options">
@@ -189,6 +193,21 @@
     </details>
   </section>
 </main>
+
+<aside class="review-panel" aria-label="Ревью изменений">
+  <div class="review-head">
+    <h2>Ревью изменений</h2>
+    <button id="review-close" aria-label="Закрыть ревью">×</button>
+  </div>
+  <label>Объём
+    <select id="review-scope">
+      <option value="turn" selected>Последний ход</option>
+      <option value="session">Весь разговор</option>
+    </select>
+  </label>
+  <div id="review-summary" class="muted"></div>
+  <div id="review-files"></div>
+</aside>
 
 <aside class="context-panel">
   <div class="eyebrow">Контекст проекта</div>

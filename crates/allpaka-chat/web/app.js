@@ -2534,8 +2534,50 @@ function renderBookmarks(s){
   }
   $('conversation-bookmarks').replaceChildren(...(rows.length?rows:[node('p','Отметьте важное сообщение кнопкой «Закладка».')]));
 }
+// ===== Панель ревью: все диффы сессии по файлам, со scope-фильтром =====
+// Данные берутся из tool-сообщений с полем diff; «последний ход» — всё после
+// последнего сообщения пользователя.
+let lastReview='';
+function collectReviewEntries(s,scope){
+  let from=0;
+  if(scope==='turn'){for(let i=s.messages.length-1;i>=0;i--){if(s.messages[i].role==='user'){from=i+1;break;}}}
+  const byFile=new Map();
+  for(let i=from;i<s.messages.length;i++){
+    const m=s.messages[i];
+    const info=isToolWithDiff(m);
+    if(!info)continue;
+    const path=filePathFromCall(toolCallFor(s,i))||'файл';
+    const entry=byFile.get(path)||{path,add:0,del:0,diffs:[]};
+    entry.add+=info.add;entry.del+=info.del;entry.diffs.push(info.result.diff);
+    byFile.set(path,entry);
+  }
+  return [...byFile.values()];
+}
+function renderReviewPanel(s){
+  const panel=document.querySelector('.review-panel');
+  if(!panel.classList.contains('open'))return;
+  const scope=$('review-scope').value;
+  const signature=s.id+':'+scope+':'+s.messages.length+':'+s.status;
+  if(signature===lastReview)return;lastReview=signature;
+  const entries=collectReviewEntries(s,scope);
+  const totalAdd=entries.reduce((a,e)=>a+e.add,0),totalDel=entries.reduce((a,e)=>a+e.del,0);
+  $('review-summary').textContent=entries.length
+    ?`Файлов: ${entries.length} · +${totalAdd} −${totalDel}`
+    :(scope==='turn'?'В последнем ходе нет правок файлов.':'В разговоре нет правок файлов.');
+  const rows=[];
+  for(const entry of entries){
+    const details=node('details',undefined,'review-file');
+    const summary=node('summary');
+    summary.append(node('span',entry.path,'review-path'),aggStatsSpan(entry.add,entry.del,'agg-file-stats'));
+    details.append(summary);
+    for(const diff of entry.diffs)details.append(StudioContent.render('```diff\n'+diff+'\n```'));
+    rows.push(details);
+  }
+  $('review-files').replaceChildren(...rows);
+}
 function render(s) {
   renderBookmarks(s);
+  renderReviewPanel(s);
   renderContextStatistics(s);
   renderBackgroundLauncher(s);renderBackground(s);
   if(traceSession!==s.id){traceSession=s.id;$('trace-results').replaceChildren();}
@@ -2942,6 +2984,18 @@ function rootRow(root={alias:'',path:'',writable:false}){
 }
 function editProject(fresh=false){const p=fresh?{id:'',name:'',instructions:'',roots:[]}:config.projects.find(p=>p.id===$('project').value);editingProject=p.id;$('project-title').value=p.name;$('project-instructions').value=p.instructions;$('root-editor').replaceChildren();p.roots.forEach(rootRow);if(!p.roots.length)rootRow();$('project-dialog').showModal();}
 $('context-toggle').onclick=()=>document.querySelector('.context-panel').classList.toggle('open');
+$('review-toggle').onclick=()=>{
+  const panel=document.querySelector('.review-panel');
+  panel.classList.toggle('open');
+  document.querySelector('.context-panel').classList.remove('open');
+  lastReview='';
+  if(panel.classList.contains('open')){
+    if(current)renderReviewPanel(current);
+    else $('review-summary').textContent='Откройте разговор, чтобы увидеть его правки.';
+  }
+};
+$('review-close').onclick=()=>document.querySelector('.review-panel').classList.remove('open');
+$('review-scope').onchange=()=>{lastReview='';if(current)renderReviewPanel(current);};
 $('menu-toggle').onclick=()=>document.querySelector('.sidebar').classList.toggle('open');
 $('save-project').onclick=async()=>{try{const roots=[...$('root-editor').children].map(d=>({alias:d.querySelector('[data-field=alias]').value.trim(),path:d.querySelector('[data-field=path]').value.trim(),writable:d.querySelector('[data-field=writable]').checked}));const p=await api('projects',{id:editingProject,name:$('project-title').value.trim(),instructions:$('project-instructions').value,roots});await loadConfig();$('project').value=p.id;renderContext();$('project-dialog').close();if(current&&current.settings.project_id!==p.id)resetChat();else await listChats();notify('Контекст проекта сохранён');}catch(e){notify(e.message);}};
 $('save-keys').onclick=async()=>{
@@ -2988,9 +3042,55 @@ $('prompt').onkeydown=e=>{
     if(e.key==='Escape'){$('command-menu').hidden=true;return;}
   }
   if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();control('send').catch(fail);}
+  // Предикшн по Tab: призрачный хвост принимается, когда курсор в конце.
+  if(promptGhostText){
+    if(e.key==='Tab'&&!e.shiftKey&&$('prompt').selectionStart===$('prompt').value.length){
+      e.preventDefault();$('prompt').value+=promptGhostText;updatePromptGhost();
+    }else if(e.key==='Escape'){promptGhostText='';$('prompt-ghost').replaceChildren();}
+  }
 };
+// ===== Предикшн черновика: как ghost text в serve-чате =====
+// Источник — сообщения пользователя в текущем разговоре плюс пресеты; всё
+// локально, без запросов к модели.
+let promptGhostText='';
+const promptPresets=[
+  'Объясни, как устроен этот модуль и его ключевые части',
+  'Найди причину ошибки и предложи исправление',
+  'Напиши тесты для последних изменений',
+  'Сделай ревью последних правок и укажи риски',
+  'Продолжи задачу с того места, где остановились'
+];
+function promptPredict(draft){
+  if(!draft||draft.length<3||draft.startsWith('/'))return '';
+  const lower=draft.toLowerCase();
+  const sources=[...(current?.messages||[]).filter(m=>m.role==='user'&&typeof m.content==='string').map(m=>m.content),...promptPresets];
+  for(const text of sources){
+    if(text.toLowerCase().startsWith(lower)&&text.length>draft.length)return text.slice(draft.length).split('\n')[0];
+  }
+  const tail=lower.trim().split(/\s+/).slice(-2).join(' ');
+  if(tail.length>=4){
+    for(const text of sources){
+      const idx=text.toLowerCase().lastIndexOf(tail);
+      if(idx===-1)continue;
+      const after=text.slice(idx+tail.length).split('\n')[0];
+      const cont=after.split(/(\s+)/).slice(0,8).join('');
+      if(cont.trim())return cont;
+    }
+  }
+  return '';
+}
+function updatePromptGhost(){
+  const ghost=$('prompt-ghost'),draft=$('prompt').value;
+  promptGhostText=$('command-menu').hidden?promptPredict(draft):'';
+  ghost.replaceChildren();
+  if(!promptGhostText)return;
+  ghost.append(node('span',draft,'ghost-prefix'),node('span',promptGhostText,'ghost-suffix'),node('span','Tab','ghost-badge'));
+  ghost.scrollTop=$('prompt').scrollTop;
+}
+$('prompt').addEventListener('scroll',()=>{$('prompt-ghost').scrollTop=$('prompt').scrollTop;});
 $('prompt').oninput=e=>{
   renderCommandMenu();
+  updatePromptGhost();
   if(!layoutFix||e.isComposing)return;
   if(e.data&&/^\s$/.test(e.data))layoutFixLastWord();
   scheduleLayoutFix();

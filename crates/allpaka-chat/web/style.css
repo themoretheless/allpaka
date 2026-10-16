@@ -2199,6 +2199,54 @@ select option:checked {
   color: var(--text);
 }
 
+/* ===== Призрачный предикшн в композере (Tab принимает) ===== */
+.prompt-wrap { position: relative; width: 100%; }
+.prompt-ghost {
+  position: absolute; inset: 0; pointer-events: none; overflow: hidden;
+  padding: 18px 22px; font: inherit; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.prompt-ghost .ghost-prefix { color: transparent; }
+.prompt-ghost .ghost-suffix { color: var(--muted); opacity: 0.65; }
+.prompt-ghost .ghost-badge {
+  margin-left: 6px; padding: 1px 6px; border-radius: 5px;
+  border: 1px solid var(--line); background: var(--inset); color: var(--muted);
+  font-size: 10px; font-family: var(--font-mono); letter-spacing: 0.3px;
+}
+
+/* ===== Панель ревью: шторка справа со списком изменённых файлов ===== */
+.review-panel { display: none; }
+.review-panel.open {
+  display: flex; flex-direction: column; gap: 12px;
+  position: fixed; top: 0; right: 0; bottom: 0; width: 440px; max-width: 100vw;
+  z-index: 40; overflow-y: auto; padding: 20px;
+  background: var(--panel); border-left: 1px solid var(--strong-line);
+  box-shadow: var(--shadow-lg);
+}
+.review-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.review-head h2 { margin: 0; font-size: 16px; }
+#review-close {
+  border: 0; font-size: 20px; width: 32px; height: 32px; padding: 0;
+  display: flex; align-items: center; justify-content: center; border-radius: 50%;
+}
+#review-close:hover { background: var(--soft); }
+.review-panel label { flex-direction: row; align-items: center; gap: 10px; font-size: 12px; }
+#review-scope { flex: 1; }
+#review-files { display: flex; flex-direction: column; gap: 8px; }
+.review-file {
+  border: 1px solid var(--line); border-radius: var(--radius-md);
+  background: var(--surface); padding: 0; overflow: hidden;
+}
+.review-file > summary {
+  list-style: none; cursor: pointer; display: flex; align-items: center;
+  justify-content: space-between; gap: 10px; padding: 10px 12px; font-size: 13px;
+}
+.review-file > summary::-webkit-details-marker { display: none; }
+.review-file > summary:hover { background: var(--soft); }
+.review-path { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+.review-file .code-block { margin: 0 10px 10px; }
+@media (max-width: 700px) { .review-panel.open { width: 100%; } }
+
 /* Подписи «Запрос» / «Ответ» внутри карточки инструмента */
 .tool-io-label {
   font-size: 10px;
