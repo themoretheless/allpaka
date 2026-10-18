@@ -7935,11 +7935,16 @@ impl Gpu {
     /// Add buffers to the queue's residency set, creating it on first use.
     /// Best effort: on failure the buffers still work, just unpinned.
     fn ensure_residency(&mut self, bufs: &[WeightChunk]) {
-        use objc::runtime::Object;
-        use objc::{class, msg_send, sel, sel_impl};
+        use objc::runtime::{Class, Object};
+        use objc::{msg_send, sel, sel_impl};
         unsafe {
             if self.residency.is_none() {
-                let desc: *mut Object = msg_send![class!(MTLResidencySetDescriptor), new];
+                // Residency sets arrived in macOS 15; class! would panic on
+                // an older system, which must simply run unpinned.
+                let Some(class) = Class::get("MTLResidencySetDescriptor") else {
+                    return;
+                };
+                let desc: *mut Object = msg_send![class, new];
                 if desc.is_null() {
                     return;
                 }
