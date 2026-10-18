@@ -15,6 +15,9 @@ SKILL = "---\nname: note\ndescription: the task asks for a note file\n---\nWrite
 HOOKS = json.dumps({"post_tool": [{"matcher": "write_file", "inject": "Reopen what you wrote."}]})
 MEMORY = 'In this workspace notes go to workspace/out.txt.'
 systems = []
+external_requests = []
+CODEX_BIN = os.environ.get('ALLPAKA_CODEX_BIN')
+OPENCODE_BIN = os.environ.get('ALLPAKA_OPENCODE_BIN')
 
 class Mock(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
@@ -22,6 +25,8 @@ class Mock(BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers(); self.wfile.write(b'{"data":[{"id":"mock"}]}')
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if self.path.endswith('/responses') or body.get('model') == 'ocmock':
+            return self.external(body)
         messages = body['messages']; system = messages[0].get('content', ''); systems.append(system)
         tools = [t['function']['name'] for t in body.get('tools') or []]
         results = [m['content'] for m in messages if m.get('role') == 'tool']
@@ -70,6 +75,27 @@ class Mock(BaseHTTPRequestHandler):
             assert '[harness hook] Reopen what you wrote.' in results[1]
             event = say('wrote the note')
         self.wfile.write(('data: ' + json.dumps(event) + '\n\ndata: [DONE]\n\n').encode()); self.wfile.flush()
+
+    def external(self, body):
+        """Real Codex (Responses API) and OpenCode (chat completions) runs."""
+        external_requests.append(json.dumps(body))
+        text = 'external-real-ok'
+        self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
+        if self.path.endswith('/responses'):
+            item = {'id': 'm1', 'type': 'message', 'role': 'assistant', 'status': 'completed', 'content': [{'type': 'output_text', 'text': text, 'annotations': []}]}
+            events = [('response.created', {'type': 'response.created', 'response': {'id': 'r1', 'object': 'response', 'status': 'in_progress', 'output': []}}),
+                      ('response.output_item.added', {'type': 'response.output_item.added', 'output_index': 0, 'item': dict(item, status='in_progress', content=[])}),
+                      ('response.output_text.delta', {'type': 'response.output_text.delta', 'item_id': 'm1', 'output_index': 0, 'content_index': 0, 'delta': text}),
+                      ('response.output_item.done', {'type': 'response.output_item.done', 'output_index': 0, 'item': item}),
+                      ('response.completed', {'type': 'response.completed', 'response': {'id': 'r1', 'object': 'response', 'status': 'completed', 'output': [item], 'usage': {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2, 'input_tokens_details': {'cached_tokens': 0}, 'output_tokens_details': {'reasoning_tokens': 0}}}})]
+            for name, data in events:
+                self.wfile.write(f'event: {name}\ndata: {json.dumps(data)}\n\n'.encode())
+        else:
+            for chunk in [{'id': 'c1', 'object': 'chat.completion.chunk', 'created': 0, 'model': 'ocmock', 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': text}, 'finish_reason': None}]},
+                          {'id': 'c1', 'object': 'chat.completion.chunk', 'created': 0, 'model': 'ocmock', 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2}}]:
+                self.wfile.write(f'data: {json.dumps(chunk)}\n\n'.encode())
+            self.wfile.write(b'data: [DONE]\n\n')
+        self.wfile.flush()
 
 mock = ThreadingHTTPServer(('127.0.0.1', 0), Mock); threading.Thread(target=mock.serve_forever, daemon=True).start()
 with tempfile.TemporaryDirectory(prefix='allpaka-harness-test-') as tmp:
@@ -168,8 +194,32 @@ with tempfile.TemporaryDirectory(prefix='allpaka-harness-test-') as tmp:
         assert all(r['delivered'] for r in runs), runs
         assert not (workspace / 'task.txt').exists()
 
+        # Optional: the real Codex and OpenCode CLIs, pointed at this mock.
+        expected_library = 5
+        clis = []
+        if CODEX_BIN:
+            home = root / 'codex-home'; home.mkdir()
+            provider = f'model_providers.mock={{name="mock",base_url="http://127.0.0.1:{mock.server_port}/v1",wire_api="responses",env_key="MOCK_KEY"}}'
+            clis.append(('codex', f"CODEX_HOME={home} MOCK_KEY=x {CODEX_BIN} exec --skip-git-repo-check -c model_provider=mock -c '{provider}' -m cxmock -"))
+        if OPENCODE_BIN:
+            home = root / 'oc-home'; home.mkdir()
+            config = json.dumps({'provider': {'mock': {'npm': '@ai-sdk/openai-compatible', 'name': 'mock', 'options': {'baseURL': f'http://127.0.0.1:{mock.server_port}/v1', 'apiKey': 'x'}, 'models': {'ocmock': {'name': 'ocmock'}}}}, 'model': 'mock/ocmock'})
+            clis.append(('opencode', f"HOME={home} XDG_CONFIG_HOME={home}/c XDG_DATA_HOME={home}/d XDG_CACHE_HOME={home}/x OPENCODE_CONFIG_CONTENT='{config}' {OPENCODE_BIN} run"))
+        for layout, command in clis:
+            external_requests.clear()
+            job = studio.start_harness_job(session, agentic=False, external=dict(command=command, layout=layout))
+            detail = until(lambda: studio.harness_job(job['id']), lambda d: d['job']['status'] in ('completed', 'failed'), 300)
+            assert detail['job']['status'] == 'completed', detail['job'].get('error')
+            runs = detail['job']['results'][0]['outcome']['runs']
+            assert all(r['delivered'] for r in runs), (layout, runs)
+            seen = [r for r in external_requests if MEMORY in r]
+            assert seen, f'{layout} never sent the harness to the model'
+            assert any('the task asks for a note' in r for r in seen), f'{layout} did not discover the skill'
+            expected_library += 1
+            print(f'real {layout}: {len(external_requests)} model requests, harness and skill seen')
+
         library = studio.harness_library(project)['entries']
-        assert len(library) == 5 and all(e['entry']['cue'] == 'a task writes a note file' for e in library)
+        assert len(library) == expected_library and all(e['entry']['cue'] == 'a task writes a note file' for e in library)
         assert '[confounded]' in library[0]['experience']
         try: studio.start_harness_job(session, k=9); raise AssertionError('k=9 accepted')
         except EvaluationError as error: assert str(error) == 'http_400'
