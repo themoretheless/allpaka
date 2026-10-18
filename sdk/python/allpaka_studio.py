@@ -1061,12 +1061,15 @@ class Studio:
         """Make a revision active; None turns the harness off."""
         return self.request("harness/activate",dict(project_id=project_id,revision=revision))
 
-    def start_harness_job(self, session_id, *, k=1, mode="parallel", agentic=True, rubric=None, tasks=None, provider=None, model=None):
-        """Propose-Probe-Compose on a conversation's task (or a stream of tasks); the result is not activated."""
+    def start_harness_job(self, session_id, *, k=1, mode="parallel", agentic=True, rubric=None, tasks=None, dataset=None, external=None, provider=None, model=None):
+        """Propose-Probe-Compose on a conversation's task, a stream of tasks or a dataset; the result is not activated.
+
+        dataset: {"id": ..., "version"?: n, "limit"?: n}; external: {"command": ..., "layout": "codex"|"opencode"}.
+        """
         if mode not in ("parallel", "sequential"):
             raise ValueError("mode must be parallel or sequential")
         body=dict(session_id=self._id(session_id),k=int(k),mode=mode,agentic=bool(agentic))
-        for key,value in (("rubric",rubric),("tasks",list(tasks) if tasks else None),("provider",provider),("model",model)):
+        for key,value in (("rubric",rubric),("tasks",list(tasks) if tasks else None),("dataset",dict(dataset) if dataset else None),("external",dict(external) if external else None),("provider",provider),("model",model)):
             if value is not None:
                 body[key]=value
         return self.request("harness/jobs",body)

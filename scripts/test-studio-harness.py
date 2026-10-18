@@ -56,7 +56,8 @@ class Mock(BaseHTTPRequestHandler):
                 event = say(json.dumps({'edits': [{'component': 'memory.md', 'candidates': 'inv1', 'change': 'names the note path', 'observed': 'agg1 wrote directly', 'verdict': 'confounded'}],
                                         'experience': {'cue': 'a task writes a note file', 'lesson': 'state the target path in memory.md', 'evidence': 'inv1 vs base1', 'confidence': 'low: one rollout'}}))
             elif system.startswith('Evaluate the supplied answer'):
-                event = say(json.dumps({'score': 0.75, 'reason': 'note written'}))
+                reference = json.loads(messages[-1]['content'])['reference']
+                event = say(json.dumps({'score': 1.0 if reference == 'a note file exists' else 0.75, 'reason': 'note written'}))
             else:
                 event = say('unexpected')
         elif not results:
@@ -150,8 +151,25 @@ with tempfile.TemporaryDirectory(prefix='allpaka-harness-test-') as tmp:
         assert any('YOURS TO EDIT' in s for s in systems) and any('HOW TO COMPOSE' in s for s in systems)
         assert not (workspace / 'out.txt').exists()
 
+        # A stream from a dataset: the expected output reaches only the judge.
+        dataset = api('evaluation/datasets', dict(project_id=project, name='Notes', base_version=0, samples=[dict(id='n1', input='Leave a note', expected_output='a note file exists')]))
+        job = studio.start_harness_job(session, agentic=False, rubric='The note file exists.', dataset=dict(id=dataset['id']))
+        detail = until(lambda: studio.harness_job(job['id']), lambda d: d['job']['status'] in ('completed', 'failed'), 60)
+        assert detail['job']['status'] == 'completed', detail['job'].get('error')
+        assert detail['job']['tasks'] == ['Leave a note'] and detail['job']['references'] == ['a note file exists']
+        assert detail['job']['results'][0]['outcome']['scores'] == {'base1': 1.0, 'agg1': 1.0}
+        assert not any('a note file exists' in s for s in systems if 'YOUR DIMENSION' in s or 'composing' in s)
+
+        # An external agent CLI executes the rollouts on the materialized harness.
+        job = studio.start_harness_job(session, agentic=False, external=dict(command="cat > task.txt; test -f .agents/skills/note/SKILL.md && echo external-ok", layout='codex'))
+        detail = until(lambda: studio.harness_job(job['id']), lambda d: d['job']['status'] in ('completed', 'failed'), 60)
+        assert detail['job']['status'] == 'completed', detail['job'].get('error')
+        runs = detail['job']['results'][0]['outcome']['runs']
+        assert all(r['delivered'] for r in runs), runs
+        assert not (workspace / 'task.txt').exists()
+
         library = studio.harness_library(project)['entries']
-        assert len(library) == 3 and all(e['entry']['cue'] == 'a task writes a note file' for e in library)
+        assert len(library) == 5 and all(e['entry']['cue'] == 'a task writes a note file' for e in library)
         assert '[confounded]' in library[0]['experience']
         try: studio.start_harness_job(session, k=9); raise AssertionError('k=9 accepted')
         except EvaluationError as error: assert str(error) == 'http_400'

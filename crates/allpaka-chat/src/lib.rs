@@ -2009,6 +2009,27 @@ async fn turn_traced(
                     .filter(|h| h.matches(tool, raw_args))
                     .filter_map(|h| h.max_output)
                     .min();
+                if cmd_enabled {
+                    let transforms = harness_hooks
+                        .post_tool
+                        .iter()
+                        .filter(|h| h.matches(tool, raw_args))
+                        .filter_map(|h| h.transform.as_ref());
+                    for program in transforms {
+                        let Some(root) = project.roots.first() else {
+                            break;
+                        };
+                        content =
+                            match transform_output(&root.path, program, tool, raw_args, &content)
+                                .await
+                            {
+                                Ok(text) => text,
+                                Err(e) => {
+                                    format!("{content}\n\n[harness hook] transform failed: {e}")
+                                }
+                            };
+                    }
+                }
                 if let Some(limit) = limit {
                     content = harness::trim_output(&content, limit);
                 }
@@ -2043,6 +2064,47 @@ async fn turn_traced(
         "Step limit reached ({}). Review the result and Resume to continue.",
         settings.max_steps
     )
+}
+
+/// Run a post_tool `transform`: the tool result goes to stdin and stdout
+/// replaces it. A non-zero exit or a timeout keeps the original result.
+async fn transform_output(
+    cwd: &std::path::Path,
+    program: &str,
+    tool: &str,
+    args: &str,
+    input: &str,
+) -> Result<String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(program)
+        .current_dir(cwd)
+        .env("ALLPAKA_TOOL", tool)
+        .env("ALLPAKA_TOOL_ARGS", args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("Failed to start transform")?;
+    let mut stdin = child.stdin.take().context("No stdin")?;
+    let data = input.as_bytes().to_vec();
+    let writer = tokio::spawn(async move {
+        let _ = stdin.write_all(&data).await;
+    });
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+        .await
+        .context("Transform timed out")??;
+    let _ = writer.await;
+    if !output.status.success() {
+        bail!(
+            "exit {:?}: {}",
+            output.status.code(),
+            truncate_output(&output.stderr)
+        );
+    }
+    Ok(truncate_output(&output.stdout))
 }
 
 /// The reason a pre_tool hook refuses this call: a `block` text, or the

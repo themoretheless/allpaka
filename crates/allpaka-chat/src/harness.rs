@@ -219,6 +219,10 @@ pub struct Hook {
     /// post_tool: keep at most this many characters of the tool result.
     #[serde(default)]
     pub max_output: Option<usize>,
+    /// post_tool: a program that reads the tool result on stdin and whose
+    /// stdout replaces it (code acting in the loop, like a Harness² plugin).
+    #[serde(default)]
+    pub transform: Option<String>,
 }
 /// Hooks act inside the tool loop, where prose cannot be skipped:
 /// `pre_tool` before a call runs, `post_tool` on its result, `stop` once
@@ -262,7 +266,7 @@ pub fn hooks(tree: &Tree) -> Result<Hooks> {
         (
             "post_tool",
             &hooks.post_tool,
-            &["inject", "command", "max_output"],
+            &["inject", "command", "max_output", "transform"],
         ),
         ("stop", &hooks.stop, &["inject", "command"]),
     ];
@@ -273,6 +277,7 @@ pub fn hooks(tree: &Tree) -> Result<Hooks> {
                 ("command", present(&hook.command)),
                 ("block", present(&hook.block)),
                 ("max_output", hook.max_output.is_some()),
+                ("transform", present(&hook.transform)),
             ]
             .into_iter()
             .filter(|(_, on)| *on)
@@ -298,6 +303,7 @@ pub fn hooks(tree: &Tree) -> Result<Hooks> {
                 || hook.inject.as_ref().is_some_and(|s| s.len() > 2000)
                 || hook.block.as_ref().is_some_and(|s| s.len() > 2000)
                 || hook.command.as_ref().is_some_and(|s| s.len() > 1000)
+                || hook.transform.as_ref().is_some_and(|s| s.len() > 1000)
             {
                 bail!("Hook text exceeds bounds");
             }
@@ -1175,6 +1181,7 @@ mod tests {
             "{\"pre\":[]}",
             r#"{"pre_tool":[{"inject":"x"}]}"#,
             r#"{"post_tool":[{"block":"x"}]}"#,
+            r#"{"pre_tool":[{"transform":"cat"}]}"#,
             r#"{"post_tool":[{"inject":"x","max_output":500}]}"#,
             r#"{"post_tool":[{"max_output":10}]}"#,
             r#"{"stop":[{"max_output":500}]}"#,

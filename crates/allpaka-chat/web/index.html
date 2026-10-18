@@ -324,6 +324,9 @@
   <label>Модель предложений, необязательно<input id="harness-model" maxlength="200" placeholder="Как в разговоре"></label>
   <label><input id="harness-agentic" type="checkbox" checked> Предлагающие работают как агенты с файлами (как в Harness²); без галочки — один JSON-ответ модели</label>
   <label>Рубрика для отчёта, необязательно<textarea id="harness-rubric" rows="2" maxlength="16000" placeholder="Оценки базы и выбранного результата попадут в отчёт; на выбор не влияют"></textarea></label>
+  <label>Датасет как серия задач, необязательно<input id="harness-dataset" maxlength="80" placeholder="ID набора примеров проекта; эталон уйдёт только в оценку по рубрике"></label>
+  <label>Внешний исполнитель, необязательно<input id="harness-external" maxlength="2000" placeholder="Например: codex exec --json -  (задача на stdin, ответ — stdout)"></label>
+  <label>Раскладка харнесса для него<select id="harness-layout"><option value="codex">Codex: AGENTS.md, .agents/skills</option><option value="opencode">OpenCode: AGENTS.md, .opencode/skills, .opencode/agent</option></select></label>
   <label>Серия задач, необязательно<textarea id="harness-tasks" rows="3" placeholder="По умолчанию — задача разговора. Несколько задач разделяйте строкой ---; каждая следующая видит уроки предыдущих"></textarea></label>
   <button id="harness-refine" type="button">Запустить улучшение</button>
   <div id="harness-jobs"></div>

@@ -66,6 +66,25 @@ pub trait Engine: Send + Sync {
     ) -> BoxFuture<'a, Result<(Tree, String)>> {
         Box::pin(async { bail!("This engine cannot run agentic proposers") })
     }
+    /// A read-only agent session over `files` (as `harness_evidence`) and
+    /// the project's own roots; returns its final answer. Engines without
+    /// agents get the files inlined into one call.
+    fn inspect<'a>(
+        &'a self,
+        label: &'a str,
+        system: &'a str,
+        mission: &'a str,
+        files: &'a BTreeMap<String, String>,
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(async move {
+            let inlined: String = files
+                .iter()
+                .map(|(p, t)| format!("=== {p} ===\n{t}\n"))
+                .collect();
+            self.call(label, system, &format!("{mission}\n\n{inlined}"))
+                .await
+        })
+    }
 }
 
 /// One execution. It never carries a score: `delivered` only says that the
@@ -121,6 +140,9 @@ pub struct Plan<'a> {
     pub agentic: bool,
     /// Optional rubric for reporting only: the method never sees scores.
     pub rubric: Option<String>,
+    /// Expected output from a dataset sample: given to the rubric judge
+    /// only, never to proposers, composers or the selector.
+    pub reference: Option<String>,
     pub progress: &'a (dyn Fn(String) + Send + Sync),
 }
 
@@ -784,7 +806,7 @@ async fn score(plan: &Plan<'_>, rubric: &str, runs: &[&RunView]) -> BTreeMap<Str
                 clip(&run.changes, 24_000)
             )
         };
-        let input = json!({"rubric": rubric, "input": plan.task, "answer": clip(&answer, 60_000), "reference": null, "contexts": []});
+        let input = json!({"rubric": rubric, "input": plan.task, "answer": clip(&answer, 60_000), "reference": plan.reference, "contexts": []});
         let value = async {
             let text = plan
                 .engine
@@ -888,6 +910,21 @@ async fn select(plan: &Plan<'_>, finals: &[(Stage, RunView)]) -> (String, String
     let ids: Vec<String> = (0..order.len())
         .map(|i| ((b'A' + i as u8) as char).to_string())
         .collect();
+    let mut files = BTreeMap::from([("task.md".to_string(), plan.task.clone())]);
+    for (id, (_, run)) in ids.iter().zip(&order) {
+        files.insert(
+            format!("candidates/{id}.md"),
+            format!(
+                "# Final answer\n{}\n\n# File changes\n{}\n",
+                run.answer,
+                if run.changes.is_empty() {
+                    "(none)"
+                } else {
+                    &run.changes
+                }
+            ),
+        );
+    }
     let mut user = format!("# REQUEST (verbatim)\n{}\n", plan.task);
     for (id, (_, run)) in ids.iter().zip(&order) {
         user.push_str(&format!(
@@ -901,10 +938,20 @@ async fn select(plan: &Plan<'_>, finals: &[(Stage, RunView)]) -> (String, String
         ));
     }
     let result = async {
-        let text = plan
-            .engine
-            .call("select", &prompts::select(order.len()), &user)
-            .await?;
+        let text = if plan.agentic {
+            plan.engine
+                .inspect(
+                    "select",
+                    &prompts::select(order.len(), true),
+                    prompts::select_mission(),
+                    &files,
+                )
+                .await?
+        } else {
+            plan.engine
+                .call("select", &prompts::select(order.len(), false), &user)
+                .await?
+        };
         let value = json_object(&text)?;
         let choice = value["choice"]
             .as_str()
@@ -995,6 +1042,7 @@ struct StudioEngine {
     project: context::Project,
     task: String,
     scratch: PathBuf,
+    external: Option<External>,
 }
 
 const COPY_MAX_FILES: usize = 20_000;
@@ -1060,15 +1108,28 @@ fn files_under(root: &std::path::Path) -> BTreeMap<String, PathBuf> {
 }
 /// What a probe changed in its copy, against the real root.
 fn changes(alias: &str, original: &std::path::Path, copy: &std::path::Path) -> String {
+    changes_over(alias, original, copy, &BTreeMap::new())
+}
+/// Like `changes`, but files the harness materialized into the copy count
+/// as already present with that content.
+fn changes_over(
+    alias: &str,
+    original: &std::path::Path,
+    copy: &std::path::Path,
+    overlay: &BTreeMap<String, String>,
+) -> String {
     let before = files_under(original);
     let after = files_under(copy);
     let mut out = String::new();
     for (rel, path) in &after {
         let new = std::fs::read(path).unwrap_or_default();
-        match before
-            .get(rel)
-            .map(|p| std::fs::read(p).unwrap_or_default())
-        {
+        let old = match overlay.get(rel) {
+            Some(text) => Some(text.as_bytes().to_vec()),
+            None => before
+                .get(rel)
+                .map(|p| std::fs::read(p).unwrap_or_default()),
+        };
+        match old {
             Some(old) if old == new => {}
             old => {
                 let header = if old.is_some() { "modified" } else { "added" };
@@ -1089,10 +1150,140 @@ fn changes(alias: &str, original: &std::path::Path, copy: &std::path::Path) -> S
             return out;
         }
     }
-    for rel in before.keys().filter(|rel| !after.contains_key(*rel)) {
+    for rel in before
+        .keys()
+        // Hidden layout directories (.agents, .opencode) are never walked.
+        .chain(overlay.keys().filter(|rel| !rel.split('/').any(skipped)))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|rel| !after.contains_key(*rel))
+    {
         out.push_str(&format!("*** {alias}/{rel} (removed)\n"));
     }
     out
+}
+
+/// An external coding agent (Codex, OpenCode or anything with a CLI) that
+/// executes rollouts instead of Studio's own loop, as the Harness²
+/// substrates do. The command runs with `/bin/sh -c` in the copy of the
+/// first writable root, receives the task on stdin and in `ALLPAKA_TASK`,
+/// and its stdout is the answer.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct External {
+    pub command: String,
+    #[serde(default)]
+    pub layout: Layout,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Layout {
+    /// `AGENTS.md` plus `.agents/skills/<name>/SKILL.md` (Codex).
+    #[default]
+    Codex,
+    /// `AGENTS.md`, `.opencode/skills/<name>/SKILL.md` and
+    /// `.opencode/agent/<name>.md` subagents (OpenCode).
+    Opencode,
+}
+
+/// The files a harness becomes in an external agent's workspace. `existing`
+/// is the workspace's own AGENTS.md, which the harness extends.
+pub fn materialize(
+    tree: &Tree,
+    layout: Layout,
+    existing: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut files = BTreeMap::new();
+    let skill_dir = match layout {
+        Layout::Codex => ".agents/skills",
+        Layout::Opencode => ".opencode/skills",
+    };
+    let mut parts = vec![];
+    let base = harness::compose_system(tree, false, false);
+    if !base.is_empty() {
+        parts.push(base);
+    }
+    let skills = harness::skills(tree);
+    if !skills.is_empty() {
+        parts.push(format!(
+            "# Available skills (read the file before following one)\n{}",
+            skills
+                .iter()
+                .map(|s| format!(
+                    "- {}: {} ({skill_dir}/{}/SKILL.md)",
+                    s.name, s.description, s.name
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    let agents = harness::subagents(tree);
+    match layout {
+        Layout::Opencode if !agents.is_empty() => {
+            parts.push(format!(
+                "# Available subagents\n{}",
+                agents
+                    .iter()
+                    .map(|a| format!("- {}: {}", a.name, a.description))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+            for a in &agents {
+                files.insert(
+                    format!(".opencode/agent/{}.md", a.name),
+                    format!(
+                        "---\ndescription: {}\nmode: subagent\n---\n{}",
+                        a.description,
+                        a.prompt.trim()
+                    ),
+                );
+            }
+        }
+        // Codex has no file-defined subagents: their prompts become playbooks.
+        Layout::Codex if !agents.is_empty() => parts.push(format!(
+            "# Delegation playbooks\n{}",
+            agents
+                .iter()
+                .map(|a| format!("## {} — {}\n{}", a.name, a.description, a.prompt.trim()))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        )),
+        _ => {}
+    }
+    let scripts = harness::scripts(tree);
+    if !scripts.is_empty() {
+        parts.push(format!(
+            "# Helper scripts (run from the workspace root with sh or python3)\n{}",
+            scripts
+                .iter()
+                .map(|s| format!("- {}: {}", external_path(&s.name, skill_dir), s.description))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    for (path, text) in tree {
+        if matches!(
+            harness::classify(path),
+            Some(harness::Kind::Skill(_) | harness::Kind::SkillScript(_) | harness::Kind::Script)
+        ) {
+            files.insert(external_path(path, skill_dir), text.clone());
+        }
+    }
+    if !parts.is_empty() {
+        let text = parts.join("\n\n");
+        let text = match existing {
+            Some(own) if !own.trim().is_empty() => format!("{}\n\n{text}\n", own.trim_end()),
+            _ => format!("{text}\n"),
+        };
+        files.insert("AGENTS.md".into(), text);
+    }
+    files
+}
+fn external_path(path: &str, skill_dir: &str) -> String {
+    match path.strip_prefix("skills/") {
+        Some(rest) => format!("{skill_dir}/{rest}"),
+        None => path.to_string(),
+    }
 }
 /// The [ACTION]/[OBSERVATION] grammar the proposers read.
 pub(crate) fn trajectory(messages: &[Message]) -> String {
@@ -1138,6 +1329,9 @@ pub(crate) fn trajectory(messages: &[Message]) -> String {
 impl Engine for StudioEngine {
     fn rollout<'a>(&'a self, label: &'a str, tree: &'a Tree) -> BoxFuture<'a, Result<RunView>> {
         Box::pin(async move {
+            if let Some(external) = &self.external {
+                return self.external_rollout(external, label, tree).await;
+            }
             let workdir = self.scratch.join(label);
             let _ = std::fs::remove_dir_all(&workdir);
             let mut project = self.project.clone();
@@ -1295,6 +1489,171 @@ impl Engine for StudioEngine {
             result
         })
     }
+    fn inspect<'a>(
+        &'a self,
+        label: &'a str,
+        system: &'a str,
+        mission: &'a str,
+        files: &'a BTreeMap<String, String>,
+    ) -> BoxFuture<'a, Result<String>> {
+        Box::pin(self.inspect_session(label, system, mission, files))
+    }
+}
+
+impl StudioEngine {
+    async fn external_rollout(
+        &self,
+        external: &External,
+        label: &str,
+        tree: &Tree,
+    ) -> Result<RunView> {
+        let workdir = self.scratch.join(label);
+        let _ = std::fs::remove_dir_all(&workdir);
+        let result =
+            async {
+                let root =
+                    self.project.roots.iter().find(|r| r.writable).context(
+                        "An external executor needs a writable context folder to work in",
+                    )?;
+                let copy = workdir.join(&root.alias);
+                let (mut files, mut bytes) = (0, 0);
+                copy_root(&root.path, &copy, &mut files, &mut bytes)?;
+                let existing = std::fs::read_to_string(root.path.join("AGENTS.md")).ok();
+                let overlay = materialize(tree, external.layout, existing.as_deref());
+                for (path, text) in &overlay {
+                    let file = copy.join(path);
+                    std::fs::create_dir_all(file.parent().context("No parent directory")?)?;
+                    std::fs::write(file, text)?;
+                }
+                let mut child = tokio::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(&external.command)
+                    .current_dir(&copy)
+                    .env("ALLPAKA_TASK", &self.task)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .context("Failed to start the external executor")?;
+                let mut stdin = child.stdin.take().context("No stdin")?;
+                let task = self.task.clone().into_bytes();
+                let writer = tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stdin.write_all(&task).await;
+                });
+                let output = tokio::time::timeout(
+                    std::time::Duration::from_secs(15 * 60),
+                    child.wait_with_output(),
+                )
+                .await;
+                let _ = writer.await;
+                let (outcome, stdout, stderr) = match output {
+                    Ok(Ok(out)) => (
+                        if out.status.success() {
+                            "Complete".to_string()
+                        } else {
+                            format!("exit {:?}", out.status.code())
+                        },
+                        String::from_utf8_lossy(&out.stdout).into_owned(),
+                        String::from_utf8_lossy(&out.stderr).into_owned(),
+                    ),
+                    Ok(Err(e)) => (format!("error: {e}"), String::new(), String::new()),
+                    Err(_) => ("timeout".into(), String::new(), String::new()),
+                };
+                let changes = changes_over(&root.alias, &root.path, &copy, &overlay);
+                let answer = clip(stdout.trim(), 64_000);
+                Ok(RunView {
+                    label: label.into(),
+                    fingerprint: String::new(),
+                    delivered: outcome == "Complete" && !answer.is_empty(),
+                    outcome,
+                    answer,
+                    changes,
+                    trajectory: format!(
+                        "[EXTERNAL] {}\n[STDOUT]\n{}\n[STDERR]\n{}\n",
+                        external.command,
+                        clip(&stdout, 60_000),
+                        clip(&stderr, 20_000)
+                    ),
+                })
+            }
+            .await;
+        let _ = std::fs::remove_dir_all(&workdir);
+        result
+    }
+
+    async fn inspect_session(
+        &self,
+        label: &str,
+        system: &str,
+        mission: &str,
+        files: &BTreeMap<String, String>,
+    ) -> Result<String> {
+        let dir = self
+            .scratch
+            .join(format!("inspect-{label}-{}", crate::evaluation::new_id()));
+        let result = async {
+            let evidence = dir.join("harness_evidence");
+            write_files(&evidence, files)?;
+            let mut roots: Vec<context::Root> = self
+                .project
+                .roots
+                .iter()
+                .filter(|r| r.alias != "harness_evidence")
+                .map(|r| context::Root {
+                    writable: false,
+                    ..r.clone()
+                })
+                .collect();
+            roots.insert(
+                0,
+                context::Root {
+                    alias: "harness_evidence".into(),
+                    path: evidence.canonicalize()?,
+                    writable: false,
+                    repository: false,
+                },
+            );
+            let project = context::Project {
+                id: self.project.id.clone(),
+                name: "harness selector".into(),
+                roots,
+                instructions: String::new(),
+            };
+            let mut settings = self.proposer.clone();
+            settings.max_steps = 30;
+            let mut session = Session::new(crate::evaluation::new_id(), settings);
+            session.ephemeral = Some(Arc::new(crate::Ephemeral {
+                project,
+                harness: Some(Tree::new()),
+                system: Some(system.to_string()),
+                nested: true,
+                restricted: true,
+            }));
+            session.messages.push(Message::text("user", mission));
+            let shared = Arc::new(Mutex::new(session));
+            tokio::time::timeout(
+                std::time::Duration::from_secs(15 * 60),
+                crate::turn(self.app.clone(), shared.clone(), None),
+            )
+            .await
+            .context("Selector timed out")??;
+            let answer = shared
+                .lock()
+                .unwrap()
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant" && !m.content.trim().is_empty())
+                .map(|m| m.content.clone())
+                .context("Selector gave no answer")?;
+            Ok(answer)
+        }
+        .await;
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
 }
 
 /// Write a flat path->text map under `root`.
@@ -1352,6 +1711,24 @@ pub(crate) struct StartRequest {
     /// the ones before it. Empty means the conversation's own task.
     #[serde(default)]
     tasks: Vec<String>,
+    /// Take the task stream from a Studio dataset instead: each sample's
+    /// input (with its contexts) is a task and its expected output goes to
+    /// the rubric judge as the reference.
+    #[serde(default)]
+    dataset: Option<DatasetRef>,
+    /// Run rollouts with an external agent CLI instead of Studio's loop.
+    /// Needs the command plugin, like every command Studio runs.
+    #[serde(default)]
+    external: Option<External>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DatasetRef {
+    id: String,
+    #[serde(default)]
+    version: Option<u64>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 fn default_k() -> usize {
     1
@@ -1373,6 +1750,9 @@ pub(crate) struct JobRecord {
     project_id: String,
     request: StartRequest,
     tasks: Vec<String>,
+    /// Dataset references, parallel to `tasks`; empty without a dataset.
+    #[serde(default)]
+    references: Vec<Option<String>>,
     executor: Settings,
     base_revision: Option<String>,
     created_ms: u64,
@@ -1528,6 +1908,7 @@ async fn execute(app: &App, id: &str) -> Result<()> {
             project: project.clone(),
             task: task.clone(),
             scratch: scratch.clone(),
+            external: job.request.external.clone(),
         };
         let entry_id = format!("{id}-{index}");
         let library = harness_library::context_for(
@@ -1559,6 +1940,7 @@ async fn execute(app: &App, id: &str) -> Result<()> {
             width: 2,
             agentic: job.request.agentic,
             rubric: job.request.rubric.clone(),
+            reference: job.references.get(index).cloned().flatten(),
             progress: &progress,
         })
         .await;
@@ -1703,13 +2085,50 @@ pub(crate) async fn start_api(
             .unwrap_or_default();
         (s.settings.clone(), task)
     };
-    let tasks = if request.tasks.is_empty() {
-        vec![task]
-    } else {
-        request.tasks.clone()
+    let (tasks, references) = match &request.dataset {
+        Some(source) => {
+            if !request.tasks.is_empty() {
+                return Err(bad("Give either tasks or a dataset, not both"));
+            }
+            let dataset = app
+                .evaluation
+                .load(&source.id, source.version)
+                .map_err(bad)?;
+            if dataset.project_id != executor.project_id {
+                return Err(bad("The dataset belongs to another project"));
+            }
+            let limit = source.limit.unwrap_or(20).clamp(1, 20);
+            dataset
+                .samples
+                .iter()
+                .take(limit)
+                .map(|sample| {
+                    let mut task = sample.input.clone();
+                    if !sample.contexts.is_empty() {
+                        task.push_str(&format!("\n\nContext:\n{}", sample.contexts.join("\n\n")));
+                    }
+                    (task, sample.expected_output.clone())
+                })
+                .unzip()
+        }
+        None if request.tasks.is_empty() => (vec![task], vec![]),
+        None => (request.tasks.clone(), vec![]),
     };
-    if tasks[0].trim().is_empty() {
+    if tasks.is_empty() || tasks[0].trim().is_empty() {
         return Err(bad("The conversation has no task to refine on"));
+    }
+    if tasks.iter().any(|t| t.len() > 16_000) {
+        return Err(bad("A task exceeds 16000 bytes"));
+    }
+    if let Some(external) = &request.external {
+        if external.command.trim().is_empty() || external.command.len() > 2000 {
+            return Err(bad("The external command must be 1–2000 bytes"));
+        }
+        if !crate::plugins::tool_unlocked(&app.plugins, "run_command") {
+            return Err(bad(
+                "An external executor runs a command: enable the command plugin first",
+            ));
+        }
     }
     match executor.mode {
         Mode::Swarm => {
@@ -1730,6 +2149,7 @@ pub(crate) async fn start_api(
         project_id: executor.project_id.clone(),
         request,
         tasks,
+        references,
         executor,
         base_revision,
         created_ms: harness::now_ms(),
@@ -1954,6 +2374,7 @@ mod tests {
             width: 2,
             agentic: false,
             rubric: None,
+            reference: None,
             progress,
         }
     }
@@ -2347,6 +2768,7 @@ mod tests {
             project: f.project.clone(),
             task: task.into(),
             scratch: f.root.join("scratch"),
+            external: None,
         }
     }
 
@@ -2408,6 +2830,7 @@ mod tests {
             width: 2,
             agentic: false,
             rubric: Some("The note exists.".into()),
+            reference: None,
             progress: &quiet,
         })
         .await
@@ -2523,6 +2946,214 @@ mod tests {
                 .read_dir()
                 .is_ok_and(|mut d| d.next().is_some()),
             "proposer workspaces are removed"
+        );
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    fn selector_model(request: &Value) -> Value {
+        let (system, tools, results) = (system_of(request), tools_of(request), results_of(request));
+        assert!(system.contains("CHECK THE CLAIMS AGAINST THE SOURCE"));
+        assert!(
+            tools.contains(&"read_file".to_string())
+                && !tools
+                    .iter()
+                    .any(|t| ["write_file", "edit_file", "run_command"].contains(&t.as_str()))
+        );
+        match results.len() {
+            0 => call(
+                "read_file",
+                json!({"path":"harness_evidence/candidates/A.md"}),
+            ),
+            1 => {
+                assert!(results[0].contains("the readme says goodbye"));
+                call("read_file", json!({"path":"workspace/readme.txt"}))
+            }
+            _ => {
+                assert!(results[1].contains("hello"));
+                say(
+                    &json!({"why":"A contradicts readme.txt; B matches it","choice":"B"})
+                        .to_string(),
+                )
+            }
+        }
+    }
+
+    /// The agentic selector reads the anonymous candidates and checks them
+    /// against the project's own files, read-only.
+    #[tokio::test]
+    async fn agentic_selector_checks_candidates_against_the_source() {
+        let f = fixture(selector_model).await;
+        let engine = engine(&f, "What does the readme say?");
+        let files = BTreeMap::from([
+            (
+                "task.md".to_string(),
+                "What does the readme say?".to_string(),
+            ),
+            (
+                "candidates/A.md".to_string(),
+                "# Final answer\nthe readme says goodbye\n".to_string(),
+            ),
+            (
+                "candidates/B.md".to_string(),
+                "# Final answer\nthe readme says hello\n".to_string(),
+            ),
+        ]);
+        let answer = engine
+            .inspect(
+                "select",
+                &prompts::select(2, true),
+                prompts::select_mission(),
+                &files,
+            )
+            .await
+            .unwrap();
+        f.server.abort();
+        assert_eq!(json_object(&answer).unwrap()["choice"], "B");
+        assert_eq!(
+            std::fs::read_to_string(f.workspace.join("readme.txt")).unwrap(),
+            "hello"
+        );
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    fn transform_model(request: &Value) -> Value {
+        let results = results_of(request);
+        if results.is_empty() {
+            return call("read_file", json!({"path":"workspace/readme.txt"}));
+        }
+        assert!(
+            results[0].contains("HELLO") && !results[0].contains("hello"),
+            "{}",
+            results[0]
+        );
+        say("done")
+    }
+
+    /// A post_tool transform is code in the loop: the tool result goes to
+    /// its stdin and its stdout is what the model sees.
+    #[tokio::test]
+    async fn post_tool_transform_rewrites_results_with_code() {
+        let f = fixture(transform_model).await;
+        let cmd = crate::plugins::defaults()
+            .into_iter()
+            .find(|p| p.unlocks_tool.as_deref() == Some("run_command"))
+            .unwrap();
+        f.app.plugins.write().unwrap().insert(
+            cmd.id.clone(),
+            crate::plugins::PluginState {
+                config: cmd,
+                client: None,
+                error: None,
+            },
+        );
+        let tree = Tree::from([(
+            "hooks.json".to_string(),
+            r#"{"post_tool":[{"matcher":"read_file","transform":"tr a-z A-Z"}]}"#.to_string(),
+        )]);
+        let mut session = Session::new(crate::evaluation::new_id(), auto_settings());
+        session.ephemeral = Some(Arc::new(crate::Ephemeral {
+            project: f.project.clone(),
+            harness: Some(tree),
+            system: None,
+            nested: false,
+            restricted: false,
+        }));
+        session
+            .messages
+            .push(Message::text("user", "Read the readme"));
+        let shared = Arc::new(Mutex::new(session));
+        crate::turn(f.app.clone(), shared.clone(), None)
+            .await
+            .unwrap();
+        f.server.abort();
+        assert_eq!(
+            shared.lock().unwrap().messages.last().unwrap().content,
+            "done"
+        );
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    fn harness_with_everything() -> Tree {
+        harness::autotrigger(&Tree::from([
+            ("system.md".to_string(), "Be exact.".to_string()),
+            ("skills/note/SKILL.md".to_string(), "---\nname: note\ndescription: the task asks for a note\n---\nRun skills/note/scripts/check.sh after writing.\n".to_string()),
+            ("skills/note/scripts/check.sh".to_string(), "# Check the note\ntest -s note.txt\n".to_string()),
+            ("scripts/count.py".to_string(), "\"\"\"Count lines.\"\"\"\n".to_string()),
+            ("subagents/reader/AGENT.md".to_string(), "---\ndescription: reads one file\n---\nRead it.\n".to_string()),
+        ]))
+    }
+
+    #[test]
+    fn harness_materializes_for_codex_and_opencode() {
+        let tree = harness_with_everything();
+        let codex = materialize(&tree, Layout::Codex, Some("# Repo rules\nUse cargo."));
+        assert!(codex["AGENTS.md"].starts_with("# Repo rules\nUse cargo.\n\nBe exact."));
+        assert!(codex["AGENTS.md"]
+            .contains("- note: the task asks for a note (.agents/skills/note/SKILL.md)"));
+        assert!(codex["AGENTS.md"]
+            .contains("# Delegation playbooks\n## reader — reads one file\nRead it."));
+        assert!(
+            codex["AGENTS.md"].contains("- .agents/skills/note/scripts/check.sh: Check the note")
+        );
+        assert!(
+            !codex["AGENTS.md"].contains("load_skill") && !codex["AGENTS.md"].contains("delegate")
+        );
+        assert!(
+            codex.contains_key(".agents/skills/note/SKILL.md")
+                && codex.contains_key("scripts/count.py")
+        );
+        let opencode = materialize(&tree, Layout::Opencode, None);
+        assert_eq!(
+            opencode[".opencode/agent/reader.md"],
+            "---\ndescription: reads one file\nmode: subagent\n---\nRead it."
+        );
+        assert!(opencode.contains_key(".opencode/skills/note/scripts/check.sh"));
+        assert!(opencode["AGENTS.md"].contains("# Available subagents\n- reader: reads one file"));
+        assert!(
+            materialize(&Tree::new(), Layout::Codex, Some("own")).is_empty(),
+            "an empty harness leaves the workspace alone"
+        );
+    }
+
+    fn unused_model(_: &Value) -> Value {
+        panic!("an external executor makes no model calls")
+    }
+
+    /// An external agent CLI runs in a copy of the workspace with the
+    /// harness laid out for it; only what it changed is reported.
+    #[tokio::test]
+    async fn external_executor_runs_a_cli_on_the_materialized_harness() {
+        let f = fixture(unused_model).await;
+        std::fs::write(f.workspace.join("AGENTS.md"), "# Repo rules\n").unwrap();
+        let mut engine = engine(&f, "Leave a note");
+        engine.external = Some(External {
+            command: "cat > task.txt; test -f .agents/skills/note/SKILL.md && grep -q 'Repo rules' AGENTS.md && grep -q 'Be exact' AGENTS.md && echo \"skill ok: $ALLPAKA_TASK\"".into(),
+            layout: Layout::Codex,
+        });
+        let run = engine
+            .rollout("base1", &harness_with_everything())
+            .await
+            .unwrap();
+        f.server.abort();
+        assert_eq!(
+            (run.outcome.as_str(), run.answer.as_str(), run.delivered),
+            ("Complete", "skill ok: Leave a note", true)
+        );
+        assert_eq!(
+            run.changes, "*** workspace/task.txt (added)\n+Leave a note\n",
+            "materialized files are not changes"
+        );
+        assert!(run.trajectory.starts_with("[EXTERNAL] cat > task.txt"));
+        assert!(!f.workspace.join("task.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(f.workspace.join("AGENTS.md")).unwrap(),
+            "# Repo rules\n"
+        );
+        engine.external.as_mut().unwrap().command = "echo partial; exit 3".into();
+        let failed = engine.rollout("base2", &Tree::new()).await.unwrap();
+        assert_eq!(
+            (failed.outcome.as_str(), failed.delivered),
+            ("exit Some(3)", false)
         );
         std::fs::remove_dir_all(&f.root).unwrap();
     }

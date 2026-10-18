@@ -3201,5 +3201,7 @@ $('harness-refine').onclick=async()=>{
   const body={session_id:active,k:Number($('harness-k').value)||1,mode:$('harness-mode').value,agentic:$('harness-agentic').checked};const model=$('harness-model').value.trim();if(model)body.model=model;
   const rubric=$('harness-rubric').value.trim();if(rubric)body.rubric=rubric;
   const tasks=$('harness-tasks').value.split(/^\s*---\s*$/m).map(t=>t.trim()).filter(Boolean);if(tasks.length)body.tasks=tasks;
+  const dataset=$('harness-dataset').value.trim();if(dataset)body.dataset={id:dataset};
+  const external=$('harness-external').value.trim();if(external)body.external={command:external,layout:$('harness-layout').value};
   try{const job=await api('harness/jobs',body);await harnessLoadJobs();await harnessShowJob(job.id);}catch(e){notify(e.message);}
 };

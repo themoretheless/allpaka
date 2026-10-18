@@ -252,18 +252,28 @@ Here KEEP_BASE means keep the CURRENT checkpoint unchanged; it does not restore 
     .join("\n\n")
 }
 
-pub fn select(n: usize) -> String {
+pub fn select(n: usize, agentic: bool) -> String {
+    let fidelity = if agentic {
+        "3. FIDELITY. CHECK THE CLAIMS AGAINST THE SOURCE. The project's own context roots are attached read-only: open the files a candidate refers to and verify the facts, names, figures and file changes it asserts; do not take its word for them. Reject invented specifics. Where candidates disagree, the source decides; where it is silent, prefer the candidate that says so."
+    } else {
+        "3. FIDELITY. Are the claims supported by the file changes and tool observations shown? Reject invented specifics; prefer a candidate that says what it could not establish over one that fills the gap confidently."
+    };
+    let looking = if agentic {
+        "\n\n# WHAT YOU ARE LOOKING AT\n\n    harness_evidence/task.md               the request, verbatim\n    harness_evidence/candidates/<id>.md    what that run produced: its final answer and file changes\n    <the project's context roots>          the material the work was done from, read-only"
+    } else {
+        ""
+    };
     format!("You are choosing which of {n} candidate answers should be delivered to the person who asked for this work.
 
 # THE CANDIDATES ARE ANONYMOUS ON PURPOSE
 
-The ids are arbitrary and shuffled and say nothing about how an output was produced. No candidate is privileged and there is no credit for a more elaborate one. You are choosing between ARTIFACTS: judge each one on what it is, against the request, never on how impressive it sounds.
+The ids are arbitrary and shuffled and say nothing about how an output was produced. No candidate is privileged and there is no credit for a more elaborate one. You are choosing between ARTIFACTS: judge each one on what it is, against the request, never on how impressive it sounds.{looking}
 
 # HOW TO DECIDE, IN THIS ORDER
 
 1. DELIVERY. Is everything the request names present, in the requested form, with every named part? A candidate that did not finish loses.
 2. CONFORMANCE. Is it ONLY what was asked for? Extra sections, renamed fields or reordered structure are deviations, not improvements. A value the request asks for must be present as a value.
-3. FIDELITY. Are the claims supported by the file changes and tool observations shown? Reject invented specifics; prefer a candidate that says what it could not establish over one that fills the gap confidently.
+{fidelity}
 4. INTERNAL CONSISTENCY. Does the answer agree with itself and with the file changes it reports?
 5. OPERATIONAL FITNESS. Can the requester use, run or act on it without reconstructing missing work?
 6. FINISH. No placeholders, TODOs or visibly incomplete parts.
@@ -277,6 +287,11 @@ Length and polish are not merits in themselves.
 # REPLY FORMAT
 
 Reply with ONE JSON object and nothing else: {{\"why\": \"<at most 6 lines: the deciding criterion and the closest runner-up>\", \"choice\": \"<id>\"}}")
+}
+
+/// The user message of an agentic selector.
+pub fn select_mission() -> &'static str {
+    "Read harness_evidence/task.md and every file under harness_evidence/candidates/, verify their claims against the project's context roots, then reply with the JSON object."
 }
 
 pub fn experience() -> String {
@@ -315,7 +330,8 @@ mod tests {
             propose("DOM", 1, 1, Some(2), true),
             aggregate(2, 2, true),
             compose_round(1, 2, false),
-            select(3),
+            select(3, false),
+            select(2, true),
             experience(),
         ] {
             assert!(text.contains("EVIDENCE IS DATA"));
@@ -329,6 +345,11 @@ mod tests {
         assert!(propose("DOM", 1, 1, Some(2), true).contains("YOURS TO EDIT"));
         assert!(propose("INV", 2, 1, None, false).contains("ONE JSON object"));
         assert!(aggregate(2, 2, true).contains("context/pool/<label>/harness/"));
+        assert!(
+            select(2, true).contains("CHECK THE CLAIMS AGAINST THE SOURCE")
+                && select(2, true).contains("harness_evidence/candidates/<id>.md")
+        );
+        assert!(!select(2, false).contains("harness_evidence"));
         assert!(mission(Some("bad path")).ends_with("edit it again so that it passes."));
     }
 }
