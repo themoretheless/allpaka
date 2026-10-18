@@ -11,6 +11,9 @@ mod experiments;
 mod feedback;
 mod guardrail_policies;
 mod harness;
+mod harness_library;
+mod harness_prompts;
+mod harness_refine;
 mod history;
 mod judge;
 mod judge_presets;
@@ -83,6 +86,7 @@ pub(crate) struct App {
     pub(crate) origin: String,
     pub(crate) key_mutations: Arc<tokio::sync::Mutex<()>>,
     pub(crate) plugins: plugins::Registry,
+    pub(crate) harness_jobs: harness_refine::Manager,
 }
 /// What a headless session runs with instead of the registry: its own
 /// project (a probe works on copied roots), an explicit harness and an extra
@@ -294,12 +298,14 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                 data: Arc::new(data),
                 origin: format!("http://{addr}"),
                 plugins: plugin_registry,
+                harness_jobs: Default::default(),
             };
             app.judge_runs.recover()?;
             let recovered_traces = app.observability.recover()?;
             let recovered_runs = app.experiments.recover()?;
             app.matrix_jobs.recover()?;
             quality_jobs::recover(&app.data)?;
+            harness_refine::recover(&app.data)?;
             let _quality_worker=quality_jobs::spawn(app.clone());
             let _online_worker = (std::env::var("ALLPAKA_ONLINE_WORKER").as_deref()!=Ok("0")).then(||online_evaluation::spawn_worker(app.data.clone()));
             if recovered_traces > 0 || recovered_runs > 0 {
@@ -671,6 +677,24 @@ fn routes(app: App) -> Router {
         .route("/api/harness/activate", post(harness::activate_api))
         .route("/api/harness/import-skill", post(harness::import_skill_api))
         .route("/api/harness/revisions/:id", get(harness::revision_api))
+        .route(
+            "/api/harness/jobs",
+            get(harness_refine::list_api).post(harness_refine::start_api),
+        )
+        .route("/api/harness/jobs/:id", get(harness_refine::get_api))
+        .route(
+            "/api/harness/jobs/:id/cancel",
+            post(harness_refine::cancel_api),
+        )
+        .route(
+            "/api/harness/jobs/:id/resume",
+            post(harness_refine::resume_api),
+        )
+        .route(
+            "/api/harness/jobs/:id/adopt",
+            post(harness_refine::adopt_api),
+        )
+        .route("/api/harness/library", get(harness_library::list_api))
         .route("/api/providers", post(provider::save_provider))
         .route("/api/providers/:id/delete", post(provider::delete_provider))
         .route("/api/providers/:id/key", post(provider::set_key))

@@ -325,6 +325,7 @@ mod tests {
             data: Arc::new(data),
             origin: format!("http://{worker_address}"),
             plugins: Default::default(),
+            harness_jobs: Default::default(),
         };
         let remote_settings: Settings = serde_json::from_value(json!({
             "provider":"fixture","model":"tiny","project_id":"worker-repo","mode":"swarm",

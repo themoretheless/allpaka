@@ -506,7 +506,7 @@ pub fn diff(from: &Tree, to: &Tree) -> Diff {
     out
 }
 /// LCS line diff; falls back to replace-all when the table would be large.
-fn line_diff(a: &str, b: &str) -> String {
+pub(crate) fn line_diff(a: &str, b: &str) -> String {
     let a: Vec<&str> = a.lines().collect();
     let b: Vec<&str> = b.lines().collect();
     let mut out = String::new();
