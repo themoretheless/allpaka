@@ -250,12 +250,21 @@ Swarm запускает не один диалог, а волну незави�
 композер-капсула, прилипший к низу. Графики ресурсов перекрашены в те же
 схоластические цвета через `getComputedStyle`, поэтому следуют за темой.
 
+## Харнесс агента
+
+Системный промпт, правила, память, подсказки к инструментам, навыки по
+требованию, субагенты, скрипты и хуки проекта редактируются как версионируемый
+харнесс; Propose → Probe → Compose улучшает его на задаче разговора без
+эталонных ответов, а библиотека опыта переносит уроки между задачами
+(по мотивам Harness²). Подробно: [docs/harness.md](harness.md).
+
 ## Проверки
 
 ```bash
 cargo test -p allpaka-chat --offline
 cargo build -p allpaka-cli --no-default-features --offline
 python3 scripts/test-studio.py
+python3 scripts/test-studio-harness.py
 node --check crates/allpaka-chat/web/app.js
 ```
 

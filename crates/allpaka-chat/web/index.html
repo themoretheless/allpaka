@@ -218,6 +218,7 @@
 
   <details><summary>Закладки разговора</summary><div id="conversation-bookmarks"></div></details>
   <button id="memory-open" type="button">Память проекта</button>
+  <button id="harness-open" type="button">Харнесс агента</button>
   <button id="online-rules-open" type="button">Правила оценки</button>
   <button id="quality-jobs-open" type="button">Модельные оценки</button>
   <button id="online-jobs-open" type="button">Очередь оценок</button>
@@ -295,6 +296,38 @@
   <label for="callback-summary-until">По дату <input id="callback-summary-until" type="datetime-local"></label>
   <button id="callback-summary-refresh" type="button">Обновить сводку оценок</button>
   <div id="callback-summary-body"></div>
+</dialog>
+<dialog id="harness-dialog">
+  <button id="harness-close" type="button">Закрыть харнесс</button>
+  <h2>Харнесс агента</h2>
+  <p>Файлы вокруг модели для текущего проекта. <code>system.md</code>, <code>guardrails.md</code>, <code>memory.md</code> и <code>tool_guidance.md</code> всегда в промпте (вместе до 24&nbsp;000 символов). Навыки <code>skills/&lt;имя&gt;/SKILL.md</code> загружаются по требованию, субагенты <code>subagents/&lt;имя&gt;/AGENT.md</code> работают в своём контексте, скрипты <code>scripts/*.sh|py</code> запускаются через инструмент команд, <code>hooks.json</code> добавляет напоминания после инструментов и перед завершением. Пустой харнесс ничего не меняет.</p>
+  <p id="harness-status" role="status"></p>
+  <div class="harness-layout">
+    <div>
+      <label>Файлы<select id="harness-file" size="10"></select></label>
+      <label>Новый путь<input id="harness-path" maxlength="200" placeholder="skills/имя/SKILL.md"></label>
+      <button id="harness-add" type="button">Добавить файл</button>
+      <button id="harness-delete" type="button">Удалить файл</button>
+    </div>
+    <label>Содержимое<textarea id="harness-text" rows="16" spellcheck="false"></textarea></label>
+  </div>
+  <ul id="harness-errors"></ul>
+  <label>Комментарий к ревизии<input id="harness-note" maxlength="4000"></label>
+  <button id="harness-save" type="button">Сохранить и включить</button>
+  <details><summary>Итоговая часть системного промпта</summary><pre id="harness-preview"></pre></details>
+  <details><summary>Ревизии</summary><div id="harness-revisions"></div></details>
+  <details><summary>Импорт навыка (SKILL.md)</summary><textarea id="harness-import-text" rows="6" spellcheck="false" placeholder="---&#10;name: имя&#10;description: когда применять&#10;---&#10;Инструкции"></textarea><button id="harness-import" type="button">Импортировать навык</button></details>
+  <h3>Улучшить на задаче этого разговора</h3>
+  <p>Propose → Probe → Compose без эталонных ответов: k базовых прогонов, кандидаты INV (как агент работает) и DOM (что знает практик), каждый проверяется одним прогоном, затем композиция и слепой выбор по результату. Прогоны идут на копиях записываемых папок и стоят 4k ходов агента и 3k вызовов модели. Результат не включается сам — его нужно принять.</p>
+  <label>Бюджет k<input id="harness-k" type="number" min="1" max="4" value="1"></label>
+  <label>Режим<select id="harness-mode"><option value="parallel">Параллельный: шире</option><option value="sequential">Последовательный: глубже</option></select></label>
+  <label>Модель предложений, необязательно<input id="harness-model" maxlength="200" placeholder="Как в разговоре"></label>
+  <button id="harness-refine" type="button">Запустить улучшение</button>
+  <div id="harness-jobs"></div>
+  <div id="harness-job"></div>
+  <h3>Библиотека опыта</h3>
+  <p>Уроки прошлых улучшений проекта. Следующие запуски читают их перед своими правками.</p>
+  <div id="harness-library"></div>
 </dialog>
 <dialog id="memory-dialog">
   <button id="memory-close" type="button">Закрыть память</button>

@@ -2032,3 +2032,12 @@ header .eyebrow { display: none; }
 
 #quality-capture-dialog{box-sizing:border-box;max-width:min(720px,calc(100vw - 32px));width:100%;}
 #quality-capture-dialog textarea{min-height:90px;}
+#harness-dialog { width:min(980px,94vw); max-width:980px; max-height:90vh; overflow:auto; }
+#harness-dialog .harness-layout { display:grid; grid-template-columns:minmax(200px,1fr) 2fr; gap:12px; }
+#harness-dialog select[size] { width:100%; font-family:var(--font-mono); }
+#harness-dialog textarea { width:100%; min-height:240px; resize:vertical; font-family:var(--font-mono); }
+#harness-dialog pre { white-space:pre-wrap; max-height:340px; overflow:auto; }
+#harness-dialog .harness-revision { display:flex; gap:8px; align-items:center; justify-content:space-between; margin:4px 0; }
+#harness-dialog .harness-job-link { display:block; width:100%; text-align:left; margin:4px 0; }
+#harness-errors .error, #harness-dialog .error { color:var(--error-text); }
+@media (max-width:700px) { #harness-dialog .harness-layout { grid-template-columns:1fr; } }
