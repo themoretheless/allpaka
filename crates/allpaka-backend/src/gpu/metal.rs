@@ -5006,7 +5006,7 @@ DEFINE_MM_ID_LL_NK(mmllg_id_q5_0, BlkQ5_0, 2, dqll_q5_0, (n_in / 32) * 22, 1, 32
 DEFINE_MM_ID_LL_NK(mm64ll_id_q5_0, BlkQ5_0, 2, dqll_q5_0, (n_in / 32) * 22, 0, 64, 0, 0)
 DEFINE_MM_ID_LL_NK(mm64llg_id_q5_0, BlkQ5_0, 2, dqll_q5_0, (n_in / 32) * 22, 1, 64, 0, 0)
 
-#define STAGE_BLOCK_4(b_arg, blk_arg) do {                              \
+#define STAGE_BLOCK_4(b_arg, blk_arg, swiglu) do {                              \
     const uint stage_b_ = (b_arg);                                      \
     const uint stage_blk_ = (blk_arg);                                  \
     const uint b = stage_b_;                                            \
@@ -5036,7 +5036,7 @@ DEFINE_MM_ID_LL_NK(mm64llg_id_q5_0, BlkQ5_0, 2, dqll_q5_0, (n_in / 32) * 22, 1, 
             const short sy = (tiitg / 4) / 8;                           \
             const short ly = (tiitg / 4) % 8;                           \
             const short ib = 4 * sx + sy;                               \
-            if (SWIGLU) {                                               \
+            if (swiglu) {                                                 \
                 float2x4 gv = *(device const float2x4*)(byk + 32 * c);  \
                 float2x4 uv = *(device const float2x4*)(by2k + 32 * c); \
                 half2x4 hv;                                             \
@@ -5113,12 +5113,12 @@ kernel void NAME(                                                              \
         mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);                   \
     }                                                                          \
     const uint nblk = n_in / NK;                                               \
-    STAGE_BLOCK_4(0, 0);                                                         \
+    STAGE_BLOCK_4(0, 0, SWIGLU);                                               \
     threadgroup_barrier(mem_flags::mem_threadgroup);                           \
     for (uint blk = 0; blk < nblk; blk++) {                                    \
         const uint cur = blk & 1;                                              \
         if (blk + 1 < nblk) {                                                  \
-            STAGE_BLOCK_4(1 - cur, blk + 1);                                     \
+            STAGE_BLOCK_4(1 - cur, blk + 1, SWIGLU);                           \
         }                                                                      \
         threadgroup const half* sa = sab[cur];                                 \
         threadgroup const half* sb = sa + 64 * NK;                             \
