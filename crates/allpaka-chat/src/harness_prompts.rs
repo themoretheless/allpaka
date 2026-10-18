@@ -74,6 +74,47 @@ Reply with ONE JSON object and nothing else, in one of these forms:
 
 In `notes`, one line per decision in this shape: `kept|revised|dropped -> <which edit> -> <the trajectory moment or base-set pattern that decided it, with counts>`.";
 
+pub const AGENT_EDIT_FORMAT: &str = "# HOW TO MAKE A CHANGE
+
+Your workspace has two context roots. `context` is read-only evidence; `harness` is the harness you are editing, and it is YOURS TO EDIT. Change files with write_file and edit_file and create new ones where a new component is the right lever. Your edits on disk ARE the proposal.
+
+- Files you do not touch are inherited unchanged. Do not rewrite a file to keep it the same.
+- To remove a component, write its file with empty content.
+- If the evidence argues for no change, leave everything as it is and say KEEP_BASE in your reply.
+
+Then reply with notes only: for each change, the trajectory moment that motivated it. The notes are read by a person, not applied by a machine.";
+
+pub const AGENT_COMPOSE_FORMAT: &str = "# HOW TO COMPOSE
+
+The `harness` root holds the harness you are composing on; edit it in place with write_file and edit_file. Each candidate's complete harness is in `context/pool/<label>/harness/`.
+- MERGE: carry the edits that earn their place into `harness/`, resolving overlaps.
+- ADOPT a candidate wholesale: make `harness/` identical to its pool copy (write its files, empty the others).
+- KEEP_BASE: change nothing.
+To remove a file, write it with empty content.
+
+Then reply with notes only, one line per decision in this shape: `kept|revised|dropped -> <which edit> -> <the trajectory moment or base-set pattern that decided it, with counts>`.";
+
+/// The user message of an agentic proposer: where the evidence lies.
+pub fn mission(retry: Option<&str>) -> String {
+    let mut text = "Adapt the harness in `harness/` using the evidence in `context/`:
+
+    context/task.md                         the task, verbatim
+    context/base_harness/                   the harness before any edit in this job (absent when it was empty)
+    context/rollouts/<label>.md             base rollouts: trajectory, final answer, file changes
+    context/pool/<label>/harness/           a candidate's complete harness
+    context/pool/<label>/harness.diff       its diff against the harness you are editing
+    context/pool/<label>/notes.md           its proposer's notes
+    context/pool/<label>/rollout.md         its one rollout
+    context/library/LIBRARY.md              lessons and harnesses from earlier tasks (when present)
+
+Start with list_files on `context` and `harness`. Read every rollout and candidate before you edit, and cite the specific trajectory moment behind every change."
+        .to_string();
+    if let Some(error) = retry {
+        text.push_str(&format!("\n\n# YOUR PREVIOUS ATTEMPT WAS REJECTED\n\n{error}\n\nThe harness was reset; edit it again so that it passes."));
+    }
+    text
+}
+
 const INV: &str = "# YOUR DIMENSION: INV -- how the agent WORKS
 
 You own procedure, tool use and completion, not subject matter. Trace the workflow, fix its earliest observed divergence, and match each failure to the cheapest effective component:
@@ -99,7 +140,13 @@ Never invent an authority, identifier, standard or citation. State knowledge the
 
 Do not diagnose commands, retries, reading order, budgeting, scripts or hooks. A parallel candidate owns procedure.";
 
-pub fn propose(dimension: &str, k: usize, index: usize, round: Option<usize>) -> String {
+pub fn propose(
+    dimension: &str,
+    k: usize,
+    index: usize,
+    round: Option<usize>,
+    agentic: bool,
+) -> String {
     let block = if dimension == "INV" { INV } else { DOM };
     let mut parts = vec![
         "You are adapting an autonomous coding and research agent's harness for one task in a Studio project.".to_string(),
@@ -123,11 +170,16 @@ Do not fix what the runs already got right, and do not restate what the harness 
     how.push_str("\n\nCommit to the single most defensible version of your dimension; a later stage compares and merges.");
     parts.push(how);
     parts.push(KEEP_BASE.into());
-    parts.extend([ANSWER_FREE, EVIDENCE_BOUNDARY, SURFACE, EDIT_FORMAT].map(String::from));
+    let format = if agentic {
+        AGENT_EDIT_FORMAT
+    } else {
+        EDIT_FORMAT
+    };
+    parts.extend([ANSWER_FREE, EVIDENCE_BOUNDARY, SURFACE, format].map(String::from));
     parts.join("\n\n")
 }
 
-pub fn aggregate(k: usize, index: usize) -> String {
+pub fn aggregate(k: usize, index: usize, agentic: bool) -> String {
     let n = 2 * k;
     let plural = if k > 1 { "s" } else { "" };
     let mut parts = vec![
@@ -156,11 +208,16 @@ Compose ONE harness. All of these are valid, judged only on what the rollouts su
     if k > 1 {
         parts.push(format!("You are aggregator {index} of {k} composing from this same evidence in parallel, and you will not see the others. Do not aim for the consensus answer; commit to the harness you can defend."));
     }
-    parts.extend([ANSWER_FREE, EVIDENCE_BOUNDARY, SURFACE, COMPOSE_FORMAT].map(String::from));
+    let format = if agentic {
+        AGENT_COMPOSE_FORMAT
+    } else {
+        COMPOSE_FORMAT
+    };
+    parts.extend([ANSWER_FREE, EVIDENCE_BOUNDARY, SURFACE, format].map(String::from));
     parts.join("\n\n")
 }
 
-pub fn compose_round(t: usize, k: usize) -> String {
+pub fn compose_round(t: usize, k: usize, agentic: bool) -> String {
     let job = if t >= k {
         "Compose THE FINAL harness, from the WHOLE history rather than just this round.".to_string()
     } else {
@@ -190,7 +247,7 @@ Here KEEP_BASE means keep the CURRENT checkpoint unchanged; it does not restore 
         ANSWER_FREE.into(),
         EVIDENCE_BOUNDARY.into(),
         SURFACE.into(),
-        COMPOSE_FORMAT.into(),
+        if agentic { AGENT_COMPOSE_FORMAT } else { COMPOSE_FORMAT }.into(),
     ]
     .join("\n\n")
 }
@@ -254,10 +311,10 @@ mod tests {
     #[test]
     fn prompts_carry_the_shared_blocks_and_never_mention_scores() {
         for text in [
-            propose("INV", 2, 1, None),
-            propose("DOM", 1, 1, Some(2)),
-            aggregate(2, 2),
-            compose_round(1, 2),
+            propose("INV", 2, 1, None, false),
+            propose("DOM", 1, 1, Some(2), true),
+            aggregate(2, 2, true),
+            compose_round(1, 2, false),
             select(3),
             experience(),
         ] {
@@ -265,9 +322,13 @@ mod tests {
             assert!(text.contains("WHAT YOU DO NOT HAVE"));
             assert!(!text.to_lowercase().contains("grader expects"));
         }
-        assert!(propose("INV", 2, 1, None).contains("candidate 1 of 2"));
-        assert!(propose("DOM", 1, 1, Some(2)).contains("round 2"));
-        assert!(aggregate(1, 1).contains("defect in 1/1"));
-        assert!(compose_round(2, 2).contains("THE FINAL harness"));
+        assert!(propose("INV", 2, 1, None, false).contains("candidate 1 of 2"));
+        assert!(propose("DOM", 1, 1, Some(2), true).contains("round 2"));
+        assert!(aggregate(1, 1, false).contains("defect in 1/1"));
+        assert!(compose_round(2, 2, true).contains("THE FINAL harness"));
+        assert!(propose("DOM", 1, 1, Some(2), true).contains("YOURS TO EDIT"));
+        assert!(propose("INV", 2, 1, None, false).contains("ONE JSON object"));
+        assert!(aggregate(2, 2, true).contains("context/pool/<label>/harness/"));
+        assert!(mission(Some("bad path")).ends_with("edit it again so that it passes."));
     }
 }

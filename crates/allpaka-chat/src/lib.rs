@@ -97,6 +97,10 @@ pub(crate) struct Ephemeral {
     pub(crate) harness: Option<harness::Tree>,
     pub(crate) system: Option<String>,
     pub(crate) nested: bool,
+    /// Only file tools: no commands, background tasks, MCP or RAG. Harness
+    /// proposers run like this, because the evidence they read may contain
+    /// commands.
+    pub(crate) restricted: bool,
 }
 #[derive(Deserialize)]
 struct Action {
@@ -1559,9 +1563,10 @@ async fn turn_traced(
     };
     let harness_hooks = harness::hooks(&harness_tree)?;
     let nested = ephemeral.as_ref().is_some_and(|e| e.nested);
+    let restricted = ephemeral.as_ref().is_some_and(|e| e.restricted);
     let mut tool_settings = settings.clone();
     tool_settings.allow_writes &= project.roots.iter().any(|r| r.writable);
-    let cmd_enabled = plugins::tool_unlocked(&app.plugins, "run_command");
+    let cmd_enabled = plugins::tool_unlocked(&app.plugins, "run_command") && !restricted;
     let mut schemas = tools::schemas(&tool_settings, cmd_enabled);
     schemas.push(conversation_search::schema());
     schemas.push(memory::schema());
@@ -1575,7 +1580,7 @@ async fn turn_traced(
             .into_iter()
             .filter(|t| !(nested && t["function"]["name"] == "delegate")),
     );
-    {
+    if !restricted {
         let registry = app.plugins.read().unwrap();
         for (id, state) in registry.iter() {
             if let Some(client) = &state.client {
@@ -1603,7 +1608,7 @@ async fn turn_traced(
         None => system,
     };
     let system = format!("{system}\n{}", settings.verbosity.instruction());
-    let rag_plugin_id = rag::connected_rag_id(&app);
+    let rag_plugin_id = rag::connected_rag_id(&app).filter(|_| !restricted);
     let system = if let Some(rag_id) = &rag_plugin_id {
         format!("{system}\nA local RAG plugin ({rag_id}) is connected. When the task may benefit from accumulated knowledge, search it first with mcp_{rag_id}_search or mcp_{rag_id}_query_with_index, then answer with citations to retrieved sources. After a valuable answer, you may persist it back with mcp_{rag_id}_file_answer.")
     } else {
@@ -1868,12 +1873,21 @@ async fn turn_traced(
                 let name = call["function"]["name"]
                     .as_str()
                     .context("Missing tool name")?;
-                let args: Value = serde_json::from_str(
-                    call["function"]["arguments"]
-                        .as_str()
-                        .context("Missing tool arguments")?,
-                )?;
-                if name == "background" {
+                let raw_args = call["function"]["arguments"]
+                    .as_str()
+                    .context("Missing tool arguments")?;
+                let args: Value = serde_json::from_str(raw_args)?;
+                let blocked = pre_tool_block(
+                    &project,
+                    &harness_hooks.pre_tool,
+                    name,
+                    raw_args,
+                    cmd_enabled,
+                )
+                .await;
+                if let Some(reason) = blocked {
+                    Err(anyhow::anyhow!("Blocked by a harness hook: {reason}"))
+                } else if name == "background" {
                     if !matches!(settings.mode, Mode::Auto | Mode::Goal)
                         || !plugins::tool_unlocked(&app.plugins, "run_command")
                     {
@@ -1932,7 +1946,8 @@ async fn turn_traced(
                     Ok(
                         json!({"contexts":project.roots.iter().map(|r|json!({"alias":r.alias,"writable":r.writable,"repository":r.repository})).collect::<Vec<_>>()}),
                     )
-                } else if let Some((client, tool)) = mcp_lookup(&app, name) {
+                } else if let Some((client, tool)) = mcp_lookup(&app, name).filter(|_| !restricted)
+                {
                     client.call(&tool, &args).await
                 } else if name == "run_command"
                     && plugins::tool_unlocked(&app.plugins, "run_command")
@@ -1987,8 +2002,23 @@ async fn turn_traced(
             let mut content = value.to_string();
             if !steered && !harness_hooks.post_tool.is_empty() {
                 let tool = call["function"]["name"].as_str().unwrap_or("");
-                let notes =
-                    hook_notes(&project, &harness_hooks.post_tool, Some(tool), cmd_enabled).await;
+                let raw_args = call["function"]["arguments"].as_str().unwrap_or("");
+                let limit = harness_hooks
+                    .post_tool
+                    .iter()
+                    .filter(|h| h.matches(tool, raw_args))
+                    .filter_map(|h| h.max_output)
+                    .min();
+                if let Some(limit) = limit {
+                    content = harness::trim_output(&content, limit);
+                }
+                let notes = hook_notes(
+                    &project,
+                    &harness_hooks.post_tool,
+                    Some((tool, raw_args)),
+                    cmd_enabled,
+                )
+                .await;
                 if !notes.is_empty() {
                     content.push_str(&format!("\n\n[harness hook] {notes}"));
                 }
@@ -2015,16 +2045,62 @@ async fn turn_traced(
     )
 }
 
+/// The reason a pre_tool hook refuses this call: a `block` text, or the
+/// output of a `command` that exits non-zero. Commands only run when the
+/// command plugin is enabled; the call's JSON arguments are in
+/// `ALLPAKA_TOOL_ARGS` and its name in `ALLPAKA_TOOL`.
+async fn pre_tool_block(
+    project: &context::Project,
+    hooks: &[harness::Hook],
+    tool: &str,
+    args: &str,
+    cmd_enabled: bool,
+) -> Option<String> {
+    for hook in hooks.iter().filter(|h| h.matches(tool, args)) {
+        if let Some(reason) = &hook.block {
+            return Some(reason.trim().to_string());
+        }
+        if let (Some(command), true, Some(root)) =
+            (&hook.command, cmd_enabled, project.roots.first())
+        {
+            let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+            let command = format!(
+                "ALLPAKA_TOOL={} ALLPAKA_TOOL_ARGS={} /bin/sh -c {}",
+                quote(tool),
+                quote(args),
+                quote(command)
+            );
+            match execute_command(&root.path, &json!({"command":command,"timeout":30})).await {
+                Ok(out) if out["exit_code"] == json!(0) => {}
+                Ok(out) => {
+                    let text = format!(
+                        "{} {}",
+                        out["stdout"].as_str().unwrap_or(""),
+                        out["stderr"].as_str().unwrap_or("")
+                    );
+                    return Some(text.trim().chars().take(2000).collect());
+                }
+                Err(e) => return Some(format!("hook command failed: {e}")),
+            }
+        }
+    }
+    None
+}
+
 /// Text of the hooks that apply: `inject` verbatim, `command` stdout when the
-/// command plugin is enabled. `tool` is None for stop hooks.
+/// command plugin is enabled. `tool` (name and raw arguments) is None for
+/// stop hooks.
 async fn hook_notes(
     project: &context::Project,
     hooks: &[harness::Hook],
-    tool: Option<&str>,
+    tool: Option<(&str, &str)>,
     cmd_enabled: bool,
 ) -> String {
     let mut notes = vec![];
-    for hook in hooks.iter().filter(|h| tool.is_none_or(|t| h.matches(t))) {
+    for hook in hooks
+        .iter()
+        .filter(|h| tool.is_none_or(|(name, args)| h.matches(name, args)))
+    {
         if let Some(text) = &hook.inject {
             notes.push(text.trim().to_string());
         } else if let (Some(command), true, Some(root)) =
@@ -2091,6 +2167,7 @@ async fn run_subagent(
         harness: Some(tree.clone()),
         system: Some(format!("You are the `{}` subagent, working on a task handed to you by another agent. Finish it and reply with the final result only; your reply is returned to that agent.\n{}", agent.name, agent.prompt.trim())),
         nested: true,
+        restricted: false,
     }));
     session.messages.push(Message::text("user", task));
     let shared: SharedSession = Arc::new(Mutex::new(session));

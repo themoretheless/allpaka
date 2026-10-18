@@ -3144,7 +3144,7 @@ async function harnessLoadJobs(){
   const project=harnessProject,value=await api('harness/jobs?project_id='+encodeURIComponent(project));
   if(project!==harnessProject)return;
   $('harness-jobs').replaceChildren(...value.jobs.map(job=>{
-    const b=node('button',`${new Date(job.created_ms).toLocaleString()} · ${job.status} · k=${job.k} ${job.mode} · ${job.task}`,'harness-job-link');b.type='button';
+    const b=node('button',`${new Date(job.created_ms).toLocaleString()} · ${job.status} · k=${job.k} ${job.mode}`+(job.tasks>1?` · задач ${job.done}/${job.tasks}`:'')+` · ${job.task}`,'harness-job-link');b.type='button';
     b.onclick=()=>harnessShowJob(job.id);return b;
   }));
 }
@@ -3155,21 +3155,27 @@ async function harnessLoadLibrary(){
     const d=node('details');d.append(node('summary',`${item.entry.cue} · ${item.entry.confidence}`),node('pre',item.experience));return d;
   }):[node('p','Пока пусто.','muted')]));
 }
+function harnessResultView(id,r,diff,active){
+  const o=r.outcome,box=node('section','','harness-result');
+  box.append(node('h5',`Задача ${r.index+1}: ${r.task.slice(0,160)}`));
+  box.append(node('p',`Выбран ${o.chosen} (${o.chosen_kind==='base'?'текущий харнесс':'композиция'}) · прогонов ${o.rollouts} · этапов ${o.stages}`+(o.similarity==null?'':` · сходство финалов ${o.similarity.toFixed(2)}`)));
+  if(o.selection_why)box.append(node('p',o.selection_why));
+  for(const w of o.warnings||[])box.append(node('p','⚠ '+w,'error'));
+  box.append(node('p',o.runs.map(run=>{const sc=o.scores?.[run.label];return `${run.label}: ${run.delivered?'результат есть':'без результата'}`+(sc==null?'':` · оценка ${sc.toFixed(2)}`);}).join(' · '),'muted'));
+  const notes=node('details');notes.append(node('summary','Заметки этапов'),node('pre',Object.entries(o.stage_notes).map(([k,v])=>`${k}: ${v}`).join('\n\n')));box.append(notes);
+  if(diff){const d=node('details');d.append(node('summary','Изменения харнесса'),node('pre',diff.text||'Без изменений'));box.append(d);}
+  if(r.revision){const b=node('button',active===r.revision?'Принят':'Принять результат');b.type='button';b.disabled=active===r.revision;b.onclick=async()=>{try{await api(`harness/jobs/${id}/adopt`,{task:r.index});await harnessLoad();await harnessShowJob(id);}catch(e){notify(e.message);}};box.append(b);}
+  return box;
+}
 async function harnessShowJob(id){
   clearTimeout(harnessJobTimer);harnessJob=id;
   let value;try{value=await api('harness/jobs/'+encodeURIComponent(id));}catch(e){$('harness-job').textContent=e.message;return;}
   if(harnessJob!==id||!$('harness-dialog').open)return;
-  const job=value.job,o=job.outcome,box=$('harness-job');
-  const parts=[node('h4',`Запуск ${job.id} · ${job.status}`),node('p',job.task.slice(0,300),'muted')];
+  const job=value.job,box=$('harness-job');
+  const parts=[node('h4',`Запуск ${job.id} · ${job.status} · задач ${job.results.length} из ${job.tasks.length} · ${job.request.agentic?'агентные':'JSON'} предложения`)];
   if(job.error)parts.push(node('p',job.error,'error'));
-  if(o){
-    parts.push(node('p',`Выбран ${o.chosen} (${o.chosen_kind==='base'?'текущий харнесс':'композиция'}) · прогонов ${o.rollouts} · этапов ${o.stages}`+(o.similarity==null?'':` · сходство финалов ${o.similarity.toFixed(2)}`)+(o.fallbacks.length?` · отклонены: ${o.fallbacks.join(', ')}`:'')));
-    if(o.selection_why)parts.push(node('p',o.selection_why));
-    parts.push(node('p',o.runs.map(r=>`${r.label}: ${r.delivered?'результат есть':'без результата'} (${r.outcome})`).join(' · '),'muted'));
-    const notes=node('details');notes.append(node('summary','Заметки этапов'),node('pre',Object.entries(o.stage_notes).map(([k,v])=>`${k}: ${v}`).join('\n\n')));parts.push(notes);
-    if(value.diff){const d=node('details');d.open=true;d.append(node('summary','Изменения харнесса'),node('pre',value.diff.text||'Без изменений'));parts.push(d);}
-  }
-  if(job.revision){const b=node('button',value.active===job.revision?'Принят':'Принять результат');b.type='button';b.disabled=value.active===job.revision;b.onclick=async()=>{try{await api(`harness/jobs/${id}/adopt`,{});await harnessLoad();await harnessShowJob(id);}catch(e){notify(e.message);}};parts.push(b);}
+  for(const w of job.warnings||[])parts.push(node('p','⚠ '+w,'error'));
+  job.results.forEach((r,i)=>parts.push(harnessResultView(id,r,value.diffs[i],value.active)));
   if(['running','queued'].includes(job.status)){const b=node('button','Остановить');b.type='button';b.onclick=async()=>{try{await api(`harness/jobs/${id}/cancel`,{});await harnessShowJob(id);}catch(e){notify(e.message);}};parts.push(b);}
   if(['failed','cancelled','interrupted'].includes(job.status)){const b=node('button','Продолжить запуск');b.type='button';b.onclick=async()=>{try{await api(`harness/jobs/${id}/resume`,{});await harnessShowJob(id);}catch(e){notify(e.message);}};parts.push(b);}
   parts.push(node('pre',job.events.slice(-12).join('\n'),'muted'));
@@ -3192,6 +3198,8 @@ $('harness-save').onclick=async()=>{try{const value=await api('harness',{project
 $('harness-import').onclick=async()=>{try{await api('harness/import-skill',{project_id:harnessProject,text:$('harness-import-text').value,activate:true});$('harness-import-text').value='';await harnessLoad();notify('Навык импортирован');}catch(e){notify(e.message);}};
 $('harness-refine').onclick=async()=>{
   if(!active)return notify('Откройте разговор с задачей');
-  const body={session_id:active,k:Number($('harness-k').value)||1,mode:$('harness-mode').value};const model=$('harness-model').value.trim();if(model)body.model=model;
+  const body={session_id:active,k:Number($('harness-k').value)||1,mode:$('harness-mode').value,agentic:$('harness-agentic').checked};const model=$('harness-model').value.trim();if(model)body.model=model;
+  const rubric=$('harness-rubric').value.trim();if(rubric)body.rubric=rubric;
+  const tasks=$('harness-tasks').value.split(/^\s*---\s*$/m).map(t=>t.trim()).filter(Boolean);if(tasks.length)body.tasks=tasks;
   try{const job=await api('harness/jobs',body);await harnessLoadJobs();await harnessShowJob(job.id);}catch(e){notify(e.message);}
 };

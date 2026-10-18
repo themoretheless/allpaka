@@ -2,14 +2,18 @@
 """Studio harness end to end against a local streaming provider; no paid API calls.
 
 Covers the editable harness (validation, activation, load_skill, hooks), a
-Propose-Probe-Compose job (probes on copies, adoption) and the experience
-library.
+JSON Propose-Probe-Compose job (probes on copies, adoption), an agentic job
+over a stream of two tasks with a report-only rubric, and the experience
+library, through the Python SDK.
 """
-import json, os, pathlib, socket, subprocess, tempfile, threading, time, urllib.error, urllib.request
+import json, os, pathlib, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "sdk/python"))
+from allpaka_studio import Studio, EvaluationError
 
 SKILL = "---\nname: note\ndescription: the task asks for a note file\n---\nWrite workspace/out.txt with the note, then reread it.\n"
 HOOKS = json.dumps({"post_tool": [{"matcher": "write_file", "inject": "Reopen what you wrote."}]})
+MEMORY = 'In this workspace notes go to workspace/out.txt.'
 systems = []
 
 class Mock(BaseHTTPRequestHandler):
@@ -24,17 +28,35 @@ class Mock(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
         def say(text): return {'choices': [{'delta': {'content': text}, 'finish_reason': 'stop'}]}
         def call(name, args): return {'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': f'c{len(results)}', 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(args)}}]}, 'finish_reason': 'tool_calls'}]}
-        if not tools:
+        proposer = 'YOUR DIMENSION' in system or 'composing THE final harness' in system
+        if proposer and tools:
+            # Agentic proposers: edit the `harness` root with file tools.
+            assert 'run_command' not in tools and 'load_skill' not in tools
             if 'YOUR DIMENSION: INV' in system:
-                event = say(json.dumps({'files': {'memory.md': 'In this workspace notes go to workspace/out.txt.'}, 'notes': 'base1 searched for the target file'}))
+                event = call('write_file', {'path': 'harness/memory.md', 'content': MEMORY}) if not results else say('base1 searched for the target file')
+            elif 'YOUR DIMENSION: DOM' in system:
+                event = say('KEEP_BASE: nothing domain specific')
+            elif not results:
+                event = call('read_file', {'path': 'context/pool/inv1/harness/memory.md'})
+            elif len(results) == 1:
+                assert MEMORY in results[0], results[0]
+                event = call('write_file', {'path': 'harness/memory.md', 'content': MEMORY})
+            else:
+                event = say('kept -> memory.md -> base1 searched 1/1')
+        elif proposer:
+            if 'YOUR DIMENSION: INV' in system:
+                event = say(json.dumps({'files': {'memory.md': MEMORY}, 'notes': 'base1 searched for the target file'}))
             elif 'YOUR DIMENSION: DOM' in system:
                 event = say(json.dumps({'files': {}, 'notes': 'KEEP_BASE: nothing domain specific'}))
-            elif 'composing THE final harness' in system:
+            else:
                 assert 'candidate inv1' in messages[-1]['content'] and 'candidate dom1' in messages[-1]['content']
                 event = say(json.dumps({'adopt': 'inv1', 'notes': 'kept -> memory.md -> base1 searched 1/1'}))
-            elif 'complete record' in system:
+        elif not tools:
+            if 'complete record' in system:
                 event = say(json.dumps({'edits': [{'component': 'memory.md', 'candidates': 'inv1', 'change': 'names the note path', 'observed': 'agg1 wrote directly', 'verdict': 'confounded'}],
                                         'experience': {'cue': 'a task writes a note file', 'lesson': 'state the target path in memory.md', 'evidence': 'inv1 vs base1', 'confidence': 'low: one rollout'}}))
+            elif system.startswith('Evaluate the supplied answer'):
+                event = say(json.dumps({'score': 0.75, 'reason': 'note written'}))
             else:
                 event = say('unexpected')
         elif not results:
@@ -76,15 +98,17 @@ with tempfile.TemporaryDirectory(prefix='allpaka-harness-test-') as tmp:
             except Exception:
                 if process.poll() is not None: raise RuntimeError((root / 'server.log').read_text())
                 time.sleep(.03)
+        studio = Studio(base)
         project = api('projects', dict(id='', name='harness', roots=[dict(alias='workspace', path=str(workspace), writable=True)], instructions=''))['id']
 
-        empty = api('harness?project_id=' + project)
+        empty = studio.harness(project)
         assert empty['active'] is None and empty['current']['tree'] == {} and empty['current']['preview'] == ''
         reject('harness', dict(project_id=project, tree={'notes.txt': 'x'}), 'not a harness path')
         reject('harness', dict(project_id=project, tree={'skills/note/SKILL.md': '---\nname: other\n---\n'}), 'frontmatter name must be `note`')
-        saved = api('harness', dict(project_id=project, tree={'skills/note/SKILL.md': SKILL, 'hooks.json': HOOKS}, note='fixture', activate=True))
+        reject('harness', dict(project_id=project, tree={'hooks.json': '{"pre_tool":[{"inject":"x"}]}'}), 'Each pre_tool hook needs exactly one of block, command')
+        saved = studio.save_harness(project, {'skills/note/SKILL.md': SKILL, 'hooks.json': HOOKS}, note='fixture', activate=True)
         assert 'load the `note` skill' in saved['current']['tree']['guardrails.md'], 'trigger line is added on save'
-        first = api('harness?project_id=' + project)
+        first = studio.harness(project)
         assert first['active'] == saved['revision']['id'] and len(first['revisions']) == 1
 
         settings = dict(project_id=project, provider='local', model='mock', mode='auto', max_steps=8, allow_writes=True)
@@ -97,25 +121,43 @@ with tempfile.TemporaryDirectory(prefix='allpaka-harness-test-') as tmp:
         (workspace / 'out.txt').unlink()
         stored = sorted(p.name for p in data.glob('*.json'))
 
-        job = api('harness/jobs', dict(session_id=session, k=1, mode='parallel'))
-        detail = until(lambda: api('harness/jobs/' + job['id']), lambda d: d['job']['status'] in ('completed', 'failed'), 60)
+        # One JSON-mode step on the conversation's task.
+        job = studio.start_harness_job(session, k=1, mode='parallel', agentic=False)
+        detail = until(lambda: studio.harness_job(job['id']), lambda d: d['job']['status'] in ('completed', 'failed'), 60)
         assert detail['job']['status'] == 'completed', detail['job'].get('error')
-        outcome = detail['job']['outcome']
+        result = detail['job']['results'][0]; outcome = result['outcome']
         assert (outcome['rollouts'], outcome['stages'], outcome['chosen']) == (4, 3, 'agg1')
         assert all(run['delivered'] for run in outcome['runs']), outcome['runs']
-        assert detail['diff']['added'] == ['memory.md'] and detail['active'] == first['active']
+        assert detail['diffs'][0]['added'] == ['memory.md'] and detail['active'] == first['active']
         assert not (workspace / 'out.txt').exists(), 'probes run on copies'
-        assert sorted(p.name for p in data.glob('*.json')) == stored, 'probe sessions are not saved'
-        assert any('# Long-term memory\nIn this workspace notes go to workspace/out.txt.' in s for s in systems), 'probes run the candidate harness'
+        assert sorted(p.name for p in data.glob('*.json')) == stored, 'probe and proposer sessions are not saved'
+        assert any('# Long-term memory\n' + MEMORY in s for s in systems), 'probes run the candidate harness'
+        studio.adopt_harness_job(job['id'])
+        adopted = studio.harness(project)
+        assert adopted['active'] == result['revision'] and adopted['current']['tree']['memory.md'] == MEMORY
 
-        api(f"harness/jobs/{job['id']}/adopt", {})
-        adopted = api('harness?project_id=' + project)
-        assert adopted['active'] == detail['job']['revision'] and 'memory.md' in adopted['current']['tree']
-        library = api('harness/library?project_id=' + project)['entries']
-        assert len(library) == 1 and library[0]['entry']['cue'] == 'a task writes a note file' and '[confounded]' in library[0]['experience']
-        reject('harness/jobs', dict(session_id=session, k=9), 'k must be between 1 and 4')
-        api('harness/activate', dict(project_id=project, revision=None))
-        assert api('harness?project_id=' + project)['active'] is None
+        # Agentic proposers over a stream of two tasks, with a report-only rubric.
+        job = studio.start_harness_job(session, k=1, agentic=True, rubric='The note file exists.', tasks=['Leave a note', 'Leave another note'])
+        detail = until(lambda: studio.harness_job(job['id']), lambda d: d['job']['status'] in ('completed', 'failed'), 90)
+        assert detail['job']['status'] == 'completed', detail['job'].get('error')
+        results = detail['job']['results']
+        assert [r['task'] for r in results] == ['Leave a note', 'Leave another note']
+        for r in results:
+            o = r['outcome']
+            assert (o['rollouts'], o['stages'], o['chosen'], o['fallbacks']) == (4, 3, 'agg1', []), o
+            assert o['scores'] == {'base1': 0.75, 'agg1': 0.75}, o['scores']
+            assert r['revision'] is None, 'the composer kept memory.md, which the adopted base already has'
+        assert any('YOURS TO EDIT' in s for s in systems) and any('HOW TO COMPOSE' in s for s in systems)
+        assert not (workspace / 'out.txt').exists()
+
+        library = studio.harness_library(project)['entries']
+        assert len(library) == 3 and all(e['entry']['cue'] == 'a task writes a note file' for e in library)
+        assert '[confounded]' in library[0]['experience']
+        try: studio.start_harness_job(session, k=9); raise AssertionError('k=9 accepted')
+        except EvaluationError as error: assert str(error) == 'http_400'
+        reject('harness/jobs', dict(session_id=session, tasks=['ok', '   ']), 'at most 20 non-empty tasks')
+        studio.activate_harness(project, None)
+        assert studio.harness(project)['active'] is None
         print('studio harness: ok')
     finally:
         process.terminate(); process.wait(timeout=10)

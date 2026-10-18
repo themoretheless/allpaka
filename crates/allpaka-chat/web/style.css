@@ -2041,3 +2041,4 @@ header .eyebrow { display: none; }
 #harness-dialog .harness-job-link { display:block; width:100%; text-align:left; margin:4px 0; }
 #harness-errors .error, #harness-dialog .error { color:var(--error-text); }
 @media (max-width:700px) { #harness-dialog .harness-layout { grid-template-columns:1fr; } }
+#harness-dialog .harness-result { border-top:1px solid var(--line); padding-top:8px; margin-top:8px; }

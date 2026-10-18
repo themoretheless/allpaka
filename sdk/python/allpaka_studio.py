@@ -1048,6 +1048,39 @@ class Studio:
             raise ValueError("Invalid Studio artifact ID")
         return value
 
+    # Agent harness (docs/harness.md)
+    def harness(self, project_id):
+        """The project's active harness tree, its validation and revisions."""
+        return self.request("harness?"+urllib.parse.urlencode(dict(project_id=project_id)))
+
+    def save_harness(self, project_id, tree, *, note="", activate=False):
+        """Store a harness tree as a revision; activate it for the project's turns if asked."""
+        return self.request("harness",dict(project_id=project_id,tree=dict(tree),note=note,activate=bool(activate)))
+
+    def activate_harness(self, project_id, revision=None):
+        """Make a revision active; None turns the harness off."""
+        return self.request("harness/activate",dict(project_id=project_id,revision=revision))
+
+    def start_harness_job(self, session_id, *, k=1, mode="parallel", agentic=True, rubric=None, tasks=None, provider=None, model=None):
+        """Propose-Probe-Compose on a conversation's task (or a stream of tasks); the result is not activated."""
+        if mode not in ("parallel", "sequential"):
+            raise ValueError("mode must be parallel or sequential")
+        body=dict(session_id=self._id(session_id),k=int(k),mode=mode,agentic=bool(agentic))
+        for key,value in (("rubric",rubric),("tasks",list(tasks) if tasks else None),("provider",provider),("model",model)):
+            if value is not None:
+                body[key]=value
+        return self.request("harness/jobs",body)
+
+    def harness_job(self, job_id):
+        return self.request("harness/jobs/"+self._id(job_id))
+
+    def adopt_harness_job(self, job_id, task=None):
+        """Activate one task's chosen harness (default: the last one that changed it)."""
+        return self.request("harness/jobs/"+self._id(job_id)+"/adopt",{} if task is None else dict(task=int(task)))
+
+    def harness_library(self, project_id):
+        return self.request("harness/library?"+urllib.parse.urlencode(dict(project_id=project_id)))
+
     def start_judges(self, plan_id):
         return self.request("evaluation/judge-runs",dict(plan_id=self._id(plan_id)))
 

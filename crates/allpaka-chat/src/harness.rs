@@ -203,57 +203,124 @@ pub struct Hook {
     /// Tool name, or a prefix ending in `*`. Empty matches every tool.
     #[serde(default)]
     pub matcher: String,
+    /// Only when the raw JSON arguments contain this text.
+    #[serde(default)]
+    pub args_contains: Option<String>,
+    /// post_tool, stop: text added for the model.
     #[serde(default)]
     pub inject: Option<String>,
+    /// pre_tool: a non-zero exit blocks the call with its output as the
+    /// reason. post_tool, stop: stdout is added for the model.
     #[serde(default)]
     pub command: Option<String>,
+    /// pre_tool: refuse the call with this reason.
+    #[serde(default)]
+    pub block: Option<String>,
+    /// post_tool: keep at most this many characters of the tool result.
+    #[serde(default)]
+    pub max_output: Option<usize>,
 }
+/// Hooks act inside the tool loop, where prose cannot be skipped:
+/// `pre_tool` before a call runs, `post_tool` on its result, `stop` once
+/// before the agent finishes.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Hooks {
+    #[serde(default)]
+    pub pre_tool: Vec<Hook>,
     #[serde(default)]
     pub post_tool: Vec<Hook>,
     #[serde(default)]
     pub stop: Vec<Hook>,
 }
 impl Hook {
-    pub fn matches(&self, tool: &str) -> bool {
-        match self.matcher.strip_suffix('*') {
+    pub fn matches(&self, tool: &str, args: &str) -> bool {
+        let name = match self.matcher.strip_suffix('*') {
             _ if self.matcher.is_empty() => true,
             Some(prefix) => tool.starts_with(prefix),
             None => tool == self.matcher,
-        }
+        };
+        name && self
+            .args_contains
+            .as_deref()
+            .is_none_or(|text| args.contains(text))
     }
 }
+fn present(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|s| !s.trim().is_empty())
+}
 pub fn hooks(tree: &Tree) -> Result<Hooks> {
-    match tree.get(HOOKS) {
-        None => Ok(Hooks::default()),
-        Some(text) if text.trim().is_empty() => Ok(Hooks::default()),
-        Some(text) => {
-            let hooks: Hooks = serde_json::from_value(crate::strict_json::parse(text)?)
-                .context("hooks.json must be {\"post_tool\":[…],\"stop\":[…]}")?;
-            for hook in hooks.post_tool.iter().chain(&hooks.stop) {
-                let inject = hook.inject.as_deref().is_some_and(|s| !s.trim().is_empty());
-                let command = hook
-                    .command
-                    .as_deref()
-                    .is_some_and(|s| !s.trim().is_empty());
-                if inject == command {
-                    bail!("Each hook needs exactly one of inject or command");
-                }
-                if hook.matcher.len() > 80
-                    || hook.inject.as_ref().is_some_and(|s| s.len() > 2000)
-                    || hook.command.as_ref().is_some_and(|s| s.len() > 1000)
-                {
-                    bail!("Hook text exceeds bounds");
-                }
+    let text = match tree.get(HOOKS) {
+        None => return Ok(Hooks::default()),
+        Some(text) if text.trim().is_empty() => return Ok(Hooks::default()),
+        Some(text) => text,
+    };
+    let hooks: Hooks = serde_json::from_value(crate::strict_json::parse(text)?)
+        .context("hooks.json must be {\"pre_tool\":[…],\"post_tool\":[…],\"stop\":[…]}")?;
+    let events: [(&str, &[Hook], &[&str]); 3] = [
+        ("pre_tool", &hooks.pre_tool, &["block", "command"]),
+        (
+            "post_tool",
+            &hooks.post_tool,
+            &["inject", "command", "max_output"],
+        ),
+        ("stop", &hooks.stop, &["inject", "command"]),
+    ];
+    for (event, list, allowed) in events {
+        for hook in list {
+            let set: Vec<&str> = [
+                ("inject", present(&hook.inject)),
+                ("command", present(&hook.command)),
+                ("block", present(&hook.block)),
+                ("max_output", hook.max_output.is_some()),
+            ]
+            .into_iter()
+            .filter(|(_, on)| *on)
+            .map(|(name, _)| name)
+            .collect();
+            if set.len() != 1 || !allowed.contains(&set[0]) {
+                bail!(
+                    "Each {event} hook needs exactly one of {}",
+                    allowed.join(", ")
+                );
             }
-            if hooks.post_tool.len() + hooks.stop.len() > MAX_HOOKS {
-                bail!("At most {MAX_HOOKS} hooks");
+            if hook
+                .max_output
+                .is_some_and(|n| !(200..=131072).contains(&n))
+            {
+                bail!("max_output must be between 200 and 131072");
             }
-            Ok(hooks)
+            if hook.matcher.len() > 80
+                || hook
+                    .args_contains
+                    .as_ref()
+                    .is_some_and(|s| s.is_empty() || s.len() > 200)
+                || hook.inject.as_ref().is_some_and(|s| s.len() > 2000)
+                || hook.block.as_ref().is_some_and(|s| s.len() > 2000)
+                || hook.command.as_ref().is_some_and(|s| s.len() > 1000)
+            {
+                bail!("Hook text exceeds bounds");
+            }
         }
     }
+    if hooks.pre_tool.len() + hooks.post_tool.len() + hooks.stop.len() > MAX_HOOKS {
+        bail!("At most {MAX_HOOKS} hooks");
+    }
+    Ok(hooks)
+}
+
+/// Keep the head and the tail of a tool result, as a post_tool hook asks.
+pub fn trim_output(text: &str, limit: usize) -> String {
+    let count = text.chars().count();
+    if count <= limit {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(limit * 3 / 4).collect();
+    let tail: String = text.chars().skip(count - limit / 4).collect();
+    format!(
+        "{head}\n… [harness hook trimmed {} characters] …\n{tail}",
+        count - limit
+    )
 }
 
 fn always_on_text(tree: &Tree) -> String {
@@ -1053,7 +1120,7 @@ mod tests {
             "never be loaded",
             "notes.txt: not a harness path",
             "scripts/missing.py",
-            "exactly one of inject or command",
+            "exactly one of",
             "cap is 24000",
             "subagent prompt is empty",
         ] {
@@ -1089,16 +1156,39 @@ mod tests {
     }
 
     #[test]
-    fn hooks_match_names_and_prefixes() {
+    fn hooks_match_names_prefixes_and_arguments() {
         let t = tree(&[(
             HOOKS,
-            r#"{"post_tool":[{"matcher":"write_file","inject":"Reopen the file."},{"matcher":"mcp_*","inject":"Cite the tool."}],"stop":[{"inject":"Check the deliverable."}]}"#,
+            r#"{"pre_tool":[{"matcher":"write_file","args_contains":"Cargo.lock","block":"Never edit the lockfile."}],"post_tool":[{"matcher":"write_file","inject":"Reopen the file."},{"matcher":"mcp_*","inject":"Cite the tool."},{"matcher":"read_file","max_output":200}],"stop":[{"inject":"Check the deliverable."}]}"#,
         )]);
         let h = hooks(&t).unwrap();
-        assert!(h.post_tool[0].matches("write_file") && !h.post_tool[0].matches("edit_file"));
-        assert!(h.post_tool[1].matches("mcp_rag_search"));
-        assert!(h.stop[0].matches("anything"));
-        assert!(hooks(&tree(&[(HOOKS, "{\"pre\":[]}")])).is_err());
+        assert!(h.pre_tool[0].matches("write_file", r#"{"path":"ws/Cargo.lock"}"#));
+        assert!(!h.pre_tool[0].matches("write_file", r#"{"path":"ws/src/a.rs"}"#));
+        assert!(
+            h.post_tool[0].matches("write_file", "{}")
+                && !h.post_tool[0].matches("edit_file", "{}")
+        );
+        assert!(h.post_tool[1].matches("mcp_rag_search", "{}"));
+        assert!(h.stop[0].matches("anything", ""));
+        assert!(validate(&t).is_empty());
+        for bad in [
+            "{\"pre\":[]}",
+            r#"{"pre_tool":[{"inject":"x"}]}"#,
+            r#"{"post_tool":[{"block":"x"}]}"#,
+            r#"{"post_tool":[{"inject":"x","max_output":500}]}"#,
+            r#"{"post_tool":[{"max_output":10}]}"#,
+            r#"{"stop":[{"max_output":500}]}"#,
+        ] {
+            assert!(hooks(&tree(&[(HOOKS, bad)])).is_err(), "{bad}");
+        }
+        let long = "x".repeat(1000);
+        let trimmed = trim_output(&long, 200);
+        assert!(
+            trimmed.starts_with(&"x".repeat(150))
+                && trimmed.contains("trimmed 800 characters")
+                && trimmed.ends_with(&"x".repeat(50))
+        );
+        assert_eq!(trim_output("short", 200), "short");
     }
 
     #[test]

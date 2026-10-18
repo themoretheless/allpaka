@@ -322,6 +322,9 @@
   <label>Бюджет k<input id="harness-k" type="number" min="1" max="4" value="1"></label>
   <label>Режим<select id="harness-mode"><option value="parallel">Параллельный: шире</option><option value="sequential">Последовательный: глубже</option></select></label>
   <label>Модель предложений, необязательно<input id="harness-model" maxlength="200" placeholder="Как в разговоре"></label>
+  <label><input id="harness-agentic" type="checkbox" checked> Предлагающие работают как агенты с файлами (как в Harness²); без галочки — один JSON-ответ модели</label>
+  <label>Рубрика для отчёта, необязательно<textarea id="harness-rubric" rows="2" maxlength="16000" placeholder="Оценки базы и выбранного результата попадут в отчёт; на выбор не влияют"></textarea></label>
+  <label>Серия задач, необязательно<textarea id="harness-tasks" rows="3" placeholder="По умолчанию — задача разговора. Несколько задач разделяйте строкой ---; каждая следующая видит уроки предыдущих"></textarea></label>
   <button id="harness-refine" type="button">Запустить улучшение</button>
   <div id="harness-jobs"></div>
   <div id="harness-job"></div>

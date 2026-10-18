@@ -53,6 +53,19 @@ pub trait Engine: Send + Sync {
         system: &'a str,
         user: &'a str,
     ) -> BoxFuture<'a, Result<String>>;
+    /// An agent session that edits `current` (its `harness` root) while
+    /// reading `files` (its read-only `context` root). Returns the edited
+    /// tree and the agent's notes.
+    fn edit<'a>(
+        &'a self,
+        _label: &'a str,
+        _system: &'a str,
+        _mission: &'a str,
+        _files: &'a BTreeMap<String, String>,
+        _current: &'a Tree,
+    ) -> BoxFuture<'a, Result<(Tree, String)>> {
+        Box::pin(async { bail!("This engine cannot run agentic proposers") })
+    }
 }
 
 /// One execution. It never carries a score: `delivered` only says that the
@@ -79,6 +92,10 @@ pub struct Stage {
     pub fell_back: bool,
     #[serde(default)]
     pub error: Option<String>,
+    /// Hash of everything the stage was asked; a resumed job reuses the
+    /// saved stage only when its inputs are unchanged.
+    #[serde(default)]
+    pub key: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,6 +116,11 @@ pub struct Plan<'a> {
     /// Library entries of earlier tasks, already rendered.
     pub library: String,
     pub width: usize,
+    /// Proposers and composers run as agents editing files (as in Harness²)
+    /// instead of answering with one JSON object.
+    pub agentic: bool,
+    /// Optional rubric for reporting only: the method never sees scores.
+    pub rubric: Option<String>,
     pub progress: &'a (dyn Fn(String) + Send + Sync),
 }
 
@@ -120,6 +142,12 @@ pub struct Outcome {
     pub runs: Vec<RunSummary>,
     pub stage_notes: BTreeMap<String, String>,
     pub reflection: Option<Value>,
+    /// Judge scores by rollout label, when a rubric was given. Reported
+    /// after selection and never fed back into it.
+    #[serde(default)]
+    pub scores: BTreeMap<String, Option<f64>>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunSummary {
@@ -165,7 +193,60 @@ struct Candidate<'a> {
     stage: &'a Stage,
     run: &'a RunView,
 }
-fn evidence(plan: &Plan, current: &Tree, bases: &[RunView], pool: &[Candidate]) -> String {
+/// The same evidence as one message (JSON proposers) and as files under
+/// `context/` (agentic proposers).
+pub struct Evidence {
+    text: String,
+    files: BTreeMap<String, String>,
+}
+fn evidence(plan: &Plan, current: &Tree, bases: &[RunView], pool: &[Candidate]) -> Evidence {
+    let mut files = BTreeMap::new();
+    files.insert("task.md".to_string(), plan.task.clone());
+    for (path, text) in &plan.base {
+        files.insert(format!("base_harness/{path}"), text.clone());
+    }
+    for run in bases {
+        files.insert(
+            format!("rollouts/{}.md", run.label),
+            render_run(run, 200_000),
+        );
+    }
+    for c in pool {
+        let label = &c.stage.label;
+        for (path, text) in &c.stage.tree {
+            files.insert(format!("pool/{label}/harness/{path}"), text.clone());
+        }
+        let d = harness::diff(current, &c.stage.tree);
+        files.insert(
+            format!("pool/{label}/harness.diff"),
+            if d.text.is_empty() {
+                "(identical)\n".into()
+            } else {
+                d.text
+            },
+        );
+        let notes = match &c.stage.error {
+            Some(e) => format!(
+                "{} candidate; its proposal was rejected twice and it inherited the tree.\n{e}\n",
+                c.stage.dimension
+            ),
+            None => format!("{} candidate\n\n{}\n", c.stage.dimension, c.stage.notes),
+        };
+        files.insert(format!("pool/{label}/notes.md"), notes);
+        files.insert(
+            format!("pool/{label}/rollout.md"),
+            render_run(c.run, 200_000),
+        );
+    }
+    if !plan.library.is_empty() {
+        files.insert("library/LIBRARY.md".into(), plan.library.clone());
+    }
+    Evidence {
+        text: evidence_text(plan, current, bases, pool),
+        files,
+    }
+}
+fn evidence_text(plan: &Plan, current: &Tree, bases: &[RunView], pool: &[Candidate]) -> String {
     let runs = bases.len() + pool.len();
     let budget = (120_000 / runs.max(1)).clamp(3_000, 24_000);
     let mut out = format!(
@@ -253,7 +334,10 @@ fn apply(reply: &Reply, current: &Tree, pool: &[Candidate]) -> Result<Tree> {
             tree
         }
     };
-    let tree = harness::autotrigger(&tree);
+    accept(&tree)
+}
+fn accept(tree: &Tree) -> Result<Tree> {
+    let tree = harness::autotrigger(tree);
     let errors = harness::validate(&tree);
     if !errors.is_empty() {
         bail!("{}", errors.join("\n"));
@@ -332,13 +416,27 @@ async fn stage(
     label: &str,
     dimension: &str,
     system: &str,
-    user: &str,
+    evidence: &Evidence,
     current: &Tree,
     pool: &[Candidate<'_>],
 ) -> Result<Stage> {
     *ledger.stages.lock().unwrap() += 1;
     let path = plan.dir.join("stages").join(format!("{label}.json"));
-    if let Some(done) = read_json::<Stage>(&path) {
+    let key = harness::fingerprint(&Tree::from([
+        ("system".to_string(), system.to_string()),
+        (
+            "evidence".to_string(),
+            if plan.agentic {
+                serde_json::to_string(&evidence.files)?
+            } else {
+                evidence.text.clone()
+            },
+        ),
+        ("current".to_string(), harness::fingerprint(current)),
+        ("agentic".to_string(), plan.agentic.to_string()),
+    ]));
+    let user = evidence.text.as_str();
+    if let Some(done) = read_json::<Stage>(&path).filter(|d| d.key == key) {
         if done.fell_back {
             ledger.fallbacks.lock().unwrap().push(label.into());
         }
@@ -348,8 +446,16 @@ async fn stage(
     (plan.progress)(format!("stage {label}"));
     let mut prompt = user.to_string();
     let mut last_error = String::new();
-    for _attempt in 0..2 {
+    for attempt in 0..2 {
         let result = async {
+            if plan.agentic {
+                let mission = prompts::mission((attempt > 0).then_some(last_error.as_str()));
+                let (tree, notes) = plan
+                    .engine
+                    .edit(label, system, &mission, &evidence.files, current)
+                    .await?;
+                return Ok::<_, anyhow::Error>((accept(&tree)?, notes));
+            }
             let text = plan.engine.call(label, system, &prompt).await?;
             let reply = parse_reply(&text)?;
             let tree = apply(&reply, current, pool)?;
@@ -365,6 +471,7 @@ async fn stage(
                     notes,
                     fell_back: false,
                     error: None,
+                    key: key.clone(),
                 };
                 write_json(&path, &done)?;
                 return Ok(done);
@@ -383,6 +490,7 @@ async fn stage(
         notes: String::new(),
         fell_back: true,
         error: Some(last_error),
+        key,
     };
     write_json(&path, &done)?;
     Ok(done)
@@ -418,12 +526,12 @@ pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
                         (
                             format!("inv{i}"),
                             "INV",
-                            prompts::propose("INV", k, i, None),
+                            prompts::propose("INV", k, i, None, plan.agentic),
                         ),
                         (
                             format!("dom{i}"),
                             "DOM",
-                            prompts::propose("DOM", k, i, None),
+                            prompts::propose("DOM", k, i, None, plan.agentic),
                         ),
                     ]
                 })
@@ -462,7 +570,7 @@ pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
                 .collect();
             let user = evidence(&plan, &plan.base, &bases, &pool);
             let systems: Vec<(String, String)> = (1..=k)
-                .map(|i| (format!("agg{i}"), prompts::aggregate(k, i)))
+                .map(|i| (format!("agg{i}"), prompts::aggregate(k, i, plan.agentic)))
                 .collect();
             let aggs: Vec<Stage> =
                 futures_util::future::join_all(systems.iter().map(|(label, system)| {
@@ -504,7 +612,7 @@ pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
                         &call_gate,
                         &format!("inv{t}"),
                         "INV",
-                        &prompts::propose("INV", 1, 1, Some(t)),
+                        &prompts::propose("INV", 1, 1, Some(t), plan.agentic),
                         &user,
                         &current,
                         &[],
@@ -515,7 +623,7 @@ pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
                         &call_gate,
                         &format!("dom{t}"),
                         "DOM",
-                        &prompts::propose("DOM", 1, 1, Some(t)),
+                        &prompts::propose("DOM", 1, 1, Some(t), plan.agentic),
                         &user,
                         &current,
                         &[],
@@ -542,9 +650,9 @@ pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
                     .collect();
                 let user = evidence(&plan, &current, &bases, &pool);
                 let system = if k == 1 {
-                    prompts::aggregate(1, 1)
+                    prompts::aggregate(1, 1, plan.agentic)
                 } else {
-                    prompts::compose_round(t, k)
+                    prompts::compose_round(t, k, plan.agentic)
                 };
                 let checkpoint = stage(
                     &plan,
@@ -607,6 +715,26 @@ pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
         .collect();
     runs.dedup_by(|a, b| a.label == b.label);
     let fallbacks = ledger.fallbacks.lock().unwrap().clone();
+    let mut scored: Vec<&RunView> = bases.iter().collect();
+    scored.extend(
+        finals
+            .iter()
+            .filter(|(s, _)| s.label == chosen)
+            .map(|(_, r)| r),
+    );
+    let scores = match &plan.rubric {
+        Some(rubric) => score(&plan, rubric, &scored).await,
+        None => BTreeMap::new(),
+    };
+    let warnings = warnings(
+        &plan,
+        &bases,
+        &chosen_kind,
+        &fallbacks,
+        similarity,
+        &scores,
+        &chosen,
+    );
     Ok(Outcome {
         mode: plan.mode,
         k,
@@ -632,7 +760,99 @@ pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
             })
             .collect(),
         reflection,
+        scores,
+        warnings,
     })
+}
+
+/// Rubric scores for the base rollouts and the chosen final, with Studio's
+/// judge instructions. Reporting only: selection and composition never see
+/// them. A failed judgement is None, never zero.
+async fn score(plan: &Plan<'_>, rubric: &str, runs: &[&RunView]) -> BTreeMap<String, Option<f64>> {
+    let path = plan.dir.join("scores.json");
+    let mut saved: BTreeMap<String, Option<f64>> = read_json(&path).unwrap_or_default();
+    for run in runs {
+        if saved.get(&run.label).is_some_and(Option::is_some) {
+            continue;
+        }
+        let answer = if run.changes.is_empty() {
+            run.answer.clone()
+        } else {
+            format!(
+                "{}\n\nFile changes:\n{}",
+                run.answer,
+                clip(&run.changes, 24_000)
+            )
+        };
+        let input = json!({"rubric": rubric, "input": plan.task, "answer": clip(&answer, 60_000), "reference": null, "contexts": []});
+        let value = async {
+            let text = plan
+                .engine
+                .call(
+                    &format!("judge-{}", run.label),
+                    crate::judge::SYSTEM,
+                    &input.to_string(),
+                )
+                .await?;
+            let score = json_object(&text)?["score"]
+                .as_f64()
+                .context("Judge reply has no score")?;
+            if !(0.0..=1.0).contains(&score) {
+                bail!("Judge score out of bounds");
+            }
+            Ok::<_, anyhow::Error>(score)
+        }
+        .await
+        .ok();
+        saved.insert(run.label.clone(), value);
+    }
+    let _ = write_json(&path, &saved);
+    saved
+}
+
+/// What a reader of the report should not miss (after Harness² report.py).
+fn warnings(
+    plan: &Plan<'_>,
+    bases: &[RunView],
+    chosen_kind: &str,
+    fallbacks: &[String],
+    similarity: Option<f64>,
+    scores: &BTreeMap<String, Option<f64>>,
+    chosen: &str,
+) -> Vec<String> {
+    let mut out = vec![];
+    if bases.iter().all(|r| !r.delivered) {
+        out.push(
+            "No base rollout delivered: check the task and the executor before trusting any edit."
+                .into(),
+        );
+    }
+    if chosen_kind == "base" {
+        out.push("No composed harness delivered; the current harness stays.".into());
+    }
+    if !fallbacks.is_empty() {
+        out.push(format!(
+            "Stages fell back to the inherited harness: {}.",
+            fallbacks.join(", ")
+        ));
+    }
+    if plan.k > 1 && similarity.is_some_and(|s| s > 0.999) {
+        out.push("The finals collapsed into one harness; more budget explored nothing new.".into());
+    }
+    let base: Vec<f64> = bases
+        .iter()
+        .filter_map(|r| scores.get(&r.label).copied().flatten())
+        .collect();
+    if let (Some(chosen), false) = (scores.get(chosen).copied().flatten(), base.is_empty()) {
+        let mean = base.iter().sum::<f64>() / base.len() as f64;
+        if chosen < mean {
+            out.push(format!("The chosen harness scored {chosen:.2} on the rubric, below the base mean {mean:.2}; review before adopting."));
+        }
+    }
+    if scores.values().any(Option::is_none) {
+        out.push("Some judgements failed and are left out of the scores.".into());
+    }
+    out
 }
 
 /// Blind selection among delivering finals. Falls back to the first
@@ -769,6 +989,8 @@ struct StudioEngine {
     app: App,
     executor: Settings,
     proposer: Settings,
+    /// The proposer as an Auto-mode agent with writes, for agentic stages.
+    proposer_agent: Settings,
     proposer_provider: crate::provider::Provider,
     project: context::Project,
     task: String,
@@ -936,6 +1158,7 @@ impl Engine for StudioEngine {
                 harness: Some(tree.clone()),
                 system: None,
                 nested: false,
+                restricted: false,
             }));
             session
                 .messages
@@ -1003,6 +1226,104 @@ impl Engine for StudioEngine {
             Ok(message.content)
         })
     }
+    fn edit<'a>(
+        &'a self,
+        label: &'a str,
+        system: &'a str,
+        mission: &'a str,
+        files: &'a BTreeMap<String, String>,
+        current: &'a Tree,
+    ) -> BoxFuture<'a, Result<(Tree, String)>> {
+        Box::pin(async move {
+            let dir = self
+                .scratch
+                .join(format!("propose-{label}-{}", crate::evaluation::new_id()));
+            let result = async {
+                let (context_dir, harness_dir) = (dir.join("context"), dir.join("harness"));
+                write_files(&context_dir, files)?;
+                write_files(&harness_dir, current)?;
+                let root =
+                    |alias: &str, path: &std::path::Path, writable| -> Result<context::Root> {
+                        Ok(context::Root {
+                            alias: alias.into(),
+                            path: path.canonicalize()?,
+                            writable,
+                            repository: false,
+                        })
+                    };
+                let project = context::Project {
+                    id: self.project.id.clone(),
+                    name: "harness proposer".into(),
+                    roots: vec![
+                        root("context", &context_dir, false)?,
+                        root("harness", &harness_dir, true)?,
+                    ],
+                    instructions: String::new(),
+                };
+                let mut session =
+                    Session::new(crate::evaluation::new_id(), self.proposer_agent.clone());
+                session.title = format!("harness proposer {label}");
+                session.ephemeral = Some(Arc::new(crate::Ephemeral {
+                    project,
+                    harness: Some(Tree::new()),
+                    system: Some(system.to_string()),
+                    nested: true,
+                    restricted: true,
+                }));
+                session.messages.push(Message::text("user", mission));
+                let shared = Arc::new(Mutex::new(session));
+                // A proposer that runs out of steps has still edited files;
+                // validation decides whether they are usable.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(20 * 60),
+                    crate::turn(self.app.clone(), shared.clone(), None),
+                )
+                .await;
+                let notes = shared
+                    .lock()
+                    .unwrap()
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "assistant" && !m.content.trim().is_empty())
+                    .map(|m| m.content.clone())
+                    .unwrap_or_default();
+                Ok((read_files(&harness_dir)?, notes))
+            }
+            .await;
+            let _ = std::fs::remove_dir_all(&dir);
+            result
+        })
+    }
+}
+
+/// Write a flat path->text map under `root`.
+fn write_files(root: &std::path::Path, files: &BTreeMap<String, String>) -> Result<()> {
+    std::fs::create_dir_all(root)?;
+    for (path, text) in files {
+        if path
+            .split('/')
+            .any(|part| part.is_empty() || part == ".." || part.starts_with('.'))
+        {
+            bail!("Unsafe evidence path {path}");
+        }
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().context("No parent directory")?)?;
+        std::fs::write(file, text)?;
+    }
+    Ok(())
+}
+/// Read a directory back into a tree; empty files are deletions.
+fn read_files(root: &std::path::Path) -> Result<Tree> {
+    let mut tree = Tree::new();
+    for (path, file) in files_under(root) {
+        let text = String::from_utf8(std::fs::read(&file)?)
+            .with_context(|| format!("{path} is not UTF-8 text"))?;
+        if !text.trim().is_empty() {
+            tree.insert(path, text);
+        }
+    }
+    Ok(tree)
 }
 
 // ---- jobs ----------------------------------------------------------------------------
@@ -1020,16 +1341,38 @@ pub(crate) struct StartRequest {
     provider: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// Proposers edit files as agents (default) or answer with JSON.
+    #[serde(default = "default_agentic")]
+    agentic: bool,
+    /// Optional rubric: the base and chosen rollouts are scored for the
+    /// report only.
+    #[serde(default)]
+    rubric: Option<String>,
+    /// A stream of tasks refined in order; each sees the library entries of
+    /// the ones before it. Empty means the conversation's own task.
+    #[serde(default)]
+    tasks: Vec<String>,
 }
 fn default_k() -> usize {
     1
+}
+fn default_agentic() -> bool {
+    true
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct TaskResult {
+    index: usize,
+    task: String,
+    outcome: Outcome,
+    revision: Option<String>,
+    library_entry: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct JobRecord {
     id: String,
     project_id: String,
     request: StartRequest,
-    task: String,
+    tasks: Vec<String>,
     executor: Settings,
     base_revision: Option<String>,
     created_ms: u64,
@@ -1037,11 +1380,9 @@ pub(crate) struct JobRecord {
     #[serde(default)]
     events: Vec<String>,
     #[serde(default)]
-    outcome: Option<Outcome>,
+    results: Vec<TaskResult>,
     #[serde(default)]
-    revision: Option<String>,
-    #[serde(default)]
-    library_entry: Option<String>,
+    warnings: Vec<String>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -1164,77 +1505,147 @@ async fn execute(app: &App, id: &str) -> Result<()> {
         .find(|p| p.id == proposer.provider)
         .cloned()
         .context("Proposer provider not found")?;
-    let dir = jobs_dir(&app.data).join(id);
-    let scratch = std::env::temp_dir().join("allpaka-harness").join(id);
-    let engine = StudioEngine {
-        app: app.clone(),
-        executor: job.executor.clone(),
-        proposer,
-        proposer_provider,
-        project,
-        task: job.task.clone(),
-        scratch: scratch.clone(),
-    };
-    let library =
-        harness_library::context_for(&app.data, &job.project_id, &job.task, Some(id), 24_000)?;
-    let data = app.data.clone();
-    let job_id = id.to_string();
-    let progress = move |event: String| {
-        let _ = update_job(&data, &job_id, |j| j.events.push(event));
-    };
-    let outcome = run(Plan {
-        engine: &engine,
-        dir,
-        k: job.request.k,
-        mode: job.request.mode,
-        task: job.task.clone(),
-        base: base.clone(),
-        library,
-        width: 2,
-        progress: &progress,
-    })
-    .await;
-    let _ = std::fs::remove_dir_all(&scratch);
-    let outcome = outcome?;
-    let revision = if outcome.tree != base {
-        Some(
-            harness::save_revision(
-                &app.data,
-                &job.project_id,
-                &outcome.tree,
-                job.base_revision.clone(),
-                &format!(
-                    "harness job {id}: {} ({:?}, k={})",
-                    outcome.chosen, outcome.mode, outcome.k
-                ),
-            )?
-            .id,
-        )
-    } else {
-        None
-    };
-    let entry = match &outcome.reflection {
-        Some(reflection) => harness_library::add(
+    let mut proposer_agent = proposer.clone();
+    proposer_agent.mode = Mode::Auto;
+    proposer_agent.allow_writes = true;
+    proposer_agent.max_steps = 40;
+    for (index, task) in job.tasks.iter().enumerate() {
+        if job.results.iter().any(|r| r.index == index) {
+            continue;
+        }
+        let label = if job.tasks.len() > 1 {
+            format!("task {}/{}: ", index + 1, job.tasks.len())
+        } else {
+            String::new()
+        };
+        let scratch = std::env::temp_dir().join("allpaka-harness").join(id);
+        let engine = StudioEngine {
+            app: app.clone(),
+            executor: job.executor.clone(),
+            proposer: proposer.clone(),
+            proposer_agent: proposer_agent.clone(),
+            proposer_provider: proposer_provider.clone(),
+            project: project.clone(),
+            task: task.clone(),
+            scratch: scratch.clone(),
+        };
+        let entry_id = format!("{id}-{index}");
+        let library = harness_library::context_for(
             &app.data,
             &job.project_id,
-            id,
-            &outcome.tree,
-            reflection,
-            &outcome.chosen,
-            &outcome.selection_why,
-        )?,
-        None => None,
-    };
-    update_job(&app.data, id, |j| {
-        j.events.push(format!(
-            "chosen {} ({})",
-            outcome.chosen, outcome.chosen_kind
-        ));
-        j.outcome = Some(outcome);
-        j.revision = revision;
-        j.library_entry = entry;
-    })?;
+            task,
+            Some(&entry_id),
+            24_000,
+        )?;
+        let data = app.data.clone();
+        let job_id = id.to_string();
+        let prefix = label.clone();
+        let progress = move |event: String| {
+            let _ = update_job(&data, &job_id, |j| {
+                j.events.push(format!("{prefix}{event}"))
+            });
+        };
+        let outcome = run(Plan {
+            engine: &engine,
+            dir: jobs_dir(&app.data)
+                .join(id)
+                .join("tasks")
+                .join(index.to_string()),
+            k: job.request.k,
+            mode: job.request.mode,
+            task: task.clone(),
+            base: base.clone(),
+            library,
+            width: 2,
+            agentic: job.request.agentic,
+            rubric: job.request.rubric.clone(),
+            progress: &progress,
+        })
+        .await;
+        let _ = std::fs::remove_dir_all(&scratch);
+        let outcome = outcome?;
+        let revision = if outcome.tree != base {
+            Some(
+                harness::save_revision(
+                    &app.data,
+                    &job.project_id,
+                    &outcome.tree,
+                    job.base_revision.clone(),
+                    &format!(
+                        "harness job {id}{}: {} ({:?}, k={})",
+                        if job.tasks.len() > 1 {
+                            format!(" task {}", index + 1)
+                        } else {
+                            String::new()
+                        },
+                        outcome.chosen,
+                        outcome.mode,
+                        outcome.k
+                    ),
+                )?
+                .id,
+            )
+        } else {
+            None
+        };
+        let library_entry = match &outcome.reflection {
+            Some(reflection) => harness_library::add(
+                &app.data,
+                &job.project_id,
+                &entry_id,
+                &outcome.tree,
+                reflection,
+                &outcome.chosen,
+                &outcome.selection_why,
+            )?,
+            None => None,
+        };
+        update_job(&app.data, id, |j| {
+            j.events.push(format!(
+                "{label}chosen {} ({})",
+                outcome.chosen, outcome.chosen_kind
+            ));
+            j.results.push(TaskResult {
+                index,
+                task: task.clone(),
+                outcome,
+                revision,
+                library_entry,
+            });
+            j.results.sort_by_key(|r| r.index);
+            j.warnings = stream_warnings(&j.results);
+        })?;
+    }
     Ok(())
+}
+
+/// Across a stream of tasks (after Harness² report.py): refinement that
+/// keeps choosing the base harness is not adapting anything.
+fn stream_warnings(results: &[TaskResult]) -> Vec<String> {
+    let mut out = vec![];
+    if results.len() >= 2 {
+        let base = results
+            .iter()
+            .filter(|r| r.outcome.chosen_kind == "base")
+            .count();
+        if base * 5 >= results.len() * 4 {
+            out.push(format!(
+                "The base harness was kept in {base} of {} tasks.",
+                results.len()
+            ));
+        }
+        let fell = results
+            .iter()
+            .filter(|r| !r.outcome.fallbacks.is_empty())
+            .count();
+        if fell > 0 {
+            out.push(format!(
+                "Stages fell back in {fell} of {} tasks.",
+                results.len()
+            ));
+        }
+    }
+    out
 }
 
 fn bad(e: impl ToString) -> (StatusCode, Json<Value>) {
@@ -1246,6 +1657,21 @@ pub(crate) async fn start_api(
 ) -> ApiResult<Value> {
     if !(1..=4).contains(&request.k) {
         return Err(bad("k must be between 1 and 4"));
+    }
+    if request.tasks.len() > 20
+        || request
+            .tasks
+            .iter()
+            .any(|t| t.trim().is_empty() || t.len() > 16_000)
+    {
+        return Err(bad("Give at most 20 non-empty tasks of up to 16000 bytes"));
+    }
+    if request
+        .rubric
+        .as_ref()
+        .is_some_and(|r| r.trim().is_empty() || r.len() > 16_000)
+    {
+        return Err(bad("Rubric must be 1–16000 bytes"));
     }
     if app.harness_jobs.running.lock().unwrap().len() >= 2 {
         return Err(error(
@@ -1277,7 +1703,12 @@ pub(crate) async fn start_api(
             .unwrap_or_default();
         (s.settings.clone(), task)
     };
-    if task.trim().is_empty() {
+    let tasks = if request.tasks.is_empty() {
+        vec![task]
+    } else {
+        request.tasks.clone()
+    };
+    if tasks[0].trim().is_empty() {
         return Err(bad("The conversation has no task to refine on"));
     }
     match executor.mode {
@@ -1298,15 +1729,14 @@ pub(crate) async fn start_api(
         id: id.clone(),
         project_id: executor.project_id.clone(),
         request,
-        task,
+        tasks,
         executor,
         base_revision,
         created_ms: harness::now_ms(),
         status: "queued".into(),
         events: vec![],
-        outcome: None,
-        revision: None,
-        library_entry: None,
+        results: vec![],
+        warnings: vec![],
         error: None,
     };
     write_json(&jobs_dir(&app.data).join(&id).join("job.json"), &job).map_err(bad)?;
@@ -1326,7 +1756,7 @@ pub(crate) async fn list_api(
         for entry in entries.flatten() {
             if let Ok(job) = load_job(&app.data, &entry.file_name().to_string_lossy()) {
                 if job.project_id == q.project_id {
-                    jobs.push(json!({"id":job.id,"status":job.status,"created_ms":job.created_ms,"k":job.request.k,"mode":job.request.mode,"task":job.task.chars().take(120).collect::<String>(),"revision":job.revision}));
+                    jobs.push(json!({"id":job.id,"status":job.status,"created_ms":job.created_ms,"k":job.request.k,"mode":job.request.mode,"agentic":job.request.agentic,"tasks":job.tasks.len(),"done":job.results.len(),"task":job.tasks[0].chars().take(120).collect::<String>()}));
                 }
             }
         }
@@ -1343,12 +1773,16 @@ pub(crate) async fn get_api(State(app): State<App>, Path(id): Path<String>) -> A
         .and_then(|r| harness::load_revision(&app.data, r).ok())
         .map(|r| r.tree)
         .unwrap_or_default();
-    let diff = job.outcome.as_ref().map(|o| harness::diff(&base, &o.tree));
+    let diffs: Vec<harness::Diff> = job
+        .results
+        .iter()
+        .map(|r| harness::diff(&base, &r.outcome.tree))
+        .collect();
     let active = harness::active_revision(&app.data, &job.project_id)
         .ok()
         .flatten()
         .map(|r| r.id);
-    Ok(Json(json!({"job": job, "diff": diff, "active": active})))
+    Ok(Json(json!({"job": job, "diffs": diffs, "active": active})))
 }
 pub(crate) async fn cancel_api(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
     let handle = app.harness_jobs.running.lock().unwrap().remove(&id);
@@ -1373,11 +1807,20 @@ pub(crate) async fn resume_api(State(app): State<App>, Path(id): Path<String>) -
     spawn(app.clone(), id);
     Ok(Json(json!({"resumed": true})))
 }
-/// Make the job's result the project's active harness.
-pub(crate) async fn adopt_api(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
+/// Make one task's result (`{"task": index}`, default the last task with a
+/// new revision) the project's active harness.
+pub(crate) async fn adopt_api(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult<Value> {
     let job = load_job(&app.data, &id).map_err(|e| error(StatusCode::NOT_FOUND, e))?;
-    let revision = job
-        .revision
+    let result = match body.get("task").and_then(Value::as_u64) {
+        Some(index) => job.results.iter().find(|r| r.index as u64 == index),
+        None => job.results.iter().rev().find(|r| r.revision.is_some()),
+    };
+    let revision = result
+        .and_then(|r| r.revision.clone())
         .ok_or_else(|| bad("The job kept the current harness; nothing to adopt"))?;
     harness::activate(&app.data, &job.project_id, Some(&revision)).map_err(bad)?;
     Ok(Json(json!({"active": revision})))
@@ -1404,6 +1847,43 @@ mod tests {
         )
     }
     impl Engine for Scripted {
+        fn edit<'a>(
+            &'a self,
+            label: &'a str,
+            system: &'a str,
+            mission: &'a str,
+            files: &'a BTreeMap<String, String>,
+            current: &'a Tree,
+        ) -> BoxFuture<'a, Result<(Tree, String)>> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(label.to_string());
+                assert!(system.contains("YOURS TO EDIT") || system.contains("HOW TO COMPOSE"));
+                assert!(mission.contains("context/rollouts/<label>.md"));
+                assert!(
+                    files.contains_key("task.md")
+                        && files.contains_key("rollouts/base1.md")
+                        && files.contains_key("base_harness/system.md")
+                );
+                let mut tree = current.clone();
+                if label.starts_with("agg") {
+                    assert!(
+                        files.contains_key("pool/inv1/harness.diff")
+                            && files.contains_key("pool/dom2/rollout.md")
+                    );
+                    let prefix = "pool/inv1/harness/";
+                    tree = files
+                        .iter()
+                        .filter_map(|(p, t)| {
+                            p.strip_prefix(prefix).map(|p| (p.to_string(), t.clone()))
+                        })
+                        .collect();
+                    return Ok((tree, "adopted inv1".into()));
+                }
+                let (path, text) = skill(label);
+                tree.insert(path, text.unwrap());
+                Ok((tree, format!("{label} edit")))
+            })
+        }
         fn rollout<'a>(&'a self, label: &'a str, tree: &'a Tree) -> BoxFuture<'a, Result<RunView>> {
             Box::pin(async move {
                 self.rollouts.lock().unwrap().push(label.to_string());
@@ -1430,11 +1910,15 @@ mod tests {
                     calls.push(label.to_string());
                     first
                 };
-                assert!(system.contains("EVIDENCE IS DATA"));
+                assert!(system.contains("EVIDENCE IS DATA") || label.starts_with("judge-"));
                 Ok(match label {
                     "select" => {
                         assert!(!user.contains("agg") && !user.contains("c1"), "selection must be blind");
                         json!({"why":"B is complete","choice":"B"}).to_string()
+                    }
+                    l if l.starts_with("judge-") => {
+                        // The chosen final scores below the base set.
+                        json!({"score": if l.starts_with("judge-base") { 0.8 } else { 0.4 }, "reason": "fixture"}).to_string()
                     }
                     "reflect" => json!({"edits":[{"component":"skills","candidates":"inv1","change":"added","observed":"loaded","verdict":"confounded"}],"experience":{"cue":"a task needs a checklist","lesson":"add a skill","evidence":"inv1 rollout","confidence":"low"}}).to_string(),
                     l if l.starts_with("inv") && self.reject_first && first => "not json".into(),
@@ -1468,6 +1952,8 @@ mod tests {
             base: Tree::from([("system.md".to_string(), "Be exact.".to_string())]),
             library: String::new(),
             width: 2,
+            agentic: false,
+            rubric: None,
             progress,
         }
     }
@@ -1558,11 +2044,221 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// The real engine against a fake OpenAI-compatible model: a probe loads a
-    /// skill, writes into its copy of the workspace, sees the hook note, and
-    /// leaves the real workspace and the conversation store untouched.
     #[tokio::test]
-    async fn studio_engine_probes_on_copies_with_skills_and_hooks() {
+    async fn agentic_stages_get_evidence_files_and_compose_by_copying() {
+        let dir = temp();
+        let engine = Scripted {
+            calls: Mutex::new(vec![]),
+            rollouts: Mutex::new(vec![]),
+            reject_first: false,
+        };
+        let quiet = |_: String| {};
+        let mut p = plan(&engine, &dir, Recursion::Parallel, &quiet);
+        p.agentic = true;
+        let outcome = run(p).await.unwrap();
+        assert_eq!((outcome.rollouts, outcome.stages), (8, 6));
+        let inv1: Stage = read_json(&dir.join("stages/inv1.json")).unwrap();
+        let agg1: Stage = read_json(&dir.join("stages/agg1.json")).unwrap();
+        assert_eq!(
+            agg1.tree, inv1.tree,
+            "the composer copied inv1 from the pool"
+        );
+        assert!(
+            inv1.tree.contains_key("skills/inv1/SKILL.md")
+                && inv1.tree["guardrails.md"].contains("`inv1`")
+        );
+        // Changing the mode changes every stage key: nothing is reused.
+        let again = Scripted {
+            calls: Mutex::new(vec![]),
+            rollouts: Mutex::new(vec![]),
+            reject_first: false,
+        };
+        run(plan(&again, &dir, Recursion::Parallel, &quiet))
+            .await
+            .unwrap();
+        assert!(again.calls.lock().unwrap().iter().any(|c| c == "inv1"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn stream_warnings_flag_a_stream_that_never_adapts() {
+        let outcome = |kind: &str, fallbacks: Vec<String>| Outcome {
+            mode: Recursion::Parallel,
+            k: 1,
+            chosen: "agg1".into(),
+            chosen_kind: kind.into(),
+            selection_why: String::new(),
+            tree: Tree::new(),
+            finals: vec![],
+            similarity: None,
+            fallbacks,
+            rollouts: 4,
+            stages: 3,
+            runs: vec![],
+            stage_notes: BTreeMap::new(),
+            reflection: None,
+            scores: BTreeMap::new(),
+            warnings: vec![],
+        };
+        let result = |i: usize, kind: &str, fallbacks: Vec<String>| TaskResult {
+            index: i,
+            task: format!("t{i}"),
+            outcome: outcome(kind, fallbacks),
+            revision: None,
+            library_entry: None,
+        };
+        assert!(stream_warnings(&[result(0, "base", vec![])]).is_empty());
+        let w = stream_warnings(&[
+            result(0, "base", vec![]),
+            result(1, "base", vec!["dom1".into()]),
+            result(2, "base", vec![]),
+            result(3, "base", vec![]),
+            result(4, "final", vec![]),
+        ]);
+        assert_eq!(
+            w,
+            vec![
+                "The base harness was kept in 4 of 5 tasks.",
+                "Stages fell back in 1 of 5 tasks."
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn rubric_scores_feed_warnings_but_never_selection() {
+        let dir = temp();
+        let engine = Scripted {
+            calls: Mutex::new(vec![]),
+            rollouts: Mutex::new(vec![]),
+            reject_first: false,
+        };
+        let quiet = |_: String| {};
+        let mut p = plan(&engine, &dir, Recursion::Parallel, &quiet);
+        p.rubric = Some("Covers every module.".into());
+        let outcome = run(p).await.unwrap();
+        let calls = engine.calls.lock().unwrap().clone();
+        let select = calls.iter().position(|c| c == "select").unwrap();
+        assert!(
+            calls.iter().position(|c| c.starts_with("judge-")).unwrap() > select,
+            "judging happens after selection"
+        );
+        assert_eq!(
+            outcome.scores.len(),
+            3,
+            "two base rollouts and the chosen final"
+        );
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|w| w.contains("below the base mean")),
+            "{:?}",
+            outcome.warnings
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn hook_model(request: &Value) -> Value {
+        let results = results_of(request);
+        match results.len() {
+            0 => call(
+                "write_file",
+                json!({"path":"workspace/Cargo.lock","content":"x"}),
+            ),
+            1 => {
+                assert!(
+                    results[0].contains("Blocked by a harness hook: Never edit the lockfile."),
+                    "{}",
+                    results[0]
+                );
+                call("read_file", json!({"path":"workspace/big.txt"}))
+            }
+            _ => {
+                assert!(
+                    results[1].contains("[harness hook trimmed")
+                        && results[1].chars().count() < 600,
+                    "{}",
+                    results[1].len()
+                );
+                say("done")
+            }
+        }
+    }
+
+    /// pre_tool hooks refuse matching calls before they run; post_tool
+    /// max_output trims the result the model sees.
+    #[tokio::test]
+    async fn pre_tool_blocks_and_post_tool_trims_inside_a_real_turn() {
+        let f = fixture(hook_model).await;
+        std::fs::write(f.workspace.join("big.txt"), "y".repeat(20_000)).unwrap();
+        let tree = Tree::from([("hooks.json".to_string(), r#"{"pre_tool":[{"matcher":"write_file","args_contains":"Cargo.lock","block":"Never edit the lockfile."}],"post_tool":[{"matcher":"read_file","max_output":400}]}"#.to_string())]);
+        let mut session = Session::new(crate::evaluation::new_id(), auto_settings());
+        session.ephemeral = Some(Arc::new(crate::Ephemeral {
+            project: f.project.clone(),
+            harness: Some(tree),
+            system: None,
+            nested: false,
+            restricted: false,
+        }));
+        session
+            .messages
+            .push(Message::text("user", "Touch the lockfile"));
+        let shared = Arc::new(Mutex::new(session));
+        crate::turn(f.app.clone(), shared.clone(), None)
+            .await
+            .unwrap();
+        f.server.abort();
+        assert!(!f.workspace.join("Cargo.lock").exists());
+        assert_eq!(
+            shared.lock().unwrap().messages.last().unwrap().content,
+            "done"
+        );
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    /// A Studio app wired to a fake OpenAI-compatible model whose replies
+    /// come from `model(request)`.
+    struct Fixture {
+        root: PathBuf,
+        app: App,
+        provider: crate::provider::Provider,
+        project: context::Project,
+        workspace: PathBuf,
+        data: PathBuf,
+        server: tokio::task::JoinHandle<()>,
+    }
+    fn say(text: &str) -> Value {
+        json!({"choices":[{"delta":{"content":text},"finish_reason":"stop"}]})
+    }
+    fn call(name: &str, args: Value) -> Value {
+        json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("c-{name}-{}", crate::evaluation::new_id()),"type":"function","function":{"name":name,"arguments":args.to_string()}}]},"finish_reason":"tool_calls"}]})
+    }
+    fn system_of(request: &Value) -> String {
+        request["messages"][0]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    }
+    fn tools_of(request: &Value) -> Vec<String> {
+        request["tools"]
+            .as_array()
+            .map(|t| {
+                t.iter()
+                    .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn results_of(request: &Value) -> Vec<String> {
+        request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .map(|m| m["content"].as_str().unwrap().to_string())
+            .collect()
+    }
+    async fn fixture(model: fn(&Value) -> Value) -> Fixture {
         use axum::{response::IntoResponse, routing::post, Router};
         let root = temp();
         std::fs::create_dir_all(root.join("workspace")).unwrap();
@@ -1571,35 +2267,17 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let router = Router::new().route("/v1/chat/completions", post(|Json(request): Json<Value>| async move {
-                let messages = request["messages"].as_array().unwrap();
-                let system = messages[0]["content"].as_str().unwrap_or("").to_string();
-                let tools: Vec<String> = request["tools"].as_array().map(|t| t.iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect()).unwrap_or_default();
-                let results: Vec<&str> = messages.iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap()).collect();
-                let call = |name: &str, args: Value| json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("c{}", results.len()),"type":"function","function":{"name":name,"arguments":args.to_string()}}]},"finish_reason":"tool_calls"}]});
-                let say = |text: String| json!({"choices":[{"delta":{"content":text},"finish_reason":"stop"}]});
-                let event = if tools.is_empty() {
-                    if system.contains("choosing which of") {
-                        say(json!({"why":"only one","choice":"A"}).to_string())
-                    } else if system.contains("complete record") {
-                        say(json!({"edits":[],"experience":null}).to_string())
-                    } else {
-                        say(json!({"files":{},"notes":"KEEP_BASE: runs agree"}).to_string())
-                    }
-                } else if results.is_empty() {
-                    assert!(system.contains("# Available skills") && tools.contains(&"load_skill".to_string()));
-                    call("load_skill", json!({"name":"note"}))
-                } else if results.len() == 1 {
-                    assert!(results[0].contains("Write out.txt"));
-                    call("write_file", json!({"path":"workspace/out.txt","content":"written by probe"}))
-                } else if results.len() == 2 && !messages.last().unwrap()["content"].as_str().unwrap_or("").contains("Pre-completion") {
-                    assert!(results[1].contains("[harness hook] Reopen what you wrote."));
-                    say("wrote out.txt".into())
-                } else {
-                    say("checked: out.txt is complete".into())
-                };
-                ([("content-type", "text/event-stream")], format!("data: {event}\n\ndata: [DONE]\n\n")).into_response()
-            }));
+            let router = Router::new().route(
+                "/v1/chat/completions",
+                post(move |Json(request): Json<Value>| async move {
+                    let event = model(&request);
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!("data: {event}\n\ndata: [DONE]\n\n"),
+                    )
+                        .into_response()
+                }),
+            );
             axum::serve(listener, router).await.unwrap();
         });
         let data = root.join("history").canonicalize().unwrap();
@@ -1644,39 +2322,108 @@ mod tests {
             plugins: Default::default(),
             harness_jobs: Default::default(),
         };
-        let settings: Settings = serde_json::from_value(json!({"provider":"fixture","model":"tiny","project_id":"p","mode":"auto","allow_writes":true})).unwrap();
+        Fixture {
+            root,
+            app,
+            provider,
+            project,
+            workspace,
+            data,
+            server,
+        }
+    }
+    fn auto_settings() -> Settings {
+        serde_json::from_value(json!({"provider":"fixture","model":"tiny","project_id":"p","mode":"auto","allow_writes":true})).unwrap()
+    }
+    fn engine(f: &Fixture, task: &str) -> StudioEngine {
+        let mut agent = auto_settings();
+        agent.max_steps = 40;
+        StudioEngine {
+            app: f.app.clone(),
+            executor: auto_settings(),
+            proposer: auto_settings(),
+            proposer_agent: agent,
+            proposer_provider: f.provider.clone(),
+            project: f.project.clone(),
+            task: task.into(),
+            scratch: f.root.join("scratch"),
+        }
+    }
+
+    fn probe_model(request: &Value) -> Value {
+        let (system, tools, results) = (system_of(request), tools_of(request), results_of(request));
+        let last = request["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if tools.is_empty() {
+            if system.contains("choosing which of") {
+                say(&json!({"why":"only one","choice":"A"}).to_string())
+            } else if system.contains("complete record") {
+                say(&json!({"edits":[],"experience":null}).to_string())
+            } else if system.starts_with("Evaluate the supplied answer") {
+                say(&json!({"score":0.5,"reason":"fixture"}).to_string())
+            } else {
+                say(&json!({"files":{},"notes":"KEEP_BASE: runs agree"}).to_string())
+            }
+        } else if results.is_empty() {
+            assert!(
+                system.contains("# Available skills") && tools.contains(&"load_skill".to_string())
+            );
+            call("load_skill", json!({"name":"note"}))
+        } else if results.len() == 1 {
+            assert!(results[0].contains("Write out.txt"));
+            call(
+                "write_file",
+                json!({"path":"workspace/out.txt","content":"written by probe"}),
+            )
+        } else if results.len() == 2 && !last.contains("Pre-completion") {
+            assert!(results[1].contains("[harness hook] Reopen what you wrote."));
+            say("wrote out.txt")
+        } else {
+            say("checked: out.txt is complete")
+        }
+    }
+
+    /// The real engine against a fake model: a probe loads a skill, writes
+    /// into its copy of the workspace, sees the hook note, and leaves the
+    /// real workspace and the conversation store untouched.
+    #[tokio::test]
+    async fn studio_engine_probes_on_copies_with_skills_and_hooks() {
+        let f = fixture(probe_model).await;
         let base = harness::autotrigger(&Tree::from([
             ("skills/note/SKILL.md".to_string(), "---\nname: note\ndescription: the task asks for a note file\n---\nWrite out.txt with the note.\n".to_string()),
             ("hooks.json".to_string(), r#"{"post_tool":[{"matcher":"write_file","inject":"Reopen what you wrote."}],"stop":[{"inject":"Confirm out.txt exists."}]}"#.to_string()),
         ]));
-        let engine = StudioEngine {
-            app: app.clone(),
-            executor: settings.clone(),
-            proposer: settings,
-            proposer_provider: provider,
-            project,
-            task: "Leave a note".into(),
-            scratch: root.join("scratch"),
-        };
+        let engine = engine(&f, "Leave a note");
         let quiet = |_: String| {};
         let outcome = run(Plan {
             engine: &engine,
-            dir: root.join("job"),
+            dir: f.root.join("job"),
             k: 1,
             mode: Recursion::Parallel,
             task: "Leave a note".into(),
             base: base.clone(),
             library: String::new(),
             width: 2,
+            agentic: false,
+            rubric: Some("The note exists.".into()),
             progress: &quiet,
         })
         .await
         .unwrap();
-        server.abort();
+        f.server.abort();
         assert_eq!((outcome.rollouts, outcome.stages), (4, 3));
         assert_eq!(outcome.chosen, "agg1");
         assert_eq!(outcome.tree, base, "KEEP_BASE everywhere keeps the harness");
-        let base1: RunView = read_json(&root.join("job/rollouts/base1.json")).unwrap();
+        assert_eq!(
+            outcome.scores,
+            BTreeMap::from([
+                ("agg1".to_string(), Some(0.5)),
+                ("base1".to_string(), Some(0.5))
+            ])
+        );
+        let base1: RunView = read_json(&f.root.join("job/rollouts/base1.json")).unwrap();
         assert!(base1.delivered, "{base1:?}");
         assert_eq!(base1.answer, "checked: out.txt is complete");
         assert!(
@@ -1693,18 +2440,166 @@ mod tests {
                     .contains("Pre-completion check from the harness")
         );
         assert!(
-            !workspace.join("out.txt").exists(),
+            !f.workspace.join("out.txt").exists(),
             "probes never touch the real workspace"
         );
         assert!(
-            !std::fs::read_dir(&data)
+            !std::fs::read_dir(&f.data)
                 .unwrap()
                 .flatten()
                 .any(|e| e.path().extension().is_some_and(|x| x == "json")),
             "probe sessions are not saved"
         );
-        assert!(!root.join("scratch/base1").exists());
-        std::fs::remove_dir_all(root).unwrap();
+        assert!(!f.root.join("scratch/base1").exists());
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    fn proposer_model(request: &Value) -> Value {
+        let (system, tools, results) = (system_of(request), tools_of(request), results_of(request));
+        assert!(system.contains("YOUR DIMENSION: INV") && system.contains("YOURS TO EDIT"));
+        assert!(!tools
+            .iter()
+            .any(|t| ["run_command", "background", "delegate", "load_skill"]
+                .contains(&t.as_str())
+                || t.starts_with("mcp_")));
+        match results.len() {
+            0 => call("read_file", json!({"path":"context/rollouts/base1.md"})),
+            1 => {
+                assert!(results[0].contains("searched three times"));
+                call(
+                    "write_file",
+                    json!({"path":"harness/skills/find/SKILL.md","content":"---\nname: find\ndescription: the task needs a file located\n---\nSearch with agentgrep once, then read the hit.\n"}),
+                )
+            }
+            2 => call(
+                "write_file",
+                json!({"path":"harness/memory.md","content":""}),
+            ),
+            3 => call(
+                "write_file",
+                json!({"path":"context/task.md","content":"tampered"}),
+            ),
+            _ => {
+                assert!(results[3].contains("read-only"), "{}", results[3]);
+                say("base1 searched three times -> skill `find`")
+            }
+        }
+    }
+
+    /// An agentic proposer edits its `harness` root with file tools, cannot
+    /// write the evidence or run commands, and its empty files are deletions.
+    #[tokio::test]
+    async fn agentic_proposer_edits_files_and_cannot_touch_evidence() {
+        let f = fixture(proposer_model).await;
+        let engine = engine(&f, "Find the config");
+        let files = BTreeMap::from([
+            ("task.md".to_string(), "Find the config".to_string()),
+            (
+                "rollouts/base1.md".to_string(),
+                "[ACTION] agentgrep — searched three times".to_string(),
+            ),
+        ]);
+        let current = Tree::from([
+            ("memory.md".to_string(), "stale".to_string()),
+            ("system.md".to_string(), "Be exact.".to_string()),
+        ]);
+        let system = prompts::propose("INV", 1, 1, None, true);
+        let (tree, notes) = engine
+            .edit("inv1", &system, &prompts::mission(None), &files, &current)
+            .await
+            .unwrap();
+        f.server.abort();
+        assert_eq!(notes, "base1 searched three times -> skill `find`");
+        assert!(
+            !tree.contains_key("memory.md"),
+            "an emptied file is a deletion"
+        );
+        assert_eq!(tree["system.md"], "Be exact.");
+        assert!(tree["skills/find/SKILL.md"].contains("name: find"));
+        assert!(accept(&tree).unwrap()["guardrails.md"].contains("load the `find` skill"));
+        assert!(
+            !f.root
+                .join("scratch")
+                .read_dir()
+                .is_ok_and(|mut d| d.next().is_some()),
+            "proposer workspaces are removed"
+        );
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    fn delegate_model(request: &Value) -> Value {
+        let (system, tools, results) = (system_of(request), tools_of(request), results_of(request));
+        if system.contains("You are the `reader` subagent") {
+            assert!(
+                !tools.contains(&"delegate".to_string()),
+                "subagents cannot delegate again"
+            );
+            assert!(
+                !tools.contains(&"write_file".to_string()),
+                "reader has writes: false"
+            );
+            return if results.is_empty() {
+                call("read_file", json!({"path":"workspace/readme.txt"}))
+            } else {
+                say("readme says hello")
+            };
+        }
+        assert!(
+            system.contains("# Available subagents\n")
+                || system.contains("# Available subagents (")
+        );
+        if results.is_empty() {
+            call(
+                "delegate",
+                json!({"agent":"reader","task":"Read workspace/readme.txt and summarise it."}),
+            )
+        } else {
+            assert!(results[0].contains("readme says hello"), "{}", results[0]);
+            say("the subagent read it")
+        }
+    }
+
+    /// `delegate` runs the subagent as a nested turn with its own prompt,
+    /// without delegation or (for `writes: false`) write tools, and returns
+    /// its answer to the parent.
+    #[tokio::test]
+    async fn delegate_runs_a_nested_subagent_turn() {
+        let f = fixture(delegate_model).await;
+        let tree = Tree::from([("subagents/reader/AGENT.md".to_string(), "---\ndescription: reads one file and summarises it\nwrites: false\n---\nRead exactly what you are asked to and summarise it in one line.\n".to_string())]);
+        let mut session = Session::new(crate::evaluation::new_id(), auto_settings());
+        session.ephemeral = Some(Arc::new(crate::Ephemeral {
+            project: f.project.clone(),
+            harness: Some(tree),
+            system: None,
+            nested: false,
+            restricted: false,
+        }));
+        session
+            .messages
+            .push(Message::text("user", "What does the readme say?"));
+        let shared = Arc::new(Mutex::new(session));
+        let outcome = crate::turn(f.app.clone(), shared.clone(), None)
+            .await
+            .unwrap();
+        f.server.abort();
+        assert!(matches!(outcome, crate::TurnOutcome::Complete));
+        let state = shared.lock().unwrap();
+        assert_eq!(
+            state.messages.last().unwrap().content,
+            "the subagent read it"
+        );
+        let tool = state.messages.iter().find(|m| m.role == "tool").unwrap();
+        let value: Value = serde_json::from_str(&tool.content).unwrap();
+        assert_eq!(
+            (
+                value["agent"].as_str(),
+                value["outcome"].as_str(),
+                value["answer"].as_str()
+            ),
+            (Some("reader"), Some("Complete"), Some("readme says hello"))
+        );
+        drop(state);
+        std::fs::remove_dir_all(&f.root).unwrap();
     }
 
     #[test]
