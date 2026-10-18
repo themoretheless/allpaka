@@ -169,6 +169,17 @@ pub const KERNELS: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
+// Device-scope fences (thread_scope_device) arrived in MSL 3.2. On older
+// Metal the only memory order is relaxed, and the threadgroup_barrier with
+// mem_device that surrounds every wait and publish is the strongest ordering
+// available, so the fence compiles away there instead of failing the whole
+// library.
+#if defined(__METAL_VERSION__) && __METAL_VERSION__ >= 320
+#define DEVICE_FENCE() atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device)
+#else
+#define DEVICE_FENCE() ((void)0)
+#endif
+
 // Batched matvec, one SIMD group per weight row: the 32 lanes walk the row's
 // quant blocks round-robin, so the group's reads are contiguous and coalesce,
 // and lane partial sums fold with simd_sum at the end. Each lane accumulates
@@ -1395,7 +1406,7 @@ kernel void matvec_q4_k_mv(
         if (ltid_v.x == 0) {
             while (atomic_load_explicit(wait_flag, memory_order_relaxed) < wait_epoch) {
             }
-            atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+            DEVICE_FENCE();
         }
         threadgroup_barrier(mem_flags::mem_device);
     }
@@ -1937,7 +1948,7 @@ kernel void residual_norm_sig(
     }
     threadgroup_barrier(mem_flags::mem_device);
     if (tid == 0) {
-        atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+        DEVICE_FENCE();
         atomic_store_explicit(flag, epoch, memory_order_relaxed);
     }
 }
@@ -1992,7 +2003,7 @@ kernel void matvec_f32(
         if (ltid == 0) {
             while (atomic_load_explicit(wait_flag, memory_order_relaxed) < wait_epoch) {
             }
-            atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
+            DEVICE_FENCE();
         }
         threadgroup_barrier(mem_flags::mem_device);
     }
@@ -4267,6 +4278,40 @@ kernel void NAME(                                                              \
     }                                                                          \
 }
 
+#define STAGE_BLOCK_1(b_arg, blk_arg) do {                            \
+    const uint stage_b_ = (b_arg);                                    \
+    const uint stage_blk_ = (blk_arg);                                \
+    const uint b = stage_b_;                                          \
+    const uint blk = stage_blk_;                                      \
+        threadgroup half* sa = sab[b];                                \
+        threadgroup half* sb = sa + 64 * NK;                          \
+        uint chunk0 = blk * (NK / 16);                                \
+        for (short c = 0; c < NK / 32; c++) {                         \
+            half4x4 temp_a;                                           \
+            uint cg = chunk0 + il0 * (NK / 32) + c;                   \
+            dqll_q4_k(bx0 + cg / 16, (short)(cg % 16), temp_a);       \
+            const short kc = il0 * (NK / 32) + c;                     \
+            _Pragma("clang loop unroll(full)")                        \
+            for (short i = 0; i < 16; i++) {                          \
+                const short sx = 2 * kc + i / 8;                      \
+                const short sy = (tiitg / 2) / 8;                     \
+                const short lx = (tiitg / 2) % 8;                     \
+                const short ly = i % 8;                               \
+                const short ib = 8 * sx + sy;                         \
+                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4]; \
+            }                                                         \
+        }                                                             \
+        device const float* byk = by + (ulong)blk * NK;               \
+        for (short c = 0; c < NK / 32; c++) {                         \
+            const short sx = tiitg % 4 + 4 * c;                       \
+            const short sy = (tiitg / 4) / 8;                         \
+            const short ly = (tiitg / 4) % 8;                         \
+            const short ib = 4 * sx + sy;                             \
+            *(threadgroup half2x4*)(sb + 64 * ib + 8 * ly) =          \
+                half2x4(*(device const float2x4*)(byk + 32 * c));     \
+        }                                                             \
+} while (0)
+
 // Software-pipelined variant of mmll_q4_k: double-buffered A/B staging.
 // Per K-block the loop dequants block i+1 into the shadow buffer while the
 // MMA chews block i, so the dequant's device loads hide behind tensor work
@@ -4311,42 +4356,13 @@ kernel void mmllp_q4_k(
     }
     const uint nblk = n_in / NK;
     // Dequant + stage one K-block into buffer set b.
-    auto stage_block = [&](uint b, uint blk) {
-        threadgroup half* sa = sab[b];
-        threadgroup half* sb = sa + 64 * NK;
-        uint chunk0 = blk * (NK / 16);
-        for (short c = 0; c < NK / 32; c++) {
-            half4x4 temp_a;
-            uint cg = chunk0 + il0 * (NK / 32) + c;
-            dqll_q4_k(bx0 + cg / 16, (short)(cg % 16), temp_a);
-            const short kc = il0 * (NK / 32) + c;
-            _Pragma("clang loop unroll(full)")
-            for (short i = 0; i < 16; i++) {
-                const short sx = 2 * kc + i / 8;
-                const short sy = (tiitg / 2) / 8;
-                const short lx = (tiitg / 2) % 8;
-                const short ly = i % 8;
-                const short ib = 8 * sx + sy;
-                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];
-            }
-        }
-        device const float* byk = by + (ulong)blk * NK;
-        for (short c = 0; c < NK / 32; c++) {
-            const short sx = tiitg % 4 + 4 * c;
-            const short sy = (tiitg / 4) / 8;
-            const short ly = (tiitg / 4) % 8;
-            const short ib = 4 * sx + sy;
-            *(threadgroup half2x4*)(sb + 64 * ib + 8 * ly) =
-                half2x4(*(device const float2x4*)(byk + 32 * c));
-        }
-    };
-    stage_block(0, 0);
+    STAGE_BLOCK_1(0, 0);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint blk = 0; blk < nblk; blk++) {
         const uint cur = blk & 1;
         if (blk + 1 < nblk) {
             // Shadow-stage the next block; its device loads overlap the MMA.
-            stage_block(1 - cur, blk + 1);
+            STAGE_BLOCK_1(1 - cur, blk + 1);
         }
         threadgroup const half* sa = sab[cur];
         threadgroup const half* sb = sa + 64 * NK;
@@ -4397,6 +4413,40 @@ kernel void mmllp_q4_k(
         }
     }
 }
+
+#define STAGE_BLOCK_2(b_arg, blk_arg) do {                            \
+    const uint stage_b_ = (b_arg);                                    \
+    const uint stage_blk_ = (blk_arg);                                \
+    const uint b = stage_b_;                                          \
+    const uint blk = stage_blk_;                                      \
+        threadgroup half* sa = sab[b];                                \
+        threadgroup half* sb = sa + 64 * NK;                          \
+        uint chunk0 = blk * (NK / 16);                                \
+        for (short c = 0; c < NK / 32; c++) {                         \
+            half4x4 temp_a;                                           \
+            uint cg = chunk0 + il0 * (NK / 32) + c;                   \
+            dqll_q8_0(bx0 + cg / 2, (short)(cg % 2), temp_a);         \
+            const short kc = il0 * (NK / 32) + c;                     \
+            _Pragma("clang loop unroll(full)")                        \
+            for (short i = 0; i < 16; i++) {                          \
+                const short sx = 2 * kc + i / 8;                      \
+                const short sy = (tiitg / 2) / 8;                     \
+                const short lx = (tiitg / 2) % 8;                     \
+                const short ly = i % 8;                               \
+                const short ib = 8 * sx + sy;                         \
+                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4]; \
+            }                                                         \
+        }                                                             \
+        device const float* byk = by + (ulong)blk * NK;               \
+        for (short c = 0; c < NK / 32; c++) {                         \
+            const short sx = tiitg % 4 + 4 * c;                       \
+            const short sy = (tiitg / 4) / 8;                         \
+            const short ly = (tiitg / 4) % 8;                         \
+            const short ib = 4 * sx + sy;                             \
+            *(threadgroup half2x4*)(sb + 64 * ib + 8 * ly) =          \
+                half2x4(*(device const float2x4*)(byk + 32 * c));     \
+        }                                                             \
+} while (0)
 
 // Software-pipelined variant of mmll_q8_0: the same double-buffered staging
 // as mmllp_q4_k, format-swapped (32-value blocks, 34 bytes each, NL=2
@@ -4440,42 +4490,13 @@ kernel void mmllp_q8_0(
     }
     const uint nblk = n_in / NK;
     // Dequant + stage one K-block into buffer set b.
-    auto stage_block = [&](uint b, uint blk) {
-        threadgroup half* sa = sab[b];
-        threadgroup half* sb = sa + 64 * NK;
-        uint chunk0 = blk * (NK / 16);
-        for (short c = 0; c < NK / 32; c++) {
-            half4x4 temp_a;
-            uint cg = chunk0 + il0 * (NK / 32) + c;
-            dqll_q8_0(bx0 + cg / 2, (short)(cg % 2), temp_a);
-            const short kc = il0 * (NK / 32) + c;
-            _Pragma("clang loop unroll(full)")
-            for (short i = 0; i < 16; i++) {
-                const short sx = 2 * kc + i / 8;
-                const short sy = (tiitg / 2) / 8;
-                const short lx = (tiitg / 2) % 8;
-                const short ly = i % 8;
-                const short ib = 8 * sx + sy;
-                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];
-            }
-        }
-        device const float* byk = by + (ulong)blk * NK;
-        for (short c = 0; c < NK / 32; c++) {
-            const short sx = tiitg % 4 + 4 * c;
-            const short sy = (tiitg / 4) / 8;
-            const short ly = (tiitg / 4) % 8;
-            const short ib = 4 * sx + sy;
-            *(threadgroup half2x4*)(sb + 64 * ib + 8 * ly) =
-                half2x4(*(device const float2x4*)(byk + 32 * c));
-        }
-    };
-    stage_block(0, 0);
+    STAGE_BLOCK_2(0, 0);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint blk = 0; blk < nblk; blk++) {
         const uint cur = blk & 1;
         if (blk + 1 < nblk) {
             // Shadow-stage the next block; its device loads overlap the MMA.
-            stage_block(1 - cur, blk + 1);
+            STAGE_BLOCK_2(1 - cur, blk + 1);
         }
         threadgroup const half* sa = sab[cur];
         threadgroup const half* sb = sa + 64 * NK;
@@ -4527,6 +4548,40 @@ kernel void mmllp_q8_0(
     }
 }
 
+#define STAGE_BLOCK_3(b_arg, blk_arg) do {                            \
+    const uint stage_b_ = (b_arg);                                    \
+    const uint stage_blk_ = (blk_arg);                                \
+    const uint b = stage_b_;                                          \
+    const uint blk = stage_blk_;                                      \
+        threadgroup half* sa = sab[b];                                \
+        threadgroup half* sb = sa + 64 * NK;                          \
+        uint chunk0 = blk * (NK / 16);                                \
+        for (short c = 0; c < NK / 32; c++) {                         \
+            half4x4 temp_a;                                           \
+            uint cg = chunk0 + il0 * (NK / 32) + c;                   \
+            dqll_q5_k(bx0 + cg / 16, (short)(cg % 16), temp_a);       \
+            const short kc = il0 * (NK / 32) + c;                     \
+            _Pragma("clang loop unroll(full)")                        \
+            for (short i = 0; i < 16; i++) {                          \
+                const short sx = 2 * kc + i / 8;                      \
+                const short sy = (tiitg / 2) / 8;                     \
+                const short lx = (tiitg / 2) % 8;                     \
+                const short ly = i % 8;                               \
+                const short ib = 8 * sx + sy;                         \
+                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4]; \
+            }                                                         \
+        }                                                             \
+        device const float* byk = by + (ulong)blk * NK;               \
+        for (short c = 0; c < NK / 32; c++) {                         \
+            const short sx = tiitg % 4 + 4 * c;                       \
+            const short sy = (tiitg / 4) / 8;                         \
+            const short ly = (tiitg / 4) % 8;                         \
+            const short ib = 4 * sx + sy;                             \
+            *(threadgroup half2x4*)(sb + 64 * ib + 8 * ly) =          \
+                half2x4(*(device const float2x4*)(byk + 32 * c));     \
+        }                                                             \
+} while (0)
+
 // Software-pipelined variant of mmll_q5_k: same double-buffered staging as
 // mmllp_q4_k, Q5_K format (256-value superblocks, 176 bytes, NL=16 chunks).
 // Estimates the pipe gain for the 35B's Q5_K down experts.
@@ -4567,41 +4622,12 @@ kernel void mmllp_q5_k(
         mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
     }
     const uint nblk = n_in / NK;
-    auto stage_block = [&](uint b, uint blk) {
-        threadgroup half* sa = sab[b];
-        threadgroup half* sb = sa + 64 * NK;
-        uint chunk0 = blk * (NK / 16);
-        for (short c = 0; c < NK / 32; c++) {
-            half4x4 temp_a;
-            uint cg = chunk0 + il0 * (NK / 32) + c;
-            dqll_q5_k(bx0 + cg / 16, (short)(cg % 16), temp_a);
-            const short kc = il0 * (NK / 32) + c;
-            _Pragma("clang loop unroll(full)")
-            for (short i = 0; i < 16; i++) {
-                const short sx = 2 * kc + i / 8;
-                const short sy = (tiitg / 2) / 8;
-                const short lx = (tiitg / 2) % 8;
-                const short ly = i % 8;
-                const short ib = 8 * sx + sy;
-                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];
-            }
-        }
-        device const float* byk = by + (ulong)blk * NK;
-        for (short c = 0; c < NK / 32; c++) {
-            const short sx = tiitg % 4 + 4 * c;
-            const short sy = (tiitg / 4) / 8;
-            const short ly = (tiitg / 4) % 8;
-            const short ib = 4 * sx + sy;
-            *(threadgroup half2x4*)(sb + 64 * ib + 8 * ly) =
-                half2x4(*(device const float2x4*)(byk + 32 * c));
-        }
-    };
-    stage_block(0, 0);
+    STAGE_BLOCK_3(0, 0);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint blk = 0; blk < nblk; blk++) {
         const uint cur = blk & 1;
         if (blk + 1 < nblk) {
-            stage_block(1 - cur, blk + 1);
+            STAGE_BLOCK_3(1 - cur, blk + 1);
         }
         threadgroup const half* sa = sab[cur];
         threadgroup const half* sb = sa + 64 * NK;
@@ -4980,6 +5006,54 @@ DEFINE_MM_ID_LL_NK(mmllg_id_q5_0, BlkQ5_0, 2, dqll_q5_0, (n_in / 32) * 22, 1, 32
 DEFINE_MM_ID_LL_NK(mm64ll_id_q5_0, BlkQ5_0, 2, dqll_q5_0, (n_in / 32) * 22, 0, 64, 0, 0)
 DEFINE_MM_ID_LL_NK(mm64llg_id_q5_0, BlkQ5_0, 2, dqll_q5_0, (n_in / 32) * 22, 1, 64, 0, 0)
 
+#define STAGE_BLOCK_4(b_arg, blk_arg) do {                              \
+    const uint stage_b_ = (b_arg);                                      \
+    const uint stage_blk_ = (blk_arg);                                  \
+    const uint b = stage_b_;                                            \
+    const uint blk = stage_blk_;                                        \
+        threadgroup half* sa = sab[b];                                  \
+        threadgroup half* sb = sa + 64 * NK;                            \
+        uint chunk0 = blk * (NK / 16);                                  \
+        for (short c = 0; c < NK / 32; c++) {                           \
+            half4x4 temp_a;                                             \
+            uint cg = chunk0 + il0 * (NK / 32) + c;                     \
+            dqll_q4_k(bx0 + cg / 16, (short)(cg % 16), temp_a);         \
+            const short kc = il0 * (NK / 32) + c;                       \
+            _Pragma("clang loop unroll(full)")                          \
+            for (short i = 0; i < 16; i++) {                            \
+                const short sx = 2 * kc + i / 8;                        \
+                const short sy = (tiitg / 2) / 8;                       \
+                const short lx = (tiitg / 2) % 8;                       \
+                const short ly = i % 8;                                 \
+                const short ib = 8 * sx + sy;                           \
+                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];   \
+            }                                                           \
+        }                                                               \
+        device const float* byk = by + (ulong)blk * NK;                 \
+        device const float* by2k = by2 + (ulong)blk * NK;               \
+        for (short c = 0; c < NK / 32; c++) {                           \
+            const short sx = tiitg % 4 + 4 * c;                         \
+            const short sy = (tiitg / 4) / 8;                           \
+            const short ly = (tiitg / 4) % 8;                           \
+            const short ib = 4 * sx + sy;                               \
+            if (SWIGLU) {                                               \
+                float2x4 gv = *(device const float2x4*)(byk + 32 * c);  \
+                float2x4 uv = *(device const float2x4*)(by2k + 32 * c); \
+                half2x4 hv;                                             \
+                _Pragma("clang loop unroll(full)")                      \
+                for (short q = 0; q < 2; q++) {                         \
+                    float4 g = gv[q];                                   \
+                    float4 u = uv[q];                                   \
+                    hv[q] = half4(g / (1.0f + exp(-g)) * u);            \
+                }                                                       \
+                *(threadgroup half2x4*)(sb + 64 * ib + 8 * ly) = hv;    \
+            } else {                                                    \
+                *(threadgroup half2x4*)(sb + 64 * ib + 8 * ly) =        \
+                    half2x4(*(device const float2x4*)(byk + 32 * c));   \
+            }                                                           \
+        }                                                               \
+} while (0)
+
 // Software-pipelined grouped mm (q4_k): same double-buffered K-loop as
 // mmllp_q4_k - dequant/stage block i+1 into the shadow set while the MMA
 // chews block i, one threadgroup barrier per block instead of two.
@@ -5039,55 +5113,12 @@ kernel void NAME(                                                              \
         mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);                   \
     }                                                                          \
     const uint nblk = n_in / NK;                                               \
-    auto stage_block = [&](uint b, uint blk) {                                 \
-        threadgroup half* sa = sab[b];                                         \
-        threadgroup half* sb = sa + 64 * NK;                                   \
-        uint chunk0 = blk * (NK / 16);                                         \
-        for (short c = 0; c < NK / 32; c++) {                                  \
-            half4x4 temp_a;                                                    \
-            uint cg = chunk0 + il0 * (NK / 32) + c;                            \
-            dqll_q4_k(bx0 + cg / 16, (short)(cg % 16), temp_a);                \
-            const short kc = il0 * (NK / 32) + c;                              \
-            _Pragma("clang loop unroll(full)")                                 \
-            for (short i = 0; i < 16; i++) {                                   \
-                const short sx = 2 * kc + i / 8;                               \
-                const short sy = (tiitg / 2) / 8;                              \
-                const short lx = (tiitg / 2) % 8;                              \
-                const short ly = i % 8;                                        \
-                const short ib = 8 * sx + sy;                                  \
-                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];          \
-            }                                                                  \
-        }                                                                      \
-        device const float* byk = by + (ulong)blk * NK;                        \
-        device const float* by2k = by2 + (ulong)blk * NK;                      \
-        for (short c = 0; c < NK / 32; c++) {                                  \
-            const short sx = tiitg % 4 + 4 * c;                                \
-            const short sy = (tiitg / 4) / 8;                                  \
-            const short ly = (tiitg / 4) % 8;                                  \
-            const short ib = 4 * sx + sy;                                      \
-            if (SWIGLU) {                                                      \
-                float2x4 gv = *(device const float2x4*)(byk + 32 * c);         \
-                float2x4 uv = *(device const float2x4*)(by2k + 32 * c);        \
-                half2x4 hv;                                                    \
-                _Pragma("clang loop unroll(full)")                             \
-                for (short q = 0; q < 2; q++) {                                \
-                    float4 g = gv[q];                                          \
-                    float4 u = uv[q];                                          \
-                    hv[q] = half4(g / (1.0f + exp(-g)) * u);                   \
-                }                                                              \
-                *(threadgroup half2x4*)(sb + 64 * ib + 8 * ly) = hv;           \
-            } else {                                                           \
-                *(threadgroup half2x4*)(sb + 64 * ib + 8 * ly) =               \
-                    half2x4(*(device const float2x4*)(byk + 32 * c));          \
-            }                                                                  \
-        }                                                                      \
-    };                                                                         \
-    stage_block(0, 0);                                                         \
+    STAGE_BLOCK_4(0, 0);                                                         \
     threadgroup_barrier(mem_flags::mem_threadgroup);                           \
     for (uint blk = 0; blk < nblk; blk++) {                                    \
         const uint cur = blk & 1;                                              \
         if (blk + 1 < nblk) {                                                  \
-            stage_block(1 - cur, blk + 1);                                     \
+            STAGE_BLOCK_4(1 - cur, blk + 1);                                     \
         }                                                                      \
         threadgroup const half* sa = sab[cur];                                 \
         threadgroup const half* sb = sa + 64 * NK;                             \
