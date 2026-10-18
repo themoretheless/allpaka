@@ -89,6 +89,10 @@ pub fn is_attached() -> bool {
     GPU.get().map_or(false, Option::is_some)
 }
 
+pub fn init_error() -> Option<String> {
+    None
+}
+
 pub fn residency_status() -> (usize, bool) {
     let Some(Some(cell)) = GPU.get() else {
         return (0, false);

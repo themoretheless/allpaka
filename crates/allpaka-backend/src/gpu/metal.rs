@@ -7599,6 +7599,22 @@ pub fn is_attached() -> bool {
     GPU.get().is_some_and(Option::is_some)
 }
 
+static INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// Why the Metal device was not attached: no device, a kernel compile error
+/// or a missing pipeline. Tests report it; the first failure is otherwise
+/// only printed into whichever test happened to initialise the device.
+pub fn init_error() -> Option<String> {
+    INIT_ERROR.lock().ok().and_then(|e| e.clone())
+}
+
+fn init_failed(message: String) {
+    eprintln!("metal: {message}");
+    if let Ok(mut slot) = INIT_ERROR.lock() {
+        slot.get_or_insert(message);
+    }
+}
+
 /// Runtime state that determines whether large mapped models avoid Metal's
 /// per-submit residency scan. The values are reported by benchmarks so a
 /// missing residency set cannot masquerade as slow kernels.
@@ -7675,10 +7691,13 @@ pub fn prefill_replay(_xs: &[f32]) -> Option<Vec<f32>> {
 const CHUNK_OVERLAP: usize = 2 << 30;
 
 fn init_device() -> Option<Gpu> {
-    let device = Device::system_default()?;
+    let Some(device) = Device::system_default() else {
+        init_failed("no system default Metal device".into());
+        return None;
+    };
     let library = device
         .new_library_with_source(KERNELS, &metal::CompileOptions::new())
-        .map_err(|e| eprintln!("metal: kernel compile failed, staying on CPU: {e}"))
+        .map_err(|e| init_failed(format!("kernel compile failed, staying on CPU: {e}")))
         .ok()?;
     let mut pipelines = HashMap::new();
     // These two take no specialisation; they are stored under the unit shape.
@@ -7740,11 +7759,11 @@ fn init_device() -> Option<Gpu> {
     ] {
         let f = library
             .get_function(name, None)
-            .map_err(|e| eprintln!("metal: get_function {name} failed: {e}"))
+            .map_err(|e| init_failed(format!("get_function {name} failed: {e}")))
             .ok()?;
         let p = device
             .new_compute_pipeline_state_with_function(&f)
-            .map_err(|e| eprintln!("metal: pipeline {name} failed: {e}"))
+            .map_err(|e| init_failed(format!("pipeline {name} failed: {e}")))
             .ok()?;
         pipelines.insert((name, 1, 1), p);
     }

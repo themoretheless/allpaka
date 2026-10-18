@@ -807,7 +807,8 @@ mod tests {
         {
             assert!(
                 allpaka_backend::gpu::is_attached(),
-                "Metal GPU should be attached and shader library compiled cleanly"
+                "Metal GPU should be attached and shader library compiled cleanly: {:?}",
+                allpaka_backend::gpu::init_error()
             );
             assert_eq!(after.attempts - before.attempts, 4);
             assert_eq!(after.successes - before.successes, 4);
@@ -923,7 +924,11 @@ mod tests {
         );
         #[cfg(target_os = "macos")]
         {
-            assert!(allpaka_backend::gpu::is_attached());
+            assert!(
+                allpaka_backend::gpu::is_attached(),
+                "Metal GPU should be attached: {:?}",
+                allpaka_backend::gpu::init_error()
+            );
             assert_eq!(after.attempts - before.attempts, 4);
             assert_eq!(after.successes - before.successes, 4);
             assert_eq!(after.declines - before.declines, 0);

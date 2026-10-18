@@ -30,6 +30,10 @@ pub fn is_attached() -> bool {
     false
 }
 
+pub fn init_error() -> Option<String> {
+    None
+}
+
 pub fn residency_status() -> (usize, bool) {
     (0, false)
 }
