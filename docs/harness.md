@@ -261,17 +261,11 @@ selection.json, reflection.json, scores.json}`. Прогон переиспол�
 | POST | `/api/harness/activate` | `{project_id, revision \| null}` |
 | POST | `/api/harness/import-skill` | `{project_id, text, activate}` |
 | GET | `/api/harness/revisions/:id` | ревизия и diff от родителя |
-| GET/POST | `/api/harness/jobs` | список / `{session_id, k, mode, agentic?, rubric?, tasks?, provider?, model?}` |
+| GET/POST | `/api/harness/jobs` | список / `{session_id, k, mode, agentic?, rubric?, tasks?, dataset?, external?, provider?, model?}` |
 | GET | `/api/harness/jobs/:id` | запись запуска, итог, diff |
 | POST | `/api/harness/jobs/:id/{cancel,resume}` | управление запуском |
 | POST | `/api/harness/jobs/:id/adopt` | `{task?}` — включить результат задачи |
 | GET | `/api/harness/library?project_id=` | записи библиотеки |
-
-Python SDK (`sdk/python/allpaka_studio.py`) предоставляет:
-- `harness`, `save_harness`, `activate_harness`;
-- `start_harness_job` (с `tasks`, `dataset`, `external`), `harness_job`,
-  `adopt_harness_job`;
-- `harness_library`.
 
 ## Чем отличается от Harness²
 
@@ -292,11 +286,11 @@ Python SDK (`sdk/python/allpaka_studio.py`) предоставляет:
 
 ```bash
 cargo test -p allpaka-chat --offline harness
-python3 scripts/test-studio-harness.py
 ```
 
-`test-studio-harness.py` запускает Studio с локальным mock-провайдером и
-проверяет:
+Интеграционный тест `crates/allpaka-chat/tests/harness_e2e.rs` поднимает
+Studio (`allpaka_chat::run`) с локальной поддельной моделью на axum и через
+HTTP API проверяет:
 
 - отклонение неверных деревьев;
 - автодобавление триггера;
@@ -307,6 +301,11 @@ python3 scripts/test-studio-harness.py
 - запуск через внешний CLI с раскладкой `codex`;
 - что пробы не трогают рабочую папку и не сохраняют разговоры;
 - принятие результата и запись в библиотеке.
+
+С переменными `ALLPAKA_CODEX_BIN` и/или `ALLPAKA_OPENCODE_BIN` тот же тест
+запускает настоящие `codex exec` и `opencode run` как внешний исполнитель
+против поддельной модели. Он проверяет, что каждый прогон дал результат, а
+модель получила разложенный `AGENTS.md` и найденный CLI навык.
 
 Rust-тесты отдельно проверяют на сценарной модели:
 

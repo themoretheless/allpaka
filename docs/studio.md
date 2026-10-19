@@ -264,7 +264,6 @@ Swarm запускает не один диалог, а волну незави�
 cargo test -p allpaka-chat --offline
 cargo build -p allpaka-cli --no-default-features --offline
 python3 scripts/test-studio.py
-python3 scripts/test-studio-harness.py
 node --check crates/allpaka-chat/web/app.js
 ```
 
