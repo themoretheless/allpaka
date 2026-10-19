@@ -2211,3 +2211,15 @@ button svg, summary svg, .attach svg { vertical-align: -2px; }
   border-top: 1px solid var(--line);
 }
 .message details .tool-io-label:first-of-type { border-top: 0; padding-top: 2px; }
+
+#harness-dialog { width:min(980px,94vw); max-width:980px; max-height:90vh; overflow:auto; }
+#harness-dialog .harness-layout { display:grid; grid-template-columns:minmax(200px,1fr) 2fr; gap:12px; }
+#harness-dialog select[size] { width:100%; font-family:var(--font-mono); }
+#harness-dialog textarea { width:100%; min-height:240px; resize:vertical; font-family:var(--font-mono); }
+#harness-dialog pre { white-space:pre-wrap; max-height:340px; overflow:auto; }
+#harness-dialog .harness-revision { display:flex; gap:8px; align-items:center; justify-content:space-between; margin:4px 0; }
+#harness-dialog .harness-job-link { display:block; width:100%; text-align:left; margin:4px 0; }
+#harness-errors .error, #harness-dialog .error { color:var(--error-text); }
+@media (max-width:700px) { #harness-dialog .harness-layout { grid-template-columns:1fr; } }
+#harness-dialog .harness-result { border-top:1px solid var(--line); padding-top:8px; margin-top:8px; }
+

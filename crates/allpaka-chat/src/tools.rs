@@ -78,6 +78,33 @@ pub(crate) fn resolve(root: &Path, path: &str, write: bool) -> Result<PathBuf> {
     }
     Ok(resolved)
 }
+/// Create the missing directories of a new file, one checked level at a
+/// time: only plain, non-hidden names, never through a symlink or a file.
+fn create_parents(root: &Path, path: &str) -> Result<()> {
+    let relative = Path::new(path);
+    let Some(parent) = relative.parent() else {
+        return Ok(());
+    };
+    let mut current = root.to_path_buf();
+    for (depth, c) in parent.components().enumerate() {
+        match c {
+            Component::CurDir => continue,
+            Component::Normal(s) if !s.to_string_lossy().starts_with('.') && depth < 16 => {
+                current.push(s)
+            }
+            _ => bail!("Only relative, non-hidden workspace paths are allowed"),
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(m) if m.file_type().is_symlink() => {
+                bail!("Symlinks are not available to chat tools")
+            }
+            Ok(m) if !m.is_dir() => bail!("A parent of this path is a file"),
+            Ok(_) => {}
+            Err(_) => fs::create_dir(&current)?,
+        }
+    }
+    Ok(())
+}
 // Shared across sessions: hold a path lock throughout each read-modify-write.
 fn mutation_lock(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
     use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -185,6 +212,7 @@ pub(crate) fn execute_scoped(
             if !matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes {
                 bail!("Writing requires Auto or Goal mode and enabled workspace writes");
             }
+            create_parents(root, args["path"].as_str().context("path is required")?)?;
             let path = resolve(
                 root,
                 args["path"].as_str().context("path is required")?,
@@ -464,5 +492,56 @@ mod tests {
         }
         assert_eq!(changes.len(), 33);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn writes_create_checked_parent_directories() {
+        let root =
+            std::env::temp_dir().join(format!("studio-parents-{}", crate::evaluation::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let mut s: Settings = serde_json::from_value(
+            json!({"provider":"t","model":"t","mode":"auto","allow_writes":true}),
+        )
+        .unwrap();
+        s.max_steps = 5;
+        execute(
+            &root,
+            &s,
+            "write_file",
+            &json!({"path":"skills/new/SKILL.md","content":"x"}),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("skills/new/SKILL.md")).unwrap(),
+            "x"
+        );
+        assert!(execute(
+            &root,
+            &s,
+            "write_file",
+            &json!({"path":".hidden/a","content":"x"})
+        )
+        .is_err());
+        assert!(execute(
+            &root,
+            &s,
+            "write_file",
+            &json!({"path":"skills/new/SKILL.md/a","content":"x"})
+        )
+        .is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(std::env::temp_dir(), root.join("link")).unwrap();
+            assert!(execute(
+                &root,
+                &s,
+                "write_file",
+                &json!({"path":"link/escape/a","content":"x"})
+            )
+            .is_err());
+            assert!(!std::env::temp_dir().join("escape").exists());
+        }
+        assert!(!root.join(".hidden").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

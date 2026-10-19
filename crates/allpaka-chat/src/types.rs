@@ -337,6 +337,10 @@ pub struct Session {
     pub notice: Option<String>,
     pub step: usize,
     pub usage: Value,
+    /// Set for headless runs (subagents, harness probes): never written to
+    /// disk and resolved against its own project and harness.
+    #[serde(skip)]
+    pub(crate) ephemeral: Option<std::sync::Arc<crate::Ephemeral>>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -380,6 +384,7 @@ impl Session {
             notice: None,
             step: 0,
             usage: Value::Null,
+            ephemeral: None,
         }
     }
     // Every emitted tool call must have a result, including interrupted batches.

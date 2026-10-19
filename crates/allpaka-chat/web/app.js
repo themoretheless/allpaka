@@ -3280,3 +3280,102 @@ function renderModelList(){
 $('model-search').oninput=renderModelList;
 $('model-pop').addEventListener('toggle',()=>{if($('model-pop').open){renderModelList();$('model-search').focus();}});
 $('provider').addEventListener('change',()=>setTimeout(renderModelList,0));
+// Agent harness: editable files around the model, refinement jobs and the experience library.
+let harnessTree={},harnessFile='',harnessProject='',harnessJob=null,harnessJobTimer=null,harnessEpoch=0;
+const harnessTemplates={
+  'skills':name=>`---\nname: ${name}\ndescription: задача требует ${name}\n---\nШаги навыка.\n`,
+  'subagents':()=>'---\ndescription: для какой ограниченной задачи нужен этот агент\nwrites: false\n---\nИнструкции субагента.\n',
+  'hooks.json':()=>'{"post_tool":[{"matcher":"write_file","inject":"Перечитай записанный файл."}],"stop":[]}\n',
+};
+function harnessRenderFiles(){
+  const select=$('harness-file');
+  select.replaceChildren(...Object.keys(harnessTree).sort().map(path=>{const o=node('option',path);o.value=path;return o;}));
+  if(!(harnessFile in harnessTree))harnessFile=Object.keys(harnessTree).sort()[0]||'';
+  select.value=harnessFile;$('harness-text').value=harnessFile?harnessTree[harnessFile]:'';$('harness-text').disabled=!harnessFile;
+}
+function harnessRenderCurrent(current){
+  $('harness-errors').replaceChildren(...current.errors.map(e=>node('li',e,'error')));
+  $('harness-preview').textContent=current.preview||'(пусто: промпт не меняется)';
+  $('harness-status').textContent=`Всегда в контексте: ${current.always_on_chars} из ${current.always_on_cap} символов · навыков ${current.skills.length} · субагентов ${current.subagents.length} · скриптов ${current.scripts.length}`;
+}
+async function harnessLoad(){
+  const project=$('project').value,epoch=++harnessEpoch;harnessProject=project;
+  const value=await api('harness?project_id='+encodeURIComponent(project));
+  if(epoch!==harnessEpoch)return;
+  harnessTree={...value.current.tree};harnessRenderFiles();harnessRenderCurrent(value.current);
+  const none=node('button',value.active?'Отключить харнесс':'Харнесс отключён');none.type='button';none.disabled=!value.active;
+  none.onclick=async()=>{try{await api('harness/activate',{project_id:project,revision:null});await harnessLoad();}catch(e){notify(e.message);}};
+  $('harness-revisions').replaceChildren(none,...value.revisions.map(r=>{
+    const row=node('div','','harness-revision');
+    row.append(node('span',`${new Date(r.created_ms).toLocaleString()} · ${r.id.slice(0,12)} · файлов ${r.files} · ${r.note||'без комментария'}`));
+    const b=node('button',r.id===value.active?'Включена':'Включить');b.type='button';b.disabled=r.id===value.active;
+    b.onclick=async()=>{try{await api('harness/activate',{project_id:project,revision:r.id});await harnessLoad();}catch(e){notify(e.message);}};
+    row.append(b);return row;
+  }));
+  await Promise.all([harnessLoadJobs(),harnessLoadLibrary()]);
+}
+async function harnessLoadJobs(){
+  const project=harnessProject,value=await api('harness/jobs?project_id='+encodeURIComponent(project));
+  if(project!==harnessProject)return;
+  $('harness-jobs').replaceChildren(...value.jobs.map(job=>{
+    const b=node('button',`${new Date(job.created_ms).toLocaleString()} · ${job.status} · k=${job.k} ${job.mode}`+(job.tasks>1?` · задач ${job.done}/${job.tasks}`:'')+` · ${job.task}`,'harness-job-link');b.type='button';
+    b.onclick=()=>harnessShowJob(job.id);return b;
+  }));
+}
+async function harnessLoadLibrary(){
+  const project=harnessProject,value=await api('harness/library?project_id='+encodeURIComponent(project));
+  if(project!==harnessProject)return;
+  $('harness-library').replaceChildren(...(value.entries.length?value.entries.map(item=>{
+    const d=node('details');d.append(node('summary',`${item.entry.cue} · ${item.entry.confidence}`),node('pre',item.experience));return d;
+  }):[node('p','Пока пусто.','muted')]));
+}
+function harnessResultView(id,r,diff,active){
+  const o=r.outcome,box=node('section','','harness-result');
+  box.append(node('h5',`Задача ${r.index+1}: ${r.task.slice(0,160)}`));
+  box.append(node('p',`Выбран ${o.chosen} (${o.chosen_kind==='base'?'текущий харнесс':'композиция'}) · прогонов ${o.rollouts} · этапов ${o.stages}`+(o.similarity==null?'':` · сходство финалов ${o.similarity.toFixed(2)}`)));
+  if(o.selection_why)box.append(node('p',o.selection_why));
+  for(const w of o.warnings||[])box.append(node('p','⚠ '+w,'error'));
+  box.append(node('p',o.runs.map(run=>{const sc=o.scores?.[run.label];return `${run.label}: ${run.delivered?'результат есть':'без результата'}`+(sc==null?'':` · оценка ${sc.toFixed(2)}`);}).join(' · '),'muted'));
+  const notes=node('details');notes.append(node('summary','Заметки этапов'),node('pre',Object.entries(o.stage_notes).map(([k,v])=>`${k}: ${v}`).join('\n\n')));box.append(notes);
+  if(diff){const d=node('details');d.append(node('summary','Изменения харнесса'),node('pre',diff.text||'Без изменений'));box.append(d);}
+  if(r.revision){const b=node('button',active===r.revision?'Принят':'Принять результат');b.type='button';b.disabled=active===r.revision;b.onclick=async()=>{try{await api(`harness/jobs/${id}/adopt`,{task:r.index});await harnessLoad();await harnessShowJob(id);}catch(e){notify(e.message);}};box.append(b);}
+  return box;
+}
+async function harnessShowJob(id){
+  clearTimeout(harnessJobTimer);harnessJob=id;
+  let value;try{value=await api('harness/jobs/'+encodeURIComponent(id));}catch(e){$('harness-job').textContent=e.message;return;}
+  if(harnessJob!==id||!$('harness-dialog').open)return;
+  const job=value.job,box=$('harness-job');
+  const parts=[node('h4',`Запуск ${job.id} · ${job.status} · задач ${job.results.length} из ${job.tasks.length} · ${job.request.agentic?'агентные':'JSON'} предложения`)];
+  if(job.error)parts.push(node('p',job.error,'error'));
+  for(const w of job.warnings||[])parts.push(node('p','⚠ '+w,'error'));
+  job.results.forEach((r,i)=>parts.push(harnessResultView(id,r,value.diffs[i],value.active)));
+  if(['running','queued'].includes(job.status)){const b=node('button','Остановить');b.type='button';b.onclick=async()=>{try{await api(`harness/jobs/${id}/cancel`,{});await harnessShowJob(id);}catch(e){notify(e.message);}};parts.push(b);}
+  if(['failed','cancelled','interrupted'].includes(job.status)){const b=node('button','Продолжить запуск');b.type='button';b.onclick=async()=>{try{await api(`harness/jobs/${id}/resume`,{});await harnessShowJob(id);}catch(e){notify(e.message);}};parts.push(b);}
+  parts.push(node('pre',job.events.slice(-12).join('\n'),'muted'));
+  box.replaceChildren(...parts);
+  if(['running','queued'].includes(job.status))harnessJobTimer=setTimeout(()=>harnessShowJob(id),2500);
+  else if(job.status==='completed')harnessLoadLibrary().catch(()=>{});
+}
+$('harness-open').onclick=async()=>{try{$('harness-job').replaceChildren();$('harness-dialog').showModal();await harnessLoad();}catch(e){notify(e.message);}};
+$('harness-close').onclick=()=>$('harness-dialog').close();
+$('harness-dialog').onclose=()=>{clearTimeout(harnessJobTimer);harnessJob=null;harnessEpoch++;};
+$('harness-file').onchange=()=>{harnessFile=$('harness-file').value;harnessRenderFiles();};
+$('harness-text').oninput=()=>{if(harnessFile)harnessTree[harnessFile]=$('harness-text').value;};
+$('harness-add').onclick=()=>{
+  const path=$('harness-path').value.trim().replace(/^\/+/,'');if(!path)return notify('Укажите путь файла');
+  if(!(path in harnessTree)){const [head,name]=path.split('/');harnessTree[path]=path==='hooks.json'?harnessTemplates['hooks.json']():path.endsWith('SKILL.md')&&head==='skills'?harnessTemplates.skills(name):path.endsWith('AGENT.md')&&head==='subagents'?harnessTemplates.subagents():'';}
+  harnessFile=path;$('harness-path').value='';harnessRenderFiles();$('harness-text').focus();
+};
+$('harness-delete').onclick=()=>{if(!harnessFile)return;delete harnessTree[harnessFile];harnessFile='';harnessRenderFiles();};
+$('harness-save').onclick=async()=>{try{const value=await api('harness',{project_id:harnessProject,tree:harnessTree,note:$('harness-note').value.trim(),activate:true});$('harness-note').value='';await harnessLoad();harnessRenderCurrent(value.current);notify('Харнесс сохранён и включён');}catch(e){$('harness-errors').replaceChildren(...e.message.split('\n').map(line=>node('li',line,'error')));}};
+$('harness-import').onclick=async()=>{try{await api('harness/import-skill',{project_id:harnessProject,text:$('harness-import-text').value,activate:true});$('harness-import-text').value='';await harnessLoad();notify('Навык импортирован');}catch(e){notify(e.message);}};
+$('harness-refine').onclick=async()=>{
+  if(!active)return notify('Откройте разговор с задачей');
+  const body={session_id:active,k:Number($('harness-k').value)||1,mode:$('harness-mode').value,agentic:$('harness-agentic').checked};const model=$('harness-model').value.trim();if(model)body.model=model;
+  const rubric=$('harness-rubric').value.trim();if(rubric)body.rubric=rubric;
+  const tasks=$('harness-tasks').value.split(/^\s*---\s*$/m).map(t=>t.trim()).filter(Boolean);if(tasks.length)body.tasks=tasks;
+  const dataset=$('harness-dataset').value.trim();if(dataset)body.dataset={id:dataset};
+  const external=$('harness-external').value.trim();if(external)body.external={command:external,layout:$('harness-layout').value};
+  try{const job=await api('harness/jobs',body);await harnessLoadJobs();await harnessShowJob(job.id);}catch(e){notify(e.message);}
+};
