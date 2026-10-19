@@ -182,7 +182,8 @@ struct GdnLayer<'a> {
     zgate: QuantMat<'a>,
     alpha: QuantMat<'a>,
     beta: QuantMat<'a>,
-    conv1d: Vec<f32>,
+    /// Pre-transposed `[d_conv][channels]` conv1d weights for contiguous SIMD FMA.
+    conv1d_t: Vec<f32>,
     conv1d_raw: &'a [u8],
     a: Vec<f32>,
     dt: Vec<f32>,
@@ -950,21 +951,21 @@ impl<'a> Model<'a> {
                 gdn: if is_gdn {
                     let s = config.ssm.as_ref().expect("is_gdn implies ssm");
                     let value_dim = (s.dt_rank * s.d_state) as usize;
+                    let channels = s.d_inner as usize + 2 * (s.n_group * s.d_state) as usize;
+                    let d_conv = s.d_conv as usize;
+                    let conv1d = norm_vec(f, &name("ssm_conv1d"), d_conv * channels)?;
+                    let mut conv1d_t = vec![0.0f32; d_conv * channels];
+                    for ch in 0..channels {
+                        for j in 0..d_conv {
+                            conv1d_t[j * channels + ch] = conv1d[ch * d_conv + j];
+                        }
+                    }
                     Some(GdnLayer {
-                        wqkv: qmat(
-                            f,
-                            &name("attn_qkv"),
-                            s.d_inner as usize + 2 * (s.n_group * s.d_state) as usize,
-                            hidden,
-                        )?,
+                        wqkv: qmat(f, &name("attn_qkv"), channels, hidden)?,
                         zgate: qmat(f, &name("attn_gate"), value_dim, hidden)?,
                         alpha: qmat(f, &name("ssm_alpha"), s.dt_rank as usize, hidden)?,
                         beta: qmat(f, &name("ssm_beta"), s.dt_rank as usize, hidden)?,
-                        conv1d: norm_vec(
-                            f,
-                            &name("ssm_conv1d"),
-                            (s.d_conv * (s.d_inner + 2 * (s.n_group * s.d_state))) as usize,
-                        )?,
+                        conv1d_t,
                         conv1d_raw: norm_raw(f, &name("ssm_conv1d")),
                         // ssm_a is the rare tensor with no `.weight` suffix.
                         a: norm_vec(f, &format!("blk.{i}.ssm_a"), s.dt_rank as usize)?,
@@ -1201,17 +1202,21 @@ impl<'a> Model<'a> {
         let mut beta_i = vec![0f32; heads_v];
         let mut gate_i = vec![0f32; heads_v];
         for i in 0..m {
-            // Depthwise causal conv: out[c] = sum_j w[c*d_conv + j] *
-            // window[j][c], with the window being the cached d_conv-1 prior
-            // qkv rows plus the current one. Weight layout is [ch][tap].
+            // Depthwise causal conv over pre-transposed `g.conv1d_t` (`[d_conv][channels]`):
+            // each tap is a contiguous vector of length `channels`, turning strided scalar
+            // loads into sequential SIMD FMA passes.
             let cur = &qkv[i * channels..(i + 1) * channels];
-            for ch in 0..channels {
-                let mut acc = 0.0f32;
-                for j in 0..d_conv - 1 {
-                    acc += conv[j * channels + ch] * g.conv1d[ch * d_conv + j];
+            c_out.fill(0.0);
+            for j in 0..d_conv - 1 {
+                let win = &conv[j * channels..(j + 1) * channels];
+                let w_tap = &g.conv1d_t[j * channels..(j + 1) * channels];
+                for ((dst, &x), &w) in c_out.iter_mut().zip(win).zip(w_tap) {
+                    *dst += x * w;
                 }
-                acc += cur[ch] * g.conv1d[ch * d_conv + (d_conv - 1)];
-                c_out[ch] = ops::silu(acc);
+            }
+            let w_last = &g.conv1d_t[(d_conv - 1) * channels..d_conv * channels];
+            for ((dst, &x), &w) in c_out.iter_mut().zip(cur).zip(w_last) {
+                *dst = ops::silu(*dst + x * w);
             }
             // Shift the window one row left, append the raw (pre-conv) qkv
             // row: the cache holds the conv's *inputs*, not its outputs.
@@ -1455,6 +1460,52 @@ impl<'a> Model<'a> {
         ops::rmsnorm(&mut x, &m.shared_head_norm, c.rms_eps);
         let logits = self.output_head()?.matmul(&x, 1)?;
         Ok((logits, x))
+    }
+
+    /// Fast path for MTP KV catch-up when all `k` draft tokens in a speculative
+    /// round are accepted: computes only `eh_proj` + `wk`/`wv` + `k_norm`/RoPE
+    /// and writes `(k, v)` into the MTP KV slot at `pos`, skipping `wq`,
+    /// `attend_group`, `wo`, MoE `ffn`, and the 150k-vocab `output_head`.
+    pub fn mtp_prefill_kv_only(
+        &self,
+        h_prev: &[f32],
+        token: u32,
+        pos: usize,
+        s: &mut Session,
+    ) -> Result<()> {
+        let c = &self.config;
+        let m = self
+            .mtp
+            .as_ref()
+            .expect("mtp_prefill_kv_only without an mtp block");
+        let head_dim = c.head_dim as usize;
+        if token >= c.vocab {
+            bail!("token {token} out of vocabulary {}", c.vocab);
+        }
+
+        let mut e = self.embedding()?.row(token as usize)?;
+        ops::rmsnorm(&mut e, &m.enorm, c.rms_eps);
+        let mut hn = h_prev.to_vec();
+        ops::rmsnorm(&mut hn, &m.hnorm, c.rms_eps);
+        let mut cat = e;
+        cat.extend_from_slice(&hn);
+        let mut h = m.eh_proj.matmul(&cat, 1)?;
+        ops::rmsnorm(&mut h, &m.attn_norm, c.rms_eps);
+
+        let aw = &m.attn;
+        let mut kv_proj = QuantMat::matmul_many(&[(&aw.wk, h.as_slice()), (&aw.wv, h.as_slice())])?;
+        let v = kv_proj.pop().expect("v");
+        let mut k = kv_proj.pop().expect("k");
+        let rope_pairs = s.rope_cache(&self.rope_inv_freq, pos, 1).to_vec();
+        for head in k.chunks_mut(head_dim) {
+            if let Some(w) = &m.k_norm {
+                ops::rmsnorm(head, w, c.rms_eps);
+            }
+            self.rope_from_arrays(head, &rope_pairs);
+        }
+        let li = c.n_layers as usize;
+        s.kv.store_at_rewrite(li, pos, &k, &v);
+        Ok(())
     }
 
     /// The shared body of the batch paths: every layer over every position,

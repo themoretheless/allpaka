@@ -275,14 +275,20 @@ fn best_split(nodes: &[Node], model: &Model, fabric: &Fabric, req: &PlanRequest)
     let max_layers_for_node: Vec<usize> = nodes
         .iter()
         .map(|node| {
-            (1..=total_layers)
-                .take_while(|&l| {
-                    let lc = l as u32;
-                    model.bytes_for_layers(lc) + model.kv_bytes(lc, req.context_tokens)
-                        <= node.usable_bytes
-                })
-                .last()
-                .unwrap_or(0)
+            let mut lo = 0usize;
+            let mut hi = total_layers;
+            while lo < hi {
+                let mid = (lo + hi).div_ceil(2);
+                let lc = mid as u32;
+                if model.bytes_for_layers(lc) + model.kv_bytes(lc, req.context_tokens)
+                    <= node.usable_bytes
+                {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            lo
         })
         .collect();
 

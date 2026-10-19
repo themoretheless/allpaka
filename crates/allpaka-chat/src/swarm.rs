@@ -866,7 +866,12 @@ async fn run_member_inner(
     let mut history = vec![Message::text("user", prompt)];
     let mut usage = Value::Null;
     let steps = member_settings.max_steps.max(1);
-    for step in 1..=steps {
+    // Research has a bounded budget; one additional call must produce the report.
+    for step in 1..=steps.saturating_add(1) {
+        let finalizing = step > steps;
+        if finalizing {
+            history.push(Message::text("user", "Лимит исследования исчерпан. Сейчас верни итоговый отчёт по уже полученным данным. Инструменты недоступны. Явно укажи ограничения и что осталось непроверенным; не обещай продолжить исследование."));
+        }
         note(
             shared,
             index,
@@ -892,7 +897,7 @@ async fn run_member_inner(
                     &member_settings,
                     &system,
                     &history,
-                    schemas,
+                    if finalizing { &[] } else { schemas },
                     move |text, _reasoning| {
                         if buffer_output || text.is_empty() {
                             return;
@@ -946,14 +951,17 @@ async fn run_member_inner(
             });
         }
         if message.tool_calls.is_empty() {
+            if message.content.trim().is_empty() {
+                bail!("участник {label} вернул пустой отчёт");
+            }
             break;
         }
-        if step == steps {
+        if finalizing {
             fail(
                 shared,
                 index,
                 slot,
-                "Достигнут лимит шагов: участник запросил инструмент, но не завершил отчёт",
+                "Участник запросил инструмент на завершающем шаге вместо итогового отчёта",
             );
             persist(app, shared);
             return Ok(MemberOutcome {
@@ -1449,6 +1457,8 @@ mod tests {
                 key_source: "none".into(),
                 key_error: None,
                 saved: false,
+                workspace_id: String::new(),
+                model_limits: Default::default(),
             },
         )];
         let shared: SharedSession = std::sync::Arc::new(std::sync::Mutex::new(Session::new(

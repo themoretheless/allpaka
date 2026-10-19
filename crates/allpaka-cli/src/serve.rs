@@ -73,7 +73,7 @@ struct PrefixSnap {
     /// `SsmCache::snapshot()` at the prompt's end for hybrid models.
     ssm_state: Option<Vec<f32>>,
     /// Last-position logits let an exact repeated prompt skip all prefill.
-    logits: Vec<f32>,
+    logits: Arc<[f32]>,
 }
 
 /// Generation cap the chat field is allowed to ask for. The session is this
@@ -136,7 +136,7 @@ fn exact_prefix_snapshot(
 #[cfg(test)]
 mod prefix_snapshot_tests {
     use super::{
-        exact_prefix_snapshot, model_prefix_namespace, prefix_key, PrefixCache, PrefixSnap,
+        exact_prefix_snapshot, model_prefix_namespace, prefix_key, Arc, PrefixCache, PrefixSnap,
     };
 
     #[test]
@@ -149,16 +149,16 @@ mod prefix_snapshot_tests {
             PrefixSnap {
                 tokens: 3,
                 ssm_state: None,
-                logits: vec![4.0],
+                logits: Arc::from([4.0f32]),
             },
             4,
         );
 
         assert_eq!(
-            exact_prefix_snapshot(&mut cache, first, &[1, 2, 3])
+            &*exact_prefix_snapshot(&mut cache, first, &[1, 2, 3])
                 .unwrap()
                 .logits,
-            vec![4.0]
+            &[4.0]
         );
         assert!(exact_prefix_snapshot(&mut cache, first, &[1, 2]).is_none());
         assert!(exact_prefix_snapshot(&mut cache, second, &[1, 2, 3]).is_none());
@@ -245,7 +245,6 @@ fn prewarm_prompt(
                     chat.session.truncate(common);
                     chat.tokens.truncate(common);
                     if common == prompt.len() {
-                        logits = snap.logits.clone();
                         skip_prefill = true;
                     }
                 }
@@ -256,8 +255,7 @@ fn prewarm_prompt(
                 }
             }
         } else if common == prompt.len() {
-            if let Some(snap) = exact_prefix_snapshot(prefixes, prefix_namespace, &prompt) {
-                logits = snap.logits.clone();
+            if exact_prefix_snapshot(prefixes, prefix_namespace, &prompt).is_some() {
                 skip_prefill = true;
             } else {
                 return Ok((0, common));
@@ -265,8 +263,7 @@ fn prewarm_prompt(
         }
     } else {
         if common == prompt.len() {
-            if let Some(snap) = exact_prefix_snapshot(prefixes, prefix_namespace, &prompt) {
-                logits = snap.logits.clone();
+            if exact_prefix_snapshot(prefixes, prefix_namespace, &prompt).is_some() {
                 skip_prefill = true;
             } else {
                 common = common.saturating_sub(1);
@@ -296,7 +293,7 @@ fn prewarm_prompt(
             PrefixSnap {
                 tokens: prompt.len(),
                 ssm_state,
-                logits,
+                logits: Arc::from(logits),
             },
             value_bytes,
         );
@@ -347,6 +344,7 @@ fn run_inference(
         .take_while(|(a, b)| **a == **b)
         .count();
     let mut logits: Vec<f32> = Vec::new();
+    let mut cached_logits: Option<Arc<[f32]>> = None;
     let mut skip_prefill = false;
     if prompt.len() + max_tokens + 1 > chat.session.capacity() {
         chat.reset(model, prompt.len() + max_tokens + 1)?;
@@ -374,7 +372,7 @@ fn run_inference(
                     if common == prompt.len() {
                         // The prompt is fully covered: its last logits are
                         // in the snapshot, no prefill at all.
-                        logits = snap.logits.clone();
+                        cached_logits = Some(Arc::clone(&snap.logits));
                         skip_prefill = true;
                     }
                 }
@@ -390,7 +388,7 @@ fn run_inference(
             // token here; the SSM cannot step back). The snapshot has them.
             match exact_prefix_snapshot(prefixes, prefix_namespace, &prompt) {
                 Some(snap) => {
-                    logits = snap.logits.clone();
+                    cached_logits = Some(Arc::clone(&snap.logits));
                     skip_prefill = true;
                 }
                 None => {
@@ -405,7 +403,7 @@ fn run_inference(
     } else {
         if common == prompt.len() {
             if let Some(snap) = exact_prefix_snapshot(prefixes, prefix_namespace, &prompt) {
-                logits = snap.logits.clone();
+                cached_logits = Some(Arc::clone(&snap.logits));
                 skip_prefill = true;
             } else {
                 common = common.saturating_sub(1);
@@ -432,16 +430,18 @@ fn run_inference(
     // Snapshot before generation, when state is exactly "prompt consumed".
     if !logits.is_empty() {
         let ssm_state = chat.session.ssm.as_ref().map(|ssm| ssm.snapshot());
-        let value_bytes = logits.len() * size_of::<f32>()
+        let shared_logits: Arc<[f32]> = Arc::from(std::mem::take(&mut logits));
+        let value_bytes = shared_logits.len() * size_of::<f32>()
             + ssm_state
                 .as_ref()
                 .map_or(0, |state| state.len() * size_of::<f32>());
+        cached_logits = Some(Arc::clone(&shared_logits));
         prefixes.insert(
             prefix_key(prefix_namespace, &prompt),
             PrefixSnap {
                 tokens: prompt.len(),
                 ssm_state,
-                logits: logits.clone(),
+                logits: shared_logits,
             },
             value_bytes,
         );
@@ -474,20 +474,30 @@ fn run_inference(
     let mut finish = "length";
     let mut greedy_next: Option<u32> = None;
     let use_pld = prompt_lookup_k > 0;
+    // Draft length follows acceptance; at k=0 the step below decodes plainly
+    // and only advances the controller's cooldown.
+    let mut adapt = allpaka_model::speculate::AdaptiveK::new(prompt_lookup_k);
     crate::airbug::span("decode", || -> Result<()> {
         while generated.len() < max_tokens {
             context.control.check()?;
             let next = match greedy_next.take() {
                 Some(t) => t,
-                None => sampler.pick(&logits, &chat.tokens),
+                None => {
+                    let active_logits = cached_logits.take();
+                    let slice = active_logits.as_deref().unwrap_or(&logits);
+                    sampler.pick(slice, &chat.tokens)
+                }
             };
             if stops.contains(&next) {
                 finish = "stop";
                 break;
             }
-            if use_pld {
-                let remaining = max_tokens - generated.len();
-                let k = prompt_lookup_k.min(remaining.saturating_sub(1));
+            let remaining = max_tokens - generated.len();
+            let k = adapt.k().min(remaining.saturating_sub(1));
+            if use_pld && k == 0 {
+                adapt.record(0, 0);
+            }
+            if use_pld && k > 0 {
                 let mut spec = allpaka_model::speculate::PromptLookupSpeculator {
                     model,
                     session: &mut chat.session,
@@ -507,6 +517,7 @@ fn run_inference(
                     logits = committed_logits;
                     r
                 };
+                adapt.record(round.drafted, round.accepted);
                 let mut hit_stop = false;
                 let mut accepted_before_stop = 0usize;
                 for &emitted_tok in &round.emitted {

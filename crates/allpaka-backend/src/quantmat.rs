@@ -143,11 +143,10 @@ impl<'a> QuantMat<'a> {
                 }
             });
         } else {
-            for i in 0..m {
-                let xi = &x[i * self.n_in..(i + 1) * self.n_in];
-                let y_row = &mut y[i * self.n_out..(i + 1) * self.n_out];
-                let cols_per = self.n_out.div_ceil(threads).max(1);
-                std::thread::scope(|scope| {
+            let cols_per = self.n_out.div_ceil(threads).max(1);
+            std::thread::scope(|scope| {
+                for (i, y_row) in y.chunks_mut(self.n_out).enumerate() {
+                    let xi = &x[i * self.n_in..(i + 1) * self.n_in];
                     for (chunk_idx, y_chunk) in y_row.chunks_mut(cols_per).enumerate() {
                         let first_j = chunk_idx * cols_per;
                         scope.spawn(move || {
@@ -156,8 +155,8 @@ impl<'a> QuantMat<'a> {
                             }
                         });
                     }
-                });
-            }
+                }
+            });
         }
         Ok(y)
     }
@@ -171,6 +170,9 @@ impl<'a> QuantMat<'a> {
     /// Other formats dequantise row-by-row. Sizes were validated at
     /// construction, so per-row dequantisation cannot fail here.
     fn matvec(&self, x: &[f32]) -> Vec<f32> {
+        if self.n_out == 0 || self.n_in == 0 {
+            return Vec::new();
+        }
         // The GPU takes any matvec whose weights live in the attached mmap
         // and whose format has a kernel; everything else falls through to
         // the CPU reference below.
@@ -214,7 +216,15 @@ impl<'a> QuantMat<'a> {
     /// one and the row length is whole blocks of 32.
     fn quantized_acts(&self, x: &[f32]) -> Option<Q8Acts> {
         match self.ty {
-            GgmlType::Q8_0 | GgmlType::Q4K | GgmlType::Q6K if self.n_in % 32 == 0 => {
+            GgmlType::Q8_0
+            | GgmlType::Q5_0
+            | GgmlType::Q2K
+            | GgmlType::Q3K
+            | GgmlType::Q4K
+            | GgmlType::Q5K
+            | GgmlType::Q6K
+                if self.n_in % 32 == 0 =>
+            {
                 Some(Q8Acts::from_f32(x))
             }
             _ => None,
@@ -227,7 +237,11 @@ impl<'a> QuantMat<'a> {
                 let bytes = &self.data[j * self.row_bytes..(j + 1) * self.row_bytes];
                 match self.ty {
                     GgmlType::Q8_0 => dot_q8_0_i8(bytes, a),
+                    GgmlType::Q5_0 => dot_q5_0_i8(bytes, a),
+                    GgmlType::Q2K => dot_q2_k_i8(bytes, a),
+                    GgmlType::Q3K => dot_q3_k_i8(bytes, a),
                     GgmlType::Q4K => dot_q4_k_i8(bytes, a),
+                    GgmlType::Q5K => dot_q5_k_i8(bytes, a),
                     GgmlType::Q6K => dot_q6_k_i8(bytes, a),
                     _ => unreachable!("acts only exist for integer-kernel types"),
                 }
@@ -629,6 +643,33 @@ fn dot_f16(row: &[u8], x: &[f32]) -> f32 {
 
 #[inline(always)]
 fn dot_bf16(row: &[u8], x: &[f32]) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let mut acc0 = vdupq_n_f32(0.0);
+        let mut acc1 = vdupq_n_f32(0.0);
+        let mut i = 0usize;
+        let n = x.len();
+        let rp = row.as_ptr();
+        let xp = x.as_ptr();
+        while i + 8 <= n {
+            let bits = vld1q_u16(rp.add(i * 2) as *const u16);
+            let f0 = vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(bits)));
+            let f1 = vreinterpretq_f32_u32(vshll_high_n_u16::<16>(bits));
+            acc0 = vfmaq_f32(acc0, f0, vld1q_f32(xp.add(i)));
+            acc1 = vfmaq_f32(acc1, f1, vld1q_f32(xp.add(i + 4)));
+            i += 8;
+        }
+        let mut total = vaddvq_f32(vaddq_f32(acc0, acc1));
+        while i < n {
+            let c0 = *rp.add(i * 2);
+            let c1 = *rp.add(i * 2 + 1);
+            total += dequant::bf16_to_f32(u16::from_le_bytes([c0, c1])) * *xp.add(i);
+            i += 1;
+        }
+        total
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     row.chunks_exact(2)
         .zip(x)
         .map(|(c, &xv)| dequant::bf16_to_f32(u16::from_le_bytes([c[0], c[1]])) * xv)
@@ -747,10 +788,36 @@ fn dot_q8_0(row: &[u8], x: &[f32]) -> f32 {
     for (bi, block) in row.chunks_exact(34).enumerate() {
         let d = dequant::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
         let xs = &x[bi * 32..bi * 32 + 32];
-        let mut s = 0f32;
-        for (q, xv) in block[2..34].iter().zip(xs) {
-            s += (*q as i8) as f32 * xv;
-        }
+        #[cfg(target_arch = "aarch64")]
+        let s = unsafe {
+            use std::arch::aarch64::*;
+            let mut acc0 = vdupq_n_f32(0.0);
+            let mut acc1 = vdupq_n_f32(0.0);
+            let qp = block.as_ptr().add(2) as *const i8;
+            let xp = xs.as_ptr();
+            for seg in [0usize, 16] {
+                let q8 = vld1q_s8(qp.add(seg));
+                let q16_lo = vmovl_s8(vget_low_s8(q8));
+                let q16_hi = vmovl_high_s8(q8);
+                let qf0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16_lo)));
+                let qf1 = vcvtq_f32_s32(vmovl_high_s16(q16_lo));
+                let qf2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(q16_hi)));
+                let qf3 = vcvtq_f32_s32(vmovl_high_s16(q16_hi));
+                acc0 = vfmaq_f32(acc0, qf0, vld1q_f32(xp.add(seg)));
+                acc1 = vfmaq_f32(acc1, qf1, vld1q_f32(xp.add(seg + 4)));
+                acc0 = vfmaq_f32(acc0, qf2, vld1q_f32(xp.add(seg + 8)));
+                acc1 = vfmaq_f32(acc1, qf3, vld1q_f32(xp.add(seg + 12)));
+            }
+            vaddvq_f32(vaddq_f32(acc0, acc1))
+        };
+        #[cfg(not(target_arch = "aarch64"))]
+        let s = {
+            let mut s = 0f32;
+            for (q, xv) in block[2..34].iter().zip(xs) {
+                s += (*q as i8) as f32 * xv;
+            }
+            s
+        };
         total += d * s;
     }
     total
@@ -949,6 +1016,24 @@ impl Q8Acts {
             } else {
                 0.0
             };
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                use std::arch::aarch64::*;
+                let vid = vdupq_n_f32(id);
+                let xp = xs.as_ptr();
+                let qp = q.as_mut_ptr().add(b * 32);
+                for k in (0..32).step_by(16) {
+                    let s0 = vcvtaq_s32_f32(vmulq_f32(vld1q_f32(xp.add(k)), vid));
+                    let s1 = vcvtaq_s32_f32(vmulq_f32(vld1q_f32(xp.add(k + 4)), vid));
+                    let s2 = vcvtaq_s32_f32(vmulq_f32(vld1q_f32(xp.add(k + 8)), vid));
+                    let s3 = vcvtaq_s32_f32(vmulq_f32(vld1q_f32(xp.add(k + 12)), vid));
+                    let h01 = vcombine_s16(vqmovn_s32(s0), vqmovn_s32(s1));
+                    let h23 = vcombine_s16(vqmovn_s32(s2), vqmovn_s32(s3));
+                    let b0123 = vcombine_s8(vqmovn_s16(h01), vqmovn_s16(h23));
+                    vst1q_s8(qp.add(k), b0123);
+                }
+            }
+            #[cfg(not(target_arch = "aarch64"))]
             for (slot, v) in q[b * 32..b * 32 + 32].iter_mut().zip(xs) {
                 *slot = (v * id).round() as i8;
             }
@@ -987,6 +1072,150 @@ fn dot_q8_0_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
         let qw: &[i8] =
             unsafe { std::slice::from_raw_parts(block[2..34].as_ptr() as *const i8, 32) };
         total += d * acts.d[bi] * dot_i8(qw, acts.block(bi)) as f32;
+    }
+    total
+}
+
+/// Q5_0 × Q8 activations: 32 5-bit signed values (`q - 16`) per 22-byte block.
+#[inline(always)]
+fn dot_q5_0_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
+    let mut total = 0f32;
+    for (bi, block) in row.chunks_exact(22).enumerate() {
+        let d = dequant::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        let qh = u32::from_le_bytes(block[2..6].try_into().unwrap());
+        let qs = &block[6..22];
+        let mut qw = [0i8; 32];
+        for j in 0..16 {
+            let x0 = ((qs[j] & 0x0f) | ((((qh >> j) & 1) as u8) << 4)) as i8 - 16;
+            let x1 = ((qs[j] >> 4) | ((((qh >> (j + 16)) & 1) as u8) << 4)) as i8 - 16;
+            qw[j] = x0;
+            qw[j + 16] = x1;
+        }
+        total += d * acts.d[bi] * dot_i8(&qw, acts.block(bi)) as f32;
+    }
+    total
+}
+
+/// Q2_K × Q8 activations: 256 2-bit weights per 84-byte super-block.
+#[inline(always)]
+fn dot_q2_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
+    let mut total = 0f32;
+    for (bi, block) in row.chunks_exact(84).enumerate() {
+        let scales = &block[0..16];
+        let qs = &block[16..80];
+        let d = dequant::f16_to_f32(u16::from_le_bytes([block[80], block[81]]));
+        let dmin = dequant::f16_to_f32(u16::from_le_bytes([block[82], block[83]]));
+
+        let mut is = 0;
+        for half in 0..2 {
+            let q = &qs[half * 32..half * 32 + 32];
+            for (s_idx, shift) in [0u8, 2, 4, 6].into_iter().enumerate() {
+                let blk = bi * 8 + half * 4 + s_idx;
+                let xq = acts.block(blk);
+                let dx = acts.d[blk];
+                let mut qw = [0i8; 32];
+                for l in 0..32 {
+                    qw[l] = ((q[l] >> shift) & 3) as i8;
+                }
+                for group in 0..2 {
+                    let sc = scales[is];
+                    let dl = d * (sc & 0xf) as f32;
+                    let ml = dmin * (sc >> 4) as f32;
+                    let dotq = dot_i8(
+                        &qw[group * 16..group * 16 + 16],
+                        &xq[group * 16..group * 16 + 16],
+                    ) as f32
+                        * dx;
+                    let sum_x = xq[group * 16..group * 16 + 16]
+                        .iter()
+                        .map(|&v| v as i32)
+                        .sum::<i32>() as f32
+                        * dx;
+                    total += dl * dotq - ml * sum_x;
+                    is += 1;
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Q3_K × Q8 activations: 256 signed 3-bit weights per 110-byte super-block.
+#[inline(always)]
+fn dot_q3_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
+    let mut total = 0f32;
+    for (bi, block) in row.chunks_exact(110).enumerate() {
+        let hmask = &block[0..32];
+        let qs = &block[32..96];
+        let packed = &block[96..108];
+        let d_all = dequant::f16_to_f32(u16::from_le_bytes([block[108], block[109]]));
+
+        let mut scales = [0i32; 16];
+        for (i, s) in scales.iter_mut().enumerate() {
+            let lo = if i < 8 {
+                packed[i] & 0xf
+            } else {
+                packed[i - 8] >> 4
+            };
+            let hi = (packed[8 + i % 4] >> (2 * (i / 4))) & 3;
+            *s = ((lo | (hi << 4)) as i32) - 32;
+        }
+
+        let mut is = 0;
+        let mut m: u8 = 1;
+        for half in 0..2 {
+            let q = &qs[half * 32..half * 32 + 32];
+            for (s_idx, shift) in [0u8, 2, 4, 6].into_iter().enumerate() {
+                let blk = bi * 8 + half * 4 + s_idx;
+                let xq = acts.block(blk);
+                let dx = acts.d[blk];
+                let mut qw = [0i8; 32];
+                for l in 0..32 {
+                    qw[l] = (((q[l] >> shift) & 3) as i8) - if hmask[l] & m != 0 { 0 } else { 4 };
+                }
+                let dot0 = dot_i8(&qw[0..16], &xq[0..16]) as f32;
+                let dot1 = dot_i8(&qw[16..32], &xq[16..32]) as f32;
+                total += d_all * dx * (scales[is] as f32 * dot0 + scales[is + 1] as f32 * dot1);
+                is += 2;
+                m <<= 1;
+            }
+        }
+    }
+    total
+}
+
+/// Q5_K × Q8 activations: 256 5-bit weights per 176-byte super-block.
+#[inline(always)]
+fn dot_q5_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
+    let mut total = 0f32;
+    for (bi, block) in row.chunks_exact(176).enumerate() {
+        let d = dequant::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        let dmin = dequant::f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+        let packed = &block[4..16];
+        let qh = &block[16..48];
+        let qs = &block[48..176];
+
+        for pair in 0..4 {
+            let q = &qs[pair * 32..pair * 32 + 32];
+            let (sc1, mn1) = dequant::scale_min_k4(pair * 2, packed);
+            let (sc2, mn2) = dequant::scale_min_k4(pair * 2 + 1, packed);
+            let bit_shift1 = (pair * 2) as u8;
+            let bit_shift2 = (pair * 2 + 1) as u8;
+            let mut lo = [0i8; 32];
+            let mut hi = [0i8; 32];
+            for l in 0..32 {
+                let h1 = ((qh[l] >> bit_shift1) & 1) << 4;
+                let h2 = ((qh[l] >> bit_shift2) & 1) << 4;
+                lo[l] = ((q[l] & 0x0f) | h1) as i8;
+                hi[l] = ((q[l] >> 4) | h2) as i8;
+            }
+            let b_lo = bi * 8 + pair * 2;
+            let b_hi = b_lo + 1;
+            let dot_lo = dot_i8(&lo, acts.block(b_lo)) as f32 * acts.d[b_lo];
+            let dot_hi = dot_i8(&hi, acts.block(b_hi)) as f32 * acts.d[b_hi];
+            total += d * sc1 * dot_lo - dmin * mn1 * acts.sum[b_lo];
+            total += d * sc2 * dot_hi - dmin * mn2 * acts.sum[b_hi];
+        }
     }
     total
 }
@@ -1133,13 +1362,22 @@ fn dot_q6_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
 
 /// i8×i8 dot product over equal-length slices, accumulated in i32.
 ///
-/// On aarch64 this is the NEON widening-multiply chain (`smull`/`sadalp`),
-/// which is the whole point of quantising the activations: sixteen products
-/// per instruction instead of one f32 FMA lane per element.
+/// On aarch64 with `dotprod` (ARMv8.2+, all Apple Silicon M1–M4), uses
+/// `vdotq_s32` (`SDOT`) to compute 16 `i8×i8` products per instruction.
 #[inline(always)]
 fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
     debug_assert_eq!(a.len(), b.len());
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_feature = "dotprod")
+    ))]
+    unsafe {
+        dot_i8_sdot(a, b)
+    }
+    #[cfg(all(
+        target_arch = "aarch64",
+        not(any(target_os = "macos", target_feature = "dotprod"))
+    ))]
     // SAFETY: NEON is baseline on aarch64; loads stay within the slices.
     unsafe {
         use std::arch::aarch64::*;
@@ -1161,6 +1399,31 @@ fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
     }
     #[cfg(not(target_arch = "aarch64"))]
     a.iter().zip(b).map(|(&p, &q)| p as i32 * q as i32).sum()
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_feature = "dotprod")
+))]
+#[target_feature(enable = "dotprod")]
+#[allow(clippy::incompatible_msrv)]
+#[inline]
+unsafe fn dot_i8_sdot(a: &[i8], b: &[i8]) -> i32 {
+    use std::arch::aarch64::*;
+    let mut acc = vdupq_n_s32(0);
+    let mut i = 0;
+    while i + 16 <= a.len() {
+        let va = vld1q_s8(a.as_ptr().add(i));
+        let vb = vld1q_s8(b.as_ptr().add(i));
+        acc = vdotq_s32(acc, va, vb);
+        i += 16;
+    }
+    let mut total = vaddvq_s32(acc);
+    while i < a.len() {
+        total += a[i] as i32 * b[i] as i32;
+        i += 1;
+    }
+    total
 }
 
 #[cfg(test)]

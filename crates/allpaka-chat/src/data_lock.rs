@@ -19,6 +19,17 @@ impl Drop for DataLock {
     }
 }
 impl DataLock {
+    pub(crate) fn acquire_workspace(workspace: &Path) -> Result<Self> {
+        use sha2::Digest;
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let workspace = workspace.canonicalize()?;
+        let digest = sha2::Sha256::digest(workspace.as_os_str().as_encoded_bytes());
+        let locks = home.join(".allpaka").join("studio-instances").join(digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+        std::fs::create_dir_all(&locks)?;
+        Self::acquire(&locks).context("Studio is already running for this workspace; use that instance or stop it before starting another, even with a different port or --data-dir")
+    }
+
     pub(crate) fn acquire(data: &Path) -> Result<Self> {
         let path = data.join(".studio.lock");
         if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file()) {
@@ -37,6 +48,17 @@ impl DataLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workspace_lock_prevents_instances_with_different_data_directories() {
+        let workspace = std::env::temp_dir().join(crate::evaluation::new_id());
+        std::fs::create_dir(&workspace).unwrap();
+        let first = DataLock::acquire_workspace(&workspace).unwrap();
+        assert!(DataLock::acquire_workspace(&workspace).is_err());
+        drop(first);
+        let second = DataLock::acquire_workspace(&workspace).unwrap();
+        drop(second);
+        std::fs::remove_dir(workspace).unwrap();
+    }
     #[cfg(unix)]
     #[test]
     fn unlocking_is_not_delayed_by_a_forked_child() {

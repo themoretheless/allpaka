@@ -60,6 +60,19 @@ impl Region {
         }
     }
 
+    fn uninit(elems: usize) -> Self {
+        let bytes = (elems * 2).div_ceil(Self::PAGE) * Self::PAGE;
+        let layout =
+            std::alloc::Layout::from_size_align(bytes, Self::PAGE).expect("kv cache layout");
+        let ptr = unsafe { std::alloc::alloc(layout) } as *mut u16;
+        assert!(!ptr.is_null(), "out of memory for a {bytes}-byte kv cache");
+        Self {
+            ptr,
+            elems: bytes / 2,
+            layout,
+        }
+    }
+
     fn as_slice(&self) -> &[u16] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.elems) }
     }
@@ -152,7 +165,7 @@ impl SsmCache {
             .as_ref()
             .is_none_or(|store| store.as_slice().len() < needed_elems);
         if needs_alloc {
-            let store = Region::zeroed(needed_elems);
+            let store = Region::uninit(needed_elems);
             self.slot_shared = allpaka_backend::gpu::wrap_region(store.as_bytes());
             self.slot_store = Some(store);
         }

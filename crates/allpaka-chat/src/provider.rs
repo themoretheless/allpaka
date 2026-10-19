@@ -20,6 +20,8 @@ pub struct Provider {
     pub key_source: String,
     pub key_error: Option<String>,
     pub saved: bool,
+    pub workspace_id: String,
+    pub(crate) model_limits: std::sync::Arc<std::sync::Mutex<BTreeMap<String, u32>>>,
 }
 #[derive(Serialize)]
 pub struct PublicProvider {
@@ -31,6 +33,7 @@ pub struct PublicProvider {
     pub key_source: String,
     pub key_error: Option<String>,
     pub saved: bool,
+    pub workspace_id: String,
 }
 impl Provider {
     pub fn public(&self) -> PublicProvider {
@@ -43,6 +46,7 @@ impl Provider {
             key_source: self.key_source.clone(),
             key_error: self.key_error.clone(),
             saved: self.saved,
+            workspace_id: self.workspace_id.clone(),
         }
     }
 }
@@ -117,6 +121,8 @@ pub fn defaults() -> Vec<Provider> {
         .into(),
         key_error: None,
         saved: false,
+        workspace_id: if anthropic { std::env::var("ANTHROPIC_WORKSPACE_ID").unwrap_or_default() } else { String::new() },
+        model_limits: Default::default(),
         env: env.into(),
         anthropic,
         custom: false,
@@ -143,26 +149,83 @@ fn request(
         r
     };
     if p.anthropic {
-        r.header("x-api-key", &p.key)
-            .header("anthropic-version", "2023-06-01")
+        let r = r.header("x-api-key", &p.key)
+            .header("anthropic-version", "2023-06-01");
+        if p.workspace_id.is_empty() { r } else { r.header("anthropic-workspace-id", &p.workspace_id) }
     } else if !p.key.is_empty() {
         r.bearer_auth(&p.key)
     } else {
         r
     }
 }
-pub async fn models(client: &reqwest::Client, p: &Provider) -> Result<Vec<Value>> {
-    let r = request(client, p, reqwest::Method::GET, "/models")
-        .send()
-        .await?;
-    if !r.status().is_success() {
-        bail!("{}: HTTP {} while listing models", p.name, r.status());
+fn require_api_key(p: &Provider) -> Result<()> {
+    if !p.custom && p.id != "local" && p.key.trim().is_empty() {
+        bail!(
+            "{} API key is not configured. Add it in Connections or set {} before starting Studio.",
+            p.name,
+            p.env
+        );
     }
-    let value: Value = r.json().await?;
-    let mut models: Vec<Value> = value["data"].as_array().context("Provider returned no model catalog")?.iter()
-        .filter(|m|m["id"].is_string()).map(|m|json!({"id":m["id"],"name":m["name"],"context_length":m["context_length"],"pricing":m["pricing"],"architecture":m["architecture"],"supported_parameters":m["supported_parameters"],"top_provider":m["top_provider"]})).collect();
-    models.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
-    Ok(models)
+    Ok(())
+}
+
+pub async fn models(client: &reqwest::Client, p: &Provider) -> Result<Vec<Value>> {
+    require_api_key(p)?;
+    let mut catalog = Vec::new();
+    let mut after_id = None;
+    let mut cursors = std::collections::BTreeSet::new();
+    loop {
+        let mut req = request(client, p, reqwest::Method::GET, "/models");
+        if p.anthropic {
+            req = req.query(&[("limit", "100")]);
+            if let Some(cursor) = &after_id {
+                req = req.query(&[("after_id", cursor)]);
+            }
+        }
+        let r = req.send().await?;
+        if !r.status().is_success() {
+            let status = r.status();
+            if p.anthropic && status == reqwest::StatusCode::BAD_REQUEST {
+                let detail = r.json::<Value>().await.unwrap_or(Value::Null);
+                if detail["error"]["message"].as_str().is_some_and(|m| m.contains("anthropic-workspace-id")) {
+                    bail!("Claude requires a Workspace ID for this API key. Set Claude Workspace ID in Connections or ANTHROPIC_WORKSPACE_ID.");
+                }
+            }
+            bail!("{}: HTTP {} while listing models", p.name, status);
+        }
+        let value: Value = r.json().await?;
+        let page = value["data"]
+            .as_array()
+            .context("Provider returned no model catalog")?;
+        catalog.extend(page.iter().filter(|m| m["id"].is_string()).map(|m| {
+            let name = m.get("name").filter(|v| v.is_string())
+                .or_else(|| m.get("display_name").filter(|v| v.is_string()));
+            let output_limit = m.get("max_tokens").and_then(Value::as_u64);
+            let top_provider = if p.anthropic && output_limit.is_some() {
+                json!({"max_completion_tokens":output_limit})
+            } else { m["top_provider"].clone() };
+            json!({"id":m["id"],"name":name,"context_length":m.get("context_length").or_else(|| m.get("max_input_tokens")),"max_output_tokens":output_limit,"pricing":m["pricing"],"architecture":m["architecture"],"supported_parameters":m["supported_parameters"],"top_provider":top_provider})
+        }));
+        if !p.anthropic || value["has_more"] != true {
+            break;
+        }
+        let cursor = value["last_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .context("Claude model catalog has more pages but no cursor")?;
+        if page.is_empty() || !cursors.insert(cursor.to_owned()) || cursors.len() >= 100 {
+            bail!("Claude model catalog pagination did not finish");
+        }
+        after_id = Some(cursor.to_owned());
+    }
+    catalog.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    if p.anthropic {
+        *p.model_limits.lock().unwrap() = catalog.iter().filter_map(|m| {
+            let limit = u32::try_from(m["max_output_tokens"].as_u64()?).ok()?;
+            (limit > 0).then(|| (m["id"].as_str().unwrap().to_owned(), limit))
+        }).collect();
+    }
+    Ok(catalog)
 }
 
 pub fn body(
@@ -461,6 +524,16 @@ pub async fn generate<F>(
 where
     F: FnMut(String, String) + Send,
 {
+    require_api_key(provider)?;
+    let mut max_output_tokens = settings.max_output_tokens;
+    if provider.anthropic {
+        if !provider.model_limits.lock().unwrap().contains_key(&settings.model) {
+            models(client, provider).await?;
+        }
+        if let Some(limit) = provider.model_limits.lock().unwrap().get(&settings.model) {
+            max_output_tokens = max_output_tokens.min(*limit);
+        }
+    }
     let route = if provider.anthropic {
         "/messages"
     } else {
@@ -472,7 +545,7 @@ where
         system,
         messages,
         tools,
-        settings.max_output_tokens,
+        max_output_tokens,
     );
     if settings.json_mode
         && provider.id == "deepseek"
@@ -539,6 +612,24 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
+fn validate_workspace_id(value: &str) -> Result<()> {
+    if !value.is_empty() && (value.len() > 200 || !value.starts_with("wrkspc_") || value.len() <= 7
+        || !value.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')) {
+        bail!("Claude Workspace ID must start with wrkspc_ and contain only letters, digits, _ or -");
+    }
+    Ok(())
+}
+
+pub(crate) fn load_workspace_id(data: &std::path::Path) -> Result<String> {
+    let ids: Vec<String> = state_file::load_list(data, "anthropic-workspace", "Claude workspace", |id: &String| validate_workspace_id(id))?;
+    Ok(ids.into_iter().next().unwrap_or_default())
+}
+
+fn save_workspace_id(data: &std::path::Path, id: &str) -> Result<()> {
+    validate_workspace_id(id)?;
+    state_file::save_list(data, "anthropic-workspace", &[id])
+}
+
 #[derive(Deserialize)]
 pub(crate) struct Key {
     key: String,
@@ -546,6 +637,8 @@ pub(crate) struct Key {
     persist: bool,
     #[serde(default)]
     use_current: bool,
+    #[serde(default)]
+    workspace_id: Option<String>,
 }
 pub(crate) async fn set_key(
     State(app): State<App>,
@@ -555,12 +648,18 @@ pub(crate) async fn set_key(
     if key.key.len() > 4096 || key.key.chars().any(char::is_control) {
         return Err(error(StatusCode::BAD_REQUEST, "Invalid API key"));
     }
+    if let Some(workspace) = &key.workspace_id {
+        validate_workspace_id(workspace).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+        if id != "anthropic" {
+            return Err(error(StatusCode::BAD_REQUEST, "Workspace ID is only supported for Claude"));
+        }
+    }
     let _serial = app.key_mutations.lock().await;
     if key.use_current {
-        if !key.persist || !key.key.is_empty() {
+        if !key.key.is_empty() {
             return Err(error(
                 StatusCode::BAD_REQUEST,
-                "Saving the current key requires persist and no replacement key",
+                "Using the current key requires no replacement key",
             ));
         }
         key.key = app
@@ -583,6 +682,10 @@ pub(crate) async fn set_key(
             StatusCode::BAD_REQUEST,
             "System credential storage is unavailable on this platform",
         ));
+    }
+    if let Some(workspace) = &key.workspace_id {
+        save_workspace_id(&app.data, workspace)
+            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
     let data = app.data.clone();
     let account = id.clone();
@@ -611,7 +714,10 @@ pub(crate) async fn set_key(
     }
     .into();
     p.key = key.key;
+    p.model_limits.lock().unwrap().clear();
     p.key_error = None;
+    if let Some(workspace) = key.workspace_id { p.workspace_id = workspace; }
+    eprintln!("studio credential update: provider={} source={} saved={} pid={}", p.id, p.key_source, p.saved, std::process::id());
     Ok(Json(
         json!({"configured":p.public().configured,"saved":p.saved,"key_source":p.key_source}),
     ))
@@ -626,6 +732,7 @@ pub(crate) async fn model_list(State(app): State<App>, Path(id): Path<String>) -
         .find(|p| p.id == id)
         .cloned()
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "Unknown provider"))?;
+    require_api_key(&p).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
     let models = models(&app.client, &p)
         .await
         .map_err(|e| error(StatusCode::BAD_GATEWAY, e))?;
@@ -914,11 +1021,137 @@ pub(crate) fn custom_to_provider(p: &CustomProvider) -> Provider {
         key_source: "none".into(),
         key_error: None,
         saved: false,
+        workspace_id: String::new(),
+        model_limits: Default::default(),
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn claude_missing_key_is_reported_before_connecting() {
+        let mut p = defaults().into_iter().find(|p| p.id == "anthropic").unwrap();
+        p.base = "http://127.0.0.1:1/v1".into();
+        p.key = " ".into();
+        let error = models(&client().unwrap(), &p).await.unwrap_err().to_string();
+        assert!(error.contains("Claude API key is not configured"));
+        assert!(error.contains("ANTHROPIC_API_KEY"));
+        assert!(!error.contains("fixture-key"));
+        p.id = "local".into();
+        assert!(require_api_key(&p).is_ok());
+        p.id = "custom".into();
+        p.custom = true;
+        assert!(require_api_key(&p).is_ok());
+    }
+
+    async fn claude_fixture(router: axum::Router) -> (Provider, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut p = defaults()
+            .into_iter()
+            .find(|p| p.id == "anthropic")
+            .unwrap();
+        p.base = base;
+        p.key = "fixture-key".into();
+        (p, task)
+    }
+
+    #[tokio::test]
+    async fn claude_catalog_uses_native_auth_and_loads_all_pages() {
+        use axum::{extract::Query, http::HeaderMap, routing::get, Json, Router};
+        let router = Router::new().route("/v1/models", get(|headers: HeaderMap, Query(q): Query<BTreeMap<String, String>>| async move {
+            assert_eq!(headers["x-api-key"], "fixture-key");
+            assert_eq!(headers["anthropic-version"], "2023-06-01");
+            assert_eq!(headers["anthropic-workspace-id"], "wrkspc_test");
+            assert!(!headers.contains_key("authorization"));
+            assert_eq!(q["limit"], "100");
+            Json(if let Some(cursor) = q.get("after_id") {
+                assert_eq!(cursor, "claude-z");
+                json!({"data":[{"id":"claude-a","display_name":"Claude A","max_tokens":128000,"max_input_tokens":1000000}],"has_more":false,"last_id":"claude-a"})
+            } else {
+                json!({"data":[{"id":"claude-z","display_name":"Claude Z"}],"has_more":true,"last_id":"claude-z"})
+            })
+        }));
+        let (mut p, task) = claude_fixture(router).await;
+        p.workspace_id = "wrkspc_test".into();
+        let catalog = models(&client().unwrap(), &p).await.unwrap();
+        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog[0]["id"], "claude-a");
+        assert_eq!(catalog[0]["name"], "Claude A");
+        assert_eq!(catalog[0]["top_provider"]["max_completion_tokens"], 128000);
+        assert_eq!(catalog[0]["context_length"], 1000000);
+        assert_eq!(catalog[1]["name"], "Claude Z");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn claude_catalog_rejects_a_repeated_cursor() {
+        let router = axum::Router::new().route(
+            "/v1/models",
+            axum::routing::get(|| async {
+                axum::Json(json!({"data":[{"id":"claude-z"}],"has_more":true,"last_id":"claude-z"}))
+            }),
+        );
+        let (p, task) = claude_fixture(router).await;
+        let error = models(&client().unwrap(), &p).await.unwrap_err();
+        assert!(error.to_string().contains("pagination did not finish"));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn claude_messages_stream_over_native_http() {
+        use axum::{http::HeaderMap, routing::post, Json, Router};
+        let router = Router::new().route("/v1/messages", post(|headers: HeaderMap, Json(b): Json<Value>| async move {
+            assert_eq!(headers["x-api-key"], "fixture-key");
+            assert_eq!(headers["anthropic-version"], "2023-06-01");
+            assert_eq!(b["model"], "claude-fixture");
+            assert_eq!(b["system"], "system instruction");
+            assert_eq!(b["max_tokens"], 64);
+            assert_eq!(b["stream"], true);
+            assert_eq!(b["messages"][0]["content"][0]["text"], "hello");
+            let events = [
+                json!({"type":"message_start","message":{"usage":{"input_tokens":3}}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello from Claude"}}),
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}),
+                json!({"type":"message_stop"}),
+            ];
+            let stream = events.iter().map(|e| format!("data: {e}\n\n")).collect::<String>();
+            ([("content-type", "text/event-stream")], stream)
+        }));
+        let router = router.route("/v1/models", axum::routing::get(|| async {
+            Json(json!({"data":[{"id":"claude-fixture","max_tokens":64}],"has_more":false}))
+        }));
+        let (p, task) = claude_fixture(router).await;
+        let settings: Settings = serde_json::from_value(
+            json!({"provider":"anthropic","model":"claude-fixture","max_output_tokens":131072}),
+        )
+        .unwrap();
+        let messages = [Message {
+            role: "user".into(),
+            content: "hello".into(),
+            ..Message::default()
+        }];
+        let mut streamed = String::new();
+        let (message, usage) = generate(
+            &client().unwrap(),
+            &p,
+            &settings,
+            "system instruction",
+            &messages,
+            &[],
+            |text, _| streamed.push_str(&text),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.content, "Hello from Claude");
+        assert_eq!(streamed, message.content);
+        assert_eq!(usage["input_tokens"], 3);
+        assert_eq!(usage["output_tokens"], 4);
+        task.abort();
+    }
+
     #[test]
     fn fragmented_tool_arguments_and_reasoning_survive() {
         let mut a = Accumulator::default();

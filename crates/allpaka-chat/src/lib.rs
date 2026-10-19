@@ -178,6 +178,7 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
     if !workspace.is_dir() {
         bail!("Workspace must be a directory");
     }
+    let _workspace_lock = data_lock::DataLock::acquire_workspace(&workspace)?;
     let data = data_dir.unwrap_or_else(|| {
         let home = std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
@@ -211,6 +212,10 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                 }]
             };
             let mut providers=provider::defaults();
+            let claude_workspace = provider::load_workspace_id(&data)?;
+            for p in &mut providers {
+                if p.anthropic && p.workspace_id.is_empty() { p.workspace_id = claude_workspace.clone(); }
+            }
             for c in provider::load_custom_providers(&data)? {
                 providers.push(provider::custom_to_provider(&c));
             }
@@ -904,14 +909,21 @@ async fn branch_session(
     Ok(Json(json!({"id":new_id})))
 }
 async fn session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
-    let sessions = app.sessions.lock().unwrap();
-    let (s, _) = sessions
-        .get(&id)
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
-    let session = s.lock().unwrap().clone();
-    let mut value =
-        serde_json::to_value(&session).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    value["context_stats"] = compact::statistics(&session);
+    let shared = {
+        let sessions = app.sessions.lock().unwrap();
+        let (s, _) = sessions
+            .get(&id)
+            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
+        s.clone()
+    };
+    let (mut value, stats) = {
+        let session = shared.lock().unwrap();
+        let val = serde_json::to_value(&*session)
+            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let st = compact::statistics(&session);
+        (val, st)
+    };
+    value["context_stats"] = stats;
     value["background"] = app.background.list(&id);
     Ok(Json(value))
 }

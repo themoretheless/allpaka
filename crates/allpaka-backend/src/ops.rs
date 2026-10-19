@@ -13,19 +13,53 @@ fn cpu_threads() -> usize {
 
 #[inline]
 fn sum_sq_f64(x: &[f32]) -> f64 {
-    let mut acc = [0.0f64; 4];
-    let mut chunks = x.chunks_exact(4);
-    for c in &mut chunks {
-        acc[0] += (c[0] as f64) * (c[0] as f64);
-        acc[1] += (c[1] as f64) * (c[1] as f64);
-        acc[2] += (c[2] as f64) * (c[2] as f64);
-        acc[3] += (c[3] as f64) * (c[3] as f64);
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let mut acc0 = vdupq_n_f64(0.0);
+        let mut acc1 = vdupq_n_f64(0.0);
+        let mut acc2 = vdupq_n_f64(0.0);
+        let mut acc3 = vdupq_n_f64(0.0);
+        let mut i = 0usize;
+        let n = x.len();
+        let xp = x.as_ptr();
+        while i + 8 <= n {
+            let v0 = vld1q_f32(xp.add(i));
+            let v1 = vld1q_f32(xp.add(i + 4));
+            let d0 = vcvt_f64_f32(vget_low_f32(v0));
+            let d1 = vcvt_high_f64_f32(v0);
+            let d2 = vcvt_f64_f32(vget_low_f32(v1));
+            let d3 = vcvt_high_f64_f32(v1);
+            acc0 = vfmaq_f64(acc0, d0, d0);
+            acc1 = vfmaq_f64(acc1, d1, d1);
+            acc2 = vfmaq_f64(acc2, d2, d2);
+            acc3 = vfmaq_f64(acc3, d3, d3);
+            i += 8;
+        }
+        let mut total = vaddvq_f64(vaddq_f64(vaddq_f64(acc0, acc1), vaddq_f64(acc2, acc3)));
+        while i < n {
+            let v = *xp.add(i) as f64;
+            total += v * v;
+            i += 1;
+        }
+        total
     }
-    let mut total = (acc[0] + acc[1]) + (acc[2] + acc[3]);
-    for &v in chunks.remainder() {
-        total += (v as f64) * (v as f64);
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let mut acc = [0.0f64; 4];
+        let mut chunks = x.chunks_exact(4);
+        for c in &mut chunks {
+            acc[0] += (c[0] as f64) * (c[0] as f64);
+            acc[1] += (c[1] as f64) * (c[1] as f64);
+            acc[2] += (c[2] as f64) * (c[2] as f64);
+            acc[3] += (c[3] as f64) * (c[3] as f64);
+        }
+        let mut total = (acc[0] + acc[1]) + (acc[2] + acc[3]);
+        for &v in chunks.remainder() {
+            total += (v as f64) * (v as f64);
+        }
+        total
     }
-    total
 }
 
 /// `y = x · Wᵀ` over plain f32, shapes `x: [m, k]`, `w: [n, k]`, `y: [m, n]`.
@@ -83,7 +117,7 @@ pub fn rmsnorm_rows_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32)
     let n = weight.len();
     let rows = src.len() / n;
     let threads = cpu_threads().min(rows.max(1));
-    if threads <= 1 || rows < 4 {
+    if threads <= 1 || rows < 4 || src.len() < 16_384 {
         for (d, s) in dst.chunks_mut(n).zip(src.chunks(n)) {
             rmsnorm_into(d, s, weight, eps);
         }
@@ -101,6 +135,45 @@ pub fn rmsnorm_rows_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32)
     });
 }
 
+#[inline(always)]
+fn add_assign_slice(a: &mut [f32], b: &[f32]) {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let mut i = 0usize;
+        let n = a.len();
+        let ap = a.as_mut_ptr();
+        let bp = b.as_ptr();
+        while i + 16 <= n {
+            vst1q_f32(
+                ap.add(i),
+                vaddq_f32(vld1q_f32(ap.add(i)), vld1q_f32(bp.add(i))),
+            );
+            vst1q_f32(
+                ap.add(i + 4),
+                vaddq_f32(vld1q_f32(ap.add(i + 4)), vld1q_f32(bp.add(i + 4))),
+            );
+            vst1q_f32(
+                ap.add(i + 8),
+                vaddq_f32(vld1q_f32(ap.add(i + 8)), vld1q_f32(bp.add(i + 8))),
+            );
+            vst1q_f32(
+                ap.add(i + 12),
+                vaddq_f32(vld1q_f32(ap.add(i + 12)), vld1q_f32(bp.add(i + 12))),
+            );
+            i += 16;
+        }
+        while i < n {
+            *ap.add(i) += *bp.add(i);
+            i += 1;
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    for (x, y) in a.iter_mut().zip(b) {
+        *x += y;
+    }
+}
+
 /// `a += b` element-wise, spread over cores; the prefill residual adds run
 /// over the same hundreds-of-rows batches as the norms.
 pub fn add_assign_par(a: &mut [f32], b: &[f32]) {
@@ -108,17 +181,13 @@ pub fn add_assign_par(a: &mut [f32], b: &[f32]) {
     let threads = cpu_threads();
     let per = a.len().div_ceil(threads).max(1 << 16);
     if a.len() <= per {
-        for (x, y) in a.iter_mut().zip(b) {
-            *x += y;
-        }
+        add_assign_slice(a, b);
         return;
     }
     std::thread::scope(|scope| {
         for (ac, bc) in a.chunks_mut(per).zip(b.chunks(per)) {
             scope.spawn(move || {
-                for (x, y) in ac.iter_mut().zip(bc) {
-                    *x += y;
-                }
+                add_assign_slice(ac, bc);
             });
         }
     });
@@ -149,6 +218,24 @@ pub fn silu(x: f32) -> f32 {
 pub fn l2_norm(x: &mut [f32], eps: f32) {
     let s = dot(x, x);
     let inv = 1.0 / (s + eps).sqrt();
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let vinv = vdupq_n_f32(inv);
+        let mut i = 0usize;
+        let n = x.len();
+        let xp = x.as_mut_ptr();
+        while i + 8 <= n {
+            vst1q_f32(xp.add(i), vmulq_f32(vld1q_f32(xp.add(i)), vinv));
+            vst1q_f32(xp.add(i + 4), vmulq_f32(vld1q_f32(xp.add(i + 4)), vinv));
+            i += 8;
+        }
+        while i < n {
+            *xp.add(i) *= inv;
+            i += 1;
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     for v in x.iter_mut() {
         *v *= inv;
     }
@@ -203,18 +290,70 @@ pub fn gated_deltanet_step(
         let s = &mut state[h * d * d..(h + 1) * d * d];
         for i in 0..d {
             let row = &mut s[i * d..(i + 1) * d];
-            let mut sk = 0.0f32;
-            for (rj, &kj) in row.iter_mut().zip(k_h) {
-                *rj *= g;
-                sk += *rj * kj;
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                use std::arch::aarch64::*;
+                let vg = vdupq_n_f32(g);
+                let mut vsk0 = vdupq_n_f32(0.0);
+                let mut vsk1 = vdupq_n_f32(0.0);
+                let mut j = 0usize;
+                let rp = row.as_mut_ptr();
+                let kp = k_h.as_ptr();
+                let qp = q_h.as_ptr();
+                while j + 8 <= d {
+                    let r0 = vmulq_f32(vld1q_f32(rp.add(j)), vg);
+                    let r1 = vmulq_f32(vld1q_f32(rp.add(j + 4)), vg);
+                    vst1q_f32(rp.add(j), r0);
+                    vst1q_f32(rp.add(j + 4), r1);
+                    vsk0 = vfmaq_f32(vsk0, r0, vld1q_f32(kp.add(j)));
+                    vsk1 = vfmaq_f32(vsk1, r1, vld1q_f32(kp.add(j + 4)));
+                    j += 8;
+                }
+                let mut sk = vaddvq_f32(vaddq_f32(vsk0, vsk1));
+                while j < d {
+                    let rj = *rp.add(j) * g;
+                    *rp.add(j) = rj;
+                    sk += rj * *kp.add(j);
+                    j += 1;
+                }
+                let delta = (v_h[i] - sk) * b;
+                let vdelta = vdupq_n_f32(delta);
+                let mut vy0 = vdupq_n_f32(0.0);
+                let mut vy1 = vdupq_n_f32(0.0);
+                j = 0;
+                while j + 8 <= d {
+                    let r0 = vfmaq_f32(vld1q_f32(rp.add(j)), vld1q_f32(kp.add(j)), vdelta);
+                    let r1 = vfmaq_f32(vld1q_f32(rp.add(j + 4)), vld1q_f32(kp.add(j + 4)), vdelta);
+                    vst1q_f32(rp.add(j), r0);
+                    vst1q_f32(rp.add(j + 4), r1);
+                    vy0 = vfmaq_f32(vy0, r0, vld1q_f32(qp.add(j)));
+                    vy1 = vfmaq_f32(vy1, r1, vld1q_f32(qp.add(j + 4)));
+                    j += 8;
+                }
+                let mut y = vaddvq_f32(vaddq_f32(vy0, vy1));
+                while j < d {
+                    let rj = *rp.add(j) + *kp.add(j) * delta;
+                    *rp.add(j) = rj;
+                    y += rj * *qp.add(j);
+                    j += 1;
+                }
+                out_h[i] = y * scale;
             }
-            let delta = (v_h[i] - sk) * b;
-            let mut y = 0.0f32;
-            for ((rj, &kj), &qj) in row.iter_mut().zip(k_h).zip(q_h) {
-                *rj += kj * delta;
-                y += *rj * qj;
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                let mut sk = 0.0f32;
+                for (rj, &kj) in row.iter_mut().zip(k_h) {
+                    *rj *= g;
+                    sk += *rj * kj;
+                }
+                let delta = (v_h[i] - sk) * b;
+                let mut y = 0.0f32;
+                for ((rj, &kj), &qj) in row.iter_mut().zip(k_h).zip(q_h) {
+                    *rj += kj * delta;
+                    y += *rj * qj;
+                }
+                out_h[i] = y * scale;
             }
-            out_h[i] = y * scale;
         }
     }
 }
@@ -255,6 +394,7 @@ pub fn rope_inv_freq(head_dim: usize, freq_base: f32) -> Vec<f32> {
 /// computed once per position and reused ~1,700 times per token.
 pub fn rope_sin_cos(pos: u32, inv_freq: &[f32], out: &mut Vec<(f32, f32)>) {
     out.clear();
+    out.reserve(inv_freq.len());
     out.extend(inv_freq.iter().map(|&f| (pos as f32 * f).sin_cos()));
 }
 
@@ -285,14 +425,10 @@ pub fn rope_neox_cached(x: &mut [f32], table: &[(f32, f32)]) {
 /// [`rope_norm`] over a precomputed per-position table stored as arrays.
 pub fn rope_norm_cached_from_array(x: &mut [f32], table: &[[f32; 2]]) {
     assert_eq!(x.len(), table.len() * 2);
-    for (i, pair) in table.iter().enumerate() {
-        let sin = pair[0];
-        let cos = pair[1];
-        let a = x[2 * i];
-        let b = x[2 * i + 1];
-        x[2 * i] = a * cos - b * sin;
-        x[2 * i + 1] = a * sin + b * cos;
-    }
+    // SAFETY: `[f32; 2]` and `(f32, f32)` have identical size, alignment, and layout.
+    let pairs =
+        unsafe { std::slice::from_raw_parts(table.as_ptr() as *const (f32, f32), table.len()) };
+    rope_norm_cached(x, pairs);
 }
 
 /// [`rope_neox`] over a precomputed per-position table stored as arrays.
@@ -301,15 +437,11 @@ pub fn rope_norm_cached_from_array(x: &mut [f32], table: &[[f32; 2]]) {
 /// GLM): those channels rotate and the tail passes through unchanged.
 pub fn rope_neox_cached_from_array(x: &mut [f32], table: &[[f32; 2]]) {
     assert!(x.len() >= table.len() * 2);
-    let half = table.len();
-    for (i, pair) in table.iter().enumerate() {
-        let sin = pair[0];
-        let cos = pair[1];
-        let a = x[i];
-        let b = x[i + half];
-        x[i] = a * cos - b * sin;
-        x[i + half] = a * sin + b * cos;
-    }
+    let rot_len = table.len() * 2;
+    // SAFETY: `[f32; 2]` and `(f32, f32)` have identical size, alignment, and layout.
+    let pairs =
+        unsafe { std::slice::from_raw_parts(table.as_ptr() as *const (f32, f32), table.len()) };
+    rope_neox_cached(&mut x[..rot_len], pairs);
 }
 
 /// Rotary embedding, "NORM" style: adjacent pairs `(x[2i], x[2i+1])` rotate

@@ -144,6 +144,89 @@ fn ffn_shaped_matvecs_report_effective_bandwidth() {
     );
 }
 
+/// One format alone at the 235B's expert-down shape [4096, 1536], m = 1,
+/// cycling enough matrices to defeat the last-level cache. Q3_K is the
+/// subject; Q4_K at the same shape is the byte-path control, so a kernel
+/// change reads as the ratio between the two lines, which drifts far less
+/// with machine state than either absolute number.
+#[test]
+#[ignore = "a bandwidth measurement; run explicitly"]
+fn down_shaped_q3k_vs_q4k_bandwidth() {
+    let len: usize = 640 << 20;
+    let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
+    let ptr = unsafe { std::alloc::alloc(layout) };
+    assert!(!ptr.is_null());
+    let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    for b in region.iter_mut() {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *b = (state >> 56) as u8;
+    }
+    if !gpu::attach(region) {
+        eprintln!("SKIP: no Metal device");
+        return;
+    }
+    let (n_out, n_in) = (4096usize, 1536usize);
+    let x = vec![0.01f32; n_in];
+    let formats = [(GgmlType::Q3K, 110usize), (GgmlType::Q4K, 144)];
+    let sets: Vec<(GgmlType, usize, Vec<QuantMat>)> = formats
+        .iter()
+        .map(|&(ty, block)| {
+            let bytes = n_out * n_in / 256 * block;
+            let count = (len / bytes).min(96) - 1;
+            let mats = (0..count)
+                .map(|i| {
+                    QuantMat::new(&region[i * bytes..(i + 1) * bytes], ty, n_out, n_in).unwrap()
+                })
+                .collect();
+            (ty, bytes, mats)
+        })
+        .collect();
+    // Ramp the GPU clock first: the first format measured otherwise reads
+    // 20-30% low.
+    for _ in 0..4 {
+        for (_, _, mats) in &sets {
+            let items: Vec<(&QuantMat, &[f32])> = mats.iter().map(|q| (q, x.as_slice())).collect();
+            QuantMat::matmul_many(&items).unwrap();
+        }
+    }
+    let trials: usize = std::env::var("FFN_TRIALS").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
+    let mut rates = vec![Vec::new(); sets.len()];
+    for _ in 0..trials {
+        for (k, (_, bytes, mats)) in sets.iter().enumerate() {
+            let items: Vec<(&QuantMat, &[f32])> = mats.iter().map(|q| (q, x.as_slice())).collect();
+            let rounds = 4;
+            let before = gpu::gpu_time_stats();
+            for _ in 0..rounds {
+                QuantMat::matmul_many(&items).unwrap();
+            }
+            let after = gpu::gpu_time_stats();
+            let busy = (after.0 - before.0) as f64 / 1e9;
+            rates[k].push((bytes * mats.len() * rounds) as f64 / busy / 1e9);
+        }
+    }
+    let mut medians = Vec::new();
+    for (k, (ty, _, mats)) in sets.iter().enumerate() {
+        let r = &mut rates[k];
+        r.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med = r[r.len() / 2];
+        medians.push(med);
+        println!(
+            "down {ty:?} [{n_out}x{n_in}]: median {med:.1} GB/s GPU-clock, range {:.1}-{:.1} ({} mats x {trials})",
+            r[0],
+            r[r.len() - 1],
+            mats.len()
+        );
+    }
+    println!("q3_k / q4_k bytes-per-second ratio: {:.3}", medians[0] / medians[1]);
+    // Best-of is the contention-robust reading: interference only ever
+    // slows a trial down.
+    let best: Vec<f64> = rates.iter().map(|r| r[r.len() - 1]).collect();
+    println!("best-of: q3_k {:.1} GB/s, q4_k {:.1} GB/s, ratio {:.3}", best[0], best[1], best[0] / best[1]);
+}
+
 /// The prefill counterpart: tile-matmul (mm) kernels at chunk batch sizes,
 /// judged by GPU clock. The shapes are the 235B's expert stages at a
 /// realistic per-expert group size and the dense qkv projection at the full

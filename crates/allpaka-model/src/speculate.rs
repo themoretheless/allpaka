@@ -61,8 +61,7 @@ impl Speculator<'_> {
         let mut drafts = Vec::with_capacity(k);
         let mut feed = next;
         for _ in 0..k {
-            let logits = self.draft.forward(feed, self.draft_session)?;
-            let t = argmax(&logits);
+            let t = self.draft.forward_greedy(feed, self.draft_session)?;
             drafts.push(t);
             feed = t;
         }
@@ -74,27 +73,44 @@ impl Speculator<'_> {
         let mut batch = Vec::with_capacity(k + 1);
         batch.push(next);
         batch.extend_from_slice(&drafts);
-        let all = self
-            .target
-            .forward_batch_full(&batch, self.target_session)?;
-        let vocab = self.target.config.vocab as usize;
 
         let mut emitted = Vec::with_capacity(k + 1);
         emitted.push(next);
         let mut accepted = 0;
         let mut new_next = 0u32;
-        for (i, &d) in drafts.iter().enumerate() {
-            let want = argmax(&all[i * vocab..(i + 1) * vocab]);
-            if want == d {
-                emitted.push(d);
-                accepted += 1;
-            } else {
-                new_next = want;
-                break;
+
+        if let Some((picks, _h_all)) = self.target.verify_tokens(&batch, self.target_session)? {
+            for (i, &d) in drafts.iter().enumerate() {
+                let want = picks[i];
+                if want == d {
+                    emitted.push(d);
+                    accepted += 1;
+                } else {
+                    new_next = want;
+                    break;
+                }
             }
-        }
-        if accepted == drafts.len() {
-            new_next = argmax(&all[k * vocab..(k + 1) * vocab]);
+            if accepted == drafts.len() {
+                new_next = picks[k];
+            }
+        } else {
+            let all = self
+                .target
+                .forward_batch_full(&batch, self.target_session)?;
+            let vocab = self.target.config.vocab as usize;
+            for (i, &d) in drafts.iter().enumerate() {
+                let want = argmax(&all[i * vocab..(i + 1) * vocab]);
+                if want == d {
+                    emitted.push(d);
+                    accepted += 1;
+                } else {
+                    new_next = want;
+                    break;
+                }
+            }
+            if accepted == drafts.len() {
+                new_next = argmax(&all[k * vocab..(k + 1) * vocab]);
+            }
         }
 
         // Roll both caches back to the committed prefix. The target keeps
@@ -112,7 +128,9 @@ impl Speculator<'_> {
         // missing committed tokens so the next round starts aligned.
         if draft_keep < committed {
             let missing = &emitted[emitted.len() - (committed - draft_keep)..];
-            self.draft.forward_batch(missing, self.draft_session)?;
+            let _ = self
+                .draft
+                .forward_batch_hidden(missing, self.draft_session)?;
         }
 
         Ok(Round {
@@ -302,10 +320,9 @@ impl MtpSpeculator<'_> {
 
         if accepted == k {
             // The last committed token never passed through the MTP block;
-            // one extra step appends its position to the MTP layer's KV
-            // (its proposal is unused). The trunk's state is already
-            // exactly at the committed prefix; the slots go stale.
-            let (_, _) = model.mtp_step(
+            // append only its KV slot at `start + k` (skipping wq, attention,
+            // wo, MoE FFN, and output_head since its proposal is unused).
+            model.mtp_prefill_kv_only(
                 &hidden_rows[(k - 1) * hidden..k * hidden],
                 drafts[k - 1],
                 start + k,
@@ -367,38 +384,64 @@ pub fn find_prompt_drafts(
     let min_n = ngram_min.max(1);
     let max_n = ngram_max.max(min_n).min(history.len() + 1);
 
-    // Search helper over a token slice. Returns the continuation slice of up to `max_k` tokens.
-    let search_slice = |haystack: &[u32], n: usize| -> Option<Vec<u32>> {
-        if haystack.len() <= n {
-            return None;
+    // Single-pass reverse scan over `haystack`: for each position `pos` where
+    // `haystack[pos] == next`, measure how many preceding tokens match the tail
+    // of `history` (up to `max_n - 1`). If a match reaches `max_n`, return
+    // immediately; otherwise record the newest occurrence of each match length
+    // `n in min_n..=max_n`.
+    let scan_slice = |haystack: &[u32]| -> (usize, Vec<u32>) {
+        if haystack.len() <= min_n {
+            return (0, Vec::new());
         }
-        let prefix = if n > 1 {
-            &history[history.len() - (n - 1)..]
-        } else {
-            &[][..]
-        };
-        let last_start = haystack.len() - n - 1;
-        for start in (0..=last_start).rev() {
-            if haystack[start + n - 1] == next && haystack[start..start + n - 1] == *prefix {
-                let cont_start = start + n;
-                let cont_end = (cont_start + max_k).min(haystack.len());
-                return Some(haystack[cont_start..cont_end].to_vec());
+        let mut best_n = 0usize;
+        let mut best_cont_start = 0usize;
+        // `pos` is the index of `next` in `haystack`; at least 1 continuation token must follow (`pos + 1 < haystack.len()`).
+        for pos in (min_n - 1..haystack.len() - 1).rev() {
+            if haystack[pos] != next {
+                continue;
+            }
+            let max_prefix = pos.min(max_n - 1);
+            if max_prefix < best_n {
+                continue;
+            }
+            let mut matched = 1usize;
+            while matched <= max_prefix
+                && haystack[pos - matched] == history[history.len() - matched]
+            {
+                matched += 1;
+            }
+            if matched >= min_n && matched > best_n {
+                best_n = matched;
+                best_cont_start = pos + 1;
+                if best_n == max_n {
+                    break;
+                }
             }
         }
-        None
+        if best_n >= min_n {
+            let cont_end = (best_cont_start + max_k).min(haystack.len());
+            (best_n, haystack[best_cont_start..cont_end].to_vec())
+        } else {
+            (0, Vec::new())
+        }
     };
 
-    for n in (min_n..=max_n).rev() {
-        if !prediction.is_empty() {
-            if let Some(drafts) = search_slice(prediction, n) {
-                return drafts;
-            }
-        }
-        if let Some(drafts) = search_slice(history, n) {
-            return drafts;
-        }
+    let (pred_n, pred_drafts) = if !prediction.is_empty() {
+        scan_slice(prediction)
+    } else {
+        (0, Vec::new())
+    };
+    if pred_n == max_n {
+        return pred_drafts;
     }
-    Vec::new()
+    let (hist_n, hist_drafts) = scan_slice(history);
+    if pred_n >= hist_n && pred_n >= min_n {
+        pred_drafts
+    } else if hist_n >= min_n {
+        hist_drafts
+    } else {
+        Vec::new()
+    }
 }
 
 /// Prompt Lookup Decoding (PLD) + Predicted Outputs speculator.
@@ -620,9 +663,115 @@ impl PromptLookupSpeculator<'_> {
     }
 }
 
+/// Draft-length controller for a speculation loop.
+///
+/// A rejected draft is not free: the verify batch carries k+1 positions
+/// whatever the outcome, and on this engine a batch costs a little more than
+/// one token (measured: draft-model k=3 at 33% acceptance ran 8.2 tok/s
+/// against 14.7 plain). So the draft length follows recent acceptance:
+/// a fully accepted round widens k (up to `max_k`), a round that keeps less
+/// than a quarter of its drafts halves it, and at k=0 the loop decodes
+/// plainly for `cooldown` steps before probing again with k=1. The emitted
+/// tokens never depend on k - only how many passes produce them.
+#[derive(Debug, Clone)]
+pub struct AdaptiveK {
+    max_k: usize,
+    k: usize,
+    cooldown: usize,
+    rest: usize,
+}
+
+impl AdaptiveK {
+    pub fn new(max_k: usize) -> Self {
+        Self {
+            max_k,
+            k: max_k,
+            cooldown: 16,
+            rest: 0,
+        }
+    }
+
+    /// Draft tokens to propose for the next round (0 = decode plainly).
+    pub fn k(&self) -> usize {
+        if self.rest > 0 {
+            0
+        } else {
+            self.k
+        }
+    }
+
+    /// Record one round. `drafted == 0` is a plain step (no drafts were
+    /// found or the controller is resting) and only advances the cooldown.
+    pub fn record(&mut self, drafted: usize, accepted: usize) {
+        if drafted == 0 {
+            if self.rest > 0 {
+                self.rest -= 1;
+                if self.rest == 0 {
+                    self.k = 1;
+                }
+            }
+            return;
+        }
+        if accepted >= drafted {
+            self.k = (self.k + 1).min(self.max_k);
+        } else if accepted * 4 < drafted {
+            self.k /= 2;
+            if self.k == 0 {
+                self.rest = self.cooldown;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::find_prompt_drafts;
+    use super::{find_prompt_drafts, AdaptiveK};
+
+    #[test]
+    fn adaptive_k_backs_off_on_rejections_and_recovers_on_hits() {
+        let mut c = AdaptiveK::new(8);
+        assert_eq!(c.k(), 8);
+        c.record(8, 0);
+        assert_eq!(c.k(), 4);
+        c.record(4, 0);
+        c.record(2, 0);
+        assert_eq!(c.k(), 1);
+        c.record(1, 0);
+        // Resting: plain decode for the cooldown, then probe with k=1.
+        assert_eq!(c.k(), 0);
+        for _ in 0..15 {
+            c.record(0, 0);
+            assert_eq!(c.k(), 0);
+        }
+        c.record(0, 0);
+        assert_eq!(c.k(), 1);
+        // Full acceptance widens one step at a time, capped at max_k.
+        for want in 2..=8 {
+            c.record(c.k(), c.k());
+            assert_eq!(c.k(), want);
+        }
+        c.record(8, 8);
+        assert_eq!(c.k(), 8);
+        // Partial acceptance at or above a quarter holds k.
+        c.record(8, 2);
+        assert_eq!(c.k(), 8);
+    }
+
+    #[test]
+    fn adaptive_k_ignores_plain_steps_when_not_resting() {
+        let mut c = AdaptiveK::new(4);
+        c.record(0, 0);
+        c.record(0, 0);
+        assert_eq!(c.k(), 4);
+    }
+
+    #[test]
+    fn adaptive_k_zero_max_never_drafts() {
+        let mut c = AdaptiveK::new(0);
+        assert_eq!(c.k(), 0);
+        c.record(0, 0);
+        assert_eq!(c.k(), 0);
+    }
 
     #[test]
     fn prompt_lookup_prefers_longest_and_most_recent_ngram() {

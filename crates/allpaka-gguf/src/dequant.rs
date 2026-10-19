@@ -146,12 +146,21 @@ pub fn bf16_to_f32(h: u16) -> f32 {
 fn dequant_mlx_q4_block_slice(block: &[u8], out: &mut [f32]) {
     let scale = bf16_to_f32(u16::from_le_bytes([block[32], block[33]]));
     let bias = bf16_to_f32(u16::from_le_bytes([block[34], block[35]]));
+    let mut table = [0.0f32; 16];
+    for (q, slot) in table.iter_mut().enumerate() {
+        *slot = (q as f32).mul_add(scale, bias);
+    }
     for w in 0..8 {
         let word = u32::from_le_bytes(block[w * 4..w * 4 + 4].try_into().unwrap());
-        for k in 0..8 {
-            let q = ((word >> (4 * k)) & 0xf) as f32;
-            out[w * 8 + k] = q * scale + bias;
-        }
+        let dst = &mut out[w * 8..w * 8 + 8];
+        dst[0] = table[(word & 0xf) as usize];
+        dst[1] = table[((word >> 4) & 0xf) as usize];
+        dst[2] = table[((word >> 8) & 0xf) as usize];
+        dst[3] = table[((word >> 12) & 0xf) as usize];
+        dst[4] = table[((word >> 16) & 0xf) as usize];
+        dst[5] = table[((word >> 20) & 0xf) as usize];
+        dst[6] = table[((word >> 24) & 0xf) as usize];
+        dst[7] = table[((word >> 28) & 0xf) as usize];
     }
 }
 
