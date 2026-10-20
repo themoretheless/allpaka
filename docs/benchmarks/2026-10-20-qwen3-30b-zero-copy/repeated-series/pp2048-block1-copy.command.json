@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "/private/tmp/allpaka-qwen30-zero-copy/allpaka-shared-bench",
+    "/Users/themoretheless/.cache/allpaka/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+    "2048",
+    "3",
+    "greedy"
+  ],
+  "exit_code": 0,
+  "started_unix": 1792461739.0401201
+}

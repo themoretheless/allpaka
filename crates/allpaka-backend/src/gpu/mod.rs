@@ -5,6 +5,8 @@
 mod cuda;
 #[cfg(target_os = "macos")]
 mod metal;
+#[cfg(target_os = "macos")]
+mod metal_kernels;
 #[cfg(not(any(target_os = "macos", feature = "cuda")))]
 mod stub;
 

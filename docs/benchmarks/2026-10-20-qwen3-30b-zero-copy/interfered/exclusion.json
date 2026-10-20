@@ -1,0 +1,13 @@
+{
+  "status": "aborted; excluded from final comparison",
+  "reason": "large throughput regime shift affected both engines; concurrent street_walk GPU renderer identified after the run",
+  "gpu_counter_sample_duration_seconds": 2,
+  "street_walk_counter_delta": [
+    [
+      "pid 8429, street_walk",
+      1070094000
+    ]
+  ],
+  "raw_large_logits_location": "/tmp/allpaka-qwen30-zero-copy/interfered",
+  "applications_paused": false
+}

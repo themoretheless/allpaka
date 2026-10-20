@@ -1127,17 +1127,16 @@ impl<'a> Model<'a> {
     /// (index n_layers); plain sessions do not pay for it.
     pub fn new_session_mtp(&self, context_tokens: usize) -> Session {
         let context_tokens = context_tokens.max(allpaka_backend::gpu::minimum_kv_capacity());
+        let mut kv_active: Vec<bool> = self.layers.iter().map(|l| l.attn.is_some()).collect();
+        kv_active.extend(std::iter::repeat_n(true, self.config.nextn as usize));
+        let ssm_active: Vec<bool> = self.layers.iter().map(|l| l.gdn.is_some()).collect();
         Session {
-            kv: KvCache::new(
-                self.config.n_layers as usize + self.config.nextn as usize,
-                self.config.kv_dim(),
-                context_tokens,
-            ),
+            kv: KvCache::with_active_layers(&kv_active, self.config.kv_dim(), context_tokens),
             rope_cache: Vec::new(),
             rope_cache_pairs: self.config.rope_dim as usize / 2,
             ssm: self.config.ssm.as_ref().map(|s| {
-                crate::kv::SsmCache::new(
-                    self.config.n_layers as usize,
+                crate::kv::SsmCache::with_active_layers(
+                    &ssm_active,
                     s.d_conv as usize,
                     (s.d_inner + 2 * (s.n_group * s.d_state)) as usize,
                     s.dt_rank as usize,
@@ -1149,13 +1148,15 @@ impl<'a> Model<'a> {
 
     pub fn new_session(&self, context_tokens: usize) -> Session {
         let context_tokens = context_tokens.max(allpaka_backend::gpu::minimum_kv_capacity());
+        let kv_active: Vec<bool> = self.layers.iter().map(|l| l.attn.is_some()).collect();
+        let ssm_active: Vec<bool> = self.layers.iter().map(|l| l.gdn.is_some()).collect();
         Session {
-            kv: KvCache::new(self.layers.len(), self.config.kv_dim(), context_tokens),
+            kv: KvCache::with_active_layers(&kv_active, self.config.kv_dim(), context_tokens),
             rope_cache: Vec::new(),
             rope_cache_pairs: self.config.rope_dim as usize / 2,
             ssm: self.config.ssm.as_ref().map(|s| {
-                crate::kv::SsmCache::new(
-                    self.layers.len(),
+                crate::kv::SsmCache::with_active_layers(
+                    &ssm_active,
                     s.d_conv as usize,
                     (s.d_inner + 2 * (s.n_group * s.d_state)) as usize,
                     s.dt_rank as usize,
@@ -1212,9 +1213,10 @@ impl<'a> Model<'a> {
         // also mirrored into the row's slot (same pointers the slices below
         // alias; the copy happens once per row inside the loop).
         let slot_ptrs = st.slot_write_ptrs(li);
+        let ssm_slot = st.slot_of(li);
         let (conv_all, state_all) = st.both_mut();
-        let conv = &mut conv_all[li * n_conv..(li + 1) * n_conv];
-        let state = &mut state_all[li * n_state..(li + 1) * n_state];
+        let conv = &mut conv_all[ssm_slot * n_conv..(ssm_slot + 1) * n_conv];
+        let state = &mut state_all[ssm_slot * n_state..(ssm_slot + 1) * n_state];
         let mut out = vec![0f32; m * value_dim];
         let mut c_out = vec![0f32; channels];
         let mut beta_i = vec![0f32; heads_v];
@@ -1388,18 +1390,18 @@ impl<'a> Model<'a> {
         }
 
         // eh_proj([enorm(emb(token)) | hnorm(h_prev)]).
-        let mut e = self.embedding()?.row(token as usize)?;
-        ops::rmsnorm(&mut e, &m.enorm, c.rms_eps);
-        let mut hn = h_prev.to_vec();
-        ops::rmsnorm(&mut hn, &m.hnorm, c.rms_eps);
-        let mut cat = e;
-        cat.extend_from_slice(&hn);
+        let hidden = c.hidden as usize;
+        let mut cat = vec![0.0f32; 2 * hidden];
+        self.embedding()?
+            .row_into(token as usize, &mut cat[..hidden])?;
+        ops::rmsnorm(&mut cat[..hidden], &m.enorm, c.rms_eps);
+        ops::rmsnorm_into(&mut cat[hidden..], h_prev, &m.hnorm, c.rms_eps);
         let mut x = m.eh_proj.matmul(&cat, 1)?;
 
         // Attention, identical to a trunk full-attention decode step.
         let aw = &m.attn;
-        let mut h = x.clone();
-        ops::rmsnorm(&mut h, &m.attn_norm, c.rms_eps);
+        let mut h = vec![0.0f32; hidden];
+        ops::rmsnorm_into(&mut h, &x, &m.attn_norm, c.rms_eps);
         let mut qkv = QuantMat::matmul_many(&[
             (&aw.wq, h.as_slice()),
             (&aw.wk, h.as_slice()),
@@ -1420,18 +1422,26 @@ impl<'a> Model<'a> {
         } else {
             Vec::new()
         };
-        let rope_pairs = s.rope_cache(&self.rope_inv_freq, pos, 1).to_vec();
-        for head in q.chunks_mut(head_dim) {
-            if let Some(w) = &m.q_norm {
+        let rope_pairs = s.rope_cache(&self.rope_inv_freq, pos, 1);
+        if let Some(w) = &m.q_norm {
+            for head in q.chunks_mut(head_dim) {
                 ops::rmsnorm(head, w, c.rms_eps);
+                self.rope_from_arrays(head, rope_pairs);
             }
-            self.rope_from_arrays(head, &rope_pairs);
+        } else {
+            for head in q.chunks_mut(head_dim) {
+                self.rope_from_arrays(head, rope_pairs);
+            }
         }
-        for head in k.chunks_mut(head_dim) {
-            if let Some(w) = &m.k_norm {
+        if let Some(w) = &m.k_norm {
+            for head in k.chunks_mut(head_dim) {
                 ops::rmsnorm(head, w, c.rms_eps);
+                self.rope_from_arrays(head, rope_pairs);
             }
-            self.rope_from_arrays(head, &rope_pairs);
+        } else {
+            for head in k.chunks_mut(head_dim) {
+                self.rope_from_arrays(head, rope_pairs);
+            }
         }
         let li = c.n_layers as usize;
         s.kv.store_at_rewrite(li, pos, &k, &v);
@@ -1468,12 +1478,8 @@ impl<'a> Model<'a> {
 
         // MoE FFN, the shared head norm, and the trunk LM head (the GGUF
         // carries no nextn.shared_head_head).
-        let h2 = {
-            let mut h = x.clone();
-            ops::rmsnorm(&mut h, &m.ffn_norm, c.rms_eps);
-            h
-        };
-        let down = m.ffn.forward(&h2)?;
+        ops::rmsnorm_into(&mut h, &x, &m.ffn_norm, c.rms_eps);
+        let down = m.ffn.forward(&h)?;
         for (a, b) in x.iter_mut().zip(&down) {
             *a += b;
         }
@@ -1503,12 +1509,12 @@ impl<'a> Model<'a> {
             bail!("token {token} out of vocabulary {}", c.vocab);
         }
 
-        let mut e = self.embedding()?.row(token as usize)?;
-        ops::rmsnorm(&mut e, &m.enorm, c.rms_eps);
-        let mut hn = h_prev.to_vec();
-        ops::rmsnorm(&mut hn, &m.hnorm, c.rms_eps);
-        let mut cat = e;
-        cat.extend_from_slice(&hn);
+        let hidden = c.hidden as usize;
+        let mut cat = vec![0.0f32; 2 * hidden];
+        self.embedding()?
+            .row_into(token as usize, &mut cat[..hidden])?;
+        ops::rmsnorm(&mut cat[..hidden], &m.enorm, c.rms_eps);
+        ops::rmsnorm_into(&mut cat[hidden..], h_prev, &m.hnorm, c.rms_eps);
         let mut h = m.eh_proj.matmul(&cat, 1)?;
         ops::rmsnorm(&mut h, &m.attn_norm, c.rms_eps);
 
@@ -1516,12 +1522,16 @@ impl<'a> Model<'a> {
         let mut kv_proj = QuantMat::matmul_many(&[(&aw.wk, h.as_slice()), (&aw.wv, h.as_slice())])?;
         let v = kv_proj.pop().expect("v");
         let mut k = kv_proj.pop().expect("k");
-        let rope_pairs = s.rope_cache(&self.rope_inv_freq, pos, 1).to_vec();
-        for head in k.chunks_mut(head_dim) {
-            if let Some(w) = &m.k_norm {
+        let rope_pairs = s.rope_cache(&self.rope_inv_freq, pos, 1);
+        if let Some(w) = &m.k_norm {
+            for head in k.chunks_mut(head_dim) {
                 ops::rmsnorm(head, w, c.rms_eps);
+                self.rope_from_arrays(head, rope_pairs);
             }
-            self.rope_from_arrays(head, &rope_pairs);
+        } else {
+            for head in k.chunks_mut(head_dim) {
+                self.rope_from_arrays(head, rope_pairs);
+            }
         }
         let li = c.n_layers as usize;
         s.kv.store_at_rewrite(li, pos, &k, &v);
@@ -2399,8 +2409,16 @@ impl<'a> Model<'a> {
         let c = &self.config;
         let dbg = tokenbuf_debug_enabled();
         let ssm_offsets: Option<Vec<(usize, usize)>> = s.ssm.as_ref().map(|ssm| {
-            (0..self.layers.len())
-                .map(|li| (ssm.conv_off(li), ssm.state_off(li)))
+            self.layers
+                .iter()
+                .enumerate()
+                .map(|(li, layer)| {
+                    if layer.gdn.is_some() {
+                        (ssm.conv_off(li), ssm.state_off(li))
+                    } else {
+                        (0, 0)
+                    }
+                })
                 .collect()
         });
         if !self.layers.is_empty() {
@@ -2411,8 +2429,6 @@ impl<'a> Model<'a> {
                 return Ok(None);
             }
         }
-        let kv_layer_stride = s.kv.layer_stride();
-        let kv_v_base = s.kv.v_base();
         let mut layers = Vec::with_capacity(self.layers.len());
         for (li, layer) in self.layers.iter().enumerate() {
             if layer.attn_norm_raw.is_empty() || layer.ffn_norm_raw.is_empty() {
@@ -2421,8 +2437,7 @@ impl<'a> Model<'a> {
                 }
                 return Ok(None);
             }
-            let k_off = li * kv_layer_stride;
-            let v_off = kv_v_base + k_off;
+            let (k_off, v_off) = s.kv.layer_offsets(li);
             let ffn = match &layer.ffn {
                 Ffn::Dense {
                     w_gate,

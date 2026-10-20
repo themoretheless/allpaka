@@ -9,7 +9,9 @@ use std::{path::Path, time::Instant};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    let file = GgufFile::open(Path::new(args.get(1).expect("MODEL [PP=512] [ROUNDS=5]")))?;
+    let file = GgufFile::open(Path::new(
+        args.get(1).expect("MODEL [PP=512] [ROUNDS=5] [greedy]"),
+    ))?;
     let model = Model::load(&file)?;
     ensure!(
         gpu::is_attached(),
@@ -19,13 +21,17 @@ fn main() -> Result<()> {
     let pp: usize = args.get(2).map_or(Ok(512), |s| s.parse())?;
     let rounds: usize = args.get(3).map_or(Ok(5), |s| s.parse())?;
     ensure!(pp > 0 && rounds > 0, "nonzero sizes required");
+    let greedy = args.get(4).is_some_and(|s| s == "greedy");
     let tokens: Vec<u32> = (0..pp)
-        .map(|i| (i as u32 * 733 + 17) % model.config.vocab.min(30000))
+        .map(|i| {
+            ((i as u32 + if greedy { 32 } else { 0 }) * 733 + 17) % model.config.vocab.min(30000)
+        })
         .collect();
     let mut prefill = Vec::new();
     let mut decode = Vec::new();
     let mut final_logits = Vec::new();
     let mut generated = Vec::new();
+    let mut fast_path = Vec::new();
     let stats_before = gpu::shared_activation_stats();
     let gpu_before = gpu::stats();
     for round in 0..=rounds {
@@ -46,21 +52,54 @@ fn main() -> Result<()> {
         final_logits = logits.clone();
         // Identical one-token initial context, independent of prefill timing.
         let mut session = model.new_session(33);
-        logits = model.forward(17, &mut session)?;
+        logits = if greedy {
+            model.forward_batch(&[1], &mut session)?
+        } else {
+            model.forward(17, &mut session)?
+        };
         generated.clear();
-        let start = Instant::now();
-        for _ in 0..32 {
-            let token = logits
+        let greedy_seed = greedy.then(|| {
+            logits
                 .iter()
                 .enumerate()
                 .max_by(|a, b| a.1.total_cmp(b.1))
                 .unwrap()
-                .0 as u32;
-            generated.push(token);
-            logits = model.forward(token, &mut session)?;
+                .0 as u32
+        });
+        let path_before = gpu::decode_path_stats();
+        let start = Instant::now();
+        if let Some(seed) = greedy_seed {
+            generated = model.forward_greedy_n(seed, &mut session, 32)?;
+            ensure!(
+                generated.len() == 32 && session.pos() == 33,
+                "decode workload mismatch"
+            );
+        } else {
+            for _ in 0..32 {
+                let token = logits
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .unwrap()
+                    .0 as u32;
+                generated.push(token);
+                logits = model.forward(token, &mut session)?;
+            }
         }
+        let seconds = start.elapsed().as_secs_f64();
+        let path_after = gpu::decode_path_stats();
+        let attempts = path_after.attempts - path_before.attempts;
+        let successes = path_after.successes - path_before.successes;
+        let declines = path_after.declines - path_before.declines;
+        if greedy {
+            ensure!(
+                attempts == 32 && successes == 32 && declines == 0,
+                "incomplete GPU decode coverage: {attempts}/{successes}/{declines}"
+            );
+        }
+        fast_path.push(json!({"round": round, "attempts": attempts, "successes": successes, "declines": declines}));
         if round > 0 {
-            decode.push(32.0 / start.elapsed().as_secs_f64());
+            decode.push(32.0 / seconds);
         }
     }
     let stats = gpu::shared_activation_stats();
@@ -69,6 +108,10 @@ fn main() -> Result<()> {
         "{}",
         json!({
             "model": args[1], "pp": pp, "rounds": rounds, "warmup_rounds": 1,
+            "decode_kind": if greedy { "forward_greedy_n" } else { "forward" },
+            "decode_context_tokens": 1, "decode_tokens": 32, "kv_format": "f16",
+            "hidden": model.config.hidden, "architecture": model.config.architecture,
+            "decode_fast_path": fast_path,
             "zero_copy": std::env::var("ALLPAKA_PREFILL_ZERO_COPY").unwrap_or_else(|_| "1".into()),
             "prefill_tokens_per_second": prefill, "decode_tokens_per_second": decode,
             "generated": generated, "prefill_logits": final_logits,

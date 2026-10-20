@@ -1,0 +1,33 @@
+{
+  "argv": [
+    "/opt/homebrew/Cellar/llama.cpp/0.7.0/bin/llama-bench",
+    "-m",
+    "/Users/themoretheless/.cache/allpaka/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+    "-p",
+    "0",
+    "-n",
+    "32",
+    "-d",
+    "1",
+    "-r",
+    "3",
+    "-ngl",
+    "99",
+    "-ctk",
+    "f16",
+    "-ctv",
+    "f16",
+    "-b",
+    "512",
+    "-ub",
+    "512",
+    "-fa",
+    "on",
+    "-t",
+    "16",
+    "-o",
+    "json"
+  ],
+  "exit_code": 0,
+  "started_unix": 1792461001.263826
+}

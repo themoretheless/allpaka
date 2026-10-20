@@ -1,0 +1,486 @@
+{
+  "samples": 80,
+  "interval_seconds": 2,
+  "events": [
+    {
+      "time": 1792461632.111562,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461634.15182,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461636.189274,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461638.2317362,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461640.2742348,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461642.3108292,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461644.407316,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461646.4905138,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461648.583573,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461650.692498,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461652.7731042,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461654.834362,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461656.908045,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461658.983608,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461661.0677462,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461663.146187,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461665.2305632,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461667.334507,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461669.4478238,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461671.542942,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461673.643627,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461675.759755,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461677.875814,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461679.979477,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461682.079715,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461684.151275,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461686.211075,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461688.309063,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461690.452817,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461692.612282,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461694.69167,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461696.8118699,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461698.960145,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461701.0388439,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461703.112639,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461705.181937,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461707.24789,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461709.3021681,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461711.359444,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461713.430014,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461715.509669,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461717.5971,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461719.6925418,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461721.765424,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461723.8402612,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461725.905484,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461727.9760299,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461730.0476348,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461732.115405,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461734.18852,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461736.273928,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461738.345077,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461740.4115908,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461742.4857118,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461744.5641558,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461746.6357498,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461748.714965,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461750.791353,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461752.872721,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461754.962326,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461757.071618,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461759.2522109,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461761.476097,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461763.604009,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461765.7570062,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461767.8489769,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461769.971482,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461772.091516,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461774.26945,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461776.4420538,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461778.557821,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461780.691348,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461782.8561249,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461784.998988,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461787.087581,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461789.19761,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461791.362785,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461793.576114,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461795.734276,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    },
+    {
+      "time": 1792461797.871862,
+      "renderers": [
+        "8914 /Users/themoretheless/Documents/Sources/voxy/artifacts/original-street-realism-2026-10-15/water-scene-ray-qualification-v1/street_walk"
+      ]
+    }
+  ]
+}

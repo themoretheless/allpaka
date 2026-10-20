@@ -1,0 +1,2 @@
+      "PerformanceStatistics" = {"In use system memory (driver)"=0,"Alloc system memory"=32135446528,"Tiler Utilization %"=2,"recoveryCount"=0,"lastRecoveryTime"=0,"Renderer Utilization %"=95,"TiledSceneBytes"=36732928,"Device Utilization %"=98,"SplitSceneCount"=0,"Allocated PB Size"=342097920,"In use system memory"=25872515072}
+      "model" = "Apple M4 Max"

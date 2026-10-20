@@ -1,0 +1,50 @@
+[
+  {
+    "order_offset": 0,
+    "source": "/tmp/allpaka-qwen30-zero-copy/clean",
+    "prefix": "pp480-block1-",
+    "criterion": "all arms completed before renderer PID 8914 started at 06:00:23",
+    "copied_to": "/Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-10-20-qwen3-30b-zero-copy/selected/block-01",
+    "relative_directory": "block-01"
+  },
+  {
+    "order_offset": 1,
+    "source": "/tmp/allpaka-qwen30-zero-copy/clean",
+    "prefix": "pp480-block2-",
+    "criterion": "all arms completed before renderer PID 8914 started at 06:00:23",
+    "copied_to": "/Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-10-20-qwen3-30b-zero-copy/selected/block-02",
+    "relative_directory": "block-02"
+  },
+  {
+    "order_offset": 2,
+    "source": "/tmp/allpaka-qwen30-zero-copy/guarded/attempt-1-order2",
+    "prefix": "pp480-block1-",
+    "criterion": "renderer absent throughout block; polled every 0.5 s",
+    "copied_to": "/Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-10-20-qwen3-30b-zero-copy/selected/block-03",
+    "relative_directory": "block-03"
+  },
+  {
+    "order_offset": 3,
+    "source": "/tmp/allpaka-qwen30-zero-copy/guarded/attempt-2-order3",
+    "prefix": "pp480-block1-",
+    "criterion": "renderer absent throughout block; polled every 0.5 s",
+    "copied_to": "/Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-10-20-qwen3-30b-zero-copy/selected/block-04",
+    "relative_directory": "block-04"
+  },
+  {
+    "order_offset": 4,
+    "source": "/tmp/allpaka-qwen30-zero-copy/guarded/attempt-3-order4",
+    "prefix": "pp480-block1-",
+    "criterion": "renderer absent throughout block; polled every 0.5 s",
+    "copied_to": "/Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-10-20-qwen3-30b-zero-copy/selected/block-05",
+    "relative_directory": "block-05"
+  },
+  {
+    "order_offset": 5,
+    "source": "/tmp/allpaka-qwen30-zero-copy/guarded/attempt-4-order5",
+    "prefix": "pp480-block1-",
+    "criterion": "renderer absent throughout block; polled every 0.5 s",
+    "copied_to": "/Users/themoretheless/Documents/Sources/allpaka/docs/benchmarks/2026-10-20-qwen3-30b-zero-copy/selected/block-06",
+    "relative_directory": "block-06"
+  }
+]

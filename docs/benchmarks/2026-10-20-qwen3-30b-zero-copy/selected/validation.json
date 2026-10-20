@@ -1,0 +1,15 @@
+{
+  "blocks": 6,
+  "measured_rounds_per_process": 3,
+  "phase_samples_per_arm": 18,
+  "allpaka_processes": 12,
+  "logit_max_difference": 0,
+  "identical_generated_tokens": true,
+  "gpu_decode_steps_including_warmup": 1536,
+  "gpu_decode_declines": 0,
+  "handoff_and_projection_bytes_avoided_including_warmup": 94568448,
+  "renderers_suspended": false,
+  "pp": 480,
+  "tg": 32,
+  "kv": "f16"
+}

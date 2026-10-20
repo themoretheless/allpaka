@@ -104,6 +104,8 @@ impl Drop for Region {
 /// boundary.
 pub struct SsmCache {
     store: Region,
+    /// Maps model layer index -> compact SSM slot index (`usize::MAX` for non-GDN layers).
+    slot_map: Vec<usize>,
     /// The conv half's element count; the state half follows.
     conv_elems: usize,
     state_elems: usize,
@@ -131,12 +133,35 @@ impl SsmCache {
         dt_rank: usize,
         d_state: usize,
     ) -> Self {
-        let conv_elems = n_layers * (d_conv - 1) * conv_channels;
-        let state_elems = n_layers * dt_rank * d_state * d_state;
+        let active = vec![true; n_layers];
+        Self::with_active_layers(&active, d_conv, conv_channels, dt_rank, d_state)
+    }
+
+    pub fn with_active_layers(
+        active: &[bool],
+        d_conv: usize,
+        conv_channels: usize,
+        dt_rank: usize,
+        d_state: usize,
+    ) -> Self {
+        let mut slot_map = Vec::with_capacity(active.len());
+        let mut n_active = 0usize;
+        for &is_active in active {
+            if is_active {
+                slot_map.push(n_active);
+                n_active += 1;
+            } else {
+                slot_map.push(usize::MAX);
+            }
+        }
+        let n_slots = n_active.max(1);
+        let conv_elems = n_slots * (d_conv - 1) * conv_channels;
+        let state_elems = n_slots * dt_rank * d_state * d_state;
         let store = Region::zeroed((conv_elems + state_elems) * 2);
         let shared = allpaka_backend::gpu::wrap_region(store.as_bytes());
         Self {
             store,
+            slot_map,
             conv_elems,
             state_elems,
             shared,
@@ -148,6 +173,13 @@ impl SsmCache {
             dt_rank,
             d_state,
         }
+    }
+
+    #[inline]
+    pub fn slot_of(&self, layer: usize) -> usize {
+        let s = self.slot_map[layer];
+        debug_assert_ne!(s, usize::MAX, "inactive SSM layer {layer}");
+        s
     }
 
     /// Elements of the whole region (conv + state); one slot's stride.
@@ -286,10 +318,11 @@ impl SsmCache {
         if !self.slots_armed {
             return None;
         }
+        let slot = self.slot_of(li);
         let n_conv = (self.d_conv - 1) * self.conv_channels;
         let n_state = self.dt_rank * self.d_state * self.d_state;
-        let conv_off = li * n_conv;
-        let state_off = self.conv_elems + li * n_state;
+        let conv_off = slot * n_conv;
+        let state_off = self.conv_elems + slot * n_state;
         let total = self.total_elems();
         unsafe {
             let sp = self.store.as_slice().as_ptr() as *const f32;
@@ -329,21 +362,23 @@ impl SsmCache {
 
     /// This layer's conv window rows, `(d_conv - 1) * conv_channels`.
     pub fn conv_layer(&mut self, layer: usize) -> &mut [f32] {
+        let slot = self.slot_of(layer);
         let n = (self.d_conv - 1) * self.conv_channels;
-        let at = layer * n;
+        let at = slot * n;
         &mut self.conv_all_mut()[at..at + n]
     }
 
     /// This layer's deltanet state, `dt_rank * d_state * d_state`.
     pub fn state_layer(&mut self, layer: usize) -> &mut [f32] {
+        let slot = self.slot_of(layer);
         let n = self.dt_rank * self.d_state * self.d_state;
-        let at = layer * n;
+        let at = slot * n;
         &mut self.state_all_mut()[at..at + n]
     }
 
     /// The wrapped region for the GDN decode kernels. Conv window of layer
-    /// `i` sits at element offset `i * (d_conv-1) * conv_channels`, its
-    /// deltanet state at `conv_elems + i * dt_rank * d_state * d_state`.
+    /// `i` sits at element offset `slot * (d_conv-1) * conv_channels`, its
+    /// deltanet state at `conv_elems + slot * dt_rank * d_state * d_state`.
     pub fn gpu_view(&mut self) -> Option<&allpaka_backend::gpu::SharedRegion> {
         if self.shared.is_none() {
             self.shared = allpaka_backend::gpu::wrap_region(self.store.as_bytes());
@@ -353,12 +388,14 @@ impl SsmCache {
 
     /// Element offset of a layer's deltanet state inside the region.
     pub fn state_off(&self, layer: usize) -> usize {
-        self.conv_elems + layer * self.dt_rank * self.d_state * self.d_state
+        let slot = self.slot_of(layer);
+        self.conv_elems + slot * self.dt_rank * self.d_state * self.d_state
     }
 
     /// Element offset of a layer's conv window inside the region.
     pub fn conv_off(&self, layer: usize) -> usize {
-        layer * (self.d_conv - 1) * self.conv_channels
+        let slot = self.slot_of(layer);
+        slot * (self.d_conv - 1) * self.conv_channels
     }
 }
 
@@ -369,6 +406,8 @@ impl SsmCache {
 /// single step.
 pub struct KvCache {
     store: Region,
+    /// Maps model layer index -> compact KV slot index (`usize::MAX` for non-attention layers).
+    slot_map: Vec<usize>,
     /// Element offset of the V half.
     v_base: usize,
     layer_stride: usize,
@@ -382,18 +421,54 @@ pub struct KvCache {
 
 impl KvCache {
     pub fn new(n_layers: usize, kv_dim: usize, capacity: usize) -> Self {
+        let active = vec![true; n_layers];
+        Self::with_active_layers(&active, kv_dim, capacity)
+    }
+
+    pub fn with_active_layers(active: &[bool], kv_dim: usize, capacity: usize) -> Self {
+        let mut slot_map = Vec::with_capacity(active.len());
+        let mut n_active = 0usize;
+        for &is_active in active {
+            if is_active {
+                slot_map.push(n_active);
+                n_active += 1;
+            } else {
+                slot_map.push(usize::MAX);
+            }
+        }
+        let n_slots = n_active.max(1);
         let layer_stride = kv_dim * capacity;
-        let half = n_layers * layer_stride;
+        let half = n_slots * layer_stride;
         let store = Region::zeroed(half * 2);
         let shared = allpaka_backend::gpu::wrap_region(store.as_bytes());
         Self {
             store,
+            slot_map,
             v_base: half,
             layer_stride,
             kv_dim,
             len: 0,
             capacity,
             shared,
+        }
+    }
+
+    #[inline]
+    fn slot_of(&self, layer: usize) -> usize {
+        let s = self.slot_map[layer];
+        debug_assert_ne!(s, usize::MAX, "inactive KV layer {layer}");
+        s
+    }
+
+    /// Returns `(k_off, v_off)` element offsets for `layer` (or `(0, 0)` if `layer` is inactive).
+    #[inline]
+    pub fn layer_offsets(&self, layer: usize) -> (usize, usize) {
+        let s = self.slot_map[layer];
+        if s == usize::MAX {
+            (0, 0)
+        } else {
+            let k_off = s * self.layer_stride;
+            (k_off, self.v_base + k_off)
         }
     }
 
@@ -425,11 +500,8 @@ impl KvCache {
                 "no Metal device or model mapping is attached"
             },
         })?;
-        Ok((
-            shared,
-            layer * self.layer_stride,
-            self.v_base + layer * self.layer_stride,
-        ))
+        let (k_off, v_off) = self.layer_offsets(layer);
+        Ok((shared, k_off, v_off))
     }
 
     /// [`gpu_view`] for callers that only hold `&self`: the offsets are pure
@@ -443,11 +515,8 @@ impl KvCache {
         &self,
         layer: usize,
     ) -> Option<(&allpaka_backend::gpu::SharedRegion, usize, usize)> {
-        Some((
-            self.shared.as_ref()?,
-            layer * self.layer_stride,
-            self.v_base + layer * self.layer_stride,
-        ))
+        let (k_off, v_off) = self.layer_offsets(layer);
+        Some((self.shared.as_ref()?, k_off, v_off))
     }
 
     #[inline]
@@ -461,12 +530,12 @@ impl KvCache {
     }
 
     fn k_range(&self, layer: usize) -> std::ops::Range<usize> {
-        let at = layer * self.layer_stride;
+        let at = self.slot_of(layer) * self.layer_stride;
         at..at + self.layer_stride
     }
 
     fn v_range(&self, layer: usize) -> std::ops::Range<usize> {
-        let at = self.v_base + layer * self.layer_stride;
+        let at = self.v_base + self.slot_of(layer) * self.layer_stride;
         at..at + self.layer_stride
     }
 
@@ -520,8 +589,9 @@ impl KvCache {
         if positions.start > positions.end || positions.end > self.capacity {
             return false;
         }
+        let slot = self.slot_of(layer);
         let count = (positions.end - positions.start) * self.kv_dim;
-        let k_at = layer * self.layer_stride + positions.start * self.kv_dim;
+        let k_at = slot * self.layer_stride + positions.start * self.kv_dim;
         let v_at = self.v_base + k_at;
         let bytes = self.store.as_bytes();
         let Some(shared) = self.shared.as_mut() else {
@@ -633,5 +703,39 @@ mod tests {
         c.store(0, &[1.0, 2.0], &[3.0, 4.0]);
         c.advance();
         c.store(0, &[5.0, 6.0], &[7.0, 8.0]);
+    }
+
+    #[test]
+    fn hybrid_active_layers_compact_kv_and_ssm_storage() {
+        let kv_mask = [false, false, false, true, false, false, false, true];
+        let ssm_mask = [true, true, true, false, true, true, true, false];
+        let kv_full = KvCache::new(8, 256, 64);
+        let mut kv_compact = KvCache::with_active_layers(&kv_mask, 256, 64);
+        assert_eq!(
+            kv_compact.store.as_slice().len() * 4,
+            kv_full.store.as_slice().len()
+        );
+        assert_eq!(kv_compact.slot_of(3), 0);
+        assert_eq!(kv_compact.slot_of(7), 1);
+        assert_eq!(kv_compact.layer_offsets(0), (0, 0));
+        assert_eq!(kv_compact.layer_offsets(3), (0, 2 * 256 * 64));
+        assert_eq!(kv_compact.layer_offsets(7), (256 * 64, 3 * 256 * 64));
+
+        kv_compact.store(3, &[1.0; 256], &[2.0; 256]);
+        kv_compact.store(7, &[3.0; 256], &[4.0; 256]);
+        kv_compact.advance();
+        assert_eq!(ops::f16::to_f32(kv_compact.k_at(3, 0, 0, 4)[0]), 1.0);
+        assert_eq!(ops::f16::to_f32(kv_compact.v_at(7, 0, 0, 4)[0]), 4.0);
+
+        let ssm_full = SsmCache::new(8, 3, 2048, 16, 16);
+        let mut ssm_compact = SsmCache::with_active_layers(&ssm_mask, 3, 2048, 16, 16);
+        assert_eq!(
+            ssm_compact.store.as_slice().len() * 4,
+            ssm_full.store.as_slice().len() * 3
+        );
+        assert_eq!(ssm_compact.slot_of(0), 0);
+        assert_eq!(ssm_compact.slot_of(4), 3);
+        ssm_compact.conv_layer(4)[0] = 42.0;
+        assert_eq!(ssm_compact.conv_layer(4)[0], 42.0);
     }
 }
