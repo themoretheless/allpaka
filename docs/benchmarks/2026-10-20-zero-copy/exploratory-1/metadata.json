@@ -1,0 +1,23 @@
+{
+  "binary": "/private/tmp/allpaka-zero-copy-bench/shared_activation_bench",
+  "binary_sha256": "c49a004667f5a345b673aaa7d48edbadc2dbd2e00389a70c88b4b2ed10a46c43",
+  "model": "/private/tmp/allpaka-zero-copy-bench/Qwen3-0.6B-Q8_0.gguf",
+  "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+  "cpu": "Apple M4 Max",
+  "git_head": "0420d788a084aba8b0d3cb1c2b86d97d75743d2e",
+  "pairs": 7,
+  "rounds": 3,
+  "pp": [
+    512,
+    2048
+  ],
+  "protocol": "alternating order per pair; fresh process; one warmup round; fixed tokens; same binary",
+  "limitations": [
+    "Other desktop applications may use CPU/GPU; pilot excluded",
+    "Single M4 Max and one Q8_0 model; not M1/M2/M3 qualification"
+  ],
+  "worktree_dirty_at_build": true,
+  "concurrent_source_edits": true,
+  "binary_is_frozen": true,
+  "baseline_cli_exit_note": "CLI wrote a complete finite benchmark report, then exited 1 because external airbug bench runner was unavailable. Diagnostic only; primary A/B uses standalone example without airbug."
+}

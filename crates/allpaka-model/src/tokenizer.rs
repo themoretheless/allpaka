@@ -30,6 +30,9 @@ pub struct Tokenizer {
     pub bos: Option<u32>,
 }
 
+const BYTE_TO_CHAR: [char; 256] = byte_to_char_table();
+const CHAR_TO_BYTE: [u16; 512] = char_to_byte_table();
+
 impl Tokenizer {
     pub fn from_gguf(f: &allpaka_gguf::GgufFile) -> Result<Self> {
         let pieces: Vec<String> = f
@@ -52,11 +55,8 @@ impl Tokenizer {
             ranks.insert(rule.clone(), rank);
         }
 
-        let byte_to_char = byte_to_char_table();
-        let mut char_to_byte = [u16::MAX; 512];
-        for (b, &c) in byte_to_char.iter().enumerate() {
-            char_to_byte[c as usize] = b as u16;
-        }
+        let byte_to_char = BYTE_TO_CHAR;
+        let char_to_byte = &CHAR_TO_BYTE;
 
         let mut piece_bytes = Vec::with_capacity(pieces.len());
         let mut buf = Vec::with_capacity(16);
@@ -85,6 +85,7 @@ impl Tokenizer {
         })
     }
 
+    #[inline]
     pub fn vocab_size(&self) -> usize {
         self.pieces.len()
     }
@@ -236,23 +237,34 @@ fn segments(text: &str) -> Vec<&str> {
 /// The GPT-2 byte-to-printable-character bijection: printable ASCII and two
 /// Latin-1 ranges map to themselves, everything else is displaced to
 /// 0x100 + n in the order encountered.
-fn byte_to_char_table() -> [char; 256] {
+const fn byte_to_char_table() -> [char; 256] {
     let mut table = ['\0'; 256];
-    let keep = |b: u8| {
-        (b'!'..=b'~').contains(&b) || (0xa1..=0xac).contains(&b) || (0xae..=0xff).contains(&b)
-    };
     let mut n = 0u32;
-    for b in 0u16..256 {
-        let b = b as u8;
-        table[b as usize] = if keep(b) {
+    let mut b_idx = 0usize;
+    while b_idx < 256 {
+        let b = b_idx as u8;
+        let keep = (b >= b'!' && b <= b'~') || (b >= 0xa1 && b <= 0xac) || b >= 0xae;
+        table[b_idx] = if keep {
             b as char
         } else {
             let c = char::from_u32(0x100 + n).unwrap();
             n += 1;
             c
         };
+        b_idx += 1;
     }
     table
+}
+
+const fn char_to_byte_table() -> [u16; 512] {
+    let mut char_to_byte = [u16::MAX; 512];
+    let mut b = 0usize;
+    while b < 256 {
+        let c = BYTE_TO_CHAR[b] as usize;
+        char_to_byte[c] = b as u16;
+        b += 1;
+    }
+    char_to_byte
 }
 
 #[cfg(test)]

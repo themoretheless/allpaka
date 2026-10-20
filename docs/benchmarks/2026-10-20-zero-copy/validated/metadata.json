@@ -1,0 +1,21 @@
+{
+  "binary": "/private/tmp/allpaka-zero-copy-bench/shared_activation_bench-validated",
+  "binary_sha256": "edcda95fef16e6ba873f08528d59220be4cb9ca60c3ed3c4b00efec1404be1ac",
+  "model": "/private/tmp/allpaka-zero-copy-bench/Qwen3-0.6B-Q8_0.gguf",
+  "model_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+  "cpu": "Apple M4 Max",
+  "git_head": "8a1058d9cceb7e1b4ecdaf59a512ff55e9f0e4cd",
+  "worktree_dirty": true,
+  "source_diff_sha256": "f05db38bcd64546c16319a490321437105de43f902a69e31ae295122876eed53",
+  "pairs": 7,
+  "rounds": 3,
+  "pp": [
+    512,
+    2048
+  ],
+  "protocol": "alternating order per pair; fresh process; one warmup round; fixed tokens; same binary",
+  "limitations": [
+    "Other desktop applications may use CPU/GPU; pilot excluded",
+    "Single M4 Max and one Q8_0 model; not M1/M2/M3 qualification"
+  ]
+}

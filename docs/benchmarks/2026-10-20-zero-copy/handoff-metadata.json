@@ -1,0 +1,7 @@
+{
+  "binary_sha256": "8a511439f01b2b6106b2dcd43744eca22a36f9c3887f6996798e614504ac6b59",
+  "scope": "handoff + last-row norm + drop only; initial copy and GPU model kernels excluded",
+  "pairs": 9,
+  "measured_iterations_per_mode_per_pair": 100,
+  "warmup_iterations_per_mode_per_pair": 10
+}

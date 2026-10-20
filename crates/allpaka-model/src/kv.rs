@@ -438,6 +438,7 @@ impl KvCache {
     /// "no device" answer, without a mutable borrow. CPU attention runs
     /// under `thread::scope` with `&self` shared across threads, and the
     /// whole-token path needs the region and the per-layer offsets at once.
+    #[inline]
     pub fn gpu_view_ref(
         &self,
         layer: usize,
@@ -447,6 +448,16 @@ impl KvCache {
             layer * self.layer_stride,
             self.v_base + layer * self.layer_stride,
         ))
+    }
+
+    #[inline]
+    pub fn layer_stride(&self) -> usize {
+        self.layer_stride
+    }
+
+    #[inline]
+    pub fn v_base(&self) -> usize {
+        self.v_base
     }
 
     fn k_range(&self, layer: usize) -> std::ops::Range<usize> {

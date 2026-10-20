@@ -1282,7 +1282,8 @@ impl<'a> Model<'a> {
             for h in 0..heads_v {
                 let y = &mut out[i * value_dim + h * d_state..i * value_dim + (h + 1) * d_state];
                 ops::rmsnorm(y, &g.ssm_norm, eps);
-                for (y, &zv) in y.iter_mut().zip(&z[i * value_dim + h * d_state..]) {
+                let z_head = &z[i * value_dim + h * d_state..][..d_state];
+                for (y, &zv) in y.iter_mut().zip(z_head) {
                     *y *= ops::silu(zv);
                 }
             }
@@ -1709,22 +1710,36 @@ impl<'a> Model<'a> {
             }
 
             let rope_span = profile::span(profile::Phase::QkNormRope);
-            for (i, row) in q.chunks_mut(c.q_dim()).enumerate() {
-                let rope = &rope_flat[i * half..(i + 1) * half];
-                for head in row.chunks_mut(head_dim) {
-                    if let Some(w) = &layer.q_norm {
+            if let Some(w) = &layer.q_norm {
+                for (i, row) in q.chunks_mut(c.q_dim()).enumerate() {
+                    let rope = &rope_flat[i * half..(i + 1) * half];
+                    for head in row.chunks_mut(head_dim) {
                         ops::rmsnorm(head, w, c.rms_eps);
+                        self.rope_from_arrays(head, rope);
                     }
-                    self.rope_from_arrays(head, rope);
+                }
+            } else {
+                for (i, row) in q.chunks_mut(c.q_dim()).enumerate() {
+                    let rope = &rope_flat[i * half..(i + 1) * half];
+                    for head in row.chunks_mut(head_dim) {
+                        self.rope_from_arrays(head, rope);
+                    }
                 }
             }
-            for (i, row) in k.chunks_mut(c.kv_dim()).enumerate() {
-                let rope = &rope_flat[i * half..(i + 1) * half];
-                for head in row.chunks_mut(head_dim) {
-                    if let Some(w) = &layer.k_norm {
+            if let Some(w) = &layer.k_norm {
+                for (i, row) in k.chunks_mut(c.kv_dim()).enumerate() {
+                    let rope = &rope_flat[i * half..(i + 1) * half];
+                    for head in row.chunks_mut(head_dim) {
                         ops::rmsnorm(head, w, c.rms_eps);
+                        self.rope_from_arrays(head, rope);
                     }
-                    self.rope_from_arrays(head, rope);
+                }
+            } else {
+                for (i, row) in k.chunks_mut(c.kv_dim()).enumerate() {
+                    let rope = &rope_flat[i * half..(i + 1) * half];
+                    for head in row.chunks_mut(head_dim) {
+                        self.rope_from_arrays(head, rope);
+                    }
                 }
             }
             drop(rope_span);
@@ -2388,6 +2403,16 @@ impl<'a> Model<'a> {
                 .map(|li| (ssm.conv_off(li), ssm.state_off(li)))
                 .collect()
         });
+        if !self.layers.is_empty() {
+            if let Err(reason) = s.kv.gpu_view_checked(0) {
+                if dbg {
+                    eprintln!("tokenbuf declined: stage=token-layers reason={reason}");
+                }
+                return Ok(None);
+            }
+        }
+        let kv_layer_stride = s.kv.layer_stride();
+        let kv_v_base = s.kv.v_base();
         let mut layers = Vec::with_capacity(self.layers.len());
         for (li, layer) in self.layers.iter().enumerate() {
             if layer.attn_norm_raw.is_empty() || layer.ffn_norm_raw.is_empty() {
@@ -2396,15 +2421,8 @@ impl<'a> Model<'a> {
                 }
                 return Ok(None);
             }
-            let (_, k_off, v_off) = match s.kv.gpu_view_checked(li) {
-                Ok(view) => view,
-                Err(reason) => {
-                    if dbg {
-                        eprintln!("tokenbuf declined: stage=token-layers reason={reason}");
-                    }
-                    return Ok(None);
-                }
-            };
+            let k_off = li * kv_layer_stride;
+            let v_off = kv_v_base + k_off;
             let ffn = match &layer.ffn {
                 Ffn::Dense {
                     w_gate,
@@ -2753,17 +2771,25 @@ impl<'a> Model<'a> {
 
             {
                 let _s = profile::span(profile::Phase::QkNormRope);
-                for head in q.chunks_mut(head_dim) {
-                    if let Some(w) = &layer.q_norm {
+                if let Some(w) = &layer.q_norm {
+                    for head in q.chunks_mut(head_dim) {
                         ops::rmsnorm(head, w, c.rms_eps);
+                        self.rope_from_arrays(head, &rope_pairs);
                     }
-                    self.rope_from_arrays(head, &rope_pairs);
+                } else {
+                    for head in q.chunks_mut(head_dim) {
+                        self.rope_from_arrays(head, &rope_pairs);
+                    }
                 }
-                for head in k.chunks_mut(head_dim) {
-                    if let Some(w) = &layer.k_norm {
+                if let Some(w) = &layer.k_norm {
+                    for head in k.chunks_mut(head_dim) {
                         ops::rmsnorm(head, w, c.rms_eps);
+                        self.rope_from_arrays(head, &rope_pairs);
                     }
-                    self.rope_from_arrays(head, &rope_pairs);
+                } else {
+                    for head in k.chunks_mut(head_dim) {
+                        self.rope_from_arrays(head, &rope_pairs);
+                    }
                 }
             }
 

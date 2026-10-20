@@ -772,11 +772,11 @@ fn dot_q3_k(row: &[u8], x: &[f32]) -> f32 {
         let mut is = 0;
         let mut m: u8 = 1;
         let mut pos = 0;
+        let mut blk_sum = 0f32;
         for half in 0..2 {
             let q = &qs[half * 32..half * 32 + 32];
             for shift in [0u8, 2, 4, 6] {
                 for group in 0..2 {
-                    let dl = d_all * scales[is] as f32;
                     let mut sub = 0f32;
                     for l in 0..16 {
                         let idx = group * 16 + l;
@@ -784,13 +784,14 @@ fn dot_q3_k(row: &[u8], x: &[f32]) -> f32 {
                             - if hmask[idx] & m != 0 { 0 } else { 4 };
                         sub += quant as f32 * xb[pos + l];
                     }
-                    total += dl * sub;
+                    blk_sum += scales[is] as f32 * sub;
                     pos += 16;
                     is += 1;
                 }
                 m <<= 1;
             }
         }
+        total += d_all * blk_sum;
     }
     total
 }
@@ -806,6 +807,8 @@ fn dot_q5_k(row: &[u8], x: &[f32]) -> f32 {
         let qs = &block[48..176];
         let xb = &x[bi * 256..bi * 256 + 256];
 
+        let mut acc_d = 0f32;
+        let mut acc_m = 0f32;
         for pair in 0..4 {
             let q = &qs[pair * 32..pair * 32 + 32];
             let x_lo = &xb[pair * 64..pair * 64 + 32];
@@ -826,9 +829,10 @@ fn dot_q5_k(row: &[u8], x: &[f32]) -> f32 {
                 dot_hi += ((q[l] >> 4) + hi2) as f32 * x_hi[l];
                 sum_hi += x_hi[l];
             }
-            total += d * sc1 * dot_lo - dmin * mn1 * sum_lo;
-            total += d * sc2 * dot_hi - dmin * mn2 * sum_hi;
+            acc_d += sc1 * dot_lo + sc2 * dot_hi;
+            acc_m += mn1 * sum_lo + mn2 * sum_hi;
         }
+        total += d * acc_d - dmin * acc_m;
     }
     total
 }
@@ -889,6 +893,8 @@ fn dot_q4_k(row: &[u8], x: &[f32]) -> f32 {
         let qs = &block[16..144];
         let xb = &x[bi * 256..bi * 256 + 256];
 
+        let mut acc_d = 0f32;
+        let mut acc_m = 0f32;
         for pair in 0..4 {
             let q = &qs[pair * 32..pair * 32 + 32];
             let x_lo = &xb[pair * 64..pair * 64 + 32];
@@ -916,9 +922,10 @@ fn dot_q4_k(row: &[u8], x: &[f32]) -> f32 {
                 dot_hi += hi[l] * x_hi[l];
                 sum_hi += x_hi[l];
             }
-            total += d * sc1 * dot_lo - dmin * mn1 * sum_lo;
-            total += d * sc2 * dot_hi - dmin * mn2 * sum_hi;
+            acc_d += sc1 * dot_lo + sc2 * dot_hi;
+            acc_m += mn1 * sum_lo + mn2 * sum_hi;
         }
+        total += d * acc_d - dmin * acc_m;
     }
     total
 }
@@ -935,13 +942,13 @@ fn dot_q2_k(row: &[u8], x: &[f32]) -> f32 {
         let xb = &x[bi * 256..bi * 256 + 256];
 
         let mut is = 0;
+        let mut acc_d = 0f32;
+        let mut acc_m = 0f32;
         for half in 0..2 {
             let q = &qs[half * 32..half * 32 + 32];
             for shift in [0u8, 2, 4, 6] {
                 for group in 0..2 {
                     let sc = scales[is];
-                    let dl = d * (sc & 0xf) as f32;
-                    let ml = dmin * (sc >> 4) as f32;
                     let x0 = half * 128 + (shift as usize / 2) * 32 + group * 16;
                     let xs = &xb[x0..x0 + 16];
                     let mut dotq = 0f32;
@@ -950,11 +957,13 @@ fn dot_q2_k(row: &[u8], x: &[f32]) -> f32 {
                         dotq += ((q[group * 16 + l] >> shift) & 3) as f32 * xs[l];
                         sum += xs[l];
                     }
-                    total += dl * dotq - ml * sum;
+                    acc_d += (sc & 0xf) as f32 * dotq;
+                    acc_m += (sc >> 4) as f32 * sum;
                     is += 1;
                 }
             }
         }
+        total += d * acc_d - dmin * acc_m;
     }
     total
 }
@@ -970,6 +979,7 @@ fn dot_q6_k(row: &[u8], x: &[f32]) -> f32 {
         let d = dequant::f16_to_f32(u16::from_le_bytes([block[208], block[209]]));
         let xb = &x[bi * 256..bi * 256 + 256];
 
+        let mut blk_sum = 0f32;
         for half in 0..2 {
             let ql = &ql[half * 64..half * 64 + 64];
             let qh = &qh[half * 32..half * 32 + 32];
@@ -978,21 +988,23 @@ fn dot_q6_k(row: &[u8], x: &[f32]) -> f32 {
             // Per-sub-block accumulators: quarter q covers xh[q*32..],
             // sub-block index within the half is q*... scale sc[is + 2q].
             let mut acc = [0f32; 8];
-            for l in 0..32 {
-                let is = l / 16;
-                let q1 = ((ql[l] & 0xf) | ((qh[l] & 3) << 4)) as i8 as i32 - 32;
-                let q2 = ((ql[l + 32] & 0xf) | (((qh[l] >> 2) & 3) << 4)) as i8 as i32 - 32;
-                let q3 = ((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) as i8 as i32 - 32;
-                let q4 = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) as i8 as i32 - 32;
-                acc[is] += q1 as f32 * xh[l];
-                acc[2 + is] += q2 as f32 * xh[l + 32];
-                acc[4 + is] += q3 as f32 * xh[l + 64];
-                acc[6 + is] += q4 as f32 * xh[l + 96];
+            for (is, range) in [(0usize, 0usize..16), (1usize, 16usize..32)] {
+                for l in range {
+                    let q1 = ((ql[l] & 0xf) | ((qh[l] & 3) << 4)) as i8 as i32 - 32;
+                    let q2 = ((ql[l + 32] & 0xf) | (((qh[l] >> 2) & 3) << 4)) as i8 as i32 - 32;
+                    let q3 = ((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) as i8 as i32 - 32;
+                    let q4 = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) as i8 as i32 - 32;
+                    acc[is] += q1 as f32 * xh[l];
+                    acc[2 + is] += q2 as f32 * xh[l + 32];
+                    acc[4 + is] += q3 as f32 * xh[l + 64];
+                    acc[6 + is] += q4 as f32 * xh[l + 96];
+                }
             }
             for (g, a) in acc.iter().enumerate() {
-                total += d * (sc[g] as i8) as f32 * a;
+                blk_sum += (sc[g] as i8) as f32 * a;
             }
         }
+        total += d * blk_sum;
     }
     total
 }

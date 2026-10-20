@@ -1005,11 +1005,15 @@ const PENALTY_WINDOW: usize = 256;
 
 impl Sampler {
     fn new(temperature: f64, top_p: f64, repeat_penalty: f64) -> Self {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x5eed)
-            | 1;
+        let seed = if temperature > 0.0 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x5eed)
+                | 1
+        } else {
+            0x5eed
+        };
         Self {
             temperature,
             top_p,
@@ -1041,10 +1045,17 @@ impl Sampler {
             let rp = self.repeat_penalty as f32;
             adjusted = logits.to_vec();
             let start = recent.len().saturating_sub(PENALTY_WINDOW);
-            let mut window: Vec<u32> = recent[start..].to_vec();
+            let tail = &recent[start..];
+            let mut window_buf = [0u32; PENALTY_WINDOW];
+            window_buf[..tail.len()].copy_from_slice(tail);
+            let window = &mut window_buf[..tail.len()];
             window.sort_unstable();
-            window.dedup();
-            for t in window {
+            let mut prev = u32::MAX;
+            for &t in window.iter() {
+                if t == prev {
+                    continue;
+                }
+                prev = t;
                 if let Some(v) = adjusted.get_mut(t as usize) {
                     if *v > 0.0 {
                         *v /= rp;
@@ -1063,10 +1074,17 @@ impl Sampler {
                 .max_by(|&a, &b| logits[a].total_cmp(&logits[b]))
                 .unwrap_or(0) as u32;
         }
-        // Maintain a fixed top-K buffer on the stack/small Vec instead of
-        // allocating and partitioning a 152k-element `Vec<usize>` on every token.
+        // Maintain a fixed top-K buffer on the stack instead of
+        // allocating heap vectors on every token.
         let k = Self::TOP_K.min(logits.len());
-        let mut top: Vec<(usize, f32)> = logits[..k].iter().copied().enumerate().collect();
+        if k == 0 {
+            return 0;
+        }
+        let mut top_buf = [(0usize, 0.0f32); Self::TOP_K];
+        let top = &mut top_buf[..k];
+        for (idx, &v) in logits[..k].iter().enumerate() {
+            top[idx] = (idx, v);
+        }
         let mut min_pos = 0usize;
         let mut min_val = top[0].1;
         for (idx, &(_, v)) in top.iter().enumerate().skip(1) {
@@ -1092,22 +1110,23 @@ impl Sampler {
 
         let inv_temp = 1.0 / self.temperature;
         let max_scaled = top[0].1 as f64 * inv_temp;
-        let mut scaled = Vec::with_capacity(top.len());
+        let mut scaled_buf = [0.0f64; Self::TOP_K];
+        let scaled = &mut scaled_buf[..k];
         let mut sum = 0.0f64;
-        for &(_, v) in &top {
+        for (dst, &(_, v)) in scaled.iter_mut().zip(top.iter()) {
             let e = ((v as f64) * inv_temp - max_scaled).exp();
-            scaled.push(e);
+            *dst = e;
             sum += e;
         }
         let inv_sum = 1.0 / sum;
-        for p in &mut scaled {
+        for p in scaled.iter_mut() {
             *p *= inv_sum;
         }
 
         // Nucleus: keep the smallest prefix whose mass reaches top_p.
         let mut kept = 0usize;
         let mut mass = 0.0f64;
-        for &p in &scaled {
+        for &p in scaled.iter() {
             kept += 1;
             mass += p;
             if mass >= self.top_p {
@@ -1115,7 +1134,7 @@ impl Sampler {
             }
         }
         let mut r = self.next_f64() * mass;
-        for (&(i, _), &p) in top[..kept].iter().zip(&scaled) {
+        for (&(i, _), &p) in top[..kept].iter().zip(scaled.iter()) {
             r -= p;
             if r <= 0.0 {
                 return i as u32;

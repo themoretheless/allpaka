@@ -579,6 +579,8 @@ kernel void matvec_q4_k(
         float dmin = half_at(blk + 2);
         device const uchar* packed = blk + 4;
         device const uchar* qs = blk + 16;
+        float acc_d[MAXT] = {0};
+        float acc_m[MAXT] = {0};
         for (uint pair = 0; pair < 4; pair++) {
             device const uchar4* q4 = (device const uchar4*)(qs + pair * 32);
             uint x_lo = b * 256 + pair * 64;
@@ -605,9 +607,12 @@ kernel void matvec_q4_k(
                 }
             }
             for (uint i = 0; i < TILE; i++) {
-                total[i] += d * sc1 * dot_lo[i] - dmin * mn1 * sum_lo[i];
-                total[i] += d * sc2 * dot_hi[i] - dmin * mn2 * sum_hi[i];
+                acc_d[i] += sc1 * dot_lo[i] + sc2 * dot_hi[i];
+                acc_m[i] += mn1 * sum_lo[i] + mn2 * sum_hi[i];
             }
+        }
+        for (uint i = 0; i < TILE; i++) {
+            total[i] += d * acc_d[i] - dmin * acc_m[i];
         }
     }
     for (uint i = 0; i < TILE; i++) {
@@ -662,6 +667,8 @@ kernel void matvec_q2_k(
         device const uint* sw = (device const uint*)blk;
         device const uint* qw = (device const uint*)(blk + 16);
         uint sc_w[4] = { sw[0], sw[1], sw[2], sw[3] };
+        float acc_d[MAXT] = {0};
+        float acc_m[MAXT] = {0};
         for (uint half_i = 0; half_i < 2; half_i++) {
             for (uint group = 0; group < 2; group++) {
                 uint q0 = qw[half_i * 8 + group * 4 + 0];
@@ -672,8 +679,8 @@ kernel void matvec_q2_k(
                     uint shift = sh2 * 2;
                     uint is = half_i * 8 + sh2 * 2 + group;
                     uint sc = (sc_w[is / 4] >> ((is % 4) * 8)) & 0xFF;
-                    float dl = d * (float)(sc & 0xF);
-                    float ml = dmin * (float)(sc >> 4);
+                    float sc_lo = (float)(sc & 0xF);
+                    float sc_hi = (float)(sc >> 4);
                     float4 qv0 = float4(as_type<uchar4>((q0 >> shift) & 0x03030303u));
                     float4 qv1 = float4(as_type<uchar4>((q1 >> shift) & 0x03030303u));
                     float4 qv2 = float4(as_type<uchar4>((q2 >> shift) & 0x03030303u));
@@ -697,10 +704,14 @@ kernel void matvec_q2_k(
                         float dotq = dot(qv0, x0v) + dot(qv1, x1v)
                                    + dot(qv2, x2v) + dot(qv3, x3v);
                         float4 xs = x0v + x1v + x2v + x3v;
-                        total[i] += dl * dotq - ml * (xs.x + xs.y + xs.z + xs.w);
+                        acc_d[i] += sc_lo * dotq;
+                        acc_m[i] += sc_hi * (xs.x + xs.y + xs.z + xs.w);
                     }
                 }
             }
+        }
+        for (uint i = 0; i < TILE; i++) {
+            total[i] += d * acc_d[i] - dmin * acc_m[i];
         }
     }
     for (uint i = 0; i < TILE; i++) {
@@ -1015,6 +1026,7 @@ kernel void matvec_q3_k(
         // byte per plane.
         device const ushort* hm16 = (device const ushort*)blk;
         device const ushort* qs16 = (device const ushort*)(blk + 32);
+        float blk_sum[MAXT] = {0};
         for (uint half_i = 0; half_i < 2; half_i++) {
             for (uint group = 0; group < 2; group++) {
                 uint qword[4];
@@ -1029,7 +1041,7 @@ kernel void matvec_q3_k(
                     uint is = half_i * 8 + si * 2 + group;
                     uint lo = (is < 8) ? (packed[is] & 0xF) : (packed[is - 8] >> 4);
                     uint hi = (packed[8 + (is % 4)] >> (2 * (is / 4))) & 3;
-                    float dl = d_all * (float)((int)(lo | (hi << 4)) - 32);
+                    float sc = (float)((int)(lo | (hi << 4)) - 32);
                     uint mrep = 0x01010101u * (uint)(1 << (half_i * 4 + si));
                     uint x0 = b * 256 + half_i * 128 + si * 32 + group * 16;
                     for (uint i = 0; i < TILE; i++) {
@@ -1044,10 +1056,13 @@ kernel void matvec_q3_k(
                                     as_type<uchar4>(hword[k] & mrep) != uchar4(0));
                             dotq += dot(float4(qi), xi[k]);
                         }
-                        total[i] += dl * dotq;
+                        blk_sum[i] += sc * dotq;
                     }
                 }
             }
+        }
+        for (uint i = 0; i < TILE; i++) {
+            total[i] += d_all * blk_sum[i];
         }
     }
     for (uint i = 0; i < TILE; i++) {
@@ -1836,6 +1851,8 @@ kernel void matvec_q5_k(
         device const uchar* packed = blk + 4;
         device const uchar* qh = blk + 16;
         device const uchar* qs = blk + 48;
+        float acc_d[MAXT] = {0};
+        float acc_m[MAXT] = {0};
         for (uint pair = 0; pair < 4; pair++) {
             device const uchar4* q4 = (device const uchar4*)(qs + pair * 32);
             device const uchar4* h4 = (device const uchar4*)qh;
@@ -1868,9 +1885,12 @@ kernel void matvec_q5_k(
                 }
             }
             for (uint i = 0; i < TILE; i++) {
-                total[i] += d * sc1 * dot_lo[i] - dmin * mn1 * sum_lo[i];
-                total[i] += d * sc2 * dot_hi[i] - dmin * mn2 * sum_hi[i];
+                acc_d[i] += sc1 * dot_lo[i] + sc2 * dot_hi[i];
+                acc_m[i] += mn1 * sum_lo[i] + mn2 * sum_hi[i];
             }
+        }
+        for (uint i = 0; i < TILE; i++) {
+            total[i] += d * acc_d[i] - dmin * acc_m[i];
         }
     }
     for (uint i = 0; i < TILE; i++) {
@@ -3589,19 +3609,20 @@ kernel void argmax_f32(
     }
 }
 
-// Stage two: one thread folds the per-threadgroup pairs into the winner.
+// Stage two: one 32-lane SIMD group folds the per-threadgroup pairs into the winner.
 kernel void argmax_final(
     device const float* parts [[buffer(0)]],
     constant uint& nparts [[buffer(1)]],
     device uint* out [[buffer(2)]],
+    uint lane [[thread_index_in_simdgroup]],
     uint tid [[thread_position_in_grid]])
 {
-    if (tid != 0) {
+    if (tid >= 32) {
         return;
     }
-    float best = parts[0];
-    uint bidx = as_type<uint>(parts[1]);
-    for (uint i = 1; i < nparts; i++) {
+    float best = -INFINITY;
+    uint bidx = 0;
+    for (uint i = lane; i < nparts; i += 32) {
         float v = parts[i * 2];
         uint idx = as_type<uint>(parts[i * 2 + 1]);
         if (v > best || (v == best && idx > bidx)) {
@@ -3609,7 +3630,17 @@ kernel void argmax_final(
             bidx = idx;
         }
     }
-    *out = bidx;
+    for (uint off = 16; off > 0; off >>= 1) {
+        float ov = simd_shuffle_down(best, off);
+        uint oi = simd_shuffle_down(bidx, off);
+        if (ov > best || (ov == best && oi > bidx)) {
+            best = ov;
+            bidx = oi;
+        }
+    }
+    if (lane == 0) {
+        *out = bidx;
+    }
 }
 
 // Dequantize one token_embd row into activations based on device-side token ID pointer.
@@ -3929,9 +3960,10 @@ inline void dq16_q6_k(device const uchar* row, uint k0, threadgroup half* out) {
 }
 
 inline void dq16_f32(device const uchar* row, uint k0, threadgroup half* out) {
-    device const float* f = (device const float*)row + k0;
-    for (uint i = 0; i < 16; i++) {
-        out[i] = (half)f[i];
+    device const float4* f4 = (device const float4*)((device const float*)row + k0);
+    _Pragma("clang loop unroll(full)")
+    for (uint i = 0; i < 4; i++) {
+        *(threadgroup half4*)(out + i * 4) = half4(f4[i]);
     }
 }
 
@@ -7560,6 +7592,7 @@ pub struct Gpu {
     /// never round-trip through the CPU.
     pf_x: Buffer,
     pf_x_cap: usize,
+    pf_active_len: Option<usize>,
     pf_spare: std::sync::Arc<Mutex<Option<Buffer>>>,
     pf_hs: Buffer,
     pf_hs_cap: usize,
@@ -7868,6 +7901,7 @@ fn init_device() -> Option<Gpu> {
         y_cap: 1 << 22,
         pf_x,
         pf_x_cap: 1 << 12,
+        pf_active_len: None,
         pf_spare: Default::default(),
         pf_hs,
         pf_hs_cap: 1 << 12,
@@ -8910,6 +8944,11 @@ pub fn matvec_shared(
     offset: usize,
     m: usize,
 ) -> Option<Vec<f32>> {
+    // Kernels use float4 loads. The staging path realigns arbitrary CPU
+    // slices, but a direct binding must already satisfy that alignment.
+    if offset % 4 != 0 || n_in % 4 != 0 || m == 0 {
+        return None;
+    }
     let end = offset.checked_add(m.checked_mul(n_in)?)?;
     let values = x.get(offset..end)?;
     let out = matvec_batch_inner(
@@ -14675,6 +14714,7 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
     unsafe {
         std::ptr::copy_nonoverlapping(xs.as_ptr(), gpu.pf_x.contents() as *mut f32, xs.len());
     }
+    gpu.pf_active_len = Some(xs.len());
     Some(())
 }
 
@@ -14702,12 +14742,13 @@ fn prefill_complete(gpu: &mut Gpu) {
 pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
     let mut gpu = GPU.get()?.as_ref()?.lock().ok()?;
     prefill_complete(&mut gpu);
-    if xs.len().checked_mul(4)? > gpu.pf_x_cap {
+    if gpu.pf_active_len != Some(xs.len()) || xs.len().checked_mul(4)? > gpu.pf_x_cap {
         return None;
     }
     unsafe {
         std::ptr::copy_nonoverlapping(gpu.pf_x.contents() as *const f32, xs.as_mut_ptr(), xs.len());
     }
+    gpu.pf_active_len = None;
     Some(())
 }
 
@@ -14768,7 +14809,7 @@ pub fn prefill_end_output(len: usize) -> Option<crate::activation::Activation> {
     }
     let mut gpu = GPU.get()?.as_ref()?.lock().ok()?;
     prefill_complete(&mut gpu);
-    if len.checked_mul(4)? > gpu.pf_x_cap {
+    if gpu.pf_active_len != Some(len) || len.checked_mul(4)? > gpu.pf_x_cap {
         return None;
     }
     let spare = gpu.pf_spare.lock().ok()?.take();
@@ -14789,6 +14830,7 @@ pub fn prefill_end_output(len: usize) -> Option<crate::activation::Activation> {
     }
     gpu.pin_buffer_in_residency(&replacement);
     let buf = std::mem::replace(&mut gpu.pf_x, replacement);
+    gpu.pf_active_len = None;
     SHARED_OUTPUTS.fetch_add(1, Ordering::Relaxed);
     SHARED_HANDOFF_BYTES.fetch_add((len * 4) as u64, Ordering::Relaxed);
     Some(crate::activation::Activation::Shared(SharedVector {
@@ -14807,6 +14849,7 @@ pub fn prefill_abort() {
             // retained handle discards it.
             gpu.pf_obuf_cmd = None;
             gpu.prefill_drain();
+            gpu.pf_active_len = None;
         }
     }
 }

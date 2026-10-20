@@ -262,10 +262,6 @@ fn search(
         return;
     }
 
-    // Leaving a model unplaced is a legal branch: sometimes there is simply no
-    // pool left that holds it.
-    search(options, nodes, model_index + 1, used_nodes, current, best);
-
     for (node_index, option) in options[model_index].iter().enumerate() {
         let Some(placement) = option else { continue };
         let bit = 1u32 << node_index;
@@ -278,6 +274,11 @@ fn search(
         current.pop();
         *used_nodes &= !bit;
     }
+
+    // Leaving a model unplaced is a legal branch: sometimes there is simply no
+    // pool left that holds it. Explored after placement branches so `best.placements.len()`
+    // reaches high coverage early and prunes inferior unplaced subtrees.
+    search(options, nodes, model_index + 1, used_nodes, current, best);
 }
 
 /// Mark agents that share a machine and slow them by that pool's measured

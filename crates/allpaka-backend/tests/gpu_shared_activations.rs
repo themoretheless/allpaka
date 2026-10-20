@@ -24,12 +24,21 @@ fn completed_residual_is_owned_and_projects_without_staging() {
         gpu::init_error()
     );
     let matrix = QuantMat::new(&weights[..n_out * 34], GgmlType::Q8_0, n_out, n_in).unwrap();
+    assert!(gpu::prefill_end_output(1).is_none(), "no active chunk");
     for rows in [1, 3, 16, 33] {
         let input: Vec<f32> = (0..(rows + 1) * n_in)
             .map(|i| (i % 31) as f32 * 0.03 - 0.4)
             .collect();
         gpu::prefill_begin(&input).unwrap();
+        assert!(
+            gpu::prefill_end_output(input.len() + 1).is_none(),
+            "reject uninitialized tail"
+        );
         let mut output = gpu::prefill_end_output(input.len()).unwrap();
+        assert!(
+            gpu::prefill_end_output(input.len()).is_none(),
+            "handoff is one-shot"
+        );
         assert!(
             matches!(&output, Activation::Shared(_)),
             "test requires zero-copy enabled"
@@ -59,6 +68,14 @@ fn completed_residual_is_owned_and_projects_without_staging() {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         assert!(max_error < 1e-4, "rows={rows}, diff={max_error}");
+        let before = gpu::shared_activation_stats();
+        let fallback = matrix.matmul_activation(&output, 1, rows).unwrap();
+        let expected = matrix.matmul(&output[1..1 + rows * n_in], rows).unwrap();
+        assert_eq!(fallback, expected, "unaligned input must use staging");
+        assert_eq!(
+            gpu::shared_activation_stats().projection_bytes,
+            before.projection_bytes
+        );
         assert!(matrix.matmul_activation(&output, usize::MAX, rows).is_err());
         assert!(matrix.matmul_activation(&output, 0, usize::MAX).is_err());
     }

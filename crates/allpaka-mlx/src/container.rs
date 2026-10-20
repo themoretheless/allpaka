@@ -62,9 +62,10 @@ where
     let shard_files: Vec<String> = if index_path.is_file() {
         let idx_txt = std::fs::read_to_string(&index_path)?;
         let index = ShardedIndex::parse(&idx_txt)?;
-        let mut files: Vec<String> = index.map.values().map(|(f, _, _)| f.clone()).collect();
-        files.sort();
-        files.dedup();
+        let mut file_refs: Vec<&str> = index.map.values().map(|(f, _, _)| f.as_str()).collect();
+        file_refs.sort_unstable();
+        file_refs.dedup();
+        let files: Vec<String> = file_refs.into_iter().map(str::to_owned).collect();
         if files.is_empty() {
             let pattern = root
                 .join("model-*.safetensors")
