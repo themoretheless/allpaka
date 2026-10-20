@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "studio",
+      "runtimeExecutable": "./target/debug/allpaka",
+      "runtimeArgs": ["studio", "--workspace", "/Users/themoretheless/Documents/Sources/allpaka", "--bind", "127.0.0.1:8140", "--data-dir", "/tmp/allpaka-studio-preview"],
+      "port": 8140
+    }
+  ]
+}

@@ -9,7 +9,7 @@
 use crate::config::{Config, Gating, MoeConfig, RopeStyle};
 use crate::kv::KvCache;
 use crate::profile;
-use allpaka_backend::{ops, QuantMat};
+use allpaka_backend::{activation::Activation, ops, QuantMat};
 use allpaka_gguf::GgufFile;
 use anyhow::{bail, Context, Result};
 use std::borrow::Cow;
@@ -465,9 +465,7 @@ impl Ffn<'_> {
                         for (out_row, h) in c.chunks_mut(hidden).zip(hc) {
                             for &(row, weight) in h {
                                 let down = &flat_ref[row * hidden..(row + 1) * hidden];
-                                for (o, d) in out_row.iter_mut().zip(down) {
-                                    *o += weight * d;
-                                }
+                                ops::add_scaled_slice(out_row, down, weight);
                             }
                         }
                     });
@@ -540,9 +538,7 @@ impl Ffn<'_> {
             for (row_idx, &(i, weight)) in groups[e].iter().enumerate() {
                 let down = &downs[gi][row_idx * hidden..(row_idx + 1) * hidden];
                 let out_row = &mut out[i * hidden..(i + 1) * hidden];
-                for (o, d) in out_row.iter_mut().zip(down) {
-                    *o += weight * d;
-                }
+                ops::add_scaled_slice(out_row, down, weight);
             }
         }
         if trace_on {
@@ -653,16 +649,12 @@ impl Ffn<'_> {
                 let _s = profile::span(profile::Phase::FfnCombine);
                 let mut out = vec![0f32; *hidden];
                 for ((_, weight), down) in picked.iter().zip(downs) {
-                    for (o, d) in out.iter_mut().zip(&down) {
-                        *o += weight * d;
-                    }
+                    ops::add_scaled_slice(&mut out, &down, *weight);
                 }
                 // The shared expert runs for every token, unweighted.
                 if let Some(sh) = shared {
                     let d = sh.forward_batch(h, 1)?;
-                    for (o, d) in out.iter_mut().zip(&d) {
-                        *o += d;
-                    }
+                    ops::add_scaled_slice(&mut out, &d, 1.0);
                 }
                 Ok(out)
             }
@@ -700,16 +692,29 @@ pub fn route_gated(
     // measurable slice of the router phase. select_nth is O(n), the tail
     // sort is over k elements. Returned best-first, like the sort produced.
     let k = k.min(scores.len());
-    let mut order: Vec<usize> = (0..scores.len()).collect();
+    if k == 0 {
+        return Vec::new();
+    }
+    let mut order_buf = [0usize; 256];
+    let mut order_vec;
+    let order: &mut [usize] = if scores.len() <= order_buf.len() {
+        for (i, slot) in order_buf[..scores.len()].iter_mut().enumerate() {
+            *slot = i;
+        }
+        &mut order_buf[..scores.len()]
+    } else {
+        order_vec = (0..scores.len()).collect::<Vec<usize>>();
+        &mut order_vec
+    };
     if k < order.len() {
         order.select_nth_unstable_by(k - 1, |&a, &b| selection[b].total_cmp(&selection[a]));
-        order.truncate(k);
     }
-    order.sort_by(|&a, &b| selection[b].total_cmp(&selection[a]));
-    let total: f32 = order.iter().map(|&e| scores[e]).sum();
-    order
-        .into_iter()
-        .map(|e| {
+    let top_k = &mut order[..k];
+    top_k.sort_by(|&a, &b| selection[b].total_cmp(&selection[a]));
+    let total: f32 = top_k.iter().map(|&e| scores[e]).sum();
+    top_k
+        .iter()
+        .map(|&e| {
             let w = if norm && total > 0.0 {
                 scores[e] / total
             } else if norm {
@@ -729,16 +734,29 @@ pub fn route_gated(
 /// the tests that pin it. New code takes raw logits and [`route_gated`].
 pub fn route(probs: &[f32], k: usize) -> Vec<(usize, f32)> {
     let k = k.min(probs.len());
-    let mut order: Vec<usize> = (0..probs.len()).collect();
+    if k == 0 {
+        return Vec::new();
+    }
+    let mut order_buf = [0usize; 256];
+    let mut order_vec;
+    let order: &mut [usize] = if probs.len() <= order_buf.len() {
+        for (i, slot) in order_buf[..probs.len()].iter_mut().enumerate() {
+            *slot = i;
+        }
+        &mut order_buf[..probs.len()]
+    } else {
+        order_vec = (0..probs.len()).collect::<Vec<usize>>();
+        &mut order_vec
+    };
     if k < order.len() {
         order.select_nth_unstable_by(k - 1, |&a, &b| probs[b].total_cmp(&probs[a]));
-        order.truncate(k);
     }
-    order.sort_by(|&a, &b| probs[b].total_cmp(&probs[a]));
-    let total: f32 = order.iter().map(|&e| probs[e]).sum();
-    order
-        .into_iter()
-        .map(|e| {
+    let top_k = &mut order[..k];
+    top_k.sort_by(|&a, &b| probs[b].total_cmp(&probs[a]));
+    let total: f32 = top_k.iter().map(|&e| probs[e]).sum();
+    top_k
+        .iter()
+        .map(|&e| {
             (
                 e,
                 if total > 0.0 {
@@ -1319,9 +1337,10 @@ impl<'a> Model<'a> {
     pub fn forward_batch(&self, tokens: &[u32], s: &mut Session) -> Result<Vec<f32>> {
         let m = tokens.len();
         let hidden = self.config.hidden as usize;
-        let xs = self.forward_batch_hidden(tokens, s)?;
-        let mut last = xs[(m - 1) * hidden..].to_vec();
-        ops::rmsnorm(&mut last, &self.output_norm, self.config.rms_eps);
+        let mut xs = self.forward_batch_activations(tokens, s)?;
+        let last_offset = (m - 1) * hidden;
+        let last = &mut xs[last_offset..];
+        ops::rmsnorm(last, &self.output_norm, self.config.rms_eps);
         // Debug hook: dump the post-norm hidden state (the head's input) to
         // compare against llama.cpp's /embedding for the same context.
         if let Ok(path) = std::env::var("ALLPAKA_DUMP_HIDDEN") {
@@ -1331,7 +1350,7 @@ impl<'a> Model<'a> {
                 .and_then(|mut f| f.write_all(body.join(" ").as_bytes()))
                 .unwrap_or_else(|e| eprintln!("ALLPAKA_DUMP_HIDDEN write failed: {e}"));
         }
-        self.output_head()?.matmul(&last, 1)
+        self.output_head()?.matmul_activation(&xs, last_offset, 1)
     }
 
     /// rmsnorm(row, output_norm): the trunk's final hidden in the form the
@@ -1511,6 +1530,11 @@ impl<'a> Model<'a> {
     /// The shared body of the batch paths: every layer over every position,
     /// returning the residual stream `[m, hidden]` before the output norm.
     pub fn forward_batch_hidden(&self, tokens: &[u32], s: &mut Session) -> Result<Vec<f32>> {
+        self.forward_batch_activations(tokens, s)
+            .map(Activation::into_vec)
+    }
+
+    fn forward_batch_activations(&self, tokens: &[u32], s: &mut Session) -> Result<Activation> {
         let c = &self.config;
         let m = tokens.len();
         if m == 0 {
@@ -1824,7 +1848,7 @@ impl<'a> Model<'a> {
             trace("l_out", li, &xs[..hidden]);
         }
         s.kv.commit(base + m);
-        Ok(xs)
+        Ok(xs.into())
     }
 
     /// The GPU-resident prefill chunk; `None` means "fall back to the
@@ -1837,10 +1861,10 @@ impl<'a> Model<'a> {
         m: usize,
         base: usize,
         s: &mut Session,
-    ) -> Option<Vec<f32>> {
+    ) -> Option<Activation> {
         let hidden = self.config.hidden as usize;
         if let Some(done) = allpaka_backend::gpu::prefill_replay(xs) {
-            return Some(done);
+            return Some(done.into());
         }
         allpaka_backend::gpu::prefill_begin(xs)?;
         // Deferred buffers of earlier layers may still be in flight when a
@@ -1852,9 +1876,7 @@ impl<'a> Model<'a> {
             allpaka_backend::gpu::prefill_abort();
             return None;
         }
-        let mut out = vec![0f32; m * hidden];
-        allpaka_backend::gpu::prefill_end(&mut out)?;
-        Some(out)
+        allpaka_backend::gpu::prefill_end_output(m * hidden)
     }
 
     /// The per-layer loop of the fused prefill chunk, split out so a
@@ -2131,12 +2153,12 @@ impl<'a> Model<'a> {
     ) -> Result<(Vec<f32>, Vec<f32>)> {
         let m = tokens.len();
         let hidden = self.config.hidden as usize;
-        let mut xs = self.forward_batch_hidden(tokens, s)?;
+        let mut xs = self.forward_batch_activations(tokens, s)?;
         for row in xs.chunks_mut(hidden) {
             ops::rmsnorm(row, &self.output_norm, self.config.rms_eps);
         }
-        let logits = self.output_head()?.matmul(&xs, m)?;
-        Ok((logits, xs))
+        let logits = self.output_head()?.matmul_activation(&xs, 0, m)?;
+        Ok((logits, xs.into_vec()))
     }
 
     /// Like [`forward_batch`], but returns the logits of EVERY position,
@@ -2149,11 +2171,11 @@ impl<'a> Model<'a> {
     pub fn forward_batch_full(&self, tokens: &[u32], s: &mut Session) -> Result<Vec<f32>> {
         let m = tokens.len();
         let hidden = self.config.hidden as usize;
-        let mut xs = self.forward_batch_hidden(tokens, s)?;
+        let mut xs = self.forward_batch_activations(tokens, s)?;
         for row in xs.chunks_mut(hidden) {
             ops::rmsnorm(row, &self.output_norm, self.config.rms_eps);
         }
-        self.output_head()?.matmul(&xs, m)
+        self.output_head()?.matmul_activation(&xs, 0, m)
     }
 
     /// Build the whole-token GPU request and run it; Ok(None) means the GPU

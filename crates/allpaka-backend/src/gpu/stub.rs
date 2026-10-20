@@ -311,6 +311,12 @@ pub fn prefill_replay(_xs: &[f32]) -> Option<Vec<f32>> {
     None
 }
 
+pub fn prefill_end_output(len: usize) -> Option<crate::activation::Activation> {
+    let mut out = vec![0.0; len];
+    prefill_end(&mut out)?;
+    Some(out.into())
+}
+
 pub fn prefill_end(_xs: &mut [f32]) -> Option<()> {
     None
 }
@@ -416,4 +422,8 @@ pub struct GroupedFfnReq<'a> {
 
 pub fn ffn_batch_grouped(_req: &GroupedFfnReq) -> Option<Vec<f32>> {
     None
+}
+
+pub fn shared_activation_stats() -> crate::activation::SharedStats {
+    crate::activation::SharedStats::default()
 }

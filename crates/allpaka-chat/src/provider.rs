@@ -121,7 +121,11 @@ pub fn defaults() -> Vec<Provider> {
         .into(),
         key_error: None,
         saved: false,
-        workspace_id: if anthropic { std::env::var("ANTHROPIC_WORKSPACE_ID").unwrap_or_default() } else { String::new() },
+        workspace_id: if anthropic {
+            std::env::var("ANTHROPIC_WORKSPACE_ID").unwrap_or_default()
+        } else {
+            String::new()
+        },
         model_limits: Default::default(),
         env: env.into(),
         anthropic,
@@ -149,9 +153,14 @@ fn request(
         r
     };
     if p.anthropic {
-        let r = r.header("x-api-key", &p.key)
+        let r = r
+            .header("x-api-key", &p.key)
             .header("anthropic-version", "2023-06-01");
-        if p.workspace_id.is_empty() { r } else { r.header("anthropic-workspace-id", &p.workspace_id) }
+        if p.workspace_id.is_empty() {
+            r
+        } else {
+            r.header("anthropic-workspace-id", &p.workspace_id)
+        }
     } else if !p.key.is_empty() {
         r.bearer_auth(&p.key)
     } else {
@@ -187,7 +196,10 @@ pub async fn models(client: &reqwest::Client, p: &Provider) -> Result<Vec<Value>
             let status = r.status();
             if p.anthropic && status == reqwest::StatusCode::BAD_REQUEST {
                 let detail = r.json::<Value>().await.unwrap_or(Value::Null);
-                if detail["error"]["message"].as_str().is_some_and(|m| m.contains("anthropic-workspace-id")) {
+                if detail["error"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("anthropic-workspace-id"))
+                {
                     bail!("Claude requires a Workspace ID for this API key. Set Claude Workspace ID in Connections or ANTHROPIC_WORKSPACE_ID.");
                 }
             }
@@ -220,10 +232,13 @@ pub async fn models(client: &reqwest::Client, p: &Provider) -> Result<Vec<Value>
     }
     catalog.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     if p.anthropic {
-        *p.model_limits.lock().unwrap() = catalog.iter().filter_map(|m| {
-            let limit = u32::try_from(m["max_output_tokens"].as_u64()?).ok()?;
-            (limit > 0).then(|| (m["id"].as_str().unwrap().to_owned(), limit))
-        }).collect();
+        *p.model_limits.lock().unwrap() = catalog
+            .iter()
+            .filter_map(|m| {
+                let limit = u32::try_from(m["max_output_tokens"].as_u64()?).ok()?;
+                (limit > 0).then(|| (m["id"].as_str().unwrap().to_owned(), limit))
+            })
+            .collect();
     }
     Ok(catalog)
 }
@@ -527,7 +542,12 @@ where
     require_api_key(provider)?;
     let mut max_output_tokens = settings.max_output_tokens;
     if provider.anthropic {
-        if !provider.model_limits.lock().unwrap().contains_key(&settings.model) {
+        if !provider
+            .model_limits
+            .lock()
+            .unwrap()
+            .contains_key(&settings.model)
+        {
             models(client, provider).await?;
         }
         if let Some(limit) = provider.model_limits.lock().unwrap().get(&settings.model) {
@@ -613,15 +633,28 @@ use axum::Json;
 use serde::Deserialize;
 
 fn validate_workspace_id(value: &str) -> Result<()> {
-    if !value.is_empty() && (value.len() > 200 || !value.starts_with("wrkspc_") || value.len() <= 7
-        || !value.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')) {
-        bail!("Claude Workspace ID must start with wrkspc_ and contain only letters, digits, _ or -");
+    if !value.is_empty()
+        && (value.len() > 200
+            || !value.starts_with("wrkspc_")
+            || value.len() <= 7
+            || !value
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'))
+    {
+        bail!(
+            "Claude Workspace ID must start with wrkspc_ and contain only letters, digits, _ or -"
+        );
     }
     Ok(())
 }
 
 pub(crate) fn load_workspace_id(data: &std::path::Path) -> Result<String> {
-    let ids: Vec<String> = state_file::load_list(data, "anthropic-workspace", "Claude workspace", |id: &String| validate_workspace_id(id))?;
+    let ids: Vec<String> = state_file::load_list(
+        data,
+        "anthropic-workspace",
+        "Claude workspace",
+        |id: &String| validate_workspace_id(id),
+    )?;
     Ok(ids.into_iter().next().unwrap_or_default())
 }
 
@@ -651,7 +684,10 @@ pub(crate) async fn set_key(
     if let Some(workspace) = &key.workspace_id {
         validate_workspace_id(workspace).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
         if id != "anthropic" {
-            return Err(error(StatusCode::BAD_REQUEST, "Workspace ID is only supported for Claude"));
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "Workspace ID is only supported for Claude",
+            ));
         }
     }
     let _serial = app.key_mutations.lock().await;
@@ -716,8 +752,16 @@ pub(crate) async fn set_key(
     p.key = key.key;
     p.model_limits.lock().unwrap().clear();
     p.key_error = None;
-    if let Some(workspace) = key.workspace_id { p.workspace_id = workspace; }
-    eprintln!("studio credential update: provider={} source={} saved={} pid={}", p.id, p.key_source, p.saved, std::process::id());
+    if let Some(workspace) = key.workspace_id {
+        p.workspace_id = workspace;
+    }
+    eprintln!(
+        "studio credential update: provider={} source={} saved={} pid={}",
+        p.id,
+        p.key_source,
+        p.saved,
+        std::process::id()
+    );
     Ok(Json(
         json!({"configured":p.public().configured,"saved":p.saved,"key_source":p.key_source}),
     ))
@@ -1031,10 +1075,16 @@ mod tests {
 
     #[tokio::test]
     async fn claude_missing_key_is_reported_before_connecting() {
-        let mut p = defaults().into_iter().find(|p| p.id == "anthropic").unwrap();
+        let mut p = defaults()
+            .into_iter()
+            .find(|p| p.id == "anthropic")
+            .unwrap();
         p.base = "http://127.0.0.1:1/v1".into();
         p.key = " ".into();
-        let error = models(&client().unwrap(), &p).await.unwrap_err().to_string();
+        let error = models(&client().unwrap(), &p)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("Claude API key is not configured"));
         assert!(error.contains("ANTHROPIC_API_KEY"));
         assert!(!error.contains("fixture-key"));
@@ -1120,9 +1170,12 @@ mod tests {
             let stream = events.iter().map(|e| format!("data: {e}\n\n")).collect::<String>();
             ([("content-type", "text/event-stream")], stream)
         }));
-        let router = router.route("/v1/models", axum::routing::get(|| async {
-            Json(json!({"data":[{"id":"claude-fixture","max_tokens":64}],"has_more":false}))
-        }));
+        let router = router.route(
+            "/v1/models",
+            axum::routing::get(|| async {
+                Json(json!({"data":[{"id":"claude-fixture","max_tokens":64}],"has_more":false}))
+            }),
+        );
         let (p, task) = claude_fixture(router).await;
         let settings: Settings = serde_json::from_value(
             json!({"provider":"anthropic","model":"claude-fixture","max_output_tokens":131072}),

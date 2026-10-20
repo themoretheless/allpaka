@@ -9,7 +9,6 @@
 use crate::ops::dot;
 use allpaka_gguf::{dequant, GgmlType};
 use anyhow::{bail, Result};
-use std::sync::Arc;
 
 /// A `[n_out, n_in]` weight matrix over quantised bytes, borrowed straight
 /// from the GGUF mmap.
@@ -92,6 +91,34 @@ impl<'a> QuantMat<'a> {
     }
 
     /// `y = x · Wᵀ`: for `x` of shape `[m, n_in]`, produces `[m, n_out]`.
+    /// Project owned activations directly from shared Metal storage when possible.
+    /// CPU and unsupported-format fallbacks retain the ordinary slice contract.
+    pub fn matmul_activation(
+        &self,
+        x: &crate::activation::Activation,
+        offset: usize,
+        m: usize,
+    ) -> Result<Vec<f32>> {
+        let end = offset
+            .checked_add(
+                m.checked_mul(self.n_in)
+                    .ok_or_else(|| anyhow::anyhow!("activation shape overflow"))?,
+            )
+            .ok_or_else(|| anyhow::anyhow!("activation offset overflow"))?;
+        let values = x
+            .get(offset..end)
+            .ok_or_else(|| anyhow::anyhow!("activation range out of bounds"))?;
+        #[cfg(target_os = "macos")]
+        if let crate::activation::Activation::Shared(shared) = x {
+            if let Some(y) = crate::gpu::matvec_shared(
+                self.ty, self.data, self.n_in, self.n_out, shared, offset, m,
+            ) {
+                return Ok(y);
+            }
+        }
+        self.matmul(values, m)
+    }
+
     pub fn matmul(&self, x: &[f32], m: usize) -> Result<Vec<f32>> {
         if x.len() != m * self.n_in {
             bail!("x has {} values, expected {m} x {}", x.len(), self.n_in);
@@ -268,51 +295,77 @@ impl<'a> QuantMat<'a> {
             }
         }
         if crate::gpu::is_attached() {
-            let reqs: Vec<crate::gpu::MatvecReq> = items
-                .iter()
-                .map(|(m, x)| crate::gpu::MatvecReq {
-                    ty: m.ty,
-                    w: m.data,
-                    n_in: m.n_in,
-                    n_out: m.n_out,
-                    x,
-                    m: x.len() / m.n_in,
-                })
-                .collect();
-            if let Some(out) = crate::gpu::matvec_batch(&reqs) {
-                return Ok(out);
+            if items.len() <= 4 {
+                let mut stack_reqs: [std::mem::MaybeUninit<crate::gpu::MatvecReq>; 4] =
+                    unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+                for (i, (m, x)) in items.iter().enumerate() {
+                    stack_reqs[i].write(crate::gpu::MatvecReq {
+                        ty: m.ty,
+                        w: m.data,
+                        n_in: m.n_in,
+                        n_out: m.n_out,
+                        x,
+                        m: x.len() / m.n_in,
+                    });
+                }
+                let reqs = unsafe {
+                    std::slice::from_raw_parts(
+                        stack_reqs.as_ptr() as *const crate::gpu::MatvecReq,
+                        items.len(),
+                    )
+                };
+                if let Some(out) = crate::gpu::matvec_batch(reqs) {
+                    return Ok(out);
+                }
+            } else {
+                let reqs: Vec<crate::gpu::MatvecReq> = items
+                    .iter()
+                    .map(|(m, x)| crate::gpu::MatvecReq {
+                        ty: m.ty,
+                        w: m.data,
+                        n_in: m.n_in,
+                        n_out: m.n_out,
+                        x,
+                        m: x.len() / m.n_in,
+                    })
+                    .collect();
+                if let Some(out) = crate::gpu::matvec_batch(&reqs) {
+                    return Ok(out);
+                }
             }
         }
         // CPU fallback: one thread per item, rows expanded once per batch.
         // FFN gate/up projections commonly share the same activation slice,
         // so retain one quantised copy for those items instead of repeating
         // the activation quantisation for every projection.
-        let mut cached_acts: Vec<(usize, usize, usize, Arc<Q8Acts>)> = Vec::new();
-        let acts: Vec<Option<Arc<Q8Acts>>> = items
-            .iter()
-            .map(|(mat, x)| {
-                let quantized = mat.quantized_acts(x)?;
-                let key = (x.as_ptr() as usize, x.len(), mat.n_in);
-                if let Some((_, _, _, acts)) = cached_acts
-                    .iter()
-                    .find(|(ptr, len, n_in, _)| (*ptr, *len, *n_in) == key)
-                {
-                    return Some(Arc::clone(acts));
-                }
-                let acts = Arc::new(quantized);
-                cached_acts.push((key.0, key.1, key.2, Arc::clone(&acts)));
-                Some(acts)
-            })
-            .collect();
+        let mut cached_acts: Vec<(usize, usize, usize, Q8Acts)> = Vec::with_capacity(items.len());
+        let mut act_indices: Vec<Option<usize>> = Vec::with_capacity(items.len());
+        for (mat, x) in items {
+            let key = (x.as_ptr() as usize, x.len(), mat.n_in);
+            if let Some(idx) = cached_acts
+                .iter()
+                .position(|(ptr, len, n_in, _)| (*ptr, *len, *n_in) == key)
+            {
+                act_indices.push(Some(idx));
+            } else if let Some(quantized) = mat.quantized_acts(x) {
+                let idx = cached_acts.len();
+                cached_acts.push((key.0, key.1, key.2, quantized));
+                act_indices.push(Some(idx));
+            } else {
+                act_indices.push(None);
+            }
+        }
+        let cached_ref = &cached_acts;
         let mut out: Vec<Vec<f32>> = vec![Vec::new(); items.len()];
         std::thread::scope(|scope| {
-            for (((mat, x), slot), acts) in items.iter().zip(out.iter_mut()).zip(acts) {
+            for (((mat, x), slot), act_idx) in items.iter().zip(out.iter_mut()).zip(act_indices) {
+                let acts_ref = act_idx.map(|idx| &cached_ref[idx].3);
                 scope.spawn(move || {
                     let rows = x.len() / mat.n_in;
                     let mut y = vec![0f32; rows * mat.n_out];
                     for i in 0..rows {
                         let xi = &x[i * mat.n_in..(i + 1) * mat.n_in];
-                        let row_acts = acts.as_deref().map(|acts| acts.row(i, mat.n_in));
+                        let row_acts = acts_ref.map(|acts| acts.row(i, mat.n_in));
                         for j in 0..mat.n_out {
                             y[i * mat.n_out + j] = mat.row_dot_dispatch(j, xi, row_acts.as_ref());
                         }
@@ -1085,6 +1138,34 @@ fn dot_q5_0_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
         let qh = u32::from_le_bytes(block[2..6].try_into().unwrap());
         let qs = &block[6..22];
         let mut qw = [0i8; 32];
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            use std::arch::aarch64::*;
+            let qv = vld1q_u8(qs.as_ptr());
+            let mask_0f = vdupq_n_u8(0x0f);
+            let bias_16 = vdupq_n_s8(16);
+            let bit_mask: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+            let vbm = vld1q_u8(bit_mask.as_ptr());
+            let qh_b0 = vdupq_n_u8((qh & 0xff) as u8);
+            let qh_b1 = vdupq_n_u8(((qh >> 8) & 0xff) as u8);
+            let qh_b2 = vdupq_n_u8(((qh >> 16) & 0xff) as u8);
+            let qh_b3 = vdupq_n_u8(((qh >> 24) & 0xff) as u8);
+            let qh_lo_bytes = vcombine_u8(vget_low_u8(qh_b0), vget_low_u8(qh_b1));
+            let qh_hi_bytes = vcombine_u8(vget_low_u8(qh_b2), vget_low_u8(qh_b3));
+            let h0 = vandq_u8(vtstq_u8(qh_lo_bytes, vbm), vdupq_n_u8(0x10));
+            let h1 = vandq_u8(vtstq_u8(qh_hi_bytes, vbm), vdupq_n_u8(0x10));
+            let x0 = vsubq_s8(
+                vreinterpretq_s8_u8(vorrq_u8(vandq_u8(qv, mask_0f), h0)),
+                bias_16,
+            );
+            let x1 = vsubq_s8(
+                vreinterpretq_s8_u8(vorrq_u8(vshrq_n_u8(qv, 4), h1)),
+                bias_16,
+            );
+            vst1q_s8(qw.as_mut_ptr(), x0);
+            vst1q_s8(qw.as_mut_ptr().add(16), x1);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         for j in 0..16 {
             let x0 = ((qs[j] & 0x0f) | ((((qh >> j) & 1) as u8) << 4)) as i8 - 16;
             let x1 = ((qs[j] >> 4) | ((((qh >> (j + 16)) & 1) as u8) << 4)) as i8 - 16;
@@ -1109,6 +1190,51 @@ fn dot_q2_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
         let mut is = 0;
         for half in 0..2 {
             let q = &qs[half * 32..half * 32 + 32];
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                use std::arch::aarch64::*;
+                let q0 = vld1q_u8(q.as_ptr());
+                let q1 = vld1q_u8(q.as_ptr().add(16));
+                let m3 = vdupq_n_u8(3);
+                let planes = [
+                    (
+                        vreinterpretq_s8_u8(vandq_u8(q0, m3)),
+                        vreinterpretq_s8_u8(vandq_u8(q1, m3)),
+                    ),
+                    (
+                        vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8(q0, 2), m3)),
+                        vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8(q1, 2), m3)),
+                    ),
+                    (
+                        vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8(q0, 4), m3)),
+                        vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8(q1, 4), m3)),
+                    ),
+                    (
+                        vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8(q0, 6), m3)),
+                        vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8(q1, 6), m3)),
+                    ),
+                ];
+                let mut qw = [0i8; 32];
+                for (s_idx, &(p0, p1)) in planes.iter().enumerate() {
+                    let blk = bi * 8 + half * 4 + s_idx;
+                    let xq = acts.block(blk);
+                    let dx = acts.d[blk];
+                    vst1q_s8(qw.as_mut_ptr(), p0);
+                    vst1q_s8(qw.as_mut_ptr().add(16), p1);
+                    let xv0 = vld1q_s8(xq.as_ptr());
+                    let xv1 = vld1q_s8(xq.as_ptr().add(16));
+                    let sum0 = vaddlvq_s8(xv0) as f32 * dx;
+                    let sum1 = vaddlvq_s8(xv1) as f32 * dx;
+                    let dot0 = dot_i8(&qw[0..16], &xq[0..16]) as f32 * dx;
+                    let dot1 = dot_i8(&qw[16..32], &xq[16..32]) as f32 * dx;
+                    let sc0 = scales[is];
+                    let sc1 = scales[is + 1];
+                    total += (d * (sc0 & 0xf) as f32) * dot0 - (dmin * (sc0 >> 4) as f32) * sum0;
+                    total += (d * (sc1 & 0xf) as f32) * dot1 - (dmin * (sc1 >> 4) as f32) * sum1;
+                    is += 2;
+                }
+            }
+            #[cfg(not(target_arch = "aarch64"))]
             for (s_idx, shift) in [0u8, 2, 4, 6].into_iter().enumerate() {
                 let blk = bi * 8 + half * 4 + s_idx;
                 let xq = acts.block(blk);
@@ -1170,6 +1296,24 @@ fn dot_q3_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
                 let xq = acts.block(blk);
                 let dx = acts.d[blk];
                 let mut qw = [0i8; 32];
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    use std::arch::aarch64::*;
+                    let m3 = vdupq_n_u8(3);
+                    let vm = vdupq_n_u8(m);
+                    let four = vdupq_n_u8(4);
+                    let vsh = vdupq_n_s8(-(shift as i8));
+                    for seg in [0usize, 16] {
+                        let qv = vld1q_u8(q.as_ptr().add(seg));
+                        let hv = vld1q_u8(hmask.as_ptr().add(seg));
+                        let crumbs = vandq_u8(vshlq_u8(qv, vsh), m3);
+                        // Where hmask & m == 0, subtract 4 (i.e. vbicq_u8(four, vtstq_u8(hv, vm))).
+                        let sub4 = vbicq_u8(four, vtstq_u8(hv, vm));
+                        let val = vsubq_s8(vreinterpretq_s8_u8(crumbs), vreinterpretq_s8_u8(sub4));
+                        vst1q_s8(qw.as_mut_ptr().add(seg), val);
+                    }
+                }
+                #[cfg(not(target_arch = "aarch64"))]
                 for l in 0..32 {
                     qw[l] = (((q[l] >> shift) & 3) as i8) - if hmask[l] & m != 0 { 0 } else { 4 };
                 }
@@ -1203,6 +1347,25 @@ fn dot_q5_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
             let bit_shift2 = (pair * 2 + 1) as u8;
             let mut lo = [0i8; 32];
             let mut hi = [0i8; 32];
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                use std::arch::aarch64::*;
+                let mask_0f = vdupq_n_u8(0x0f);
+                let mask_10 = vdupq_n_u8(0x10);
+                let bm1 = vdupq_n_u8(1u8 << bit_shift1);
+                let bm2 = vdupq_n_u8(1u8 << bit_shift2);
+                for seg in [0usize, 16] {
+                    let qv = vld1q_u8(q.as_ptr().add(seg));
+                    let qhv = vld1q_u8(qh.as_ptr().add(seg));
+                    let h1 = vandq_u8(vtstq_u8(qhv, bm1), mask_10);
+                    let h2 = vandq_u8(vtstq_u8(qhv, bm2), mask_10);
+                    let vlo = vorrq_u8(vandq_u8(qv, mask_0f), h1);
+                    let vhi = vorrq_u8(vshrq_n_u8(qv, 4), h2);
+                    vst1q_s8(lo.as_mut_ptr().add(seg), vreinterpretq_s8_u8(vlo));
+                    vst1q_s8(hi.as_mut_ptr().add(seg), vreinterpretq_s8_u8(vhi));
+                }
+            }
+            #[cfg(not(target_arch = "aarch64"))]
             for l in 0..32 {
                 let h1 = ((qh[l] >> bit_shift1) & 1) << 4;
                 let h2 = ((qh[l] >> bit_shift2) & 1) << 4;

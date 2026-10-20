@@ -90,6 +90,33 @@ pub fn rmsnorm(x: &mut [f32], weight: &[f32], eps: f32) {
     assert_eq!(x.len(), weight.len());
     let mean_sq = sum_sq_f64(x) / x.len() as f64;
     let scale = 1.0 / (mean_sq + eps as f64).sqrt();
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let vscale = vdupq_n_f64(scale);
+        let mut i = 0usize;
+        let n = x.len();
+        let xp = x.as_mut_ptr();
+        let wp = weight.as_ptr();
+        while i + 8 <= n {
+            let x0 = vld1q_f32(xp.add(i));
+            let x1 = vld1q_f32(xp.add(i + 4));
+            let w0 = vld1q_f32(wp.add(i));
+            let w1 = vld1q_f32(wp.add(i + 4));
+            let s0_lo = vcvt_f32_f64(vmulq_f64(vcvt_f64_f32(vget_low_f32(x0)), vscale));
+            let s0_hi = vcvt_f32_f64(vmulq_f64(vcvt_high_f64_f32(x0), vscale));
+            let s1_lo = vcvt_f32_f64(vmulq_f64(vcvt_f64_f32(vget_low_f32(x1)), vscale));
+            let s1_hi = vcvt_f32_f64(vmulq_f64(vcvt_high_f64_f32(x1), vscale));
+            vst1q_f32(xp.add(i), vmulq_f32(vcombine_f32(s0_lo, s0_hi), w0));
+            vst1q_f32(xp.add(i + 4), vmulq_f32(vcombine_f32(s1_lo, s1_hi), w1));
+            i += 8;
+        }
+        while i < n {
+            *xp.add(i) = (*xp.add(i) as f64 * scale) as f32 * *wp.add(i);
+            i += 1;
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     for (v, w) in x.iter_mut().zip(weight) {
         *v = (*v as f64 * scale) as f32 * w;
     }
@@ -104,6 +131,34 @@ pub fn rmsnorm_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
     assert_eq!(dst.len(), src.len());
     let mean_sq = sum_sq_f64(src) / src.len() as f64;
     let scale = 1.0 / (mean_sq + eps as f64).sqrt();
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let vscale = vdupq_n_f64(scale);
+        let mut i = 0usize;
+        let n = src.len();
+        let dp = dst.as_mut_ptr();
+        let sp = src.as_ptr();
+        let wp = weight.as_ptr();
+        while i + 8 <= n {
+            let x0 = vld1q_f32(sp.add(i));
+            let x1 = vld1q_f32(sp.add(i + 4));
+            let w0 = vld1q_f32(wp.add(i));
+            let w1 = vld1q_f32(wp.add(i + 4));
+            let s0_lo = vcvt_f32_f64(vmulq_f64(vcvt_f64_f32(vget_low_f32(x0)), vscale));
+            let s0_hi = vcvt_f32_f64(vmulq_f64(vcvt_high_f64_f32(x0), vscale));
+            let s1_lo = vcvt_f32_f64(vmulq_f64(vcvt_f64_f32(vget_low_f32(x1)), vscale));
+            let s1_hi = vcvt_f32_f64(vmulq_f64(vcvt_high_f64_f32(x1), vscale));
+            vst1q_f32(dp.add(i), vmulq_f32(vcombine_f32(s0_lo, s0_hi), w0));
+            vst1q_f32(dp.add(i + 4), vmulq_f32(vcombine_f32(s1_lo, s1_hi), w1));
+            i += 8;
+        }
+        while i < n {
+            *dp.add(i) = (*sp.add(i) as f64 * scale) as f32 * *wp.add(i);
+            i += 1;
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     for ((d, &v), w) in dst.iter_mut().zip(src).zip(weight) {
         *d = (v as f64 * scale) as f32 * w;
     }
@@ -133,6 +188,47 @@ pub fn rmsnorm_rows_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32)
             });
         }
     });
+}
+
+#[inline(always)]
+pub fn add_scaled_slice(dst: &mut [f32], src: &[f32], scale: f32) {
+    debug_assert_eq!(dst.len(), src.len());
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let vs = vdupq_n_f32(scale);
+        let mut i = 0usize;
+        let n = dst.len();
+        let dp = dst.as_mut_ptr();
+        let sp = src.as_ptr();
+        while i + 16 <= n {
+            vst1q_f32(
+                dp.add(i),
+                vfmaq_f32(vld1q_f32(dp.add(i)), vld1q_f32(sp.add(i)), vs),
+            );
+            vst1q_f32(
+                dp.add(i + 4),
+                vfmaq_f32(vld1q_f32(dp.add(i + 4)), vld1q_f32(sp.add(i + 4)), vs),
+            );
+            vst1q_f32(
+                dp.add(i + 8),
+                vfmaq_f32(vld1q_f32(dp.add(i + 8)), vld1q_f32(sp.add(i + 8)), vs),
+            );
+            vst1q_f32(
+                dp.add(i + 12),
+                vfmaq_f32(vld1q_f32(dp.add(i + 12)), vld1q_f32(sp.add(i + 12)), vs),
+            );
+            i += 16;
+        }
+        while i < n {
+            *dp.add(i) = (*sp.add(i)).mul_add(scale, *dp.add(i));
+            i += 1;
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    for (d, &s) in dst.iter_mut().zip(src) {
+        *d += scale * s;
+    }
 }
 
 #[inline(always)]

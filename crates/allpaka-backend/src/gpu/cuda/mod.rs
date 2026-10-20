@@ -3453,6 +3453,12 @@ fn pf_graph_on() -> bool {
         .map_or(true, |v| !(v == "0" || v.eq_ignore_ascii_case("false")))
 }
 
+pub fn prefill_end_output(len: usize) -> Option<crate::activation::Activation> {
+    let mut out = vec![0.0; len];
+    prefill_end(&mut out)?;
+    Some(out.into())
+}
+
 pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
     with_gpu(|gpu| {
         if !gpu.pf_active || xs.len() != gpu.pf_len {
@@ -5242,4 +5248,8 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     } else {
         Some(down_out)
     }
+}
+
+pub fn shared_activation_stats() -> crate::activation::SharedStats {
+    crate::activation::SharedStats::default()
 }

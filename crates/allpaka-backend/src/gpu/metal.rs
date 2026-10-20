@@ -510,15 +510,20 @@ kernel void matvec_q5_0(
         device const uchar* blk = row + b * 22;
         float d = half_at(blk);
         uint qh = as_type<uint>(uchar4(blk[2], blk[3], blk[4], blk[5]));
-        device const uchar* qs = blk + 6;
+        device const packed_uchar4* qs4 = (device const packed_uchar4*)(blk + 6);
         float s[MAXT] = {0};
-        for (uint jj = 0; jj < 16; jj++) {
-            uchar qbyte = qs[jj];
-            int q0 = (int)((qbyte & 0xF) | (((qh >> jj) & 1) << 4)) - 16;
-            int q1 = (int)((qbyte >> 4) | (((qh >> (jj + 16)) & 1) << 4)) - 16;
+        #pragma clang loop unroll(full)
+        for (uint l4 = 0; l4 < 4; l4++) {
+            uchar4 qb = uchar4(qs4[l4]);
+            uint shift0 = l4 * 4;
+            uint shift1 = shift0 + 16;
+            int4 h0 = int4((qh >> shift0) & 1u, (qh >> (shift0 + 1)) & 1u, (qh >> (shift0 + 2)) & 1u, (qh >> (shift0 + 3)) & 1u) << 4;
+            int4 h1 = int4((qh >> shift1) & 1u, (qh >> (shift1 + 1)) & 1u, (qh >> (shift1 + 2)) & 1u, (qh >> (shift1 + 3)) & 1u) << 4;
+            float4 q0 = float4((int4(qb & (uchar4)0xF) | h0) - 16);
+            float4 q1 = float4((int4(qb >> 4) | h1) - 16);
             for (uint i = 0; i < TILE; i++) {
-                device const float* xi = x + i * n_in + b * 32;
-                s[i] += float(q0) * xi[jj] + float(q1) * xi[jj + 16];
+                device const float4* xi = (device const float4*)(x + i * n_in + b * 32);
+                s[i] += dot(q0, xi[l4]) + dot(q1, xi[l4 + 4]);
             }
         }
         for (uint i = 0; i < TILE; i++) total[i] += d * s[i];
@@ -1160,20 +1165,32 @@ kernel void matvec_q3_k_mv(
     float sumf2[2] = {0.0f, 0.0f};
 
     for (uint ib = ix; ib < nb; ib += 4) {
-        #pragma clang loop unroll(full)
-        for (short l = 0; l < 8; ++l) {
-            if (SWIGLU_X) {
-                yl[l + 0] = sw1(y1[l + 0], u1[l + 0]);
-                yl[l + 8] = sw1(y1[l + 16], u1[l + 16]);
-                yl[l + 16] = sw1(y1[l + 32], u1[l + 32]);
-                yl[l + 24] = sw1(y1[l + 48], u1[l + 48]);
-            } else {
-                yl[l + 0] = y1[l + 0];
-                yl[l + 8] = y1[l + 16];
-                yl[l + 16] = y1[l + 32];
-                yl[l + 24] = y1[l + 48];
-            }
+        float4 yl0 = *(device const float4*)(y1 + 0);
+        float4 yl1 = *(device const float4*)(y1 + 4);
+        float4 yl2 = *(device const float4*)(y1 + 16);
+        float4 yl3 = *(device const float4*)(y1 + 20);
+        float4 yl4 = *(device const float4*)(y1 + 32);
+        float4 yl5 = *(device const float4*)(y1 + 36);
+        float4 yl6 = *(device const float4*)(y1 + 48);
+        float4 yl7 = *(device const float4*)(y1 + 52);
+        if (SWIGLU_X) {
+            yl0 = sw4(yl0, *(device const float4*)(u1 + 0));
+            yl1 = sw4(yl1, *(device const float4*)(u1 + 4));
+            yl2 = sw4(yl2, *(device const float4*)(u1 + 16));
+            yl3 = sw4(yl3, *(device const float4*)(u1 + 20));
+            yl4 = sw4(yl4, *(device const float4*)(u1 + 32));
+            yl5 = sw4(yl5, *(device const float4*)(u1 + 36));
+            yl6 = sw4(yl6, *(device const float4*)(u1 + 48));
+            yl7 = sw4(yl7, *(device const float4*)(u1 + 52));
         }
+        *((thread float4*)(yl + 0)) = yl0;
+        *((thread float4*)(yl + 4)) = yl1;
+        *((thread float4*)(yl + 8)) = yl2;
+        *((thread float4*)(yl + 12)) = yl3;
+        *((thread float4*)(yl + 16)) = yl4;
+        *((thread float4*)(yl + 20)) = yl5;
+        *((thread float4*)(yl + 24)) = yl6;
+        *((thread float4*)(yl + 28)) = yl7;
         device const uchar* blk = row0 + ib * 110;
         device const ushort* q = (device const ushort*)(blk + 32 + q_offset);
         device const ushort* h = (device const ushort*)(blk + l0);
@@ -1339,11 +1356,16 @@ kernel void matvec_q6_k_mv(
         device const uchar* dh = blk + 208;
 
         device const float* yv = x + ib * 256 + y_offset;
+        float4 yv0 = *(device const float4*)(yv + 0);
+        float4 yv1 = *(device const float4*)(yv + 32);
+        float4 yv2 = *(device const float4*)(yv + 64);
+        float4 yv3 = *(device const float4*)(yv + 96);
+        _Pragma("clang loop unroll(full)")
         for (short l = 0; l < 4; ++l) {
-            yl[4 * l + 0] = yv[l + 0];
-            yl[4 * l + 1] = yv[l + 32];
-            yl[4 * l + 2] = yv[l + 64];
-            yl[4 * l + 3] = yv[l + 96];
+            yl[4 * l + 0] = yv0[l];
+            yl[4 * l + 1] = yv1[l];
+            yl[4 * l + 2] = yv2[l];
+            yl[4 * l + 3] = yv3[l];
         }
 
         for (uint row = 0; row < 2; ++row) {
@@ -1676,13 +1698,38 @@ kernel void matvec_q5_k_mv(
     for (uint ib = ix; ib < nb; ib += 4) {
         device const float* y2 = y1 + 128;
         device const float* u2 = u1 + 128;
-        float4 sumy = {0.0f, 0.0f, 0.0f, 0.0f};
-        for (short l = 0; l < 8; ++l) {
-            yl[l + 0] = SWIGLU_X ? sw1(y1[l + 0], u1[l + 0]) : y1[l + 0];  sumy[0] += yl[l + 0];
-            yl[l + 8] = SWIGLU_X ? sw1(y1[l + 32], u1[l + 32]) : y1[l + 32]; sumy[1] += yl[l + 8];
-            yh[l + 0] = SWIGLU_X ? sw1(y2[l + 0], u2[l + 0]) : y2[l + 0];  sumy[2] += yh[l + 0];
-            yh[l + 8] = SWIGLU_X ? sw1(y2[l + 32], u2[l + 32]) : y2[l + 32]; sumy[3] += yh[l + 8];
+        float4 yl0 = *(device const float4*)(y1 + 0);
+        float4 yl1 = *(device const float4*)(y1 + 4);
+        float4 yl2 = *(device const float4*)(y1 + 32);
+        float4 yl3 = *(device const float4*)(y1 + 36);
+        float4 yh0 = *(device const float4*)(y2 + 0);
+        float4 yh1 = *(device const float4*)(y2 + 4);
+        float4 yh2 = *(device const float4*)(y2 + 32);
+        float4 yh3 = *(device const float4*)(y2 + 36);
+        if (SWIGLU_X) {
+            yl0 = sw4(yl0, *(device const float4*)(u1 + 0));
+            yl1 = sw4(yl1, *(device const float4*)(u1 + 4));
+            yl2 = sw4(yl2, *(device const float4*)(u1 + 32));
+            yl3 = sw4(yl3, *(device const float4*)(u1 + 36));
+            yh0 = sw4(yh0, *(device const float4*)(u2 + 0));
+            yh1 = sw4(yh1, *(device const float4*)(u2 + 4));
+            yh2 = sw4(yh2, *(device const float4*)(u2 + 32));
+            yh3 = sw4(yh3, *(device const float4*)(u2 + 36));
         }
+        *((thread float4*)(yl + 0)) = yl0;
+        *((thread float4*)(yl + 4)) = yl1;
+        *((thread float4*)(yl + 8)) = yl2;
+        *((thread float4*)(yl + 12)) = yl3;
+        *((thread float4*)(yh + 0)) = yh0;
+        *((thread float4*)(yh + 4)) = yh1;
+        *((thread float4*)(yh + 8)) = yh2;
+        *((thread float4*)(yh + 12)) = yh3;
+        float4 sumy = {
+            yl0[0] + yl0[1] + yl0[2] + yl0[3] + yl1[0] + yl1[1] + yl1[2] + yl1[3],
+            yl2[0] + yl2[1] + yl2[2] + yl2[3] + yl3[0] + yl3[1] + yl3[2] + yl3[3],
+            yh0[0] + yh0[1] + yh0[2] + yh0[3] + yh1[0] + yh1[1] + yh1[2] + yh1[3],
+            yh2[0] + yh2[1] + yh2[2] + yh2[3] + yh3[0] + yh3[1] + yh3[2] + yh3[3],
+        };
 
         device const uchar* blk = row0 + (ulong)ib * 176u;
         device const ushort* a = (device const ushort*)(blk + 4) + iq;
@@ -7513,6 +7560,7 @@ pub struct Gpu {
     /// never round-trip through the CPU.
     pf_x: Buffer,
     pf_x_cap: usize,
+    pf_spare: std::sync::Arc<Mutex<Option<Buffer>>>,
     pf_hs: Buffer,
     pf_hs_cap: usize,
     /// GPU-side MoE routing scratch: counters, the group table, picks,
@@ -7820,6 +7868,7 @@ fn init_device() -> Option<Gpu> {
         y_cap: 1 << 22,
         pf_x,
         pf_x_cap: 1 << 12,
+        pf_spare: Default::default(),
         pf_hs,
         pf_hs_cap: 1 << 12,
         route_buf,
@@ -8849,6 +8898,40 @@ pub fn matvec(ty: GgmlType, w: &[u8], n_in: usize, n_out: usize, x: &[f32]) -> O
 /// All-or-nothing: if any request has no kernel or foreign bytes, the whole
 /// batch declines and the caller runs it on the CPU.
 pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
+    matvec_batch_inner(reqs, None)
+}
+
+pub fn matvec_shared(
+    ty: GgmlType,
+    w: &[u8],
+    n_in: usize,
+    n_out: usize,
+    x: &SharedVector,
+    offset: usize,
+    m: usize,
+) -> Option<Vec<f32>> {
+    let end = offset.checked_add(m.checked_mul(n_in)?)?;
+    let values = x.get(offset..end)?;
+    let out = matvec_batch_inner(
+        &[MatvecReq {
+            ty,
+            w,
+            n_in,
+            n_out,
+            x: values,
+            m,
+        }],
+        Some((x.buf.as_ref()?, offset.checked_mul(4)?)),
+    )?
+    .pop()?;
+    SHARED_PROJECTION_BYTES.fetch_add((values.len() * 4) as u64, Ordering::Relaxed);
+    Some(out)
+}
+
+fn matvec_batch_inner(
+    reqs: &[MatvecReq],
+    shared: Option<(&Buffer, usize)>,
+) -> Option<Vec<Vec<f32>>> {
     if reqs.is_empty() {
         return Some(Vec::new());
     }
@@ -8953,6 +9036,9 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
     unsafe {
         let xp = gpu.x_arena.contents() as *mut u8;
         for s in &slots {
+            if shared.is_some() {
+                continue;
+            }
             let r = &reqs[s.ri];
             let xs = &r.x[s.start_row * r.n_in..(s.start_row + s.rows) * r.n_in];
             std::ptr::copy_nonoverlapping(xs.as_ptr() as *const u8, xp.add(s.x_off), xs.len() * 4);
@@ -8978,7 +9064,11 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
             let (_, chunk, w_off) = &kernels[s.ri];
             enc.set_compute_pipeline_state(&states[si]);
             enc.set_buffer(0, Some(&gpu.chunks[*chunk].buf), 0);
-            enc.set_buffer(1, Some(&gpu.x_arena), s.x_off as u64);
+            let (input, input_offset) = shared
+                .map_or((&gpu.x_arena, s.x_off), |(buffer, offset)| {
+                    (buffer, offset + s.start_row * r.n_in * 4)
+                });
+            enc.set_buffer(1, Some(input), input_offset as u64);
             enc.set_buffer(2, Some(&gpu.y_arena), s.y_off as u64);
             let n_in32 = r.n_in as u32;
             let n_out32 = r.n_out as u32;
@@ -14589,8 +14679,8 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
 }
 
 /// Download the residual stream after the last fused layer.
-pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
-    let mut gpu = GPU.get()?.as_ref()?.lock().ok()?;
+/// Drain GPU writers before exposing CPU slices of the residual stream.
+fn prefill_complete(gpu: &mut Gpu) {
     let mut cal = None;
     if let Some(cmd) = gpu.pf_obuf_cmd.take() {
         // The one-buffer chunk commits here: the only wait of the prefill.
@@ -14607,13 +14697,105 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
     }
     gpu.prefill_drain();
     gpu.cstamps_report(cal);
-    if xs.len() * 4 > gpu.pf_x_cap {
+}
+
+pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
+    let mut gpu = GPU.get()?.as_ref()?.lock().ok()?;
+    prefill_complete(&mut gpu);
+    if xs.len().checked_mul(4)? > gpu.pf_x_cap {
         return None;
     }
     unsafe {
         std::ptr::copy_nonoverlapping(gpu.pf_x.contents() as *const f32, xs.as_mut_ptr(), xs.len());
     }
     Some(())
+}
+
+static SHARED_OUTPUTS: AtomicU64 = AtomicU64::new(0);
+static SHARED_HANDOFF_BYTES: AtomicU64 = AtomicU64::new(0);
+static SHARED_PROJECTION_BYTES: AtomicU64 = AtomicU64::new(0);
+
+pub fn shared_activation_stats() -> crate::activation::SharedStats {
+    crate::activation::SharedStats {
+        outputs: SHARED_OUTPUTS.load(Ordering::Relaxed),
+        handoff_bytes: SHARED_HANDOFF_BYTES.load(Ordering::Relaxed),
+        projection_bytes: SHARED_PROJECTION_BYTES.load(Ordering::Relaxed),
+    }
+}
+
+/// A completed, exclusively owned shared allocation. No GPU arena retains this
+/// buffer. Borrowing it for a synchronous dispatch prevents CPU mutation until
+/// that dispatch completes. Dropping it returns storage to a bounded spare slot.
+pub struct SharedVector {
+    buf: Option<Buffer>,
+    len: usize,
+    spare: std::sync::Arc<Mutex<Option<Buffer>>>,
+}
+
+impl std::ops::Deref for SharedVector {
+    type Target = [f32];
+    fn deref(&self) -> &[f32] {
+        // Only constructed after prefill_complete; storage outlives the slice.
+        unsafe {
+            std::slice::from_raw_parts(self.buf.as_ref().unwrap().contents().cast(), self.len)
+        }
+    }
+}
+impl std::ops::DerefMut for SharedVector {
+    fn deref_mut(&mut self) -> &mut [f32] {
+        unsafe {
+            std::slice::from_raw_parts_mut(self.buf.as_ref().unwrap().contents().cast(), self.len)
+        }
+    }
+}
+impl Drop for SharedVector {
+    fn drop(&mut self) {
+        if let Ok(mut spare) = self.spare.lock() {
+            if spare.is_none() {
+                *spare = self.buf.take();
+            }
+        }
+    }
+}
+
+/// Hand the completed residual allocation to its next consumer without memcpy.
+/// The old copying path remains available for controlled A/B measurements.
+pub fn prefill_end_output(len: usize) -> Option<crate::activation::Activation> {
+    if std::env::var("ALLPAKA_PREFILL_ZERO_COPY").is_ok_and(|v| v == "0") {
+        let mut out = vec![0.0; len];
+        prefill_end(&mut out)?;
+        return Some(out.into());
+    }
+    let mut gpu = GPU.get()?.as_ref()?.lock().ok()?;
+    prefill_complete(&mut gpu);
+    if len.checked_mul(4)? > gpu.pf_x_cap {
+        return None;
+    }
+    let spare = gpu.pf_spare.lock().ok()?.take();
+    let replacement = spare
+        .filter(|b| b.length() as usize == gpu.pf_x_cap)
+        .unwrap_or_else(|| {
+            gpu.device
+                .new_buffer(gpu.pf_x_cap as u64, MTLResourceOptions::StorageModeShared)
+        });
+    // Residency sets must not retain every output ever handed to a caller.
+    if let Some(set) = gpu.residency {
+        use objc::runtime::Object;
+        use objc::{msg_send, sel, sel_impl};
+        unsafe {
+            let _: () =
+                msg_send![set as *mut Object, removeAllocation: gpu.pf_x.as_ptr() as *mut Object];
+        }
+    }
+    gpu.pin_buffer_in_residency(&replacement);
+    let buf = std::mem::replace(&mut gpu.pf_x, replacement);
+    SHARED_OUTPUTS.fetch_add(1, Ordering::Relaxed);
+    SHARED_HANDOFF_BYTES.fetch_add((len * 4) as u64, Ordering::Relaxed);
+    Some(crate::activation::Activation::Shared(SharedVector {
+        buf: Some(buf),
+        len,
+        spare: gpu.pf_spare.clone(),
+    }))
 }
 
 /// Wait out deferred prefill buffers after a mid-chunk fallback: the CPU

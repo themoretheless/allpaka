@@ -192,7 +192,10 @@ fn down_shaped_q3k_vs_q4k_bandwidth() {
             QuantMat::matmul_many(&items).unwrap();
         }
     }
-    let trials: usize = std::env::var("FFN_TRIALS").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
+    let trials: usize = std::env::var("FFN_TRIALS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7);
     let mut rates = vec![Vec::new(); sets.len()];
     for _ in 0..trials {
         for (k, (_, bytes, mats)) in sets.iter().enumerate() {
@@ -220,11 +223,19 @@ fn down_shaped_q3k_vs_q4k_bandwidth() {
             mats.len()
         );
     }
-    println!("q3_k / q4_k bytes-per-second ratio: {:.3}", medians[0] / medians[1]);
+    println!(
+        "q3_k / q4_k bytes-per-second ratio: {:.3}",
+        medians[0] / medians[1]
+    );
     // Best-of is the contention-robust reading: interference only ever
     // slows a trial down.
     let best: Vec<f64> = rates.iter().map(|r| r[r.len() - 1]).collect();
-    println!("best-of: q3_k {:.1} GB/s, q4_k {:.1} GB/s, ratio {:.3}", best[0], best[1], best[0] / best[1]);
+    println!(
+        "best-of: q3_k {:.1} GB/s, q4_k {:.1} GB/s, ratio {:.3}",
+        best[0],
+        best[1],
+        best[0] / best[1]
+    );
 }
 
 /// The prefill counterpart: tile-matmul (mm) kernels at chunk batch sizes,

@@ -1809,7 +1809,15 @@ async fn turn_traced(
         message.model = Some(settings.model.clone());
         let truncated = message.truncated;
         let calls = message.tool_calls.clone();
-        let answer = message.content.clone();
+        let rag_answer = if calls.is_empty()
+            && rag_plugin_id.is_some()
+            && rag_context.as_ref().is_some_and(|c| !c.is_empty())
+            && message.content.chars().take(200).count() >= 200
+        {
+            Some(message.content.clone())
+        } else {
+            None
+        };
         {
             let mut s = s.lock().unwrap();
             s.messages[index] = message;
@@ -1843,22 +1851,18 @@ async fn turn_traced(
                         continue;
                     }
                 }
-                if let Some(rag_id) = &rag_plugin_id {
-                    if rag_context.as_ref().is_some_and(|c| !c.is_empty())
-                        && answer.chars().count() >= 200
-                    {
-                        let title = {
-                            let state = s.lock().unwrap();
-                            state
-                                .messages
-                                .iter()
-                                .rev()
-                                .find(|m| m.role == "user")
-                                .map(|m| m.content.chars().take(80).collect::<String>())
-                                .unwrap_or_else(|| "allpaka answer".into())
-                        };
-                        rag::auto_file_answer(&app, rag_id, &title, &answer).await;
-                    }
+                if let (Some(rag_id), Some(answer)) = (&rag_plugin_id, rag_answer.as_deref()) {
+                    let title = {
+                        let state = s.lock().unwrap();
+                        state
+                            .messages
+                            .iter()
+                            .rev()
+                            .find(|m| m.role == "user")
+                            .map(|m| m.content.chars().take(80).collect::<String>())
+                            .unwrap_or_else(|| "allpaka answer".into())
+                    };
+                    rag::auto_file_answer(&app, rag_id, &title, answer).await;
                 }
                 return Ok(TurnOutcome::Complete);
             }
@@ -1948,10 +1952,19 @@ async fn turn_traced(
                     )
                 } else if name == "set_plan" && settings.mode != Mode::Chat {
                     tools::parse_plan(&args).and_then(|steps| {
-                        let base=args.get("base_revision").map(|value|value.as_u64().context("Invalid plan base_revision")).transpose()?;
-                        let mut state=s.lock().unwrap();let mut next=state.clone();
-                        plan::update(&mut next,steps,base,"agent",false)?;
-                        save(&app,&next)?;*state=next;
+                        let base = args
+                            .get("base_revision")
+                            .map(|value| value.as_u64().context("Invalid plan base_revision"))
+                            .transpose()?;
+                        let mut state = s.lock().unwrap();
+                        let prev_plan = state.plan.clone();
+                        let prev_rev = state.plan_revision;
+                        plan::update(&mut state, steps, base, "agent", false)?;
+                        if let Err(err) = save(&app, &state) {
+                            state.plan = prev_plan;
+                            state.plan_revision = prev_rev;
+                            return Err(err);
+                        }
                         Ok(json!({"updated":true,"revision":state.plan_revision,"steps":state.plan,"evidence_basis":"reported"}))
                     })
                 } else if name == "list_files" && args["path"] == "." {

@@ -21,11 +21,18 @@ impl Drop for DataLock {
 impl DataLock {
     pub(crate) fn acquire_workspace(workspace: &Path) -> Result<Self> {
         use sha2::Digest;
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-            .map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
         let workspace = workspace.canonicalize()?;
         let digest = sha2::Sha256::digest(workspace.as_os_str().as_encoded_bytes());
-        let locks = home.join(".allpaka").join("studio-instances").join(digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+        let locks = home.join(".allpaka").join("studio-instances").join(
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+        );
         std::fs::create_dir_all(&locks)?;
         Self::acquire(&locks).context("Studio is already running for this workspace; use that instance or stop it before starting another, even with a different port or --data-dir")
     }
