@@ -72,4 +72,5 @@ ALLPAKA_TEST_MODEL=/path/to/model.gguf cargo test --release -p allpaka-model \
 - 40 backend unit tests, 43 model unit tests, 1 Metal ownership/alignment regression: все прошли.
 - Дополнительный реальный model parity test прошёл; проверяет `forward_batch`, `forward_batch_hidden`, `forward_batch_full`, `forward_batch_full_hn` на 16, 33 и 512 токенах.
 - Регрессия владения проверяет, что новый chunk не меняет уже выданный буфер; CPU-нормализация сохраняет его адрес; повторная выдача, неверная длина и переполнения отвергаются; невыровненный вход использует staging.
+- `cargo build --release -p allpaka-cli --offline` завершился успешно.
 - Полная проверка CUDA/Linux и других Apple SoC не выполнялась.
