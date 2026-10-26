@@ -89,6 +89,20 @@ pub fn is_attached() -> bool {
     GPU.get().map_or(false, Option::is_some)
 }
 
+/// Active physical memory architecture for the CUDA backend.
+///
+/// Discrete NVIDIA GPUs operate in `dUMA` mode: device tensors and caches live
+/// in dedicated VRAM (`CudaSlice`), separate from host RAM, requiring explicit
+/// H2D and D2H transfers when state crosses between CPU and GPU.
+#[inline]
+pub fn memory_architecture() -> crate::memory::MemoryArchitecture {
+    if is_attached() {
+        crate::memory::MemoryArchitecture::Duma
+    } else {
+        crate::memory::MemoryArchitecture::HostOnly
+    }
+}
+
 pub fn init_error() -> Option<String> {
     None
 }
@@ -230,37 +244,13 @@ pub fn ffn_batch(reqs: &[FfnReq]) -> Option<Vec<Vec<f32>>> {
             if r.x.len() != r.m * r.hidden {
                 return None;
             }
-            let gate = run_matvec(gpu, r.gate_ty, r.gate_w, r.hidden, r.ffn, r.x, r.m)?;
+            let mut gate = run_matvec(gpu, r.gate_ty, r.gate_w, r.hidden, r.ffn, r.x, r.m)?;
             let up = run_matvec(gpu, r.up_ty, r.up_w, r.hidden, r.ffn, r.x, r.m)?;
-            gpu.ensure_arenas(r.m * r.ffn * 4, r.m * r.ffn * 4)?;
-            gpu.stream
-                .memcpy_htod(&gate, &mut gpu.x_arena.slice_mut(0..gate.len()))
-                .ok()?;
-            gpu.stream
-                .memcpy_htod(&up, &mut gpu.y_arena.slice_mut(0..up.len()))
-                .ok()?;
-            {
-                let f = gpu.func_owned("swiglu")?;
-                let n = gate.len() as u32;
-                let cfg = CudaGpu::cfg_1d(n, 256);
-                let mut g = gpu.x_arena.slice_mut(0..gate.len());
-                let u = gpu.y_arena.slice(0..up.len());
-                unsafe {
-                    gpu.stream
-                        .launch_builder_pdl(&f)
-                        .arg(&mut g)
-                        .arg(&u)
-                        .arg(&n)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-            }
-            gpu.sync()?;
-            let act = gpu
-                .stream
-                .clone_dtoh(&gpu.x_arena.slice(0..gate.len()))
-                .ok()?;
-            let down = run_matvec(gpu, r.down_ty, r.down_w, r.ffn, r.hidden, &act, r.m)?;
+            // `run_matvec` already materialized `gate` and `up` on the host; on
+            // dUMA, running elementwise SwiGLU in place on the CPU avoids two
+            // redundant H2D uploads and one D2H download across PCIe before `down`.
+            crate::ops::swiglu(&mut gate, &up);
+            let down = run_matvec(gpu, r.down_ty, r.down_w, r.ffn, r.hidden, &gate, r.m)?;
             outs.push(down);
         }
         Some(outs)
@@ -272,6 +262,28 @@ pub struct SharedRegion {
     pub(crate) len: usize,
     #[allow(dead_code)]
     host: usize,
+}
+
+impl SharedRegion {
+    /// Memory architecture backing this region (`dUMA` discrete VRAM buffer).
+    #[inline]
+    pub const fn architecture(&self) -> crate::memory::MemoryArchitecture {
+        crate::memory::MemoryArchitecture::Duma
+    }
+
+    /// False on dUMA: `buf` is a separate `CudaSlice<u8>` in device VRAM, not
+    /// a zero-copy alias of the host allocation.
+    #[inline]
+    pub const fn is_unified(&self) -> bool {
+        false
+    }
+
+    /// True on dUMA: host and device buffers are physically distinct and must
+    /// be synchronized via `upload_region_range` (H2D) / `download_region_range` (D2H).
+    #[inline]
+    pub const fn is_discrete(&self) -> bool {
+        true
+    }
 }
 
 unsafe impl Send for SharedRegion {}
@@ -300,9 +312,31 @@ pub fn upload_region_range(region: &mut SharedRegion, offset: usize, data: &[u8]
     if end > region.len {
         return false;
     }
+    if data.is_empty() {
+        return true;
+    }
     with_gpu(|gpu| {
         gpu.stream
             .memcpy_htod(data, &mut region.buf.slice_mut(offset..end))
+            .ok()?;
+        Some(())
+    })
+    .is_some()
+}
+
+pub fn download_region_range(region: &SharedRegion, offset: usize, dst: &mut [u8]) -> bool {
+    let Some(end) = offset.checked_add(dst.len()) else {
+        return false;
+    };
+    if end > region.len {
+        return false;
+    }
+    if dst.is_empty() {
+        return true;
+    }
+    with_gpu(|gpu| {
+        gpu.stream
+            .memcpy_dtoh(&region.buf.slice(offset..end), dst)
             .ok()?;
         Some(())
     })
@@ -4137,31 +4171,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 return None;
             }
             let w = norm_f32_bytes(f.attn_norm, hidden)?;
-            let mut dw = unsafe { gpu.stream.alloc::<f32>(hidden) }.ok()?;
-            gpu.stream.memcpy_htod(&w, &mut dw).ok()?;
-            let f_rms = gpu.func_owned("rmsnorm_into_f32")?;
-            let n = hidden as u32;
-            let rows = req.m as u32;
-            let eps = req.eps;
-            let cfg = LaunchConfig {
-                grid_dim: (rows, 1, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            let src = gpu.pf_x.slice(0..req.m * hidden);
-            let mut dst = gpu.pf_hs.slice_mut(0..req.m * hidden);
-            unsafe {
-                gpu.stream
-                    .launch_builder_pdl(&f_rms)
-                    .arg(&mut dst)
-                    .arg(&src)
-                    .arg(&dw)
-                    .arg(&n)
-                    .arg(&eps)
-                    .arg(&rows)
-                    .launch_pdl(cfg)
-            }
-            .ok()?;
+            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
             gpu.sync()?;
             gpu.stream
                 .clone_dtoh(&gpu.pf_hs.slice(0..req.m * hidden))
@@ -4343,33 +4353,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 .ok()?;
             }
             let w = norm_f32_bytes(f.ffn_norm, hidden)?;
-            let mut dw = unsafe { gpu.stream.alloc::<f32>(hidden) }.ok()?;
-            gpu.stream.memcpy_htod(&w, &mut dw).ok()?;
-            {
-                let f_rms = gpu.func_owned("rmsnorm_into_f32")?;
-                let n = hidden as u32;
-                let rows = req.m as u32;
-                let eps = req.eps;
-                let cfg = LaunchConfig {
-                    grid_dim: (rows, 1, 1),
-                    block_dim: (256, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                let src = gpu.pf_x.slice(0..req.m * hidden);
-                let mut dst = gpu.pf_hs.slice_mut(0..req.m * hidden);
-                unsafe {
-                    gpu.stream
-                        .launch_builder_pdl(&f_rms)
-                        .arg(&mut dst)
-                        .arg(&src)
-                        .arg(&dw)
-                        .arg(&n)
-                        .arg(&eps)
-                        .arg(&rows)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-            }
+            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
             gpu.sync()?;
             if f.n_expert == 0 {
                 return Some(Vec::new());
@@ -4420,31 +4404,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                     return None;
                 }
                 let w = norm_f32_bytes(f.ffn_norm, req.hidden)?;
-                let mut dw = unsafe { gpu.stream.alloc::<f32>(req.hidden) }.ok()?;
-                gpu.stream.memcpy_htod(&w, &mut dw).ok()?;
-                let f_rms = gpu.func_owned("rmsnorm_into_f32")?;
-                let n = req.hidden as u32;
-                let rows = req.m as u32;
-                let eps = req.eps;
-                let cfg = LaunchConfig {
-                    grid_dim: (rows, 1, 1),
-                    block_dim: (256, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                let src = gpu.pf_x.slice(0..req.m * req.hidden);
-                let mut dst = gpu.pf_hs.slice_mut(0..req.m * req.hidden);
-                unsafe {
-                    gpu.stream
-                        .launch_builder_pdl(&f_rms)
-                        .arg(&mut dst)
-                        .arg(&src)
-                        .arg(&dw)
-                        .arg(&n)
-                        .arg(&eps)
-                        .arg(&rows)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
+                rmsnorm_pf_x_into_hs(gpu, &w, req.hidden, req.m, req.eps)?;
                 gpu.sync()?;
                 if f.n_expert == 0 {
                     return Some(Vec::new());
@@ -4499,31 +4459,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 return None;
             }
             let w = norm_f32_bytes(f.attn_norm, hidden)?;
-            let mut dw = unsafe { gpu.stream.alloc::<f32>(hidden) }.ok()?;
-            gpu.stream.memcpy_htod(&w, &mut dw).ok()?;
-            let f_rms = gpu.func_owned("rmsnorm_into_f32")?;
-            let n = hidden as u32;
-            let rows = req.m as u32;
-            let eps = req.eps;
-            let cfg = LaunchConfig {
-                grid_dim: (rows, 1, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            let src = gpu.pf_x.slice(0..req.m * hidden);
-            let mut dst = gpu.pf_hs.slice_mut(0..req.m * hidden);
-            unsafe {
-                gpu.stream
-                    .launch_builder_pdl(&f_rms)
-                    .arg(&mut dst)
-                    .arg(&src)
-                    .arg(&dw)
-                    .arg(&n)
-                    .arg(&eps)
-                    .arg(&rows)
-                    .launch_pdl(cfg)
-            }
-            .ok()?;
+            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
             gpu.sync()?;
             gpu.stream
                 .clone_dtoh(&gpu.pf_hs.slice(0..req.m * hidden))
@@ -4858,33 +4794,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 .ok()?;
             }
             let w = norm_f32_bytes(f.ffn_norm, hidden)?;
-            let mut dw = unsafe { gpu.stream.alloc::<f32>(hidden) }.ok()?;
-            gpu.stream.memcpy_htod(&w, &mut dw).ok()?;
-            {
-                let f_rms = gpu.func_owned("rmsnorm_into_f32")?;
-                let n = hidden as u32;
-                let rows = req.m as u32;
-                let eps = req.eps;
-                let cfg = LaunchConfig {
-                    grid_dim: (rows, 1, 1),
-                    block_dim: (256, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                let src = gpu.pf_x.slice(0..req.m * hidden);
-                let mut dst = gpu.pf_hs.slice_mut(0..req.m * hidden);
-                unsafe {
-                    gpu.stream
-                        .launch_builder_pdl(&f_rms)
-                        .arg(&mut dst)
-                        .arg(&src)
-                        .arg(&dw)
-                        .arg(&n)
-                        .arg(&eps)
-                        .arg(&rows)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-            }
+            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
             gpu.sync()?;
             if f.n_expert == 0 {
                 return Some(Vec::new());
@@ -5089,25 +4999,23 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     }
 
     // Fused prefill leaves normed activations in pf_hs; `x` is often empty.
-    let mut gathered = vec![0f32; total_rows * req.hidden];
-    if let Some(hs) = act_src.as_ref() {
-        for (r, &t) in tok.iter().enumerate() {
-            let s = (t as usize) * req.hidden;
-            if s + req.hidden > hs.len() {
-                return None;
-            }
-            gathered[r * req.hidden..(r + 1) * req.hidden].copy_from_slice(&hs[s..s + req.hidden]);
-        }
-    } else if fused.is_some() && req.x.is_empty() {
+    // Cache `pf_hs` on the host once on dUMA so the shared-expert pass below
+    // does not perform a second PCIe D2H transfer of the same activation block.
+    let mut act_src = act_src;
+    if act_src.is_none() && fused.is_some() && req.x.is_empty() {
         let m = fused.as_ref()?.m;
-        let hs = with_gpu(|gpu| {
+        act_src = Some(with_gpu(|gpu| {
             if !gpu.pf_active {
                 return None;
             }
             gpu.stream
                 .clone_dtoh(&gpu.pf_hs.slice(0..m * req.hidden))
                 .ok()
-        })?;
+        })?);
+    }
+
+    let mut gathered = vec![0f32; total_rows * req.hidden];
+    if let Some(hs) = act_src.as_ref() {
         for (r, &t) in tok.iter().enumerate() {
             let s = (t as usize) * req.hidden;
             if s + req.hidden > hs.len() {
@@ -5185,17 +5093,25 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     }
 
     if let (Some(sh), Some(comb)) = (&req.shared, fused) {
-        let hs = with_gpu(|gpu| {
-            if !gpu.pf_active {
-                return None;
-            }
-            gpu.stream
-                .clone_dtoh(&gpu.pf_hs.slice(0..comb.m * req.hidden))
-                .ok()
-        })?;
+        let hs_owned;
+        let hs: &[f32] = if let Some(hs) = act_src.as_deref() {
+            hs
+        } else if !req.x.is_empty() && req.x.len() >= comb.m * req.hidden {
+            &req.x[..comb.m * req.hidden]
+        } else {
+            hs_owned = with_gpu(|gpu| {
+                if !gpu.pf_active {
+                    return None;
+                }
+                gpu.stream
+                    .clone_dtoh(&gpu.pf_hs.slice(0..comb.m * req.hidden))
+                    .ok()
+            })?;
+            &hs_owned
+        };
         let g =
-            with_gpu(|gpu| run_matvec(gpu, sh.gate.0, sh.gate.1, req.hidden, sh.ffn, &hs, comb.m))?;
-        let u = with_gpu(|gpu| run_matvec(gpu, sh.up.0, sh.up.1, req.hidden, sh.ffn, &hs, comb.m))?;
+            with_gpu(|gpu| run_matvec(gpu, sh.gate.0, sh.gate.1, req.hidden, sh.ffn, hs, comb.m))?;
+        let u = with_gpu(|gpu| run_matvec(gpu, sh.up.0, sh.up.1, req.hidden, sh.ffn, hs, comb.m))?;
         let mut act = g;
         crate::ops::swiglu(&mut act, &u);
         let d = with_gpu(|gpu| {

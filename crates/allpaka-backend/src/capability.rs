@@ -1,5 +1,6 @@
 //! Backend feature coverage, independent of model-name matching.
 
+use crate::memory::MemoryArchitecture;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -75,6 +76,14 @@ impl BackendCapabilities {
     #[inline]
     pub const fn supports(&self, feature: Feature) -> bool {
         (self.bits & (1u16 << (feature as u8))) != 0
+    }
+
+    /// Physical memory topology of the active accelerator backend (`UMA` on
+    /// Apple Silicon Metal, `dUMA` on discrete CUDA GPUs, `HostOnly` when GPU
+    /// acceleration is disabled or unavailable).
+    #[inline]
+    pub fn memory_architecture() -> MemoryArchitecture {
+        crate::gpu::memory_architecture()
     }
 
     pub fn coverage(&self, required: &[Feature]) -> CapabilityCoverage {

@@ -30,6 +30,10 @@ pub fn is_attached() -> bool {
     false
 }
 
+pub fn memory_architecture() -> crate::memory::MemoryArchitecture {
+    crate::memory::MemoryArchitecture::HostOnly
+}
+
 pub fn init_error() -> Option<String> {
     None
 }
@@ -92,11 +96,32 @@ pub fn ffn_batch(_reqs: &[FfnReq]) -> Option<Vec<Vec<f32>>> {
 
 pub struct SharedRegion;
 
+impl SharedRegion {
+    #[inline]
+    pub const fn architecture(&self) -> crate::memory::MemoryArchitecture {
+        crate::memory::MemoryArchitecture::HostOnly
+    }
+
+    #[inline]
+    pub const fn is_unified(&self) -> bool {
+        false
+    }
+
+    #[inline]
+    pub const fn is_discrete(&self) -> bool {
+        false
+    }
+}
+
 pub fn wrap_region(_region: &[u8]) -> Option<SharedRegion> {
     None
 }
 
 pub fn upload_region_range(_region: &mut SharedRegion, _offset: usize, _data: &[u8]) -> bool {
+    false
+}
+
+pub fn download_region_range(_region: &SharedRegion, _offset: usize, _dst: &mut [u8]) -> bool {
     false
 }
 

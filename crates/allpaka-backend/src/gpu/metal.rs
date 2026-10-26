@@ -323,6 +323,21 @@ pub fn is_attached() -> bool {
     GPU.get().is_some_and(Option::is_some)
 }
 
+/// Active physical memory architecture for the Metal backend.
+///
+/// Apple Silicon GPUs use Unified Memory Architecture (`UMA`): CPU and GPU
+/// share physical RAM, and `StorageModeShared` buffers created with
+/// `newBufferWithBytesNoCopy` alias host allocations directly without H2D/D2H
+/// copies.
+#[inline]
+pub fn memory_architecture() -> crate::memory::MemoryArchitecture {
+    if is_attached() {
+        crate::memory::MemoryArchitecture::Uma
+    } else {
+        crate::memory::MemoryArchitecture::HostOnly
+    }
+}
+
 static INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 /// Why the Metal device was not attached: no device, a kernel compile error
@@ -1792,6 +1807,27 @@ pub struct SharedRegion {
     len: usize,
 }
 
+impl SharedRegion {
+    /// Memory architecture backing this region (`UMA` zero-copy shared memory).
+    #[inline]
+    pub const fn architecture(&self) -> crate::memory::MemoryArchitecture {
+        crate::memory::MemoryArchitecture::Uma
+    }
+
+    /// True because Metal `StorageModeShared` aliases the host allocation in
+    /// unified physical memory without separate device VRAM storage.
+    #[inline]
+    pub const fn is_unified(&self) -> bool {
+        true
+    }
+
+    /// False on UMA: host and GPU share the same physical bytes.
+    #[inline]
+    pub const fn is_discrete(&self) -> bool {
+        false
+    }
+}
+
 // The buffer is an ObjC refcounted handle; the region it wraps is owned by
 // the caller, who is responsible for not writing it while a kernel reads it
 // (the forward pass stores the step, then attends, in that order).
@@ -1833,6 +1869,22 @@ pub fn upload_region_range(region: &mut SharedRegion, offset: usize, data: &[u8]
         let dst = (region.buf.contents() as *mut u8).add(offset);
         if !std::ptr::eq(dst, data.as_ptr()) {
             std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+        }
+    }
+    true
+}
+
+pub fn download_region_range(region: &SharedRegion, offset: usize, dst: &mut [u8]) -> bool {
+    if offset.saturating_add(dst.len()) > region.len {
+        return false;
+    }
+    if dst.is_empty() {
+        return true;
+    }
+    unsafe {
+        let src = (region.buf.contents() as *const u8).add(offset);
+        if !std::ptr::eq(src, dst.as_ptr()) {
+            std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len());
         }
     }
     true

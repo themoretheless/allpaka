@@ -1,9 +1,80 @@
-//! Backend-neutral byte reservations tied to resource ownership.
+//! Backend-neutral byte reservations tied to resource ownership, plus explicit
+//! UMA vs dUMA memory architecture classification.
 //!
 //! Reserve before allocating. Keep the lease alongside the allocation and,
 //! for asynchronous devices, until the last command using it has completed.
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// Physical memory topology between host CPU and accelerator GPU.
+///
+/// * [`MemoryArchitecture::Uma`] — Unified Memory Architecture (e.g. Apple
+///   Silicon Metal): CPU and GPU address the same physical RAM pool. Page-aligned
+///   host allocations wrapped via `newBufferWithBytesNoCopy` (`StorageModeShared`)
+///   are read and mutated in place by both processors without H2D/D2H copies.
+/// * [`MemoryArchitecture::Duma`] — Discrete / non-unified memory architecture
+///   (e.g. discrete NVIDIA CUDA GPUs): GPU kernels read and mutate dedicated
+///   VRAM (`CudaSlice`), requiring explicit Host-to-Device (H2D) and
+///   Device-to-Host (D2H) transfers across PCIe/NVLink when state crosses
+///   between CPU and GPU.
+/// * [`MemoryArchitecture::HostOnly`] — No accelerator attached; all buffers
+///   live solely in host RAM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MemoryArchitecture {
+    /// Unified Memory Architecture (shared physical RAM pool between CPU and GPU).
+    Uma,
+    /// Discrete Memory Architecture (separate host RAM and device VRAM).
+    Duma,
+    /// Host CPU memory only (no GPU backend active).
+    HostOnly,
+}
+
+impl MemoryArchitecture {
+    /// True when CPU and GPU share the same physical memory pool (`UMA`),
+    /// allowing zero-copy buffer aliasing without H2D/D2H transfers.
+    #[inline]
+    pub const fn is_unified(self) -> bool {
+        matches!(self, Self::Uma)
+    }
+
+    /// True when GPU execution uses discrete device VRAM (`dUMA`) that must be
+    /// explicitly synchronized with host RAM via H2D/D2H copies.
+    #[inline]
+    pub const fn is_discrete(self) -> bool {
+        matches!(self, Self::Duma)
+    }
+
+    /// True when host-side mutations to a wrapped region require an explicit
+    /// upload (`H2D`) and GPU-side mutations require an explicit download (`D2H`)
+    /// before the other processor can observe them.
+    #[inline]
+    pub const fn requires_explicit_sync(self) -> bool {
+        matches!(self, Self::Duma)
+    }
+
+    /// True when page-aligned host memory can be wrapped in place for GPU
+    /// kernels without allocating a separate device buffer.
+    #[inline]
+    pub const fn supports_zero_copy_aliases(self) -> bool {
+        matches!(self, Self::Uma)
+    }
+
+    /// Short human-readable label for diagnostics and telemetry.
+    #[inline]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Uma => "UMA (unified shared memory)",
+            Self::Duma => "dUMA (discrete device memory)",
+            Self::HostOnly => "host-only RAM",
+        }
+    }
+}
+
+impl std::fmt::Display for MemoryArchitecture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 #[derive(Clone)]
 pub struct Budget(Arc<State>);
@@ -159,5 +230,22 @@ mod tests {
         drop(replacement);
         assert_eq!(budget.snapshot().reserved_bytes, 0);
         assert_eq!(budget.snapshot().peak_reserved_bytes, 100);
+    }
+    #[test]
+    fn memory_architecture_distinguishes_uma_and_duma_invariants() {
+        assert!(MemoryArchitecture::Uma.is_unified());
+        assert!(!MemoryArchitecture::Uma.is_discrete());
+        assert!(!MemoryArchitecture::Uma.requires_explicit_sync());
+        assert!(MemoryArchitecture::Uma.supports_zero_copy_aliases());
+
+        assert!(!MemoryArchitecture::Duma.is_unified());
+        assert!(MemoryArchitecture::Duma.is_discrete());
+        assert!(MemoryArchitecture::Duma.requires_explicit_sync());
+        assert!(!MemoryArchitecture::Duma.supports_zero_copy_aliases());
+
+        assert!(!MemoryArchitecture::HostOnly.is_unified());
+        assert!(!MemoryArchitecture::HostOnly.is_discrete());
+        assert!(!MemoryArchitecture::HostOnly.requires_explicit_sync());
+        assert!(!MemoryArchitecture::HostOnly.supports_zero_copy_aliases());
     }
 }

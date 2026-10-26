@@ -84,6 +84,10 @@ impl Region {
     fn as_bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.elems * 2) }
     }
+
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr as *mut u8, self.elems * 2) }
+    }
 }
 
 impl Drop for Region {
@@ -243,16 +247,34 @@ impl SsmCache {
 
     /// Roll the recurrence back to "after chunk row `i`": one contiguous
     /// copy, the slot layout mirrors the region.
+    ///
+    /// * On **UMA** (Metal Unified Memory): `slot_shared` and `shared` alias
+    ///   `slot_store` and `store` directly, so copying `slot(i)` into `store`
+    ///   in host RAM immediately updates the GPU-visible buffer in place.
+    /// * On **dUMA** (discrete CUDA VRAM): GPU batch kernels wrote slot `i`
+    ///   into `slot_shared` in VRAM, so we first download slot `i` from VRAM
+    ///   (when discrete) and then upload the restored state into `shared`.
     pub fn restore_slot(&mut self, i: usize) {
         let n = self.total_elems();
+        let byte_len = n * 4;
+        let slot_byte_off = i * byte_len;
+        if let (Some(slot_sh), Some(slot_st)) = (self.slot_shared.as_ref(), self.slot_store.as_mut())
+        {
+            if slot_sh.is_discrete() {
+                let dst = &mut slot_st.as_bytes_mut()[slot_byte_off..slot_byte_off + byte_len];
+                allpaka_backend::gpu::download_region_range(slot_sh, slot_byte_off, dst);
+            }
+        }
         unsafe {
             let sp = self.slot(i).as_ptr();
             let dp = self.store.as_mut_slice().as_mut_ptr() as *mut f32;
             std::ptr::copy_nonoverlapping(sp, dp, n);
         }
         if let Some(sh) = self.shared.as_mut() {
-            let bytes = &self.store.as_bytes()[..n * 4];
-            allpaka_backend::gpu::upload_region_range(sh, 0, bytes);
+            if sh.is_discrete() {
+                let bytes = &self.store.as_bytes()[..byte_len];
+                allpaka_backend::gpu::upload_region_range(sh, 0, bytes);
+            }
         }
         self.slots_armed = false;
     }
@@ -292,8 +314,23 @@ impl SsmCache {
     /// states), for the serve prompt cache: unlike the KV cache, the
     /// recurrence cannot be rolled back by truncating, so a prefix hit has
     /// to restore a snapshot taken at that prefix's end.
+    ///
+    /// On **UMA**, host memory (`self.store`) is already coherent with GPU
+    /// prefill/decode writes. On **dUMA**, if a discrete VRAM buffer is
+    /// attached, we pull the latest recurrent state from VRAM (`D2H`).
     pub fn snapshot(&self) -> Vec<f32> {
-        self.floats()[..self.conv_elems + self.state_elems].to_vec()
+        let n = self.conv_elems + self.state_elems;
+        if let Some(sh) = self.shared.as_ref() {
+            if sh.is_discrete() {
+                let mut out = vec![0.0f32; n];
+                let dst =
+                    unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, n * 4) };
+                if allpaka_backend::gpu::download_region_range(sh, 0, dst) {
+                    return out;
+                }
+            }
+        }
+        self.floats()[..n].to_vec()
     }
 
     /// Raw pointers for the CPU path's per-row slot write: this layer's
@@ -355,8 +392,10 @@ impl SsmCache {
         );
         self.floats_mut()[..snap.len()].copy_from_slice(snap);
         if let Some(sh) = self.shared.as_mut() {
-            let bytes = &self.store.as_bytes()[..snap.len() * 4];
-            allpaka_backend::gpu::upload_region_range(sh, 0, bytes);
+            if sh.is_discrete() {
+                let bytes = &self.store.as_bytes()[..snap.len() * 4];
+                allpaka_backend::gpu::upload_region_range(sh, 0, bytes);
+            }
         }
     }
 
@@ -483,7 +522,7 @@ impl KvCache {
         self.gpu_view_checked(layer).ok()
     }
 
-    /// Fast-path view that never erases the reason Metal wrapping failed.
+    /// Fast-path view that never erases the reason GPU wrapping failed.
     pub fn gpu_view_checked(
         &mut self,
         layer: usize,
@@ -491,14 +530,23 @@ impl KvCache {
         if self.shared.is_none() {
             self.shared = allpaka_backend::gpu::wrap_region(self.store.as_bytes());
         }
-        let shared = self.shared.as_ref().ok_or(GpuViewError {
-            cache: "kv-cache",
-            layer: Some(layer),
-            reason: if allpaka_backend::gpu::is_attached() {
-                "Metal rejected the page-aligned shared region"
-            } else {
-                "no Metal device or model mapping is attached"
-            },
+        let shared = self.shared.as_ref().ok_or_else(|| {
+            let reason = match allpaka_backend::gpu::memory_architecture() {
+                allpaka_backend::memory::MemoryArchitecture::Uma => {
+                    "UMA backend rejected the page-aligned shared region"
+                }
+                allpaka_backend::memory::MemoryArchitecture::Duma => {
+                    "dUMA backend failed to allocate or upload the discrete device region"
+                }
+                allpaka_backend::memory::MemoryArchitecture::HostOnly => {
+                    "no GPU device or model mapping is attached"
+                }
+            };
+            GpuViewError {
+                cache: "kv-cache",
+                layer: Some(layer),
+                reason,
+            }
         })?;
         let (k_off, v_off) = self.layer_offsets(layer);
         Ok((shared, k_off, v_off))
@@ -555,13 +603,31 @@ impl KvCache {
 
     /// Store one position's k and v for one layer. The position is implicit:
     /// always appended at the end, `advance` seals the step.
+    ///
+    /// On **UMA** (Metal), the write lands directly in unified memory shared
+    /// with the GPU. On **dUMA** (CUDA), if a discrete VRAM cache is attached,
+    /// the written position is also uploaded (`H2D`) so subsequent GPU
+    /// attention kernels (`attend_project`) observe the current step's K/V.
     pub fn store(&mut self, layer: usize, k: &[f32], v: &[f32]) {
         assert!(
             self.len < self.capacity,
             "kv cache full at {} positions",
             self.capacity
         );
-        self.store_at(layer, self.len, k, v);
+        let pos = self.len;
+        self.store_at(layer, pos, k, v);
+        self.sync_gpu_pos_if_discrete(layer, pos);
+    }
+
+    #[inline]
+    fn sync_gpu_pos_if_discrete(&mut self, layer: usize, pos: usize) {
+        if self
+            .shared
+            .as_ref()
+            .is_some_and(allpaka_backend::gpu::SharedRegion::is_discrete)
+        {
+            self.sync_gpu_range(layer, pos..pos + 1);
+        }
     }
 
     /// Store at an explicit position at or past the sealed length.
@@ -585,18 +651,27 @@ impl KvCache {
         ops::f16::from_f32(v, &mut store[vr.start + at..vr.start + at + kv_dim]);
     }
 
+    /// Synchronize a range of host-written KV positions to the GPU cache.
+    ///
+    /// * On **UMA** (`SharedRegion::is_unified()`), host and GPU share physical
+    ///   memory in place — this is a zero-copy no-op returning `true`.
+    /// * On **dUMA** (`SharedRegion::is_discrete()`), uploads the K and V byte
+    ///   slices for `positions` to device VRAM (`H2D`).
     pub fn sync_gpu_range(&mut self, layer: usize, positions: std::ops::Range<usize>) -> bool {
         if positions.start > positions.end || positions.end > self.capacity {
             return false;
         }
         let slot = self.slot_of(layer);
+        let Some(shared) = self.shared.as_mut() else {
+            return false;
+        };
+        if shared.is_unified() || positions.is_empty() {
+            return true;
+        }
         let count = (positions.end - positions.start) * self.kv_dim;
         let k_at = slot * self.layer_stride + positions.start * self.kv_dim;
         let v_at = self.v_base + k_at;
         let bytes = self.store.as_bytes();
-        let Some(shared) = self.shared.as_mut() else {
-            return false;
-        };
         let k_bytes = k_at * 2;
         let v_bytes = v_at * 2;
         let byte_count = count * 2;
@@ -630,6 +705,7 @@ impl KvCache {
         let store = self.store.as_mut_slice();
         ops::f16::from_f32(k, &mut store[kr.start + at..kr.start + at + kv_dim]);
         ops::f16::from_f32(v, &mut store[vr.start + at..vr.start + at + kv_dim]);
+        self.sync_gpu_pos_if_discrete(layer, pos);
     }
 
     /// Seal the current position after every layer has stored into it.
@@ -737,5 +813,36 @@ mod tests {
         assert_eq!(ssm_compact.slot_of(4), 3);
         ssm_compact.conv_layer(4)[0] = 42.0;
         assert_eq!(ssm_compact.conv_layer(4)[0], 42.0);
+    }
+
+    #[test]
+    fn ssm_snapshot_restore_and_slot_rollback_roundtrip() {
+        let mut ssm = SsmCache::new(2, 3, 8, 2, 4);
+        ssm.conv_layer(0)[0] = 1.5;
+        ssm.state_layer(1)[3] = -2.25;
+        let snap = ssm.snapshot();
+        assert_eq!(snap.len(), ssm.total_elems());
+
+        ssm.arm_slots(2);
+        if let Some((cp, sp, dp, conv_off, state_off, n_conv, n_state, stride)) =
+            ssm.slot_write_ptrs(0)
+        {
+            unsafe {
+                std::ptr::copy_nonoverlapping(cp, dp.add(conv_off), n_conv);
+                std::ptr::copy_nonoverlapping(sp, dp.add(state_off), n_state);
+                // Slot 1 gets mutated values
+                std::ptr::copy_nonoverlapping(cp, dp.add(stride + conv_off), n_conv);
+                *dp.add(stride + conv_off) = 99.0;
+            }
+        }
+        ssm.conv_layer(0)[0] = 777.0;
+        ssm.restore_slot(0);
+        assert_eq!(ssm.conv_layer(0)[0], 1.5);
+
+        ssm.conv_layer(0)[0] = 0.0;
+        ssm.state_layer(1)[3] = 0.0;
+        ssm.restore(&snap);
+        assert_eq!(ssm.conv_layer(0)[0], 1.5);
+        assert_eq!(ssm.state_layer(1)[3], -2.25);
     }
 }
