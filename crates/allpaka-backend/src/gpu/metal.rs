@@ -9710,7 +9710,11 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 MTLSize::new(256, 1, 1),
             );
         }
-        if !no_barrier() && !no_stage_barrier() {
+        // Only the shared expert's down projection consumes the swiglu
+        // written above. Without a shared expert, the combine barrier below
+        // already orders all expert down outputs; draining the same arena
+        // here would add a second barrier without an intervening dispatch.
+        if req.shared.is_some() && !no_barrier() && !no_stage_barrier() {
             enc.memory_barrier_with_resources(&[y]);
         }
         split_here!("down");

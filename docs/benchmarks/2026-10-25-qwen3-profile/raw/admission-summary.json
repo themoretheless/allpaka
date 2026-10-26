@@ -1,0 +1,17 @@
+{
+  "samples": 109,
+  "quiet_samples": 0,
+  "background_cpu_percent_range": [
+    174.1,
+    1542.1
+  ],
+  "background_gpu_percent_range": [
+    7.953,
+    18.742
+  ],
+  "last": {
+    "observed_unix": 1792920325.1822588,
+    "background_cpu_percent": 344.59,
+    "background_gpu_percent_excluding_compositor": 14.969
+  }
+}

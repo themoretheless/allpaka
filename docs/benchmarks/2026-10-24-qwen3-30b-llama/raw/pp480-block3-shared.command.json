@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "/private/tmp/allpaka-llama-20261024/allpaka-bench",
+    "/Users/themoretheless/.cache/allpaka/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+    "480",
+    "3",
+    "greedy"
+  ],
+  "exit_code": 0,
+  "started_unix": 1792801475.8666618
+}

@@ -1,0 +1,31 @@
+{
+  "allpaka_binary": "/private/tmp/allpaka-llama-20261024/allpaka-bench",
+  "allpaka_sha256": "dc1a760dcc4a50cd071f5dfd5c3fa90089538c32894c7aab5ab733900809f3a2",
+  "llama_binary": "/opt/homebrew/Cellar/llama.cpp/0.7.0/bin/llama-bench",
+  "llama_sha256": "111c46299bfa1a7f684c8c3328e94c706e71c77044ef08b885491546a8ed3c04",
+  "model": "/Users/themoretheless/.cache/allpaka/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+  "model_sha256": "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5",
+  "cpu": "Apple M4 Max",
+  "git_head": "1064da42ee0641c063ce36f882f59ca566a52395",
+  "dirty": true,
+  "pp": [
+    480
+  ],
+  "tg": 32,
+  "decode_context_tokens": 1,
+  "kv": "f16",
+  "chunk_and_ubatch": 512,
+  "llama_batch": 512,
+  "llama_flash_attention": "on",
+  "threads": 16,
+  "blocks": 6,
+  "order_offset": 0,
+  "measured_rounds_per_process": 3,
+  "allpaka_warmup_rounds": 1,
+  "comparison_validated": false,
+  "limitations": [
+    "llama-bench uses its own token stream; MoE expert routing differs",
+    "Desktop background load is uncontrolled; report paired uncertainty",
+    "Fresh model hash and llama version; do not compare numerically to historical reports"
+  ]
+}

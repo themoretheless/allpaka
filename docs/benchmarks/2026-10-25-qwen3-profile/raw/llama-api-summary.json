@@ -1,0 +1,5828 @@
+[
+  [
+    "14",
+    "Command Buffer 0  (Frame  1 ) ( llama-bench (68996) )",
+    1,
+    0.902125
+  ],
+  [
+    "15",
+    "Compute Command 0  ( Main Thread (0x391d4c5) (llama-bench, pid: 68996) )",
+    646,
+    1056.39517
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  2 ) ( llama-bench (68996) )",
+    1,
+    4.263959
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  3 ) ( llama-bench (68996) )",
+    1,
+    0.0425
+  ],
+  [
+    "15",
+    "Blit Command 0  ( Main Thread (0x391d4c5) (llama-bench, pid: 68996) )",
+    323,
+    12.033037000000004
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  4 ) ( llama-bench (68996) )",
+    1,
+    0.388125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  5 ) ( llama-bench (68996) )",
+    1,
+    2.559959
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  6 ) ( llama-bench (68996) )",
+    1,
+    0.0445
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  7 ) ( llama-bench (68996) )",
+    1,
+    0.461583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  8 ) ( llama-bench (68996) )",
+    1,
+    3.08275
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  9 ) ( llama-bench (68996) )",
+    1,
+    0.039291
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  10 ) ( llama-bench (68996) )",
+    1,
+    0.450958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  11 ) ( llama-bench (68996) )",
+    1,
+    2.857708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  12 ) ( llama-bench (68996) )",
+    1,
+    0.041
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  13 ) ( llama-bench (68996) )",
+    1,
+    0.396625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  14 ) ( llama-bench (68996) )",
+    1,
+    3.292584
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  15 ) ( llama-bench (68996) )",
+    1,
+    0.044
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  16 ) ( llama-bench (68996) )",
+    1,
+    0.493583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  17 ) ( llama-bench (68996) )",
+    1,
+    2.571417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  18 ) ( llama-bench (68996) )",
+    1,
+    0.037583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  19 ) ( llama-bench (68996) )",
+    1,
+    0.371167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  20 ) ( llama-bench (68996) )",
+    1,
+    2.589167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  21 ) ( llama-bench (68996) )",
+    1,
+    0.033167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  22 ) ( llama-bench (68996) )",
+    1,
+    0.3945
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  23 ) ( llama-bench (68996) )",
+    1,
+    3.437792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  24 ) ( llama-bench (68996) )",
+    1,
+    0.0415
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  25 ) ( llama-bench (68996) )",
+    1,
+    0.432333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  26 ) ( llama-bench (68996) )",
+    1,
+    3.158375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  27 ) ( llama-bench (68996) )",
+    1,
+    0.046125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  28 ) ( llama-bench (68996) )",
+    1,
+    0.369917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  29 ) ( llama-bench (68996) )",
+    1,
+    3.83725
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  30 ) ( llama-bench (68996) )",
+    1,
+    0.043333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  31 ) ( llama-bench (68996) )",
+    1,
+    0.741334
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  32 ) ( llama-bench (68996) )",
+    1,
+    3.652209
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  33 ) ( llama-bench (68996) )",
+    1,
+    0.086
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  34 ) ( llama-bench (68996) )",
+    1,
+    0.489084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  35 ) ( llama-bench (68996) )",
+    1,
+    2.998625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  36 ) ( llama-bench (68996) )",
+    1,
+    0.040709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  37 ) ( llama-bench (68996) )",
+    1,
+    0.556458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  38 ) ( llama-bench (68996) )",
+    1,
+    3.245541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  39 ) ( llama-bench (68996) )",
+    1,
+    0.039292
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  40 ) ( llama-bench (68996) )",
+    1,
+    0.447666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  41 ) ( llama-bench (68996) )",
+    1,
+    3.931459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  42 ) ( llama-bench (68996) )",
+    1,
+    0.041167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  43 ) ( llama-bench (68996) )",
+    1,
+    0.374833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  44 ) ( llama-bench (68996) )",
+    1,
+    3.525583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  45 ) ( llama-bench (68996) )",
+    1,
+    0.03675
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  46 ) ( llama-bench (68996) )",
+    1,
+    0.381208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  47 ) ( llama-bench (68996) )",
+    1,
+    7.288834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  48 ) ( llama-bench (68996) )",
+    1,
+    0.741333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  49 ) ( llama-bench (68996) )",
+    1,
+    0.727708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  50 ) ( llama-bench (68996) )",
+    1,
+    3.042125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  51 ) ( llama-bench (68996) )",
+    1,
+    0.040417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  52 ) ( llama-bench (68996) )",
+    1,
+    0.408625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  53 ) ( llama-bench (68996) )",
+    1,
+    3.85225
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  54 ) ( llama-bench (68996) )",
+    1,
+    0.040875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  55 ) ( llama-bench (68996) )",
+    1,
+    0.375333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  56 ) ( llama-bench (68996) )",
+    1,
+    2.87825
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  57 ) ( llama-bench (68996) )",
+    1,
+    0.040375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  58 ) ( llama-bench (68996) )",
+    1,
+    0.500959
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  59 ) ( llama-bench (68996) )",
+    1,
+    3.303041
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  60 ) ( llama-bench (68996) )",
+    1,
+    0.03975
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  61 ) ( llama-bench (68996) )",
+    1,
+    0.548875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  62 ) ( llama-bench (68996) )",
+    1,
+    2.591833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  63 ) ( llama-bench (68996) )",
+    1,
+    0.038875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  64 ) ( llama-bench (68996) )",
+    1,
+    0.421125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  65 ) ( llama-bench (68996) )",
+    1,
+    2.654833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  66 ) ( llama-bench (68996) )",
+    1,
+    0.034834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  67 ) ( llama-bench (68996) )",
+    1,
+    0.389
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  68 ) ( llama-bench (68996) )",
+    1,
+    2.840917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  69 ) ( llama-bench (68996) )",
+    1,
+    0.04025
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  70 ) ( llama-bench (68996) )",
+    1,
+    0.392292
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  71 ) ( llama-bench (68996) )",
+    1,
+    2.566583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  72 ) ( llama-bench (68996) )",
+    1,
+    0.039709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  73 ) ( llama-bench (68996) )",
+    1,
+    0.424583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  74 ) ( llama-bench (68996) )",
+    1,
+    3.535542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  75 ) ( llama-bench (68996) )",
+    1,
+    0.040416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  76 ) ( llama-bench (68996) )",
+    1,
+    0.64625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  77 ) ( llama-bench (68996) )",
+    1,
+    2.831417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  78 ) ( llama-bench (68996) )",
+    1,
+    0.0405
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  79 ) ( llama-bench (68996) )",
+    1,
+    0.348792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  80 ) ( llama-bench (68996) )",
+    1,
+    2.450416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  81 ) ( llama-bench (68996) )",
+    1,
+    0.032792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  82 ) ( llama-bench (68996) )",
+    1,
+    0.316166
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  83 ) ( llama-bench (68996) )",
+    1,
+    2.438375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  84 ) ( llama-bench (68996) )",
+    1,
+    0.0285
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  85 ) ( llama-bench (68996) )",
+    1,
+    0.307875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  86 ) ( llama-bench (68996) )",
+    1,
+    2.229
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  87 ) ( llama-bench (68996) )",
+    1,
+    0.03075
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  88 ) ( llama-bench (68996) )",
+    1,
+    0.334583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  89 ) ( llama-bench (68996) )",
+    1,
+    2.236792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  90 ) ( llama-bench (68996) )",
+    1,
+    0.030583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  91 ) ( llama-bench (68996) )",
+    1,
+    0.391
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  92 ) ( llama-bench (68996) )",
+    1,
+    2.453459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  93 ) ( llama-bench (68996) )",
+    1,
+    0.034333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  94 ) ( llama-bench (68996) )",
+    1,
+    0.403333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  95 ) ( llama-bench (68996) )",
+    1,
+    2.907042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  96 ) ( llama-bench (68996) )",
+    1,
+    0.0475
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  97 ) ( llama-bench (68996) )",
+    1,
+    0.508042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  98 ) ( llama-bench (68996) )",
+    1,
+    3.035167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  99 ) ( llama-bench (68996) )",
+    1,
+    0.047042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  100 ) ( llama-bench (68996) )",
+    1,
+    0.478125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  101 ) ( llama-bench (68996) )",
+    1,
+    3.463459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  102 ) ( llama-bench (68996) )",
+    1,
+    0.045792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  103 ) ( llama-bench (68996) )",
+    1,
+    0.646125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  104 ) ( llama-bench (68996) )",
+    1,
+    3.883583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  105 ) ( llama-bench (68996) )",
+    1,
+    0.049875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  106 ) ( llama-bench (68996) )",
+    1,
+    0.514792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  107 ) ( llama-bench (68996) )",
+    1,
+    3.727917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  108 ) ( llama-bench (68996) )",
+    1,
+    0.039833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  109 ) ( llama-bench (68996) )",
+    1,
+    0.509917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  110 ) ( llama-bench (68996) )",
+    1,
+    2.68825
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  111 ) ( llama-bench (68996) )",
+    1,
+    0.040042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  112 ) ( llama-bench (68996) )",
+    1,
+    0.58275
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  113 ) ( llama-bench (68996) )",
+    1,
+    3.461792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  114 ) ( llama-bench (68996) )",
+    1,
+    0.037709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  115 ) ( llama-bench (68996) )",
+    1,
+    0.752291
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  116 ) ( llama-bench (68996) )",
+    1,
+    2.946084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  117 ) ( llama-bench (68996) )",
+    1,
+    0.037084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  118 ) ( llama-bench (68996) )",
+    1,
+    0.395833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  119 ) ( llama-bench (68996) )",
+    1,
+    2.574958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  120 ) ( llama-bench (68996) )",
+    1,
+    0.037875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  121 ) ( llama-bench (68996) )",
+    1,
+    0.362084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  122 ) ( llama-bench (68996) )",
+    1,
+    2.851792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  123 ) ( llama-bench (68996) )",
+    1,
+    0.043959
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  124 ) ( llama-bench (68996) )",
+    1,
+    0.595541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  125 ) ( llama-bench (68996) )",
+    1,
+    2.900542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  126 ) ( llama-bench (68996) )",
+    1,
+    0.040041
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  127 ) ( llama-bench (68996) )",
+    1,
+    0.418416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  128 ) ( llama-bench (68996) )",
+    1,
+    2.979458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  129 ) ( llama-bench (68996) )",
+    1,
+    0.039083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  130 ) ( llama-bench (68996) )",
+    1,
+    0.588209
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  131 ) ( llama-bench (68996) )",
+    1,
+    2.68
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  132 ) ( llama-bench (68996) )",
+    1,
+    0.047833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  133 ) ( llama-bench (68996) )",
+    1,
+    0.545667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  134 ) ( llama-bench (68996) )",
+    1,
+    2.556791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  135 ) ( llama-bench (68996) )",
+    1,
+    0.037541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  136 ) ( llama-bench (68996) )",
+    1,
+    0.374084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  137 ) ( llama-bench (68996) )",
+    1,
+    3.5885
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  138 ) ( llama-bench (68996) )",
+    1,
+    0.040667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  139 ) ( llama-bench (68996) )",
+    1,
+    0.369292
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  140 ) ( llama-bench (68996) )",
+    1,
+    2.863125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  141 ) ( llama-bench (68996) )",
+    1,
+    0.0425
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  142 ) ( llama-bench (68996) )",
+    1,
+    0.353417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  143 ) ( llama-bench (68996) )",
+    1,
+    2.6915
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  144 ) ( llama-bench (68996) )",
+    1,
+    0.035333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  145 ) ( llama-bench (68996) )",
+    1,
+    0.380833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  146 ) ( llama-bench (68996) )",
+    1,
+    3.243833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  147 ) ( llama-bench (68996) )",
+    1,
+    0.037583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  148 ) ( llama-bench (68996) )",
+    1,
+    0.493
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  149 ) ( llama-bench (68996) )",
+    1,
+    2.681208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  150 ) ( llama-bench (68996) )",
+    1,
+    0.172084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  151 ) ( llama-bench (68996) )",
+    1,
+    0.39525
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  152 ) ( llama-bench (68996) )",
+    1,
+    2.896208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  153 ) ( llama-bench (68996) )",
+    1,
+    0.041083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  154 ) ( llama-bench (68996) )",
+    1,
+    0.371708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  155 ) ( llama-bench (68996) )",
+    1,
+    3.671875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  156 ) ( llama-bench (68996) )",
+    1,
+    0.039958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  157 ) ( llama-bench (68996) )",
+    1,
+    0.50725
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  158 ) ( llama-bench (68996) )",
+    1,
+    2.61075
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  159 ) ( llama-bench (68996) )",
+    1,
+    0.038583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  160 ) ( llama-bench (68996) )",
+    1,
+    0.3695
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  161 ) ( llama-bench (68996) )",
+    1,
+    2.702458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  162 ) ( llama-bench (68996) )",
+    1,
+    0.037792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  163 ) ( llama-bench (68996) )",
+    1,
+    0.383542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  164 ) ( llama-bench (68996) )",
+    1,
+    2.599584
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  165 ) ( llama-bench (68996) )",
+    1,
+    0.040125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  166 ) ( llama-bench (68996) )",
+    1,
+    0.531875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  167 ) ( llama-bench (68996) )",
+    1,
+    4.743458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  168 ) ( llama-bench (68996) )",
+    1,
+    0.039417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  169 ) ( llama-bench (68996) )",
+    1,
+    0.413417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  170 ) ( llama-bench (68996) )",
+    1,
+    3.600833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  171 ) ( llama-bench (68996) )",
+    1,
+    0.038833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  172 ) ( llama-bench (68996) )",
+    1,
+    0.575417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  173 ) ( llama-bench (68996) )",
+    1,
+    2.865583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  174 ) ( llama-bench (68996) )",
+    1,
+    0.039
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  175 ) ( llama-bench (68996) )",
+    1,
+    0.823791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  176 ) ( llama-bench (68996) )",
+    1,
+    2.982625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  177 ) ( llama-bench (68996) )",
+    1,
+    0.041667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  178 ) ( llama-bench (68996) )",
+    1,
+    0.542208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  179 ) ( llama-bench (68996) )",
+    1,
+    3.57975
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  180 ) ( llama-bench (68996) )",
+    1,
+    0.080542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  181 ) ( llama-bench (68996) )",
+    1,
+    0.466916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  182 ) ( llama-bench (68996) )",
+    1,
+    2.719209
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  183 ) ( llama-bench (68996) )",
+    1,
+    0.039084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  184 ) ( llama-bench (68996) )",
+    1,
+    0.422958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  185 ) ( llama-bench (68996) )",
+    1,
+    2.825084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  186 ) ( llama-bench (68996) )",
+    1,
+    0.038667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  187 ) ( llama-bench (68996) )",
+    1,
+    0.399083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  188 ) ( llama-bench (68996) )",
+    1,
+    2.613708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  189 ) ( llama-bench (68996) )",
+    1,
+    0.037916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  190 ) ( llama-bench (68996) )",
+    1,
+    0.356042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  191 ) ( llama-bench (68996) )",
+    1,
+    2.933
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  192 ) ( llama-bench (68996) )",
+    1,
+    0.036417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  193 ) ( llama-bench (68996) )",
+    1,
+    0.341917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  194 ) ( llama-bench (68996) )",
+    1,
+    2.658583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  195 ) ( llama-bench (68996) )",
+    1,
+    0.03775
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  196 ) ( llama-bench (68996) )",
+    1,
+    0.686042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  197 ) ( llama-bench (68996) )",
+    1,
+    3.277458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  198 ) ( llama-bench (68996) )",
+    1,
+    0.06825
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  199 ) ( llama-bench (68996) )",
+    1,
+    0.368542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  200 ) ( llama-bench (68996) )",
+    1,
+    3.182834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  201 ) ( llama-bench (68996) )",
+    1,
+    0.038417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  202 ) ( llama-bench (68996) )",
+    1,
+    0.416375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  203 ) ( llama-bench (68996) )",
+    1,
+    2.584459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  204 ) ( llama-bench (68996) )",
+    1,
+    0.036667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  205 ) ( llama-bench (68996) )",
+    1,
+    0.364958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  206 ) ( llama-bench (68996) )",
+    1,
+    2.63925
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  207 ) ( llama-bench (68996) )",
+    1,
+    0.062125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  208 ) ( llama-bench (68996) )",
+    1,
+    0.369083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  209 ) ( llama-bench (68996) )",
+    1,
+    2.555875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  210 ) ( llama-bench (68996) )",
+    1,
+    0.036833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  211 ) ( llama-bench (68996) )",
+    1,
+    0.386792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  212 ) ( llama-bench (68996) )",
+    1,
+    2.654208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  213 ) ( llama-bench (68996) )",
+    1,
+    0.033208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  214 ) ( llama-bench (68996) )",
+    1,
+    0.374083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  215 ) ( llama-bench (68996) )",
+    1,
+    2.592459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  216 ) ( llama-bench (68996) )",
+    1,
+    0.038792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  217 ) ( llama-bench (68996) )",
+    1,
+    0.374666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  218 ) ( llama-bench (68996) )",
+    1,
+    2.643625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  219 ) ( llama-bench (68996) )",
+    1,
+    0.038458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  220 ) ( llama-bench (68996) )",
+    1,
+    0.368792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  221 ) ( llama-bench (68996) )",
+    1,
+    2.496458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  222 ) ( llama-bench (68996) )",
+    1,
+    0.033583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  223 ) ( llama-bench (68996) )",
+    1,
+    0.361167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  224 ) ( llama-bench (68996) )",
+    1,
+    2.56075
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  225 ) ( llama-bench (68996) )",
+    1,
+    0.037958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  226 ) ( llama-bench (68996) )",
+    1,
+    0.347042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  227 ) ( llama-bench (68996) )",
+    1,
+    2.455959
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  228 ) ( llama-bench (68996) )",
+    1,
+    0.031166
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  229 ) ( llama-bench (68996) )",
+    1,
+    0.326667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  230 ) ( llama-bench (68996) )",
+    1,
+    2.252625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  231 ) ( llama-bench (68996) )",
+    1,
+    0.030875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  232 ) ( llama-bench (68996) )",
+    1,
+    0.32175
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  233 ) ( llama-bench (68996) )",
+    1,
+    2.233958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  234 ) ( llama-bench (68996) )",
+    1,
+    0.030542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  235 ) ( llama-bench (68996) )",
+    1,
+    0.366875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  236 ) ( llama-bench (68996) )",
+    1,
+    2.201667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  237 ) ( llama-bench (68996) )",
+    1,
+    0.034584
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  238 ) ( llama-bench (68996) )",
+    1,
+    0.33175
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  239 ) ( llama-bench (68996) )",
+    1,
+    7.801041
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  240 ) ( llama-bench (68996) )",
+    1,
+    0.032666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  241 ) ( llama-bench (68996) )",
+    1,
+    0.321875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  242 ) ( llama-bench (68996) )",
+    1,
+    2.237375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  243 ) ( llama-bench (68996) )",
+    1,
+    0.034916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  244 ) ( llama-bench (68996) )",
+    1,
+    0.311833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  245 ) ( llama-bench (68996) )",
+    1,
+    2.325542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  246 ) ( llama-bench (68996) )",
+    1,
+    0.037042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  247 ) ( llama-bench (68996) )",
+    1,
+    0.328
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  248 ) ( llama-bench (68996) )",
+    1,
+    2.222042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  249 ) ( llama-bench (68996) )",
+    1,
+    0.037375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  250 ) ( llama-bench (68996) )",
+    1,
+    0.333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  251 ) ( llama-bench (68996) )",
+    1,
+    2.325125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  252 ) ( llama-bench (68996) )",
+    1,
+    0.034167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  253 ) ( llama-bench (68996) )",
+    1,
+    0.314041
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  254 ) ( llama-bench (68996) )",
+    1,
+    2.1085
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  255 ) ( llama-bench (68996) )",
+    1,
+    0.033708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  256 ) ( llama-bench (68996) )",
+    1,
+    0.30475
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  257 ) ( llama-bench (68996) )",
+    1,
+    2.033208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  258 ) ( llama-bench (68996) )",
+    1,
+    0.029541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  259 ) ( llama-bench (68996) )",
+    1,
+    0.310791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  260 ) ( llama-bench (68996) )",
+    1,
+    2.2095
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  261 ) ( llama-bench (68996) )",
+    1,
+    0.029208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  262 ) ( llama-bench (68996) )",
+    1,
+    0.297292
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  263 ) ( llama-bench (68996) )",
+    1,
+    2.050958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  264 ) ( llama-bench (68996) )",
+    1,
+    0.028208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  265 ) ( llama-bench (68996) )",
+    1,
+    0.275958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  266 ) ( llama-bench (68996) )",
+    1,
+    1.940834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  267 ) ( llama-bench (68996) )",
+    1,
+    0.027167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  268 ) ( llama-bench (68996) )",
+    1,
+    0.355042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  269 ) ( llama-bench (68996) )",
+    1,
+    2.010958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  270 ) ( llama-bench (68996) )",
+    1,
+    0.03125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  271 ) ( llama-bench (68996) )",
+    1,
+    0.266042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  272 ) ( llama-bench (68996) )",
+    1,
+    1.981791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  273 ) ( llama-bench (68996) )",
+    1,
+    0.027583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  274 ) ( llama-bench (68996) )",
+    1,
+    0.356208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  275 ) ( llama-bench (68996) )",
+    1,
+    2.016458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  276 ) ( llama-bench (68996) )",
+    1,
+    0.031416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  277 ) ( llama-bench (68996) )",
+    1,
+    0.290417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  278 ) ( llama-bench (68996) )",
+    1,
+    2.043625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  279 ) ( llama-bench (68996) )",
+    1,
+    0.030459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  280 ) ( llama-bench (68996) )",
+    1,
+    0.305625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  281 ) ( llama-bench (68996) )",
+    1,
+    1.996333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  282 ) ( llama-bench (68996) )",
+    1,
+    0.030792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  283 ) ( llama-bench (68996) )",
+    1,
+    0.296709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  284 ) ( llama-bench (68996) )",
+    1,
+    2.425292
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  285 ) ( llama-bench (68996) )",
+    1,
+    0.029917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  286 ) ( llama-bench (68996) )",
+    1,
+    0.296458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  287 ) ( llama-bench (68996) )",
+    1,
+    2.064292
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  288 ) ( llama-bench (68996) )",
+    1,
+    0.034791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  289 ) ( llama-bench (68996) )",
+    1,
+    0.285709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  290 ) ( llama-bench (68996) )",
+    1,
+    2.193333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  291 ) ( llama-bench (68996) )",
+    1,
+    0.031416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  292 ) ( llama-bench (68996) )",
+    1,
+    0.288667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  293 ) ( llama-bench (68996) )",
+    1,
+    2.089083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  294 ) ( llama-bench (68996) )",
+    1,
+    0.031833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  295 ) ( llama-bench (68996) )",
+    1,
+    0.296167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  296 ) ( llama-bench (68996) )",
+    1,
+    2.132917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  297 ) ( llama-bench (68996) )",
+    1,
+    0.027375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  298 ) ( llama-bench (68996) )",
+    1,
+    0.287709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  299 ) ( llama-bench (68996) )",
+    1,
+    1.988334
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  300 ) ( llama-bench (68996) )",
+    1,
+    0.032167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  301 ) ( llama-bench (68996) )",
+    1,
+    0.283041
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  302 ) ( llama-bench (68996) )",
+    1,
+    2.004625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  303 ) ( llama-bench (68996) )",
+    1,
+    0.028667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  304 ) ( llama-bench (68996) )",
+    1,
+    0.393959
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  305 ) ( llama-bench (68996) )",
+    1,
+    2.337
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  306 ) ( llama-bench (68996) )",
+    1,
+    0.040208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  307 ) ( llama-bench (68996) )",
+    1,
+    0.378875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  308 ) ( llama-bench (68996) )",
+    1,
+    2.006708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  309 ) ( llama-bench (68996) )",
+    1,
+    0.030458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  310 ) ( llama-bench (68996) )",
+    1,
+    0.441208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  311 ) ( llama-bench (68996) )",
+    1,
+    2.080958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  312 ) ( llama-bench (68996) )",
+    1,
+    0.034958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  313 ) ( llama-bench (68996) )",
+    1,
+    0.299834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  314 ) ( llama-bench (68996) )",
+    1,
+    2.441
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  315 ) ( llama-bench (68996) )",
+    1,
+    0.033084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  316 ) ( llama-bench (68996) )",
+    1,
+    0.305
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  317 ) ( llama-bench (68996) )",
+    1,
+    2.405917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  318 ) ( llama-bench (68996) )",
+    1,
+    0.0305
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  319 ) ( llama-bench (68996) )",
+    1,
+    0.282416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  320 ) ( llama-bench (68996) )",
+    1,
+    2.14225
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  321 ) ( llama-bench (68996) )",
+    1,
+    0.029667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  322 ) ( llama-bench (68996) )",
+    1,
+    0.361625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  323 ) ( llama-bench (68996) )",
+    1,
+    2.100875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  324 ) ( llama-bench (68996) )",
+    1,
+    0.03125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  325 ) ( llama-bench (68996) )",
+    1,
+    0.301709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  326 ) ( llama-bench (68996) )",
+    1,
+    2.145833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  327 ) ( llama-bench (68996) )",
+    1,
+    0.031875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  328 ) ( llama-bench (68996) )",
+    1,
+    0.360958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  329 ) ( llama-bench (68996) )",
+    1,
+    2.014917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  330 ) ( llama-bench (68996) )",
+    1,
+    0.031
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  331 ) ( llama-bench (68996) )",
+    1,
+    0.287666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  332 ) ( llama-bench (68996) )",
+    1,
+    2.060292
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  333 ) ( llama-bench (68996) )",
+    1,
+    0.040875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  334 ) ( llama-bench (68996) )",
+    1,
+    0.295459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  335 ) ( llama-bench (68996) )",
+    1,
+    2.138791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  336 ) ( llama-bench (68996) )",
+    1,
+    0.030417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  337 ) ( llama-bench (68996) )",
+    1,
+    0.260375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  338 ) ( llama-bench (68996) )",
+    1,
+    1.78775
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  339 ) ( llama-bench (68996) )",
+    1,
+    0.025291
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  340 ) ( llama-bench (68996) )",
+    1,
+    0.279333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  341 ) ( llama-bench (68996) )",
+    1,
+    1.818791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  342 ) ( llama-bench (68996) )",
+    1,
+    0.027333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  343 ) ( llama-bench (68996) )",
+    1,
+    0.315958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  344 ) ( llama-bench (68996) )",
+    1,
+    1.849708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  345 ) ( llama-bench (68996) )",
+    1,
+    0.027542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  346 ) ( llama-bench (68996) )",
+    1,
+    0.28
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  347 ) ( llama-bench (68996) )",
+    1,
+    2.094083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  348 ) ( llama-bench (68996) )",
+    1,
+    0.026083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  349 ) ( llama-bench (68996) )",
+    1,
+    0.269583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  350 ) ( llama-bench (68996) )",
+    1,
+    1.832375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  351 ) ( llama-bench (68996) )",
+    1,
+    0.02575
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  352 ) ( llama-bench (68996) )",
+    1,
+    0.33675
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  353 ) ( llama-bench (68996) )",
+    1,
+    1.849917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  354 ) ( llama-bench (68996) )",
+    1,
+    0.037583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  355 ) ( llama-bench (68996) )",
+    1,
+    0.354
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  356 ) ( llama-bench (68996) )",
+    1,
+    1.854541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  357 ) ( llama-bench (68996) )",
+    1,
+    0.028583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  358 ) ( llama-bench (68996) )",
+    1,
+    0.31525
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  359 ) ( llama-bench (68996) )",
+    1,
+    1.875875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  360 ) ( llama-bench (68996) )",
+    1,
+    0.025917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  361 ) ( llama-bench (68996) )",
+    1,
+    0.270167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  362 ) ( llama-bench (68996) )",
+    1,
+    1.879625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  363 ) ( llama-bench (68996) )",
+    1,
+    0.029625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  364 ) ( llama-bench (68996) )",
+    1,
+    0.255833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  365 ) ( llama-bench (68996) )",
+    1,
+    1.898542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  366 ) ( llama-bench (68996) )",
+    1,
+    0.025917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  367 ) ( llama-bench (68996) )",
+    1,
+    0.2425
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  368 ) ( llama-bench (68996) )",
+    1,
+    1.841042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  369 ) ( llama-bench (68996) )",
+    1,
+    0.02775
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  370 ) ( llama-bench (68996) )",
+    1,
+    0.277208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  371 ) ( llama-bench (68996) )",
+    1,
+    1.918625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  372 ) ( llama-bench (68996) )",
+    1,
+    0.0265
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  373 ) ( llama-bench (68996) )",
+    1,
+    0.277792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  374 ) ( llama-bench (68996) )",
+    1,
+    1.909666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  375 ) ( llama-bench (68996) )",
+    1,
+    0.026333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  376 ) ( llama-bench (68996) )",
+    1,
+    0.274583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  377 ) ( llama-bench (68996) )",
+    1,
+    1.888875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  378 ) ( llama-bench (68996) )",
+    1,
+    0.022458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  379 ) ( llama-bench (68996) )",
+    1,
+    0.258958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  380 ) ( llama-bench (68996) )",
+    1,
+    1.908667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  381 ) ( llama-bench (68996) )",
+    1,
+    0.025833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  382 ) ( llama-bench (68996) )",
+    1,
+    0.25625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  383 ) ( llama-bench (68996) )",
+    1,
+    1.783916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  384 ) ( llama-bench (68996) )",
+    1,
+    0.02775
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  385 ) ( llama-bench (68996) )",
+    1,
+    0.278291
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  386 ) ( llama-bench (68996) )",
+    1,
+    1.874458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  387 ) ( llama-bench (68996) )",
+    1,
+    0.028125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  388 ) ( llama-bench (68996) )",
+    1,
+    0.249875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  389 ) ( llama-bench (68996) )",
+    1,
+    1.7885
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  390 ) ( llama-bench (68996) )",
+    1,
+    0.02725
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  391 ) ( llama-bench (68996) )",
+    1,
+    0.279208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  392 ) ( llama-bench (68996) )",
+    1,
+    1.915041
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  393 ) ( llama-bench (68996) )",
+    1,
+    0.028042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  394 ) ( llama-bench (68996) )",
+    1,
+    0.271834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  395 ) ( llama-bench (68996) )",
+    1,
+    1.942459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  396 ) ( llama-bench (68996) )",
+    1,
+    0.030459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  397 ) ( llama-bench (68996) )",
+    1,
+    0.293625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  398 ) ( llama-bench (68996) )",
+    1,
+    1.909083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  399 ) ( llama-bench (68996) )",
+    1,
+    0.028666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  400 ) ( llama-bench (68996) )",
+    1,
+    0.277375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  401 ) ( llama-bench (68996) )",
+    1,
+    1.962959
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  402 ) ( llama-bench (68996) )",
+    1,
+    0.028834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  403 ) ( llama-bench (68996) )",
+    1,
+    0.273166
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  404 ) ( llama-bench (68996) )",
+    1,
+    1.830458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  405 ) ( llama-bench (68996) )",
+    1,
+    0.028667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  406 ) ( llama-bench (68996) )",
+    1,
+    0.270167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  407 ) ( llama-bench (68996) )",
+    1,
+    1.824542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  408 ) ( llama-bench (68996) )",
+    1,
+    0.027625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  409 ) ( llama-bench (68996) )",
+    1,
+    0.239666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  410 ) ( llama-bench (68996) )",
+    1,
+    1.646542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  411 ) ( llama-bench (68996) )",
+    1,
+    0.026042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  412 ) ( llama-bench (68996) )",
+    1,
+    0.240542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  413 ) ( llama-bench (68996) )",
+    1,
+    1.751334
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  414 ) ( llama-bench (68996) )",
+    1,
+    0.024084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  415 ) ( llama-bench (68996) )",
+    1,
+    0.259459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  416 ) ( llama-bench (68996) )",
+    1,
+    1.69
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  417 ) ( llama-bench (68996) )",
+    1,
+    0.023792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  418 ) ( llama-bench (68996) )",
+    1,
+    0.246417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  419 ) ( llama-bench (68996) )",
+    1,
+    1.653875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  420 ) ( llama-bench (68996) )",
+    1,
+    0.02525
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  421 ) ( llama-bench (68996) )",
+    1,
+    0.248959
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  422 ) ( llama-bench (68996) )",
+    1,
+    1.686833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  423 ) ( llama-bench (68996) )",
+    1,
+    0.027792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  424 ) ( llama-bench (68996) )",
+    1,
+    0.247917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  425 ) ( llama-bench (68996) )",
+    1,
+    1.673875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  426 ) ( llama-bench (68996) )",
+    1,
+    0.02775
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  427 ) ( llama-bench (68996) )",
+    1,
+    0.243458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  428 ) ( llama-bench (68996) )",
+    1,
+    1.760083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  429 ) ( llama-bench (68996) )",
+    1,
+    0.022667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  430 ) ( llama-bench (68996) )",
+    1,
+    0.242375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  431 ) ( llama-bench (68996) )",
+    1,
+    1.680667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  432 ) ( llama-bench (68996) )",
+    1,
+    0.027792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  433 ) ( llama-bench (68996) )",
+    1,
+    0.243209
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  434 ) ( llama-bench (68996) )",
+    1,
+    1.691209
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  435 ) ( llama-bench (68996) )",
+    1,
+    0.029834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  436 ) ( llama-bench (68996) )",
+    1,
+    0.243083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  437 ) ( llama-bench (68996) )",
+    1,
+    1.665834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  438 ) ( llama-bench (68996) )",
+    1,
+    0.026792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  439 ) ( llama-bench (68996) )",
+    1,
+    0.238417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  440 ) ( llama-bench (68996) )",
+    1,
+    1.859541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  441 ) ( llama-bench (68996) )",
+    1,
+    0.02575
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  442 ) ( llama-bench (68996) )",
+    1,
+    0.272625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  443 ) ( llama-bench (68996) )",
+    1,
+    1.756167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  444 ) ( llama-bench (68996) )",
+    1,
+    0.030541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  445 ) ( llama-bench (68996) )",
+    1,
+    0.253375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  446 ) ( llama-bench (68996) )",
+    1,
+    1.752042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  447 ) ( llama-bench (68996) )",
+    1,
+    0.021542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  448 ) ( llama-bench (68996) )",
+    1,
+    0.242583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  449 ) ( llama-bench (68996) )",
+    1,
+    1.6535
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  450 ) ( llama-bench (68996) )",
+    1,
+    0.023375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  451 ) ( llama-bench (68996) )",
+    1,
+    0.237958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  452 ) ( llama-bench (68996) )",
+    1,
+    1.714084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  453 ) ( llama-bench (68996) )",
+    1,
+    0.021
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  454 ) ( llama-bench (68996) )",
+    1,
+    0.247
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  455 ) ( llama-bench (68996) )",
+    1,
+    1.7895
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  456 ) ( llama-bench (68996) )",
+    1,
+    0.02475
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  457 ) ( llama-bench (68996) )",
+    1,
+    0.264667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  458 ) ( llama-bench (68996) )",
+    1,
+    1.810083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  459 ) ( llama-bench (68996) )",
+    1,
+    0.032625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  460 ) ( llama-bench (68996) )",
+    1,
+    0.244833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  461 ) ( llama-bench (68996) )",
+    1,
+    1.657875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  462 ) ( llama-bench (68996) )",
+    1,
+    0.026709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  463 ) ( llama-bench (68996) )",
+    1,
+    0.238917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  464 ) ( llama-bench (68996) )",
+    1,
+    1.651666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  465 ) ( llama-bench (68996) )",
+    1,
+    0.026584
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  466 ) ( llama-bench (68996) )",
+    1,
+    0.22625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  467 ) ( llama-bench (68996) )",
+    1,
+    1.709084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  468 ) ( llama-bench (68996) )",
+    1,
+    0.026792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  469 ) ( llama-bench (68996) )",
+    1,
+    0.254583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  470 ) ( llama-bench (68996) )",
+    1,
+    1.686125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  471 ) ( llama-bench (68996) )",
+    1,
+    0.028042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  472 ) ( llama-bench (68996) )",
+    1,
+    0.233583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  473 ) ( llama-bench (68996) )",
+    1,
+    1.587834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  474 ) ( llama-bench (68996) )",
+    1,
+    0.022375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  475 ) ( llama-bench (68996) )",
+    1,
+    0.226833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  476 ) ( llama-bench (68996) )",
+    1,
+    1.594125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  477 ) ( llama-bench (68996) )",
+    1,
+    0.026958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  478 ) ( llama-bench (68996) )",
+    1,
+    0.242583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  479 ) ( llama-bench (68996) )",
+    1,
+    1.578208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  480 ) ( llama-bench (68996) )",
+    1,
+    0.021667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  481 ) ( llama-bench (68996) )",
+    1,
+    0.231792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  482 ) ( llama-bench (68996) )",
+    1,
+    1.546
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  483 ) ( llama-bench (68996) )",
+    1,
+    0.022583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  484 ) ( llama-bench (68996) )",
+    1,
+    0.23625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  485 ) ( llama-bench (68996) )",
+    1,
+    1.655833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  486 ) ( llama-bench (68996) )",
+    1,
+    0.025916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  487 ) ( llama-bench (68996) )",
+    1,
+    0.22275
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  488 ) ( llama-bench (68996) )",
+    1,
+    1.618375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  489 ) ( llama-bench (68996) )",
+    1,
+    0.022375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  490 ) ( llama-bench (68996) )",
+    1,
+    0.235792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  491 ) ( llama-bench (68996) )",
+    1,
+    1.616167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  492 ) ( llama-bench (68996) )",
+    1,
+    0.022667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  493 ) ( llama-bench (68996) )",
+    1,
+    0.21375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  494 ) ( llama-bench (68996) )",
+    1,
+    1.659208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  495 ) ( llama-bench (68996) )",
+    1,
+    0.020917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  496 ) ( llama-bench (68996) )",
+    1,
+    0.23425
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  497 ) ( llama-bench (68996) )",
+    1,
+    1.596667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  498 ) ( llama-bench (68996) )",
+    1,
+    0.0275
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  499 ) ( llama-bench (68996) )",
+    1,
+    0.233709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  500 ) ( llama-bench (68996) )",
+    1,
+    1.554125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  501 ) ( llama-bench (68996) )",
+    1,
+    0.024541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  502 ) ( llama-bench (68996) )",
+    1,
+    0.225625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  503 ) ( llama-bench (68996) )",
+    1,
+    1.5605
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  504 ) ( llama-bench (68996) )",
+    1,
+    0.026375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  505 ) ( llama-bench (68996) )",
+    1,
+    0.248166
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  506 ) ( llama-bench (68996) )",
+    1,
+    1.759
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  507 ) ( llama-bench (68996) )",
+    1,
+    0.051666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  508 ) ( llama-bench (68996) )",
+    1,
+    0.232458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  509 ) ( llama-bench (68996) )",
+    1,
+    1.608542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  510 ) ( llama-bench (68996) )",
+    1,
+    0.024458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  511 ) ( llama-bench (68996) )",
+    1,
+    0.298458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  512 ) ( llama-bench (68996) )",
+    1,
+    1.702291
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  513 ) ( llama-bench (68996) )",
+    1,
+    0.022291
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  514 ) ( llama-bench (68996) )",
+    1,
+    0.269958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  515 ) ( llama-bench (68996) )",
+    1,
+    1.764333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  516 ) ( llama-bench (68996) )",
+    1,
+    0.022
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  517 ) ( llama-bench (68996) )",
+    1,
+    0.250209
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  518 ) ( llama-bench (68996) )",
+    1,
+    1.656834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  519 ) ( llama-bench (68996) )",
+    1,
+    0.029125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  520 ) ( llama-bench (68996) )",
+    1,
+    0.329625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  521 ) ( llama-bench (68996) )",
+    1,
+    1.576
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  522 ) ( llama-bench (68996) )",
+    1,
+    0.02425
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  523 ) ( llama-bench (68996) )",
+    1,
+    0.389708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  524 ) ( llama-bench (68996) )",
+    1,
+    1.60625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  525 ) ( llama-bench (68996) )",
+    1,
+    0.024416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  526 ) ( llama-bench (68996) )",
+    1,
+    0.23975
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  527 ) ( llama-bench (68996) )",
+    1,
+    1.6225
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  528 ) ( llama-bench (68996) )",
+    1,
+    0.023541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  529 ) ( llama-bench (68996) )",
+    1,
+    0.228791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  530 ) ( llama-bench (68996) )",
+    1,
+    1.553459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  531 ) ( llama-bench (68996) )",
+    1,
+    0.025166
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  532 ) ( llama-bench (68996) )",
+    1,
+    0.232833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  533 ) ( llama-bench (68996) )",
+    1,
+    1.560917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  534 ) ( llama-bench (68996) )",
+    1,
+    0.024333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  535 ) ( llama-bench (68996) )",
+    1,
+    0.238709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  536 ) ( llama-bench (68996) )",
+    1,
+    1.643084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  537 ) ( llama-bench (68996) )",
+    1,
+    0.02525
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  538 ) ( llama-bench (68996) )",
+    1,
+    0.237166
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  539 ) ( llama-bench (68996) )",
+    1,
+    1.669
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  540 ) ( llama-bench (68996) )",
+    1,
+    0.025875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  541 ) ( llama-bench (68996) )",
+    1,
+    0.22975
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  542 ) ( llama-bench (68996) )",
+    1,
+    1.726625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  543 ) ( llama-bench (68996) )",
+    1,
+    0.026417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  544 ) ( llama-bench (68996) )",
+    1,
+    0.224667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  545 ) ( llama-bench (68996) )",
+    1,
+    1.574125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  546 ) ( llama-bench (68996) )",
+    1,
+    0.022542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  547 ) ( llama-bench (68996) )",
+    1,
+    0.252917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  548 ) ( llama-bench (68996) )",
+    1,
+    1.707167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  549 ) ( llama-bench (68996) )",
+    1,
+    0.02425
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  550 ) ( llama-bench (68996) )",
+    1,
+    0.21525
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  551 ) ( llama-bench (68996) )",
+    1,
+    1.555666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  552 ) ( llama-bench (68996) )",
+    1,
+    0.022375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  553 ) ( llama-bench (68996) )",
+    1,
+    0.225542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  554 ) ( llama-bench (68996) )",
+    1,
+    1.549333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  555 ) ( llama-bench (68996) )",
+    1,
+    0.025291
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  556 ) ( llama-bench (68996) )",
+    1,
+    0.229166
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  557 ) ( llama-bench (68996) )",
+    1,
+    1.597417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  558 ) ( llama-bench (68996) )",
+    1,
+    0.025125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  559 ) ( llama-bench (68996) )",
+    1,
+    0.224541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  560 ) ( llama-bench (68996) )",
+    1,
+    1.618333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  561 ) ( llama-bench (68996) )",
+    1,
+    0.024917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  562 ) ( llama-bench (68996) )",
+    1,
+    0.231334
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  563 ) ( llama-bench (68996) )",
+    1,
+    1.615542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  564 ) ( llama-bench (68996) )",
+    1,
+    0.022875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  565 ) ( llama-bench (68996) )",
+    1,
+    0.227542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  566 ) ( llama-bench (68996) )",
+    1,
+    1.542542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  567 ) ( llama-bench (68996) )",
+    1,
+    0.026125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  568 ) ( llama-bench (68996) )",
+    1,
+    0.253042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  569 ) ( llama-bench (68996) )",
+    1,
+    5.306875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  570 ) ( llama-bench (68996) )",
+    1,
+    0.057583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  571 ) ( llama-bench (68996) )",
+    1,
+    0.601042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  572 ) ( llama-bench (68996) )",
+    1,
+    2.770666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  573 ) ( llama-bench (68996) )",
+    1,
+    0.053208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  574 ) ( llama-bench (68996) )",
+    1,
+    0.251416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  575 ) ( llama-bench (68996) )",
+    1,
+    1.603875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  576 ) ( llama-bench (68996) )",
+    1,
+    0.025791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  577 ) ( llama-bench (68996) )",
+    1,
+    0.230542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  578 ) ( llama-bench (68996) )",
+    1,
+    1.5725
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  579 ) ( llama-bench (68996) )",
+    1,
+    0.02475
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  580 ) ( llama-bench (68996) )",
+    1,
+    0.354042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  581 ) ( llama-bench (68996) )",
+    1,
+    1.601625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  582 ) ( llama-bench (68996) )",
+    1,
+    0.026708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  583 ) ( llama-bench (68996) )",
+    1,
+    0.32275
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  584 ) ( llama-bench (68996) )",
+    1,
+    1.633875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  585 ) ( llama-bench (68996) )",
+    1,
+    0.024875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  586 ) ( llama-bench (68996) )",
+    1,
+    0.245042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  587 ) ( llama-bench (68996) )",
+    1,
+    1.615
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  588 ) ( llama-bench (68996) )",
+    1,
+    0.0275
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  589 ) ( llama-bench (68996) )",
+    1,
+    0.344375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  590 ) ( llama-bench (68996) )",
+    1,
+    1.933625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  591 ) ( llama-bench (68996) )",
+    1,
+    0.023083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  592 ) ( llama-bench (68996) )",
+    1,
+    0.666375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  593 ) ( llama-bench (68996) )",
+    1,
+    1.681875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  594 ) ( llama-bench (68996) )",
+    1,
+    0.028041
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  595 ) ( llama-bench (68996) )",
+    1,
+    0.320042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  596 ) ( llama-bench (68996) )",
+    1,
+    1.86575
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  597 ) ( llama-bench (68996) )",
+    1,
+    0.024042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  598 ) ( llama-bench (68996) )",
+    1,
+    0.239667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  599 ) ( llama-bench (68996) )",
+    1,
+    1.558667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  600 ) ( llama-bench (68996) )",
+    1,
+    0.026708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  601 ) ( llama-bench (68996) )",
+    1,
+    0.235084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  602 ) ( llama-bench (68996) )",
+    1,
+    1.649584
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  603 ) ( llama-bench (68996) )",
+    1,
+    0.024542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  604 ) ( llama-bench (68996) )",
+    1,
+    0.22575
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  605 ) ( llama-bench (68996) )",
+    1,
+    1.649709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  606 ) ( llama-bench (68996) )",
+    1,
+    0.025792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  607 ) ( llama-bench (68996) )",
+    1,
+    0.224875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  608 ) ( llama-bench (68996) )",
+    1,
+    1.554708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  609 ) ( llama-bench (68996) )",
+    1,
+    0.022625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  610 ) ( llama-bench (68996) )",
+    1,
+    0.283208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  611 ) ( llama-bench (68996) )",
+    1,
+    1.968458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  612 ) ( llama-bench (68996) )",
+    1,
+    0.027708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  613 ) ( llama-bench (68996) )",
+    1,
+    0.229958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  614 ) ( llama-bench (68996) )",
+    1,
+    1.578958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  615 ) ( llama-bench (68996) )",
+    1,
+    0.025791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  616 ) ( llama-bench (68996) )",
+    1,
+    0.317125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  617 ) ( llama-bench (68996) )",
+    1,
+    1.87475
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  618 ) ( llama-bench (68996) )",
+    1,
+    0.023166
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  619 ) ( llama-bench (68996) )",
+    1,
+    0.228125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  620 ) ( llama-bench (68996) )",
+    1,
+    1.650667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  621 ) ( llama-bench (68996) )",
+    1,
+    0.022458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  622 ) ( llama-bench (68996) )",
+    1,
+    0.22575
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  623 ) ( llama-bench (68996) )",
+    1,
+    1.657125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  624 ) ( llama-bench (68996) )",
+    1,
+    0.063583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  625 ) ( llama-bench (68996) )",
+    1,
+    0.217375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  626 ) ( llama-bench (68996) )",
+    1,
+    1.56175
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  627 ) ( llama-bench (68996) )",
+    1,
+    0.022875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  628 ) ( llama-bench (68996) )",
+    1,
+    0.230667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  629 ) ( llama-bench (68996) )",
+    1,
+    1.5905
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  630 ) ( llama-bench (68996) )",
+    1,
+    0.024666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  631 ) ( llama-bench (68996) )",
+    1,
+    0.220125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  632 ) ( llama-bench (68996) )",
+    1,
+    1.683417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  633 ) ( llama-bench (68996) )",
+    1,
+    0.023042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  634 ) ( llama-bench (68996) )",
+    1,
+    0.237875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  635 ) ( llama-bench (68996) )",
+    1,
+    1.75425
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  636 ) ( llama-bench (68996) )",
+    1,
+    0.027125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  637 ) ( llama-bench (68996) )",
+    1,
+    0.246167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  638 ) ( llama-bench (68996) )",
+    1,
+    1.676333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  639 ) ( llama-bench (68996) )",
+    1,
+    0.066459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  640 ) ( llama-bench (68996) )",
+    1,
+    0.244167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  641 ) ( llama-bench (68996) )",
+    1,
+    1.7405
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  642 ) ( llama-bench (68996) )",
+    1,
+    0.02325
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  643 ) ( llama-bench (68996) )",
+    1,
+    0.273791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  644 ) ( llama-bench (68996) )",
+    1,
+    1.737792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  645 ) ( llama-bench (68996) )",
+    1,
+    0.025167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  646 ) ( llama-bench (68996) )",
+    1,
+    0.250167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  647 ) ( llama-bench (68996) )",
+    1,
+    1.662167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  648 ) ( llama-bench (68996) )",
+    1,
+    0.0255
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  649 ) ( llama-bench (68996) )",
+    1,
+    0.23275
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  650 ) ( llama-bench (68996) )",
+    1,
+    1.683167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  651 ) ( llama-bench (68996) )",
+    1,
+    0.025916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  652 ) ( llama-bench (68996) )",
+    1,
+    0.248542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  653 ) ( llama-bench (68996) )",
+    1,
+    1.771625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  654 ) ( llama-bench (68996) )",
+    1,
+    0.02525
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  655 ) ( llama-bench (68996) )",
+    1,
+    0.327541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  656 ) ( llama-bench (68996) )",
+    1,
+    1.808875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  657 ) ( llama-bench (68996) )",
+    1,
+    0.0275
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  658 ) ( llama-bench (68996) )",
+    1,
+    0.247125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  659 ) ( llama-bench (68996) )",
+    1,
+    1.766334
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  660 ) ( llama-bench (68996) )",
+    1,
+    0.0235
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  661 ) ( llama-bench (68996) )",
+    1,
+    0.307875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  662 ) ( llama-bench (68996) )",
+    1,
+    1.7385
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  663 ) ( llama-bench (68996) )",
+    1,
+    0.0245
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  664 ) ( llama-bench (68996) )",
+    1,
+    0.247541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  665 ) ( llama-bench (68996) )",
+    1,
+    1.704292
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  666 ) ( llama-bench (68996) )",
+    1,
+    0.024083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  667 ) ( llama-bench (68996) )",
+    1,
+    0.302166
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  668 ) ( llama-bench (68996) )",
+    1,
+    1.652625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  669 ) ( llama-bench (68996) )",
+    1,
+    0.025916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  670 ) ( llama-bench (68996) )",
+    1,
+    0.25825
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  671 ) ( llama-bench (68996) )",
+    1,
+    1.804958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  672 ) ( llama-bench (68996) )",
+    1,
+    0.026166
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  673 ) ( llama-bench (68996) )",
+    1,
+    0.246541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  674 ) ( llama-bench (68996) )",
+    1,
+    1.749542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  675 ) ( llama-bench (68996) )",
+    1,
+    0.02425
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  676 ) ( llama-bench (68996) )",
+    1,
+    0.237083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  677 ) ( llama-bench (68996) )",
+    1,
+    1.644125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  678 ) ( llama-bench (68996) )",
+    1,
+    0.022667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  679 ) ( llama-bench (68996) )",
+    1,
+    0.263375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  680 ) ( llama-bench (68996) )",
+    1,
+    1.71325
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  681 ) ( llama-bench (68996) )",
+    1,
+    0.027708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  682 ) ( llama-bench (68996) )",
+    1,
+    0.252208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  683 ) ( llama-bench (68996) )",
+    1,
+    1.745917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  684 ) ( llama-bench (68996) )",
+    1,
+    0.023875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  685 ) ( llama-bench (68996) )",
+    1,
+    0.248958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  686 ) ( llama-bench (68996) )",
+    1,
+    1.699583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  687 ) ( llama-bench (68996) )",
+    1,
+    0.027833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  688 ) ( llama-bench (68996) )",
+    1,
+    0.250125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  689 ) ( llama-bench (68996) )",
+    1,
+    1.6595
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  690 ) ( llama-bench (68996) )",
+    1,
+    0.025208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  691 ) ( llama-bench (68996) )",
+    1,
+    0.244542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  692 ) ( llama-bench (68996) )",
+    1,
+    1.71725
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  693 ) ( llama-bench (68996) )",
+    1,
+    0.027
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  694 ) ( llama-bench (68996) )",
+    1,
+    0.29575
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  695 ) ( llama-bench (68996) )",
+    1,
+    1.770917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  696 ) ( llama-bench (68996) )",
+    1,
+    0.02425
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  697 ) ( llama-bench (68996) )",
+    1,
+    0.252792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  698 ) ( llama-bench (68996) )",
+    1,
+    1.667208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  699 ) ( llama-bench (68996) )",
+    1,
+    0.025
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  700 ) ( llama-bench (68996) )",
+    1,
+    0.237542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  701 ) ( llama-bench (68996) )",
+    1,
+    1.744
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  702 ) ( llama-bench (68996) )",
+    1,
+    0.024083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  703 ) ( llama-bench (68996) )",
+    1,
+    0.250833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  704 ) ( llama-bench (68996) )",
+    1,
+    1.700709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  705 ) ( llama-bench (68996) )",
+    1,
+    0.04025
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  706 ) ( llama-bench (68996) )",
+    1,
+    0.237875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  707 ) ( llama-bench (68996) )",
+    1,
+    1.662459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  708 ) ( llama-bench (68996) )",
+    1,
+    0.02425
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  709 ) ( llama-bench (68996) )",
+    1,
+    0.264708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  710 ) ( llama-bench (68996) )",
+    1,
+    1.684875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  711 ) ( llama-bench (68996) )",
+    1,
+    0.026375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  712 ) ( llama-bench (68996) )",
+    1,
+    0.234333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  713 ) ( llama-bench (68996) )",
+    1,
+    1.651625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  714 ) ( llama-bench (68996) )",
+    1,
+    0.025291
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  715 ) ( llama-bench (68996) )",
+    1,
+    0.225084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  716 ) ( llama-bench (68996) )",
+    1,
+    1.737709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  717 ) ( llama-bench (68996) )",
+    1,
+    0.028125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  718 ) ( llama-bench (68996) )",
+    1,
+    0.265625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  719 ) ( llama-bench (68996) )",
+    1,
+    1.637833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  720 ) ( llama-bench (68996) )",
+    1,
+    0.023125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  721 ) ( llama-bench (68996) )",
+    1,
+    0.252625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  722 ) ( llama-bench (68996) )",
+    1,
+    1.741458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  723 ) ( llama-bench (68996) )",
+    1,
+    0.033208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  724 ) ( llama-bench (68996) )",
+    1,
+    0.22475
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  725 ) ( llama-bench (68996) )",
+    1,
+    1.691416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  726 ) ( llama-bench (68996) )",
+    1,
+    0.023375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  727 ) ( llama-bench (68996) )",
+    1,
+    0.286667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  728 ) ( llama-bench (68996) )",
+    1,
+    1.715125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  729 ) ( llama-bench (68996) )",
+    1,
+    0.026459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  730 ) ( llama-bench (68996) )",
+    1,
+    0.221875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  731 ) ( llama-bench (68996) )",
+    1,
+    1.651958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  732 ) ( llama-bench (68996) )",
+    1,
+    0.022334
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  733 ) ( llama-bench (68996) )",
+    1,
+    0.246666
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  734 ) ( llama-bench (68996) )",
+    1,
+    1.669292
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  735 ) ( llama-bench (68996) )",
+    1,
+    0.0255
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  736 ) ( llama-bench (68996) )",
+    1,
+    0.253417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  737 ) ( llama-bench (68996) )",
+    1,
+    1.777833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  738 ) ( llama-bench (68996) )",
+    1,
+    0.025833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  739 ) ( llama-bench (68996) )",
+    1,
+    0.256792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  740 ) ( llama-bench (68996) )",
+    1,
+    1.697875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  741 ) ( llama-bench (68996) )",
+    1,
+    0.028208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  742 ) ( llama-bench (68996) )",
+    1,
+    0.249667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  743 ) ( llama-bench (68996) )",
+    1,
+    1.729417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  744 ) ( llama-bench (68996) )",
+    1,
+    0.025208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  745 ) ( llama-bench (68996) )",
+    1,
+    0.235208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  746 ) ( llama-bench (68996) )",
+    1,
+    1.668917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  747 ) ( llama-bench (68996) )",
+    1,
+    0.025042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  748 ) ( llama-bench (68996) )",
+    1,
+    0.271833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  749 ) ( llama-bench (68996) )",
+    1,
+    1.725583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  750 ) ( llama-bench (68996) )",
+    1,
+    0.024292
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  751 ) ( llama-bench (68996) )",
+    1,
+    0.245375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  752 ) ( llama-bench (68996) )",
+    1,
+    1.649959
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  753 ) ( llama-bench (68996) )",
+    1,
+    0.02625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  754 ) ( llama-bench (68996) )",
+    1,
+    0.2555
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  755 ) ( llama-bench (68996) )",
+    1,
+    1.737208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  756 ) ( llama-bench (68996) )",
+    1,
+    0.026167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  757 ) ( llama-bench (68996) )",
+    1,
+    0.243416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  758 ) ( llama-bench (68996) )",
+    1,
+    1.725834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  759 ) ( llama-bench (68996) )",
+    1,
+    0.02225
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  760 ) ( llama-bench (68996) )",
+    1,
+    0.315375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  761 ) ( llama-bench (68996) )",
+    1,
+    1.647
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  762 ) ( llama-bench (68996) )",
+    1,
+    0.024834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  763 ) ( llama-bench (68996) )",
+    1,
+    0.339959
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  764 ) ( llama-bench (68996) )",
+    1,
+    1.802792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  765 ) ( llama-bench (68996) )",
+    1,
+    0.026
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  766 ) ( llama-bench (68996) )",
+    1,
+    0.320833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  767 ) ( llama-bench (68996) )",
+    1,
+    1.757375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  768 ) ( llama-bench (68996) )",
+    1,
+    0.022542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  769 ) ( llama-bench (68996) )",
+    1,
+    0.249667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  770 ) ( llama-bench (68996) )",
+    1,
+    1.698167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  771 ) ( llama-bench (68996) )",
+    1,
+    0.0235
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  772 ) ( llama-bench (68996) )",
+    1,
+    0.272084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  773 ) ( llama-bench (68996) )",
+    1,
+    1.6925
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  774 ) ( llama-bench (68996) )",
+    1,
+    0.024333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  775 ) ( llama-bench (68996) )",
+    1,
+    0.268334
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  776 ) ( llama-bench (68996) )",
+    1,
+    1.737417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  777 ) ( llama-bench (68996) )",
+    1,
+    0.03675
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  778 ) ( llama-bench (68996) )",
+    1,
+    0.300791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  779 ) ( llama-bench (68996) )",
+    1,
+    1.661292
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  780 ) ( llama-bench (68996) )",
+    1,
+    0.026416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  781 ) ( llama-bench (68996) )",
+    1,
+    0.250833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  782 ) ( llama-bench (68996) )",
+    1,
+    1.744042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  783 ) ( llama-bench (68996) )",
+    1,
+    0.022417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  784 ) ( llama-bench (68996) )",
+    1,
+    0.343708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  785 ) ( llama-bench (68996) )",
+    1,
+    1.916541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  786 ) ( llama-bench (68996) )",
+    1,
+    0.058958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  787 ) ( llama-bench (68996) )",
+    1,
+    0.257916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  788 ) ( llama-bench (68996) )",
+    1,
+    1.867375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  789 ) ( llama-bench (68996) )",
+    1,
+    0.026875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  790 ) ( llama-bench (68996) )",
+    1,
+    0.280667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  791 ) ( llama-bench (68996) )",
+    1,
+    1.902209
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  792 ) ( llama-bench (68996) )",
+    1,
+    0.02425
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  793 ) ( llama-bench (68996) )",
+    1,
+    0.286042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  794 ) ( llama-bench (68996) )",
+    1,
+    2.02875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  795 ) ( llama-bench (68996) )",
+    1,
+    0.109709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  796 ) ( llama-bench (68996) )",
+    1,
+    0.262
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  797 ) ( llama-bench (68996) )",
+    1,
+    1.801
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  798 ) ( llama-bench (68996) )",
+    1,
+    0.025875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  799 ) ( llama-bench (68996) )",
+    1,
+    0.269459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  800 ) ( llama-bench (68996) )",
+    1,
+    1.932542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  801 ) ( llama-bench (68996) )",
+    1,
+    0.023542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  802 ) ( llama-bench (68996) )",
+    1,
+    0.357875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  803 ) ( llama-bench (68996) )",
+    1,
+    1.7985
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  804 ) ( llama-bench (68996) )",
+    1,
+    0.027208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  805 ) ( llama-bench (68996) )",
+    1,
+    0.2695
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  806 ) ( llama-bench (68996) )",
+    1,
+    1.807958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  807 ) ( llama-bench (68996) )",
+    1,
+    0.026875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  808 ) ( llama-bench (68996) )",
+    1,
+    0.275416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  809 ) ( llama-bench (68996) )",
+    1,
+    1.787417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  810 ) ( llama-bench (68996) )",
+    1,
+    0.028584
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  811 ) ( llama-bench (68996) )",
+    1,
+    0.2945
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  812 ) ( llama-bench (68996) )",
+    1,
+    1.858
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  813 ) ( llama-bench (68996) )",
+    1,
+    0.030208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  814 ) ( llama-bench (68996) )",
+    1,
+    0.274667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  815 ) ( llama-bench (68996) )",
+    1,
+    1.888583
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  816 ) ( llama-bench (68996) )",
+    1,
+    0.025667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  817 ) ( llama-bench (68996) )",
+    1,
+    0.272167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  818 ) ( llama-bench (68996) )",
+    1,
+    1.906041
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  819 ) ( llama-bench (68996) )",
+    1,
+    0.026667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  820 ) ( llama-bench (68996) )",
+    1,
+    0.260375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  821 ) ( llama-bench (68996) )",
+    1,
+    2.169334
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  822 ) ( llama-bench (68996) )",
+    1,
+    0.029417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  823 ) ( llama-bench (68996) )",
+    1,
+    0.30675
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  824 ) ( llama-bench (68996) )",
+    1,
+    1.909416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  825 ) ( llama-bench (68996) )",
+    1,
+    0.027709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  826 ) ( llama-bench (68996) )",
+    1,
+    0.296042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  827 ) ( llama-bench (68996) )",
+    1,
+    1.8545
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  828 ) ( llama-bench (68996) )",
+    1,
+    0.026458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  829 ) ( llama-bench (68996) )",
+    1,
+    0.27575
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  830 ) ( llama-bench (68996) )",
+    1,
+    1.84425
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  831 ) ( llama-bench (68996) )",
+    1,
+    0.030417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  832 ) ( llama-bench (68996) )",
+    1,
+    0.261709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  833 ) ( llama-bench (68996) )",
+    1,
+    1.880958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  834 ) ( llama-bench (68996) )",
+    1,
+    0.028458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  835 ) ( llama-bench (68996) )",
+    1,
+    0.254708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  836 ) ( llama-bench (68996) )",
+    1,
+    1.784291
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  837 ) ( llama-bench (68996) )",
+    1,
+    0.0285
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  838 ) ( llama-bench (68996) )",
+    1,
+    0.27675
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  839 ) ( llama-bench (68996) )",
+    1,
+    3.461791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  840 ) ( llama-bench (68996) )",
+    1,
+    0.031208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  841 ) ( llama-bench (68996) )",
+    1,
+    0.401208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  842 ) ( llama-bench (68996) )",
+    1,
+    3.017
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  843 ) ( llama-bench (68996) )",
+    1,
+    0.055791
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  844 ) ( llama-bench (68996) )",
+    1,
+    0.610083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  845 ) ( llama-bench (68996) )",
+    1,
+    3.008708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  846 ) ( llama-bench (68996) )",
+    1,
+    0.028209
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  847 ) ( llama-bench (68996) )",
+    1,
+    0.483458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  848 ) ( llama-bench (68996) )",
+    1,
+    2.803875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  849 ) ( llama-bench (68996) )",
+    1,
+    0.029792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  850 ) ( llama-bench (68996) )",
+    1,
+    0.28025
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  851 ) ( llama-bench (68996) )",
+    1,
+    3.267667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  852 ) ( llama-bench (68996) )",
+    1,
+    0.03925
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  853 ) ( llama-bench (68996) )",
+    1,
+    0.344167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  854 ) ( llama-bench (68996) )",
+    1,
+    1.95625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  855 ) ( llama-bench (68996) )",
+    1,
+    0.027709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  856 ) ( llama-bench (68996) )",
+    1,
+    0.478584
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  857 ) ( llama-bench (68996) )",
+    1,
+    1.904167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  858 ) ( llama-bench (68996) )",
+    1,
+    0.062958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  859 ) ( llama-bench (68996) )",
+    1,
+    0.395458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  860 ) ( llama-bench (68996) )",
+    1,
+    1.999709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  861 ) ( llama-bench (68996) )",
+    1,
+    0.029458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  862 ) ( llama-bench (68996) )",
+    1,
+    0.264208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  863 ) ( llama-bench (68996) )",
+    1,
+    1.819709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  864 ) ( llama-bench (68996) )",
+    1,
+    0.027041
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  865 ) ( llama-bench (68996) )",
+    1,
+    0.358875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  866 ) ( llama-bench (68996) )",
+    1,
+    2.065209
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  867 ) ( llama-bench (68996) )",
+    1,
+    0.028541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  868 ) ( llama-bench (68996) )",
+    1,
+    0.336916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  869 ) ( llama-bench (68996) )",
+    1,
+    1.853917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  870 ) ( llama-bench (68996) )",
+    1,
+    0.031334
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  871 ) ( llama-bench (68996) )",
+    1,
+    0.266917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  872 ) ( llama-bench (68996) )",
+    1,
+    2.119667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  873 ) ( llama-bench (68996) )",
+    1,
+    0.0285
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  874 ) ( llama-bench (68996) )",
+    1,
+    0.345417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  875 ) ( llama-bench (68996) )",
+    1,
+    3.015417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  876 ) ( llama-bench (68996) )",
+    1,
+    0.030958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  877 ) ( llama-bench (68996) )",
+    1,
+    0.258917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  878 ) ( llama-bench (68996) )",
+    1,
+    2.42725
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  879 ) ( llama-bench (68996) )",
+    1,
+    0.033084
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  880 ) ( llama-bench (68996) )",
+    1,
+    0.302833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  881 ) ( llama-bench (68996) )",
+    1,
+    2.494459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  882 ) ( llama-bench (68996) )",
+    1,
+    0.049833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  883 ) ( llama-bench (68996) )",
+    1,
+    0.518
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  884 ) ( llama-bench (68996) )",
+    1,
+    2.05125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  885 ) ( llama-bench (68996) )",
+    1,
+    0.03275
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  886 ) ( llama-bench (68996) )",
+    1,
+    0.412708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  887 ) ( llama-bench (68996) )",
+    1,
+    2.381375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  888 ) ( llama-bench (68996) )",
+    1,
+    0.030042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  889 ) ( llama-bench (68996) )",
+    1,
+    0.520958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  890 ) ( llama-bench (68996) )",
+    1,
+    3.154833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  891 ) ( llama-bench (68996) )",
+    1,
+    0.029916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  892 ) ( llama-bench (68996) )",
+    1,
+    0.788875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  893 ) ( llama-bench (68996) )",
+    1,
+    2.110958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  894 ) ( llama-bench (68996) )",
+    1,
+    0.032333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  895 ) ( llama-bench (68996) )",
+    1,
+    0.573459
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  896 ) ( llama-bench (68996) )",
+    1,
+    2.908416
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  897 ) ( llama-bench (68996) )",
+    1,
+    0.049708
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  898 ) ( llama-bench (68996) )",
+    1,
+    0.988917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  899 ) ( llama-bench (68996) )",
+    1,
+    3.628291
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  900 ) ( llama-bench (68996) )",
+    1,
+    0.044208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  901 ) ( llama-bench (68996) )",
+    1,
+    0.445625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  902 ) ( llama-bench (68996) )",
+    1,
+    2.791875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  903 ) ( llama-bench (68996) )",
+    1,
+    0.033833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  904 ) ( llama-bench (68996) )",
+    1,
+    0.445916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  905 ) ( llama-bench (68996) )",
+    1,
+    3.423417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  906 ) ( llama-bench (68996) )",
+    1,
+    0.038625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  907 ) ( llama-bench (68996) )",
+    1,
+    0.580958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  908 ) ( llama-bench (68996) )",
+    1,
+    3.887917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  909 ) ( llama-bench (68996) )",
+    1,
+    0.040333
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  910 ) ( llama-bench (68996) )",
+    1,
+    0.30275
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  911 ) ( llama-bench (68996) )",
+    1,
+    2.190542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  912 ) ( llama-bench (68996) )",
+    1,
+    0.042375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  913 ) ( llama-bench (68996) )",
+    1,
+    0.420208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  914 ) ( llama-bench (68996) )",
+    1,
+    2.136166
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  915 ) ( llama-bench (68996) )",
+    1,
+    0.034458
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  916 ) ( llama-bench (68996) )",
+    1,
+    0.610541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  917 ) ( llama-bench (68996) )",
+    1,
+    2.189083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  918 ) ( llama-bench (68996) )",
+    1,
+    0.032875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  919 ) ( llama-bench (68996) )",
+    1,
+    0.457875
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  920 ) ( llama-bench (68996) )",
+    1,
+    2.63725
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  921 ) ( llama-bench (68996) )",
+    1,
+    0.0505
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  922 ) ( llama-bench (68996) )",
+    1,
+    0.64425
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  923 ) ( llama-bench (68996) )",
+    1,
+    3.837916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  924 ) ( llama-bench (68996) )",
+    1,
+    0.031083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  925 ) ( llama-bench (68996) )",
+    1,
+    0.369209
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  926 ) ( llama-bench (68996) )",
+    1,
+    3.803167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  927 ) ( llama-bench (68996) )",
+    1,
+    0.154667
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  928 ) ( llama-bench (68996) )",
+    1,
+    1.250709
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  929 ) ( llama-bench (68996) )",
+    1,
+    4.263375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  930 ) ( llama-bench (68996) )",
+    1,
+    0.119042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  931 ) ( llama-bench (68996) )",
+    1,
+    0.933916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  932 ) ( llama-bench (68996) )",
+    1,
+    4.361542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  933 ) ( llama-bench (68996) )",
+    1,
+    0.031417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  934 ) ( llama-bench (68996) )",
+    1,
+    0.5225
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  935 ) ( llama-bench (68996) )",
+    1,
+    3.328417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  936 ) ( llama-bench (68996) )",
+    1,
+    0.038375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  937 ) ( llama-bench (68996) )",
+    1,
+    0.455541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  938 ) ( llama-bench (68996) )",
+    1,
+    78.596166
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  939 ) ( llama-bench (68996) )",
+    1,
+    1.988584
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  940 ) ( llama-bench (68996) )",
+    1,
+    6.730375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  941 ) ( llama-bench (68996) )",
+    1,
+    41.088542
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  942 ) ( llama-bench (68996) )",
+    1,
+    0.035083
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  943 ) ( llama-bench (68996) )",
+    1,
+    0.323208
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  944 ) ( llama-bench (68996) )",
+    1,
+    7.237209
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  945 ) ( llama-bench (68996) )",
+    1,
+    0.032417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  946 ) ( llama-bench (68996) )",
+    1,
+    1.720792
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  947 ) ( llama-bench (68996) )",
+    1,
+    28.867833
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  948 ) ( llama-bench (68996) )",
+    1,
+    0.042958
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  949 ) ( llama-bench (68996) )",
+    1,
+    0.620959
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  950 ) ( llama-bench (68996) )",
+    1,
+    50.742541
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  951 ) ( llama-bench (68996) )",
+    1,
+    0.0435
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  952 ) ( llama-bench (68996) )",
+    1,
+    0.29375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  953 ) ( llama-bench (68996) )",
+    1,
+    9.26575
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  954 ) ( llama-bench (68996) )",
+    1,
+    0.042625
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  955 ) ( llama-bench (68996) )",
+    1,
+    0.380292
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  956 ) ( llama-bench (68996) )",
+    1,
+    14.587042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  957 ) ( llama-bench (68996) )",
+    1,
+    0.879417
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  958 ) ( llama-bench (68996) )",
+    1,
+    0.308916
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  959 ) ( llama-bench (68996) )",
+    1,
+    2.251209
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  960 ) ( llama-bench (68996) )",
+    1,
+    0.0315
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  961 ) ( llama-bench (68996) )",
+    1,
+    2.473125
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  962 ) ( llama-bench (68996) )",
+    1,
+    2.059042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  963 ) ( llama-bench (68996) )",
+    1,
+    0.029834
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  964 ) ( llama-bench (68996) )",
+    1,
+    0.529042
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  965 ) ( llama-bench (68996) )",
+    1,
+    2.334167
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  966 ) ( llama-bench (68996) )",
+    1,
+    0.03375
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  967 ) ( llama-bench (68996) )",
+    1,
+    0.3025
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  968 ) ( llama-bench (68996) )",
+    1,
+    6.456917
+  ],
+  [
+    "14",
+    "Command Buffer 0  (Frame  969 ) ( llama-bench (68996) )",
+    1,
+    0.177834
+  ]
+]

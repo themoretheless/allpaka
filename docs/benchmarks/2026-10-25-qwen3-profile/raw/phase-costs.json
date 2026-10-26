@@ -1,0 +1,24 @@
+[
+  {
+    "calls": 2,
+    "dispatches": 481,
+    "encode_ms": 0.635171,
+    "gpu_busy_ms": 318.785624,
+    "gpu_schedule_ms": 0.608999,
+    "phase": "prefill",
+    "round": 1,
+    "wait_ms": 319.578959,
+    "wall_ms": 321.110917
+  },
+  {
+    "calls": 32,
+    "dispatches": 23136,
+    "encode_ms": 8.49725,
+    "gpu_busy_ms": 208.671775,
+    "gpu_schedule_ms": 2.314191,
+    "phase": "decode",
+    "round": 1,
+    "wait_ms": 213.906582,
+    "wall_ms": 223.709292
+  }
+]

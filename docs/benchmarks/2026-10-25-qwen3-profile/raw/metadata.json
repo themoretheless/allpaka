@@ -1,0 +1,42 @@
+{
+  "git_head": "1064da42ee0641c063ce36f882f59ca566a52395",
+  "dirty": true,
+  "model": "/Users/themoretheless/.cache/allpaka/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+  "model_sha256": "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5",
+  "frozen_binaries": {
+    "forced-before": {
+      "path": "/tmp/allpaka-profile-20261025/forced-before",
+      "sha256": "8b0d08806251954a2c2957b1e4033cf46605b0d1fcf3cb173e0db12a33a69867"
+    },
+    "forced-after": {
+      "path": "/tmp/allpaka-profile-20261025/forced-after",
+      "sha256": "fd27dd5a5fde0bf84c4bb33e974d8cdd4cc5d1a2d364cfb6700eedd4800600a5"
+    },
+    "llama-matched": {
+      "path": "/tmp/allpaka-profile-20261025/llama-matched",
+      "sha256": "3b6efaa13dd48084e5950a91956fed13f4d22df598aa1103ca87fc79c90ab001"
+    }
+  },
+  "native_llama_version": "0.7.0, build 11669, commit 620d2225c; ggml 0.27.0",
+  "native_traces": [
+    "/tmp/allpaka-profile-20261025/llama.trace",
+    "/tmp/allpaka-profile-20261025/llama-attached.trace"
+  ],
+  "comparison_validated": false,
+  "performance_qualified": false,
+  "notes": [
+    "Six existing dirty source files predate this task and are retained in both builds.",
+    "Matched token streams do not imply bitwise cross-engine numeric equivalence.",
+    "No quiet blocks admitted yet; do not treat smoke rates as isolated throughput."
+  ],
+  "model_hash_verified_this_run": true,
+  "shared_libraries_sha256": {
+    "/opt/homebrew/Cellar/llama.cpp/0.7.0/lib/libllama.0.7.0.dylib": "e6ac848eab1fb74d825354a74b74fca48d61d413a3d0147164d0718050781115",
+    "/opt/homebrew/Cellar/ggml/0.27.0/libexec/libggml-metal.so": "0e7f450879c116699bee6c3bbc3a8630d01d6e4e74e9f918af6dd6b1c7facffa",
+    "/opt/homebrew/Cellar/ggml/0.27.0/lib/libggml-base.0.27.0.dylib": "4b83a188ddd93a32003edbe342aeae7e3726b7aed2c2e7774642f80fb4855d7f"
+  },
+  "source_state_patch_sha256": "11a3d6c7c47755dcd4b71177534f05c800b4d703c6ab52c45548f26bc9f7f0c5",
+  "admitted_blocks": 0,
+  "required_blocks": 6,
+  "quiet_admission_complete": false
+}

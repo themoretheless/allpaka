@@ -1,0 +1,1134 @@
+diff --git a/crates/allpaka-backend/examples/mmbench.rs b/crates/allpaka-backend/examples/mmbench.rs
+index 5dce694..8e8b039 100644
+--- a/crates/allpaka-backend/examples/mmbench.rs
++++ b/crates/allpaka-backend/examples/mmbench.rs
+@@ -124,6 +124,11 @@ fn main() {
+ 
+     let device = Device::system_default().unwrap();
+     let queue = device.new_command_queue();
++    // Freeze reference shaders separately from the executable for paired
++    // kernel measurements; production never reads this benchmark option.
++    let source = std::env::var("MM_SOURCE")
++        .map(|path| std::fs::read_to_string(path).expect("MM_SOURCE shader file"))
++        .unwrap_or_else(|_| allpaka_backend::gpu::KERNELS.to_owned());
+ 
+     let mut w = vec![0u8; w_pool];
+     for (i, b) in w.iter_mut().enumerate() {
+@@ -182,7 +187,7 @@ fn main() {
+ 
+     // --- ours ---
+     let lib = device
+-        .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
++        .new_library_with_source(&source, &CompileOptions::new())
+         .unwrap();
+     let kernel_list: Vec<(&str, u64)> = match fmt.as_str() {
+         "q8_0" => vec![("mmll_q8_0", 32), ("mmllp_q8_0", 32), ("mm64ll_q8_0", 32)],
+@@ -236,7 +241,7 @@ fn main() {
+     // --- mmid (grouped) mode ---
+     if id_mode {
+         let lib = device
+-            .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
++            .new_library_with_source(&source, &CompileOptions::new())
+             .unwrap();
+         // [expert, row0, rows] per group; the pairs spread evenly over the
+         // active experts (in-model: ACT ~= EXP, ~30 rows each at pp480).
+diff --git a/crates/allpaka-backend/src/capability.rs b/crates/allpaka-backend/src/capability.rs
+index 4594608..7f187bd 100644
+--- a/crates/allpaka-backend/src/capability.rs
++++ b/crates/allpaka-backend/src/capability.rs
+@@ -1,5 +1,6 @@
+ //! Backend feature coverage, independent of model-name matching.
+ 
++use crate::memory::MemoryArchitecture;
+ use std::sync::OnceLock;
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+@@ -77,6 +78,14 @@ impl BackendCapabilities {
+         (self.bits & (1u16 << (feature as u8))) != 0
+     }
+ 
++    /// Physical memory topology of the active accelerator backend (`UMA` on
++    /// Apple Silicon Metal, `dUMA` on discrete CUDA GPUs, `HostOnly` when GPU
++    /// acceleration is disabled or unavailable).
++    #[inline]
++    pub fn memory_architecture() -> MemoryArchitecture {
++        crate::gpu::memory_architecture()
++    }
++
+     pub fn coverage(&self, required: &[Feature]) -> CapabilityCoverage {
+         let missing = required
+             .iter()
+diff --git a/crates/allpaka-backend/src/gpu/cuda/mod.rs b/crates/allpaka-backend/src/gpu/cuda/mod.rs
+index c6c712e..70a13cf 100644
+--- a/crates/allpaka-backend/src/gpu/cuda/mod.rs
++++ b/crates/allpaka-backend/src/gpu/cuda/mod.rs
+@@ -89,6 +89,20 @@ pub fn is_attached() -> bool {
+     GPU.get().map_or(false, Option::is_some)
+ }
+ 
++/// Active physical memory architecture for the CUDA backend.
++///
++/// Discrete NVIDIA GPUs operate in `dUMA` mode: device tensors and caches live
++/// in dedicated VRAM (`CudaSlice`), separate from host RAM, requiring explicit
++/// H2D and D2H transfers when state crosses between CPU and GPU.
++#[inline]
++pub fn memory_architecture() -> crate::memory::MemoryArchitecture {
++    if is_attached() {
++        crate::memory::MemoryArchitecture::Duma
++    } else {
++        crate::memory::MemoryArchitecture::HostOnly
++    }
++}
++
+ pub fn init_error() -> Option<String> {
+     None
+ }
+@@ -230,37 +244,13 @@ pub fn ffn_batch(reqs: &[FfnReq]) -> Option<Vec<Vec<f32>>> {
+             if r.x.len() != r.m * r.hidden {
+                 return None;
+             }
+-            let gate = run_matvec(gpu, r.gate_ty, r.gate_w, r.hidden, r.ffn, r.x, r.m)?;
++            let mut gate = run_matvec(gpu, r.gate_ty, r.gate_w, r.hidden, r.ffn, r.x, r.m)?;
+             let up = run_matvec(gpu, r.up_ty, r.up_w, r.hidden, r.ffn, r.x, r.m)?;
+-            gpu.ensure_arenas(r.m * r.ffn * 4, r.m * r.ffn * 4)?;
+-            gpu.stream
+-                .memcpy_htod(&gate, &mut gpu.x_arena.slice_mut(0..gate.len()))
+-                .ok()?;
+-            gpu.stream
+-                .memcpy_htod(&up, &mut gpu.y_arena.slice_mut(0..up.len()))
+-                .ok()?;
+-            {
+-                let f = gpu.func_owned("swiglu")?;
+-                let n = gate.len() as u32;
+-                let cfg = CudaGpu::cfg_1d(n, 256);
+-                let mut g = gpu.x_arena.slice_mut(0..gate.len());
+-                let u = gpu.y_arena.slice(0..up.len());
+-                unsafe {
+-                    gpu.stream
+-                        .launch_builder_pdl(&f)
+-                        .arg(&mut g)
+-                        .arg(&u)
+-                        .arg(&n)
+-                        .launch_pdl(cfg)
+-                }
+-                .ok()?;
+-            }
+-            gpu.sync()?;
+-            let act = gpu
+-                .stream
+-                .clone_dtoh(&gpu.x_arena.slice(0..gate.len()))
+-                .ok()?;
+-            let down = run_matvec(gpu, r.down_ty, r.down_w, r.ffn, r.hidden, &act, r.m)?;
++            // `run_matvec` already materialized `gate` and `up` on the host; on
++            // dUMA, running elementwise SwiGLU in place on the CPU avoids two
++            // redundant H2D uploads and one D2H download across PCIe before `down`.
++            crate::ops::swiglu(&mut gate, &up);
++            let down = run_matvec(gpu, r.down_ty, r.down_w, r.ffn, r.hidden, &gate, r.m)?;
+             outs.push(down);
+         }
+         Some(outs)
+@@ -274,6 +264,28 @@ pub struct SharedRegion {
+     host: usize,
+ }
+ 
++impl SharedRegion {
++    /// Memory architecture backing this region (`dUMA` discrete VRAM buffer).
++    #[inline]
++    pub const fn architecture(&self) -> crate::memory::MemoryArchitecture {
++        crate::memory::MemoryArchitecture::Duma
++    }
++
++    /// False on dUMA: `buf` is a separate `CudaSlice<u8>` in device VRAM, not
++    /// a zero-copy alias of the host allocation.
++    #[inline]
++    pub const fn is_unified(&self) -> bool {
++        false
++    }
++
++    /// True on dUMA: host and device buffers are physically distinct and must
++    /// be synchronized via `upload_region_range` (H2D) / `download_region_range` (D2H).
++    #[inline]
++    pub const fn is_discrete(&self) -> bool {
++        true
++    }
++}
++
+ unsafe impl Send for SharedRegion {}
+ unsafe impl Sync for SharedRegion {}
+ 
+@@ -300,6 +312,9 @@ pub fn upload_region_range(region: &mut SharedRegion, offset: usize, data: &[u8]
+     if end > region.len {
+         return false;
+     }
++    if data.is_empty() {
++        return true;
++    }
+     with_gpu(|gpu| {
+         gpu.stream
+             .memcpy_htod(data, &mut region.buf.slice_mut(offset..end))
+@@ -309,6 +324,25 @@ pub fn upload_region_range(region: &mut SharedRegion, offset: usize, data: &[u8]
+     .is_some()
+ }
+ 
++pub fn download_region_range(region: &SharedRegion, offset: usize, dst: &mut [u8]) -> bool {
++    let Some(end) = offset.checked_add(dst.len()) else {
++        return false;
++    };
++    if end > region.len {
++        return false;
++    }
++    if dst.is_empty() {
++        return true;
++    }
++    with_gpu(|gpu| {
++        gpu.stream
++            .memcpy_dtoh(&region.buf.slice(offset..end), dst)
++            .ok()?;
++        Some(())
++    })
++    .is_some()
++}
++
+ pub fn decode_attention_capacity_safe(capacity: usize) -> bool {
+     let native = std::env::var("ALLPAKA_NATIVE_ATTEND")
+         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+@@ -4137,31 +4171,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
+                 return None;
+             }
+             let w = norm_f32_bytes(f.attn_norm, hidden)?;
+-            let mut dw = unsafe { gpu.stream.alloc::<f32>(hidden) }.ok()?;
+-            gpu.stream.memcpy_htod(&w, &mut dw).ok()?;
+-            let f_rms = gpu.func_owned("rmsnorm_into_f32")?;
+-            let n = hidden as u32;
+-            let rows = req.m as u32;
+-            let eps = req.eps;
+-            let cfg = LaunchConfig {
+-                grid_dim: (rows, 1, 1),
+-                block_dim: (256, 1, 1),
+-                shared_mem_bytes: 0,
+-            };
+-            let src = gpu.pf_x.slice(0..req.m * hidden);
+-            let mut dst = gpu.pf_hs.slice_mut(0..req.m * hidden);
+-            unsafe {
+-                gpu.stream
+-                    .launch_builder_pdl(&f_rms)
+-                    .arg(&mut dst)
+-                    .arg(&src)
+-                    .arg(&dw)
+-                    .arg(&n)
+-                    .arg(&eps)
+-                    .arg(&rows)
+-                    .launch_pdl(cfg)
+-            }
+-            .ok()?;
++            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
+             gpu.sync()?;
+             gpu.stream
+                 .clone_dtoh(&gpu.pf_hs.slice(0..req.m * hidden))
+@@ -4343,33 +4353,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
+                 .ok()?;
+             }
+             let w = norm_f32_bytes(f.ffn_norm, hidden)?;
+-            let mut dw = unsafe { gpu.stream.alloc::<f32>(hidden) }.ok()?;
+-            gpu.stream.memcpy_htod(&w, &mut dw).ok()?;
+-            {
+-                let f_rms = gpu.func_owned("rmsnorm_into_f32")?;
+-                let n = hidden as u32;
+-                let rows = req.m as u32;
+-                let eps = req.eps;
+-                let cfg = LaunchConfig {
+-                    grid_dim: (rows, 1, 1),
+-                    block_dim: (256, 1, 1),
+-                    shared_mem_bytes: 0,
+-                };
+-                let src = gpu.pf_x.slice(0..req.m * hidden);
+-                let mut dst = gpu.pf_hs.slice_mut(0..req.m * hidden);
+-                unsafe {
+-                    gpu.stream
+-                        .launch_builder_pdl(&f_rms)
+-                        .arg(&mut dst)
+-                        .arg(&src)
+-                        .arg(&dw)
+-                        .arg(&n)
+-                        .arg(&eps)
+-                        .arg(&rows)
+-                        .launch_pdl(cfg)
+-                }
+-                .ok()?;
+-            }
++            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
+             gpu.sync()?;
+             if f.n_expert == 0 {
+                 return Some(Vec::new());
+@@ -4420,31 +4404,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
+                     return None;
+                 }
+                 let w = norm_f32_bytes(f.ffn_norm, req.hidden)?;
+-                let mut dw = unsafe { gpu.stream.alloc::<f32>(req.hidden) }.ok()?;
+-                gpu.stream.memcpy_htod(&w, &mut dw).ok()?;
+-                let f_rms = gpu.func_owned("rmsnorm_into_f32")?;
+-                let n = req.hidden as u32;
+-                let rows = req.m as u32;
+-                let eps = req.eps;
+-                let cfg = LaunchConfig {
+-                    grid_dim: (rows, 1, 1),
+-                    block_dim: (256, 1, 1),
+-                    shared_mem_bytes: 0,
+-                };
+-                let src = gpu.pf_x.slice(0..req.m * req.hidden);
+-                let mut dst = gpu.pf_hs.slice_mut(0..req.m * req.hidden);
+-                unsafe {
+-                    gpu.stream
+-                        .launch_builder_pdl(&f_rms)
+-                        .arg(&mut dst)
+-                        .arg(&src)
+-                        .arg(&dw)
+-                        .arg(&n)
+-                        .arg(&eps)
+-                        .arg(&rows)
+-                        .launch_pdl(cfg)
+-                }
+-                .ok()?;
++                rmsnorm_pf_x_into_hs(gpu, &w, req.hidden, req.m, req.eps)?;
+                 gpu.sync()?;
+                 if f.n_expert == 0 {
+                     return Some(Vec::new());
+@@ -4499,31 +4459,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
+                 return None;
+             }
+             let w = norm_f32_bytes(f.attn_norm, hidden)?;
+-            let mut dw = unsafe { gpu.stream.alloc::<f32>(hidden) }.ok()?;
+-            gpu.stream.memcpy_htod(&w, &mut dw).ok()?;
+-            let f_rms = gpu.func_owned("rmsnorm_into_f32")?;
+-            let n = hidden as u32;
+-            let rows = req.m as u32;
+-            let eps = req.eps;
+-            let cfg = LaunchConfig {
+-                grid_dim: (rows, 1, 1),
+-                block_dim: (256, 1, 1),
+-                shared_mem_bytes: 0,
+-            };
+-            let src = gpu.pf_x.slice(0..req.m * hidden);
+-            let mut dst = gpu.pf_hs.slice_mut(0..req.m * hidden);
+-            unsafe {
+-                gpu.stream
+-                    .launch_builder_pdl(&f_rms)
+-                    .arg(&mut dst)
+-                    .arg(&src)
+-                    .arg(&dw)
+-                    .arg(&n)
+-                    .arg(&eps)
+-                    .arg(&rows)
+-                    .launch_pdl(cfg)
+-            }
+-            .ok()?;
++            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
+             gpu.sync()?;
+             gpu.stream
+                 .clone_dtoh(&gpu.pf_hs.slice(0..req.m * hidden))
+@@ -4858,33 +4794,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
+                 .ok()?;
+             }
+             let w = norm_f32_bytes(f.ffn_norm, hidden)?;
+-            let mut dw = unsafe { gpu.stream.alloc::<f32>(hidden) }.ok()?;
+-            gpu.stream.memcpy_htod(&w, &mut dw).ok()?;
+-            {
+-                let f_rms = gpu.func_owned("rmsnorm_into_f32")?;
+-                let n = hidden as u32;
+-                let rows = req.m as u32;
+-                let eps = req.eps;
+-                let cfg = LaunchConfig {
+-                    grid_dim: (rows, 1, 1),
+-                    block_dim: (256, 1, 1),
+-                    shared_mem_bytes: 0,
+-                };
+-                let src = gpu.pf_x.slice(0..req.m * hidden);
+-                let mut dst = gpu.pf_hs.slice_mut(0..req.m * hidden);
+-                unsafe {
+-                    gpu.stream
+-                        .launch_builder_pdl(&f_rms)
+-                        .arg(&mut dst)
+-                        .arg(&src)
+-                        .arg(&dw)
+-                        .arg(&n)
+-                        .arg(&eps)
+-                        .arg(&rows)
+-                        .launch_pdl(cfg)
+-                }
+-                .ok()?;
+-            }
++            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
+             gpu.sync()?;
+             if f.n_expert == 0 {
+                 return Some(Vec::new());
+@@ -5089,25 +4999,23 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
+     }
+ 
+     // Fused prefill leaves normed activations in pf_hs; `x` is often empty.
+-    let mut gathered = vec![0f32; total_rows * req.hidden];
+-    if let Some(hs) = act_src.as_ref() {
+-        for (r, &t) in tok.iter().enumerate() {
+-            let s = (t as usize) * req.hidden;
+-            if s + req.hidden > hs.len() {
+-                return None;
+-            }
+-            gathered[r * req.hidden..(r + 1) * req.hidden].copy_from_slice(&hs[s..s + req.hidden]);
+-        }
+-    } else if fused.is_some() && req.x.is_empty() {
++    // Cache `pf_hs` on the host once on dUMA so the shared-expert pass below
++    // does not perform a second PCIe D2H transfer of the same activation block.
++    let mut act_src = act_src;
++    if act_src.is_none() && fused.is_some() && req.x.is_empty() {
+         let m = fused.as_ref()?.m;
+-        let hs = with_gpu(|gpu| {
++        act_src = Some(with_gpu(|gpu| {
+             if !gpu.pf_active {
+                 return None;
+             }
+             gpu.stream
+                 .clone_dtoh(&gpu.pf_hs.slice(0..m * req.hidden))
+                 .ok()
+-        })?;
++        })?);
++    }
++
++    let mut gathered = vec![0f32; total_rows * req.hidden];
++    if let Some(hs) = act_src.as_ref() {
+         for (r, &t) in tok.iter().enumerate() {
+             let s = (t as usize) * req.hidden;
+             if s + req.hidden > hs.len() {
+@@ -5185,17 +5093,25 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
+     }
+ 
+     if let (Some(sh), Some(comb)) = (&req.shared, fused) {
+-        let hs = with_gpu(|gpu| {
+-            if !gpu.pf_active {
+-                return None;
+-            }
+-            gpu.stream
+-                .clone_dtoh(&gpu.pf_hs.slice(0..comb.m * req.hidden))
+-                .ok()
+-        })?;
++        let hs_owned;
++        let hs: &[f32] = if let Some(hs) = act_src.as_deref() {
++            hs
++        } else if !req.x.is_empty() && req.x.len() >= comb.m * req.hidden {
++            &req.x[..comb.m * req.hidden]
++        } else {
++            hs_owned = with_gpu(|gpu| {
++                if !gpu.pf_active {
++                    return None;
++                }
++                gpu.stream
++                    .clone_dtoh(&gpu.pf_hs.slice(0..comb.m * req.hidden))
++                    .ok()
++            })?;
++            &hs_owned
++        };
+         let g =
+-            with_gpu(|gpu| run_matvec(gpu, sh.gate.0, sh.gate.1, req.hidden, sh.ffn, &hs, comb.m))?;
+-        let u = with_gpu(|gpu| run_matvec(gpu, sh.up.0, sh.up.1, req.hidden, sh.ffn, &hs, comb.m))?;
++            with_gpu(|gpu| run_matvec(gpu, sh.gate.0, sh.gate.1, req.hidden, sh.ffn, hs, comb.m))?;
++        let u = with_gpu(|gpu| run_matvec(gpu, sh.up.0, sh.up.1, req.hidden, sh.ffn, hs, comb.m))?;
+         let mut act = g;
+         crate::ops::swiglu(&mut act, &u);
+         let d = with_gpu(|gpu| {
+diff --git a/crates/allpaka-backend/src/gpu/metal.rs b/crates/allpaka-backend/src/gpu/metal.rs
+index 9fd4f5d..65f01d4 100644
+--- a/crates/allpaka-backend/src/gpu/metal.rs
++++ b/crates/allpaka-backend/src/gpu/metal.rs
+@@ -323,6 +323,21 @@ pub fn is_attached() -> bool {
+     GPU.get().is_some_and(Option::is_some)
+ }
+ 
++/// Active physical memory architecture for the Metal backend.
++///
++/// Apple Silicon GPUs use Unified Memory Architecture (`UMA`): CPU and GPU
++/// share physical RAM, and `StorageModeShared` buffers created with
++/// `newBufferWithBytesNoCopy` alias host allocations directly without H2D/D2H
++/// copies.
++#[inline]
++pub fn memory_architecture() -> crate::memory::MemoryArchitecture {
++    if is_attached() {
++        crate::memory::MemoryArchitecture::Uma
++    } else {
++        crate::memory::MemoryArchitecture::HostOnly
++    }
++}
++
+ static INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
+ 
+ /// Why the Metal device was not attached: no device, a kernel compile error
+@@ -1792,6 +1807,27 @@ pub struct SharedRegion {
+     len: usize,
+ }
+ 
++impl SharedRegion {
++    /// Memory architecture backing this region (`UMA` zero-copy shared memory).
++    #[inline]
++    pub const fn architecture(&self) -> crate::memory::MemoryArchitecture {
++        crate::memory::MemoryArchitecture::Uma
++    }
++
++    /// True because Metal `StorageModeShared` aliases the host allocation in
++    /// unified physical memory without separate device VRAM storage.
++    #[inline]
++    pub const fn is_unified(&self) -> bool {
++        true
++    }
++
++    /// False on UMA: host and GPU share the same physical bytes.
++    #[inline]
++    pub const fn is_discrete(&self) -> bool {
++        false
++    }
++}
++
+ // The buffer is an ObjC refcounted handle; the region it wraps is owned by
+ // the caller, who is responsible for not writing it while a kernel reads it
+ // (the forward pass stores the step, then attends, in that order).
+@@ -1838,6 +1874,22 @@ pub fn upload_region_range(region: &mut SharedRegion, offset: usize, data: &[u8]
+     true
+ }
+ 
++pub fn download_region_range(region: &SharedRegion, offset: usize, dst: &mut [u8]) -> bool {
++    if offset.saturating_add(dst.len()) > region.len {
++        return false;
++    }
++    if dst.is_empty() {
++        return true;
++    }
++    unsafe {
++        let src = (region.buf.contents() as *const u8).add(offset);
++        if !std::ptr::eq(src, dst.as_ptr()) {
++            std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len());
++        }
++    }
++    true
++}
++
+ pub fn decode_attention_capacity_safe(_capacity: usize) -> bool {
+     true
+ }
+@@ -9658,7 +9710,11 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
+                 MTLSize::new(256, 1, 1),
+             );
+         }
+-        if !no_barrier() && !no_stage_barrier() {
++        // Only the shared expert's down projection consumes the swiglu
++        // written above. Without a shared expert, the combine barrier below
++        // already orders all expert down outputs; draining the same arena
++        // here would add a second barrier without an intervening dispatch.
++        if req.shared.is_some() && !no_barrier() && !no_stage_barrier() {
+             enc.memory_barrier_with_resources(&[y]);
+         }
+         split_here!("down");
+diff --git a/crates/allpaka-backend/src/gpu/metal_kernels.rs b/crates/allpaka-backend/src/gpu/metal_kernels.rs
+index 0321a27..552cf37 100644
+--- a/crates/allpaka-backend/src/gpu/metal_kernels.rs
++++ b/crates/allpaka-backend/src/gpu/metal_kernels.rs
+@@ -4736,6 +4736,10 @@ DEFINE_MM_LL_NK(mm64ll_f32, BlkF32, 1, dqll_f32, (ulong)n_in * 4, 64)
+ // tile, plus the MmGroup indirection of DEFINE_MM_ID. Grid z picks the
+ // group; a threadgroup whose token tile lies past its group's rows exits
+ // whole before the first barrier (uniform), like the old kernel.
++// Tail stores use disjoint 64-float scratch slices per SIMD group. Only
++// entering/leaving that scratch needs a whole-threadgroup barrier: inside
++// the eight stores, synchronize the owning SIMD group instead. This matters
++// for MoE's short expert batches, where most tiles take the tail branch.
+ #define DEFINE_MM_ID_LL_NK(NAME, BLOCK_T, NL, DQ, ROW_BYTES, GATHER, NK, SWIGLU, DUAL) \
+ kernel void NAME(                                                              \
+     device const uchar* w [[buffer(0)]],                                       \
+@@ -4871,10 +4875,11 @@ kernel void NAME(                                                              \
+         }                                                                      \
+     } else {                                                                   \
+         threadgroup float* temp_str = shmem_f + sgitg * 64;                    \
++        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+         for (short i = 0; i < 8; i++) {                                        \
+-            threadgroup_barrier(mem_flags::mem_threadgroup);                   \
++            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
+             simdgroup_store(mc[i], temp_str, 8, 0, false);                     \
+-            threadgroup_barrier(mem_flags::mem_threadgroup);                   \
++            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
+             const short cc0 = 8 * (i % 4) + 32 * (sgitg & 1);                  \
+             const short rr0 = 8 * (i / 4) + 16 * (sgitg >> 1);                 \
+             for (short e = tiitg % 32; e < 64; e += 32) {                      \
+@@ -4885,6 +4890,7 @@ kernel void NAME(                                                              \
+                 }                                                              \
+             }                                                                  \
+         }                                                                      \
++        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+     }                                                                          \
+     }                                                                          \
+ }
+@@ -5065,10 +5071,11 @@ kernel void NAME(                                                              \
+         }                                                                      \
+     } else {                                                                   \
+         threadgroup float* temp_str = shmem_f + sgitg * 64;                    \
++        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+         for (short i = 0; i < 8; i++) {                                        \
+-            threadgroup_barrier(mem_flags::mem_threadgroup);                   \
++            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
+             simdgroup_store(mc[i], temp_str, 8, 0, false);                     \
+-            threadgroup_barrier(mem_flags::mem_threadgroup);                   \
++            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
+             const short cc0 = 8 * (i % 4) + 32 * (sgitg & 1);                  \
+             const short rr0 = 8 * (i / 4) + 16 * (sgitg >> 1);                 \
+             for (short e = tiitg % 32; e < 64; e += 32) {                      \
+@@ -5079,6 +5086,7 @@ kernel void NAME(                                                              \
+                 }                                                              \
+             }                                                                  \
+         }                                                                      \
++        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+     }                                                                          \
+     }                                                                          \
+ }
+diff --git a/crates/allpaka-backend/src/gpu/stub.rs b/crates/allpaka-backend/src/gpu/stub.rs
+index ab7ea80..3aac48e 100644
+--- a/crates/allpaka-backend/src/gpu/stub.rs
++++ b/crates/allpaka-backend/src/gpu/stub.rs
+@@ -30,6 +30,10 @@ pub fn is_attached() -> bool {
+     false
+ }
+ 
++pub fn memory_architecture() -> crate::memory::MemoryArchitecture {
++    crate::memory::MemoryArchitecture::HostOnly
++}
++
+ pub fn init_error() -> Option<String> {
+     None
+ }
+@@ -92,6 +96,23 @@ pub fn ffn_batch(_reqs: &[FfnReq]) -> Option<Vec<Vec<f32>>> {
+ 
+ pub struct SharedRegion;
+ 
++impl SharedRegion {
++    #[inline]
++    pub const fn architecture(&self) -> crate::memory::MemoryArchitecture {
++        crate::memory::MemoryArchitecture::HostOnly
++    }
++
++    #[inline]
++    pub const fn is_unified(&self) -> bool {
++        false
++    }
++
++    #[inline]
++    pub const fn is_discrete(&self) -> bool {
++        false
++    }
++}
++
+ pub fn wrap_region(_region: &[u8]) -> Option<SharedRegion> {
+     None
+ }
+@@ -100,6 +121,10 @@ pub fn upload_region_range(_region: &mut SharedRegion, _offset: usize, _data: &[
+     false
+ }
+ 
++pub fn download_region_range(_region: &SharedRegion, _offset: usize, _dst: &mut [u8]) -> bool {
++    false
++}
++
+ pub fn decode_attention_capacity_safe(_capacity: usize) -> bool {
+     true
+ }
+diff --git a/crates/allpaka-backend/src/memory.rs b/crates/allpaka-backend/src/memory.rs
+index 29eb0ed..8cf568c 100644
+--- a/crates/allpaka-backend/src/memory.rs
++++ b/crates/allpaka-backend/src/memory.rs
+@@ -1,10 +1,81 @@
+-//! Backend-neutral byte reservations tied to resource ownership.
++//! Backend-neutral byte reservations tied to resource ownership, plus explicit
++//! UMA vs dUMA memory architecture classification.
+ //!
+ //! Reserve before allocating. Keep the lease alongside the allocation and,
+ //! for asynchronous devices, until the last command using it has completed.
+ use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::Arc;
+ 
++/// Physical memory topology between host CPU and accelerator GPU.
++///
++/// * [`MemoryArchitecture::Uma`] — Unified Memory Architecture (e.g. Apple
++///   Silicon Metal): CPU and GPU address the same physical RAM pool. Page-aligned
++///   host allocations wrapped via `newBufferWithBytesNoCopy` (`StorageModeShared`)
++///   are read and mutated in place by both processors without H2D/D2H copies.
++/// * [`MemoryArchitecture::Duma`] — Discrete / non-unified memory architecture
++///   (e.g. discrete NVIDIA CUDA GPUs): GPU kernels read and mutate dedicated
++///   VRAM (`CudaSlice`), requiring explicit Host-to-Device (H2D) and
++///   Device-to-Host (D2H) transfers across PCIe/NVLink when state crosses
++///   between CPU and GPU.
++/// * [`MemoryArchitecture::HostOnly`] — No accelerator attached; all buffers
++///   live solely in host RAM.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
++pub enum MemoryArchitecture {
++    /// Unified Memory Architecture (shared physical RAM pool between CPU and GPU).
++    Uma,
++    /// Discrete Memory Architecture (separate host RAM and device VRAM).
++    Duma,
++    /// Host CPU memory only (no GPU backend active).
++    HostOnly,
++}
++
++impl MemoryArchitecture {
++    /// True when CPU and GPU share the same physical memory pool (`UMA`),
++    /// allowing zero-copy buffer aliasing without H2D/D2H transfers.
++    #[inline]
++    pub const fn is_unified(self) -> bool {
++        matches!(self, Self::Uma)
++    }
++
++    /// True when GPU execution uses discrete device VRAM (`dUMA`) that must be
++    /// explicitly synchronized with host RAM via H2D/D2H copies.
++    #[inline]
++    pub const fn is_discrete(self) -> bool {
++        matches!(self, Self::Duma)
++    }
++
++    /// True when host-side mutations to a wrapped region require an explicit
++    /// upload (`H2D`) and GPU-side mutations require an explicit download (`D2H`)
++    /// before the other processor can observe them.
++    #[inline]
++    pub const fn requires_explicit_sync(self) -> bool {
++        matches!(self, Self::Duma)
++    }
++
++    /// True when page-aligned host memory can be wrapped in place for GPU
++    /// kernels without allocating a separate device buffer.
++    #[inline]
++    pub const fn supports_zero_copy_aliases(self) -> bool {
++        matches!(self, Self::Uma)
++    }
++
++    /// Short human-readable label for diagnostics and telemetry.
++    #[inline]
++    pub const fn as_str(self) -> &'static str {
++        match self {
++            Self::Uma => "UMA (unified shared memory)",
++            Self::Duma => "dUMA (discrete device memory)",
++            Self::HostOnly => "host-only RAM",
++        }
++    }
++}
++
++impl std::fmt::Display for MemoryArchitecture {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str(self.as_str())
++    }
++}
++
+ #[derive(Clone)]
+ pub struct Budget(Arc<State>);
+ struct State {
+@@ -160,4 +231,21 @@ mod tests {
+         assert_eq!(budget.snapshot().reserved_bytes, 0);
+         assert_eq!(budget.snapshot().peak_reserved_bytes, 100);
+     }
++    #[test]
++    fn memory_architecture_distinguishes_uma_and_duma_invariants() {
++        assert!(MemoryArchitecture::Uma.is_unified());
++        assert!(!MemoryArchitecture::Uma.is_discrete());
++        assert!(!MemoryArchitecture::Uma.requires_explicit_sync());
++        assert!(MemoryArchitecture::Uma.supports_zero_copy_aliases());
++
++        assert!(!MemoryArchitecture::Duma.is_unified());
++        assert!(MemoryArchitecture::Duma.is_discrete());
++        assert!(MemoryArchitecture::Duma.requires_explicit_sync());
++        assert!(!MemoryArchitecture::Duma.supports_zero_copy_aliases());
++
++        assert!(!MemoryArchitecture::HostOnly.is_unified());
++        assert!(!MemoryArchitecture::HostOnly.is_discrete());
++        assert!(!MemoryArchitecture::HostOnly.requires_explicit_sync());
++        assert!(!MemoryArchitecture::HostOnly.supports_zero_copy_aliases());
++    }
+ }
+diff --git a/crates/allpaka-model/examples/shared_activation_bench.rs b/crates/allpaka-model/examples/shared_activation_bench.rs
+index f74e588..600ef0c 100644
+--- a/crates/allpaka-model/examples/shared_activation_bench.rs
++++ b/crates/allpaka-model/examples/shared_activation_bench.rs
+@@ -10,7 +10,8 @@ use std::{path::Path, time::Instant};
+ fn main() -> Result<()> {
+     let args: Vec<String> = std::env::args().collect();
+     let file = GgufFile::open(Path::new(
+-        args.get(1).expect("MODEL [PP=512] [ROUNDS=5] [greedy]"),
++        args.get(1)
++            .expect("MODEL [PP=512] [ROUNDS=5] [greedy|forced]"),
+     ))?;
+     let model = Model::load(&file)?;
+     ensure!(
+@@ -22,26 +23,38 @@ fn main() -> Result<()> {
+     let rounds: usize = args.get(3).map_or(Ok(5), |s| s.parse())?;
+     ensure!(pp > 0 && rounds > 0, "nonzero sizes required");
+     let greedy = args.get(4).is_some_and(|s| s == "greedy");
++    // Fixed inputs and full logits match scripts/llama-matched-bench.cpp,
++    // avoiding a comparison of greedy vs random MoE expert selections.
++    let forced = args.get(4).is_some_and(|s| s == "forced");
++    let token_at = |i: usize| ((i as u32 + 32) * 733 + 17) % model.config.vocab.min(30000);
+     let tokens: Vec<u32> = (0..pp)
+         .map(|i| {
+-            ((i as u32 + if greedy { 32 } else { 0 }) * 733 + 17) % model.config.vocab.min(30000)
++            ((i as u32 + if greedy || forced { 32 } else { 0 }) * 733 + 17)
++                % model.config.vocab.min(30000)
+         })
+         .collect();
+     let mut prefill = Vec::new();
+     let mut decode = Vec::new();
+     let mut final_logits = Vec::new();
++    let mut decode_final_logits = Vec::new();
+     let mut generated = Vec::new();
+     let mut fast_path = Vec::new();
++    let mut phase_costs = Vec::new();
+     let stats_before = gpu::shared_activation_stats();
+     let gpu_before = gpu::stats();
+     for round in 0..=rounds {
+         let mut session = model.new_session(pp + 33);
++        let prefill_gpu = gpu::stats();
++        let prefill_clock = gpu::gpu_time_stats();
+         let start = Instant::now();
+         let mut logits = Vec::new();
+         for chunk in tokens.chunks(Model::prefill_chunk()) {
+             logits = model.forward_batch(chunk, &mut session)?;
+         }
+         let seconds = start.elapsed().as_secs_f64();
++        if round > 0 {
++            phase_costs.push(costs("prefill", round, seconds, prefill_gpu, prefill_clock));
++        }
+         ensure!(
+             !logits.is_empty() && logits.iter().all(|x| x.is_finite()),
+             "invalid logits"
+@@ -52,7 +65,7 @@ fn main() -> Result<()> {
+         final_logits = logits.clone();
+         // Identical one-token initial context, independent of prefill timing.
+         let mut session = model.new_session(33);
+-        logits = if greedy {
++        logits = if greedy || forced {
+             model.forward_batch(&[1], &mut session)?
+         } else {
+             model.forward(17, &mut session)?
+@@ -67,8 +80,14 @@ fn main() -> Result<()> {
+                 .0 as u32
+         });
+         let path_before = gpu::decode_path_stats();
++        let decode_gpu = gpu::stats();
++        let decode_clock = gpu::gpu_time_stats();
+         let start = Instant::now();
+-        if let Some(seed) = greedy_seed {
++        if forced {
++            for i in 0..32 {
++                logits = model.forward(token_at(i), &mut session)?;
++            }
++        } else if let Some(seed) = greedy_seed {
+             generated = model.forward_greedy_n(seed, &mut session, 32)?;
+             ensure!(
+                 generated.len() == 32 && session.pos() == 33,
+@@ -87,11 +106,14 @@ fn main() -> Result<()> {
+             }
+         }
+         let seconds = start.elapsed().as_secs_f64();
++        if round > 0 {
++            phase_costs.push(costs("decode", round, seconds, decode_gpu, decode_clock));
++        }
+         let path_after = gpu::decode_path_stats();
+         let attempts = path_after.attempts - path_before.attempts;
+         let successes = path_after.successes - path_before.successes;
+         let declines = path_after.declines - path_before.declines;
+-        if greedy {
++        if greedy || forced {
+             ensure!(
+                 attempts == 32 && successes == 32 && declines == 0,
+                 "incomplete GPU decode coverage: {attempts}/{successes}/{declines}"
+@@ -101,6 +123,13 @@ fn main() -> Result<()> {
+         if round > 0 {
+             decode.push(32.0 / seconds);
+         }
++        if forced {
++            ensure!(
++                session.pos() == 33 && logits.iter().all(|v| v.is_finite()),
++                "invalid forced decode"
++            );
++            decode_final_logits = logits;
++        }
+     }
+     let stats = gpu::shared_activation_stats();
+     let gpu_after = gpu::stats();
+@@ -108,13 +137,16 @@ fn main() -> Result<()> {
+         "{}",
+         json!({
+             "model": args[1], "pp": pp, "rounds": rounds, "warmup_rounds": 1,
+-            "decode_kind": if greedy { "forward_greedy_n" } else { "forward" },
++            "decode_kind": if forced { "forced_full_logits" } else if greedy { "forward_greedy_n" } else { "forward" },
+             "decode_context_tokens": 1, "decode_tokens": 32, "kv_format": "f16",
+             "hidden": model.config.hidden, "architecture": model.config.architecture,
+             "decode_fast_path": fast_path,
++            "phase_costs": phase_costs,
+             "zero_copy": std::env::var("ALLPAKA_PREFILL_ZERO_COPY").unwrap_or_else(|_| "1".into()),
+             "prefill_tokens_per_second": prefill, "decode_tokens_per_second": decode,
+             "generated": generated, "prefill_logits": final_logits,
++            "decode_final_logits": decode_final_logits,
++            "forced_decode_inputs": if forced { (0..32).map(token_at).collect::<Vec<_>>() } else { Vec::new() },
+             "shared_outputs": stats.outputs-stats_before.outputs,
+             "handoff_bytes_avoided": stats.handoff_bytes-stats_before.handoff_bytes,
+             "projection_bytes_avoided": stats.projection_bytes-stats_before.projection_bytes,
+@@ -123,3 +155,24 @@ fn main() -> Result<()> {
+     );
+     Ok(())
+ }
++
++// Encode and wait are CPU wall spans; GPU execution and scheduling can
++// overlap them. These columns must not be summed into an additive split.
++fn costs(
++    phase: &str,
++    round: usize,
++    seconds: f64,
++    before: (u64, u64, u64, u64),
++    clock_before: (u64, u64),
++) -> serde_json::Value {
++    let after = gpu::stats();
++    let clock = gpu::gpu_time_stats();
++    json!({
++        "phase": phase, "round": round, "wall_ms": seconds * 1e3,
++        "calls": after.0 - before.0, "dispatches": after.1 - before.1,
++        "encode_ms": (after.2 - before.2) as f64 / 1e6,
++        "wait_ms": (after.3 - before.3) as f64 / 1e6,
++        "gpu_busy_ms": (clock.0 - clock_before.0) as f64 / 1e6,
++        "gpu_schedule_ms": (clock.1 - clock_before.1) as f64 / 1e6,
++    })
++}
+diff --git a/crates/allpaka-model/src/kv.rs b/crates/allpaka-model/src/kv.rs
+index 322e7a2..ce9d976 100644
+--- a/crates/allpaka-model/src/kv.rs
++++ b/crates/allpaka-model/src/kv.rs
+@@ -84,6 +84,10 @@ impl Region {
+     fn as_bytes(&self) -> &[u8] {
+         unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.elems * 2) }
+     }
++
++    fn as_bytes_mut(&mut self) -> &mut [u8] {
++        unsafe { std::slice::from_raw_parts_mut(self.ptr as *mut u8, self.elems * 2) }
++    }
+ }
+ 
+ impl Drop for Region {
+@@ -243,16 +247,34 @@ impl SsmCache {
+ 
+     /// Roll the recurrence back to "after chunk row `i`": one contiguous
+     /// copy, the slot layout mirrors the region.
++    ///
++    /// * On **UMA** (Metal Unified Memory): `slot_shared` and `shared` alias
++    ///   `slot_store` and `store` directly, so copying `slot(i)` into `store`
++    ///   in host RAM immediately updates the GPU-visible buffer in place.
++    /// * On **dUMA** (discrete CUDA VRAM): GPU batch kernels wrote slot `i`
++    ///   into `slot_shared` in VRAM, so we first download slot `i` from VRAM
++    ///   (when discrete) and then upload the restored state into `shared`.
+     pub fn restore_slot(&mut self, i: usize) {
+         let n = self.total_elems();
++        let byte_len = n * 4;
++        let slot_byte_off = i * byte_len;
++        if let (Some(slot_sh), Some(slot_st)) = (self.slot_shared.as_ref(), self.slot_store.as_mut())
++        {
++            if slot_sh.is_discrete() {
++                let dst = &mut slot_st.as_bytes_mut()[slot_byte_off..slot_byte_off + byte_len];
++                allpaka_backend::gpu::download_region_range(slot_sh, slot_byte_off, dst);
++            }
++        }
+         unsafe {
+             let sp = self.slot(i).as_ptr();
+             let dp = self.store.as_mut_slice().as_mut_ptr() as *mut f32;
+             std::ptr::copy_nonoverlapping(sp, dp, n);
+         }
+         if let Some(sh) = self.shared.as_mut() {
+-            let bytes = &self.store.as_bytes()[..n * 4];
+-            allpaka_backend::gpu::upload_region_range(sh, 0, bytes);
++            if sh.is_discrete() {
++                let bytes = &self.store.as_bytes()[..byte_len];
++                allpaka_backend::gpu::upload_region_range(sh, 0, bytes);
++            }
+         }
+         self.slots_armed = false;
+     }
+@@ -292,8 +314,23 @@ impl SsmCache {
+     /// states), for the serve prompt cache: unlike the KV cache, the
+     /// recurrence cannot be rolled back by truncating, so a prefix hit has
+     /// to restore a snapshot taken at that prefix's end.
++    ///
++    /// On **UMA**, host memory (`self.store`) is already coherent with GPU
++    /// prefill/decode writes. On **dUMA**, if a discrete VRAM buffer is
++    /// attached, we pull the latest recurrent state from VRAM (`D2H`).
+     pub fn snapshot(&self) -> Vec<f32> {
+-        self.floats()[..self.conv_elems + self.state_elems].to_vec()
++        let n = self.conv_elems + self.state_elems;
++        if let Some(sh) = self.shared.as_ref() {
++            if sh.is_discrete() {
++                let mut out = vec![0.0f32; n];
++                let dst =
++                    unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, n * 4) };
++                if allpaka_backend::gpu::download_region_range(sh, 0, dst) {
++                    return out;
++                }
++            }
++        }
++        self.floats()[..n].to_vec()
+     }
+ 
+     /// Raw pointers for the CPU path's per-row slot write: this layer's
+@@ -355,8 +392,10 @@ impl SsmCache {
+         );
+         self.floats_mut()[..snap.len()].copy_from_slice(snap);
+         if let Some(sh) = self.shared.as_mut() {
+-            let bytes = &self.store.as_bytes()[..snap.len() * 4];
+-            allpaka_backend::gpu::upload_region_range(sh, 0, bytes);
++            if sh.is_discrete() {
++                let bytes = &self.store.as_bytes()[..snap.len() * 4];
++                allpaka_backend::gpu::upload_region_range(sh, 0, bytes);
++            }
+         }
+     }
+ 
+@@ -483,7 +522,7 @@ impl KvCache {
+         self.gpu_view_checked(layer).ok()
+     }
+ 
+-    /// Fast-path view that never erases the reason Metal wrapping failed.
++    /// Fast-path view that never erases the reason GPU wrapping failed.
+     pub fn gpu_view_checked(
+         &mut self,
+         layer: usize,
+@@ -491,14 +530,23 @@ impl KvCache {
+         if self.shared.is_none() {
+             self.shared = allpaka_backend::gpu::wrap_region(self.store.as_bytes());
+         }
+-        let shared = self.shared.as_ref().ok_or(GpuViewError {
+-            cache: "kv-cache",
+-            layer: Some(layer),
+-            reason: if allpaka_backend::gpu::is_attached() {
+-                "Metal rejected the page-aligned shared region"
+-            } else {
+-                "no Metal device or model mapping is attached"
+-            },
++        let shared = self.shared.as_ref().ok_or_else(|| {
++            let reason = match allpaka_backend::gpu::memory_architecture() {
++                allpaka_backend::memory::MemoryArchitecture::Uma => {
++                    "UMA backend rejected the page-aligned shared region"
++                }
++                allpaka_backend::memory::MemoryArchitecture::Duma => {
++                    "dUMA backend failed to allocate or upload the discrete device region"
++                }
++                allpaka_backend::memory::MemoryArchitecture::HostOnly => {
++                    "no GPU device or model mapping is attached"
++                }
++            };
++            GpuViewError {
++                cache: "kv-cache",
++                layer: Some(layer),
++                reason,
++            }
+         })?;
+         let (k_off, v_off) = self.layer_offsets(layer);
+         Ok((shared, k_off, v_off))
+@@ -555,13 +603,31 @@ impl KvCache {
+ 
+     /// Store one position's k and v for one layer. The position is implicit:
+     /// always appended at the end, `advance` seals the step.
++    ///
++    /// On **UMA** (Metal), the write lands directly in unified memory shared
++    /// with the GPU. On **dUMA** (CUDA), if a discrete VRAM cache is attached,
++    /// the written position is also uploaded (`H2D`) so subsequent GPU
++    /// attention kernels (`attend_project`) observe the current step's K/V.
+     pub fn store(&mut self, layer: usize, k: &[f32], v: &[f32]) {
+         assert!(
+             self.len < self.capacity,
+             "kv cache full at {} positions",
+             self.capacity
+         );
+-        self.store_at(layer, self.len, k, v);
++        let pos = self.len;
++        self.store_at(layer, pos, k, v);
++        self.sync_gpu_pos_if_discrete(layer, pos);
++    }
++
++    #[inline]
++    fn sync_gpu_pos_if_discrete(&mut self, layer: usize, pos: usize) {
++        if self
++            .shared
++            .as_ref()
++            .is_some_and(allpaka_backend::gpu::SharedRegion::is_discrete)
++        {
++            self.sync_gpu_range(layer, pos..pos + 1);
++        }
+     }
+ 
+     /// Store at an explicit position at or past the sealed length.
+@@ -585,18 +651,27 @@ impl KvCache {
+         ops::f16::from_f32(v, &mut store[vr.start + at..vr.start + at + kv_dim]);
+     }
+ 
++    /// Synchronize a range of host-written KV positions to the GPU cache.
++    ///
++    /// * On **UMA** (`SharedRegion::is_unified()`), host and GPU share physical
++    ///   memory in place — this is a zero-copy no-op returning `true`.
++    /// * On **dUMA** (`SharedRegion::is_discrete()`), uploads the K and V byte
++    ///   slices for `positions` to device VRAM (`H2D`).
+     pub fn sync_gpu_range(&mut self, layer: usize, positions: std::ops::Range<usize>) -> bool {
+         if positions.start > positions.end || positions.end > self.capacity {
+             return false;
+         }
+         let slot = self.slot_of(layer);
++        let Some(shared) = self.shared.as_mut() else {
++            return false;
++        };
++        if shared.is_unified() || positions.is_empty() {
++            return true;
++        }
+         let count = (positions.end - positions.start) * self.kv_dim;
+         let k_at = slot * self.layer_stride + positions.start * self.kv_dim;
+         let v_at = self.v_base + k_at;
+         let bytes = self.store.as_bytes();
+-        let Some(shared) = self.shared.as_mut() else {
+-            return false;
+-        };
+         let k_bytes = k_at * 2;
+         let v_bytes = v_at * 2;
+         let byte_count = count * 2;
+@@ -630,6 +705,7 @@ impl KvCache {
+         let store = self.store.as_mut_slice();
+         ops::f16::from_f32(k, &mut store[kr.start + at..kr.start + at + kv_dim]);
+         ops::f16::from_f32(v, &mut store[vr.start + at..vr.start + at + kv_dim]);
++        self.sync_gpu_pos_if_discrete(layer, pos);
+     }
+ 
+     /// Seal the current position after every layer has stored into it.
+@@ -738,4 +814,35 @@ mod tests {
+         ssm_compact.conv_layer(4)[0] = 42.0;
+         assert_eq!(ssm_compact.conv_layer(4)[0], 42.0);
+     }
++
++    #[test]
++    fn ssm_snapshot_restore_and_slot_rollback_roundtrip() {
++        let mut ssm = SsmCache::new(2, 3, 8, 2, 4);
++        ssm.conv_layer(0)[0] = 1.5;
++        ssm.state_layer(1)[3] = -2.25;
++        let snap = ssm.snapshot();
++        assert_eq!(snap.len(), ssm.total_elems());
++
++        ssm.arm_slots(2);
++        if let Some((cp, sp, dp, conv_off, state_off, n_conv, n_state, stride)) =
++            ssm.slot_write_ptrs(0)
++        {
++            unsafe {
++                std::ptr::copy_nonoverlapping(cp, dp.add(conv_off), n_conv);
++                std::ptr::copy_nonoverlapping(sp, dp.add(state_off), n_state);
++                // Slot 1 gets mutated values
++                std::ptr::copy_nonoverlapping(cp, dp.add(stride + conv_off), n_conv);
++                *dp.add(stride + conv_off) = 99.0;
++            }
++        }
++        ssm.conv_layer(0)[0] = 777.0;
++        ssm.restore_slot(0);
++        assert_eq!(ssm.conv_layer(0)[0], 1.5);
++
++        ssm.conv_layer(0)[0] = 0.0;
++        ssm.state_layer(1)[3] = 0.0;
++        ssm.restore(&snap);
++        assert_eq!(ssm.conv_layer(0)[0], 1.5);
++        assert_eq!(ssm.state_layer(1)[3], -2.25);
++    }
+ }

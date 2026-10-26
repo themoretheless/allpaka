@@ -1,0 +1,89 @@
+{
+  "architecture": "qwen3moe",
+  "decode_context_tokens": 1,
+  "decode_fast_path": [
+    {
+      "attempts": 32,
+      "declines": 0,
+      "round": 0,
+      "successes": 32
+    },
+    {
+      "attempts": 32,
+      "declines": 0,
+      "round": 1,
+      "successes": 32
+    },
+    {
+      "attempts": 32,
+      "declines": 0,
+      "round": 2,
+      "successes": 32
+    },
+    {
+      "attempts": 32,
+      "declines": 0,
+      "round": 3,
+      "successes": 32
+    }
+  ],
+  "decode_kind": "forward_greedy_n",
+  "decode_tokens": 32,
+  "decode_tokens_per_second": [
+    89.08670467931397,
+    105.13460697492093,
+    98.79847927528228
+  ],
+  "generated": [
+    1,
+    374,
+    264,
+    1378,
+    48342,
+    1372,
+    13,
+    576,
+    2629,
+    315,
+    279,
+    18509,
+    374,
+    220,
+    16,
+    15,
+    13,
+    576,
+    1372,
+    374,
+    220,
+    16,
+    15,
+    803,
+    1091,
+    264,
+    5248,
+    315,
+    220,
+    16,
+    15,
+    13
+  ],
+  "gpu_dispatches": 54660,
+  "handoff_bytes_avoided": 15728640,
+  "hidden": 2048,
+  "kv_format": "f16",
+  "model": "/Users/themoretheless/.cache/allpaka/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+  "pp": 480,
+  "prefill_tokens_per_second": [
+    745.0623611375472,
+    783.7676277115917,
+    819.5878070946424
+  ],
+  "projection_bytes_avoided": 32768,
+  "rounds": 3,
+  "shared_outputs": 4,
+  "warmup_rounds": 1,
+  "zero_copy": "1",
+  "max_logit_difference": 0.0,
+  "logit_sha256": "6e02cf46d7c185e135f643a5dcfdee5a7d6d5bf9034341d44f573ac7f3e41d9b"
+}

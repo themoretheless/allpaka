@@ -1,0 +1,7 @@
+{
+  "inputs_equal": true,
+  "logit_max_difference": {
+    "prefill_logits": 0.051502704621123385,
+    "decode_final_logits": 0.24900627140351617
+  }
+}

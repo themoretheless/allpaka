@@ -4736,6 +4736,10 @@ DEFINE_MM_LL_NK(mm64ll_f32, BlkF32, 1, dqll_f32, (ulong)n_in * 4, 64)
 // tile, plus the MmGroup indirection of DEFINE_MM_ID. Grid z picks the
 // group; a threadgroup whose token tile lies past its group's rows exits
 // whole before the first barrier (uniform), like the old kernel.
+// Tail stores use disjoint 64-float scratch slices per SIMD group. Only
+// entering/leaving that scratch needs a whole-threadgroup barrier: inside
+// the eight stores, synchronize the owning SIMD group instead. This matters
+// for MoE's short expert batches, where most tiles take the tail branch.
 #define DEFINE_MM_ID_LL_NK(NAME, BLOCK_T, NL, DQ, ROW_BYTES, GATHER, NK, SWIGLU, DUAL) \
 kernel void NAME(                                                              \
     device const uchar* w [[buffer(0)]],                                       \
@@ -4871,10 +4875,11 @@ kernel void NAME(                                                              \
         }                                                                      \
     } else {                                                                   \
         threadgroup float* temp_str = shmem_f + sgitg * 64;                    \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
         for (short i = 0; i < 8; i++) {                                        \
-            threadgroup_barrier(mem_flags::mem_threadgroup);                   \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
             simdgroup_store(mc[i], temp_str, 8, 0, false);                     \
-            threadgroup_barrier(mem_flags::mem_threadgroup);                   \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
             const short cc0 = 8 * (i % 4) + 32 * (sgitg & 1);                  \
             const short rr0 = 8 * (i / 4) + 16 * (sgitg >> 1);                 \
             for (short e = tiitg % 32; e < 64; e += 32) {                      \
@@ -4885,6 +4890,7 @@ kernel void NAME(                                                              \
                 }                                                              \
             }                                                                  \
         }                                                                      \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
     }                                                                          \
     }                                                                          \
 }
@@ -5065,10 +5071,11 @@ kernel void NAME(                                                              \
         }                                                                      \
     } else {                                                                   \
         threadgroup float* temp_str = shmem_f + sgitg * 64;                    \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
         for (short i = 0; i < 8; i++) {                                        \
-            threadgroup_barrier(mem_flags::mem_threadgroup);                   \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
             simdgroup_store(mc[i], temp_str, 8, 0, false);                     \
-            threadgroup_barrier(mem_flags::mem_threadgroup);                   \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
             const short cc0 = 8 * (i % 4) + 32 * (sgitg & 1);                  \
             const short rr0 = 8 * (i / 4) + 16 * (sgitg >> 1);                 \
             for (short e = tiitg % 32; e < 64; e += 32) {                      \
@@ -5079,6 +5086,7 @@ kernel void NAME(                                                              \
                 }                                                              \
             }                                                                  \
         }                                                                      \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
     }                                                                          \
     }                                                                          \
 }

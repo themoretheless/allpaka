@@ -1,0 +1,11 @@
+{
+  "accepted": 0,
+  "required": 6,
+  "complete": false,
+  "binary_sha256": {
+    "before": "8b0d08806251954a2c2957b1e4033cf46605b0d1fcf3cb173e0db12a33a69867",
+    "after": "fd27dd5a5fde0bf84c4bb33e974d8cdd4cc5d1a2d364cfb6700eedd4800600a5",
+    "llama": "3b6efaa13dd48084e5950a91956fed13f4d22df598aa1103ca87fc79c90ab001"
+  },
+  "model": "/Users/themoretheless/.cache/allpaka/models/Qwen3-30B-A3B-Q4_K_M.gguf"
+}

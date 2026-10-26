@@ -124,6 +124,11 @@ fn main() {
 
     let device = Device::system_default().unwrap();
     let queue = device.new_command_queue();
+    // Freeze reference shaders separately from the executable for paired
+    // kernel measurements; production never reads this benchmark option.
+    let source = std::env::var("MM_SOURCE")
+        .map(|path| std::fs::read_to_string(path).expect("MM_SOURCE shader file"))
+        .unwrap_or_else(|_| allpaka_backend::gpu::KERNELS.to_owned());
 
     let mut w = vec![0u8; w_pool];
     for (i, b) in w.iter_mut().enumerate() {
@@ -182,7 +187,7 @@ fn main() {
 
     // --- ours ---
     let lib = device
-        .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
+        .new_library_with_source(&source, &CompileOptions::new())
         .unwrap();
     let kernel_list: Vec<(&str, u64)> = match fmt.as_str() {
         "q8_0" => vec![("mmll_q8_0", 32), ("mmllp_q8_0", 32), ("mm64ll_q8_0", 32)],
@@ -236,7 +241,7 @@ fn main() {
     // --- mmid (grouped) mode ---
     if id_mode {
         let lib = device
-            .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
+            .new_library_with_source(&source, &CompileOptions::new())
             .unwrap();
         // [expert, row0, rows] per group; the pairs spread evenly over the
         // active experts (in-model: ACT ~= EXP, ~30 rows each at pp480).

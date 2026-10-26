@@ -1,0 +1,37 @@
+{
+  "inputs_equal": true,
+  "max_difference": {
+    "prefill_logits": 0.0,
+    "decode_final_logits": 0.0
+  },
+  "gpu_decode": {
+    "before": [
+      {
+        "attempts": 32,
+        "declines": 0,
+        "round": 0,
+        "successes": 32
+      },
+      {
+        "attempts": 32,
+        "declines": 0,
+        "round": 1,
+        "successes": 32
+      }
+    ],
+    "after": [
+      {
+        "attempts": 32,
+        "declines": 0,
+        "round": 0,
+        "successes": 32
+      },
+      {
+        "attempts": 32,
+        "declines": 0,
+        "round": 1,
+        "successes": 32
+      }
+    ]
+  }
+}

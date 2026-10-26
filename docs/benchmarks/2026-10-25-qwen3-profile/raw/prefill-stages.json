@@ -1,0 +1,57 @@
+{
+  "attn qkv": {
+    "calls": 96,
+    "total_ms": 138.2,
+    "mean_ms": 1.4395833333333332
+  },
+  "attn prep": {
+    "calls": 96,
+    "total_ms": 7.272,
+    "mean_ms": 0.07575
+  },
+  "attn attend": {
+    "calls": 96,
+    "total_ms": 52.591,
+    "mean_ms": 0.5478229166666667
+  },
+  "attn wo": {
+    "calls": 96,
+    "total_ms": 113.82300000000001,
+    "mean_ms": 1.18565625
+  },
+  "attn ffnnorm_router": {
+    "calls": 96,
+    "total_ms": 20.394,
+    "mean_ms": 0.21243749999999997
+  },
+  "ffn route": {
+    "calls": 96,
+    "total_ms": 9.154,
+    "mean_ms": 0.09535416666666667
+  },
+  "ffn gate": {
+    "calls": 96,
+    "total_ms": 485.973,
+    "mean_ms": 5.06221875
+  },
+  "ffn up": {
+    "calls": 96,
+    "total_ms": 5.553,
+    "mean_ms": 0.05784375
+  },
+  "ffn swiglu": {
+    "calls": 96,
+    "total_ms": 10.266,
+    "mean_ms": 0.1069375
+  },
+  "ffn down": {
+    "calls": 96,
+    "total_ms": 273.432,
+    "mean_ms": 2.84825
+  },
+  "ffn shared": {
+    "calls": 96,
+    "total_ms": 5.699,
+    "mean_ms": 0.05936458333333333
+  }
+}
