@@ -1,6 +1,6 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
-const start=source.indexOf('let offlineScoresEpoch=0,'),end=source.indexOf('let evaluationMatrixEpoch=',start);
+const start=source.indexOf('let offlineScoresEpoch=0,'),end=source.indexOf('function verifyStudioMatrixJob(',start);
 assert(start>=0&&end>start);
 class Element {constructor(text=''){this.text=text;this.children=[];this.open=false;}append(...items){this.children.push(...items);}replaceChildren(...items){this.children=items;}}
 function setup(){
@@ -12,10 +12,11 @@ function setup(){
 }
 (async()=>{
  // Model native option semantics: absent value defaults to its visible text.
- const select={children:[],replaceChildren(...items){this.children=items;},get value(){return this.selected ?? this.children[0]?.value ?? '';},set value(value){this.selected=value;}};
- const datasetContext={evaluationProject:'default',api:async()=>({datasets:[{id:'data',name:'Fixture',version:2}]}),$:()=>select,node:(_,text)=>{let explicit;return {dataset:{},get value(){return explicit ?? text;},set value(value){explicit=value;}};}};
+ const select={children:[],replaceChildren(...items){this.children=items;delete this.selected;},get value(){return this.selected ?? this.children[0]?.value ?? '';},set value(value){this.selected=value;}};
+ const datasetContext={evaluationProject:'default',api:async()=>({datasets:[{id:'data',name:'Fixture',version:2}]}),$:id=>({'evaluation-dataset':select,project:{value:'default'},'evaluation-dialog':{open:true}}[id]),node:(_,text)=>{let explicit;return {dataset:{},get value(){return explicit ?? text;},set value(value){explicit=value;}};}};
  vm.createContext(datasetContext);
- const loaderStart=source.indexOf('async function loadEvaluationDatasets('),loaderEnd=source.indexOf('async function loadSelectedDataset(',loaderStart);
+ const loaderStart=source.indexOf('let evaluationDatasetCatalogEpoch='),loaderEnd=source.indexOf('let datasetLifecycleEpoch=',loaderStart);
+ assert(loaderStart>=0&&loaderEnd>loaderStart);
  vm.runInContext(source.slice(loaderStart,loaderEnd),datasetContext);
  await datasetContext.loadEvaluationDatasets();assert.equal(select.value,'');
  assert.equal(select.children[1].value,'data');assert.equal(select.children[1].dataset.version,2);

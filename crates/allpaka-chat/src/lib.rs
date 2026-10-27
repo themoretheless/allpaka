@@ -9,6 +9,7 @@ mod data_lock;
 mod evaluation;
 mod experiments;
 mod feedback;
+mod files;
 mod guardrail_policies;
 mod harness;
 mod harness_library;
@@ -381,6 +382,7 @@ fn routes(app: App) -> Router {
                 )
             }),
         )
+        .route("/files.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../web/files.js")) }))
         .route(
             "/style.css",
             get(|| async {
@@ -679,6 +681,9 @@ fn routes(app: App) -> Router {
         .route("/api/plugins/:id/delete", post(plugins::delete_plugin))
         .route("/api/plugins/:id/reload", post(plugins::reload_plugin))
         .route("/api/projects", post(save_project))
+        .route("/api/files/list", post(files::list))
+        .route("/api/files/search", post(files::search))
+        .route("/api/files/read", post(files::read))
         .route(
             "/api/harness",
             get(harness::get_api).post(harness::save_api),

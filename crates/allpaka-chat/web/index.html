@@ -6,6 +6,7 @@
   <title>allpaka · Studio</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/content.js" defer></script>
+  <script src="/files.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -67,6 +68,7 @@
       <h1 id="title">Новый разговор</h1>
     </div>
     <div class="header-actions">
+      <button id="file-toggle" title="Файлы проекта (⌘P / Ctrl+P)">Файлы</button>
       <button id="review-toggle">Ревью</button>
       <button id="context-toggle" title="Контекст разговора">
         <svg class="ctx-ring" width="16" height="16" viewBox="0 0 20 20" aria-hidden="true">
@@ -632,6 +634,18 @@
   <button id="review-queues-refresh" type="button">Обновить очереди</button>
   <div id="review-queues-list"></div>
   <div id="review-queue-detail"></div>
+</dialog>
+<dialog id="file-panel" aria-labelledby="file-panel-title">
+  <div class="file-heading"><h2 id="file-panel-title">Файлы проекта</h2><button id="file-close" type="button" aria-label="Закрыть файловую панель">Закрыть</button></div>
+  <div class="file-toolbar"><label>Папка проекта<select id="file-root"></select></label><label>Поиск файлов<input id="file-query" type="search" maxlength="256" placeholder="Найти по имени или пути…" autocomplete="off"></label></div>
+  <p id="file-status" role="status" aria-live="polite"></p>
+  <div class="file-columns"><section class="file-browser" aria-label="Список файлов"><div class="file-location"><button id="file-up" type="button" aria-label="В родительскую папку">↑</button><span id="file-location"></span></div><div id="file-list"></div></section>
+  <section class="file-detail" aria-label="Предпросмотр файла"><strong id="file-name">Выберите файл</strong>
+    <div class="file-source"><pre id="file-numbers" aria-hidden="true"></pre><textarea id="file-preview" readonly wrap="off" spellcheck="false" aria-label="Текст файла; выделите строки для добавления"></textarea></div>
+    <div class="file-ranges"><label>Строки с<input id="file-line-start" type="number" min="1" step="1"></label><label>по<input id="file-line-end" type="number" min="1" step="1"></label><button id="file-add-lines" type="button" disabled>Добавить строки</button></div>
+    <button id="file-add" type="button" disabled>Добавить весь файл в контекст</button>
+    <small class="muted">Выделите текст мышью или задайте номера строк. Текстовые файлы до 100 KB; вложения появятся перед следующим сообщением.</small>
+  </section></div>
 </dialog>
 </body>
 </html>

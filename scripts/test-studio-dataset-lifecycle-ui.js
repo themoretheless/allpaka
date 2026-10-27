@@ -1,5 +1,6 @@
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),start=source.indexOf('let datasetLifecycleEpoch='),end=source.indexOf('async function loadSelectedDataset()',start);
+const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),start=source.indexOf('let datasetLifecycleEpoch='),end=source.indexOf('let datasetVersionsEpoch=',start);
+assert(start>=0&&end>start);
 const node=(tag,text)=>({tag,text,children:[],append(...rows){this.children.push(...rows);},replaceChildren(...rows){this.children=rows;}}),elements={'project':{value:'p'},'evaluation-dialog':{open:true},'dataset-lifecycle-result':node('div'),'dataset-active-show':{},'dataset-archive-show':{},'dataset-lifecycle-search':{value:''},'dataset-lifecycle-find':{}},calls=[];
 let archived=false,revision=0,finishMutation;const item=()=>({id:'d',project_id:'p',version:1,lifecycle_revision:revision,archived,sha256:'hash',name:'Fixture',samples:1});
 const context={URLSearchParams,evaluationProject:'p',$:id=>elements[id],node,loadEvaluationDatasets:async()=>{},api:async(path,body)=>{calls.push({path,body});if(!body){const params=new URLSearchParams(path.split('?')[1]),datasets=[item()].filter(row=>row.archived===(params.get('archived')==='true'));return {datasets,total:datasets.length,offset:Number(params.get('offset')),limit:20,has_more:false};}return new Promise(resolve=>finishMutation=()=>{archived=body.archived;revision++;resolve({...item(),snapshots_retained:true});});}};

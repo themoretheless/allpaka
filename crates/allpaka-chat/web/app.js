@@ -32,6 +32,7 @@ $('theme-toggle').onclick = () => {
   try { localStorage.setItem('allpaka.studio.theme', theme); } catch {}
 };
 let config, active = null, current = null, draftImages = [], draftTexts = [], editingProject = '', lastMessages = '', lastPlan = '', polling = false;
+let filePanel = null;
 let layoutFix = false;
 const PREFS_KEY = 'allpaka.studio.prefs.v1';
 let prefs = {};
@@ -90,8 +91,8 @@ const commands = [
   {cmd:'/help',desc:'Список команд'},
 ];
 let commandIndex=0,commandMatches=[];
-async function api(path, body) {
-  const r = await fetch('/api/' + path, {method:body === undefined?'GET':'POST',headers:body === undefined?{}:{'Content-Type':'application/json','X-Allpaka-Client':'studio'},body:body === undefined?undefined:JSON.stringify(body)});
+async function api(path, body, signal) {
+  const r = await fetch('/api/' + path, {signal,method:body === undefined?'GET':'POST',headers:body === undefined?{}:{'Content-Type':'application/json','X-Allpaka-Client':'studio'},body:body === undefined?undefined:JSON.stringify(body)});
   const value = await r.json(); if (!r.ok) throw new Error(value.error || `HTTP ${r.status}`); return value;
 }
 async function del(path) {
@@ -285,6 +286,8 @@ async function loadConfig() {
   renderContext();
 }
 function renderContext() {
+  draftTexts=draftTexts.filter(f=>!f.projectId||f.projectId===$('project').value);renderAttachments();
+  if(filePanel)filePanel.changed();
   const p=config.projects.find(p=>p.id===$('project').value);if(!p)return;
   $('project-name').textContent=p.name;
   $('roots').replaceChildren(...p.roots.map(r=>{const div=node('div',undefined,'root-card');div.append(node('b',(r.repository?'⑂ ':'▱ ')+r.alias),node('small',r.path),node('small',r.writable?'Auto: запись разрешена для папки':'Только чтение'));return div;}));
@@ -2742,6 +2745,7 @@ async function control(kind, actionText) {
   if(sends&&layoutFix&&!text.startsWith('/')){autoFixField(false);text=$('prompt').value.trim();}
   const snapshot=settings();
   if(sends){
+    draftTexts=draftTexts.filter(f=>!f.projectId||f.projectId===snapshot.project_id);renderAttachments();
     if(draftTexts.length)text+='\n\n'+draftTexts.map(f=>`<attached-file name=${JSON.stringify(f.name)}>\n${f.text}\n</attached-file>`).join('\n\n');
     if(!text && draftImages.length)text='Посмотри на приложенные изображения.';
     if(!text)throw new Error('Введите сообщение или приложите файл.');
@@ -3379,3 +3383,13 @@ $('harness-refine').onclick=async()=>{
   const external=$('harness-external').value.trim();if(external)body.external={command:external,layout:$('harness-layout').value};
   try{const job=await api('harness/jobs',body);await harnessLoadJobs();await harnessShowJob(job.id);}catch(e){notify(e.message);}
 };
+
+filePanel = StudioFiles.create({
+  api,
+  project: () => config?.projects.find(p => p.id === $('project').value),
+  attach: file => {
+    if(draftTexts.some(f => f.projectId === file.projectId && f.sourceKey === file.sourceKey))throw new Error('Этот файл или диапазон уже добавлен.');
+    if(new TextEncoder().encode(draftTexts.map(f=>f.text).join('')+file.text).length>110000)throw new Error('Слишком много текстовых вложений. Удалите лишние или выберите меньше строк.');
+    draftTexts.push(file);renderAttachments();
+  }
+});
