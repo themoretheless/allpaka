@@ -470,8 +470,12 @@ fn init_device() -> Option<Gpu> {
         "mmllr64_q4_k",
         "mmllp_q4_k",
         "mmllp_q8_0",
+        "mmllp_qkv_q4_k",
+        "mmllp_qkv_q8_0",
         "mmllpg_id_q4_k",
         "mmllps_id_q4_k",
+        "mmllpg_id_q4_k_bn16",
+        "mmllps_id_q4_k_bn16",
         "route_pick",
         "route_scan",
         "route_scatter",
@@ -1510,6 +1514,56 @@ fn mm_kernel_for(ty: GgmlType, m: usize) -> Option<(&'static str, usize, usize)>
         Shape::Wide => (32, 64),
     };
     Some((name, bm, bn))
+}
+
+#[repr(C)]
+struct MmQkvArgs {
+    n_in: u32,
+    n_q: u32,
+    n_k: u32,
+    n_v: u32,
+    wq_off: u64,
+    wk_off: u64,
+    wv_off: u64,
+    q_off: u64,
+    k_off: u64,
+    v_off: u64,
+    m: u32,
+    pad: u32,
+}
+
+/// Fused QKV (or dual wqkv + zgate) prefill kernel when projections share the
+/// same quantized format and their output widths are multiples of 64.
+fn mm_qkv_kernel_for(ty: GgmlType) -> Option<&'static str> {
+    static NO_QKV: OnceLock<bool> = OnceLock::new();
+    if !mm_ll()
+        || mm_k64()
+        || *NO_QKV.get_or_init(|| std::env::var_os("ALLPAKA_NO_FUSED_QKV").is_some())
+    {
+        return None;
+    }
+    Some(match ty {
+        GgmlType::Q8_0 => {
+            if mm_pipe() {
+                "mmllp_qkv_q8_0"
+            } else {
+                "mmll_qkv_q8_0"
+            }
+        }
+        GgmlType::Q5_0 => "mmll_qkv_q5_0",
+        GgmlType::Q2K => "mmll_qkv_q2_k",
+        GgmlType::Q3K => "mmll_qkv_q3_k",
+        GgmlType::Q4K => {
+            if mm_pipe() {
+                "mmllp_qkv_q4_k"
+            } else {
+                "mmll_qkv_q4_k"
+            }
+        }
+        GgmlType::Q5K => "mmll_qkv_q5_k",
+        GgmlType::Q6K => "mmll_qkv_q6_k",
+        _ => return None,
+    })
 }
 
 /// The compiled TILE specialisations, largest last. A batch is split into
@@ -7457,6 +7511,16 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 .to_owned(),
         );
     }
+    let qkv_state = if wq_out % 64 == 0
+        && kv % 64 == 0
+        && mats[0].ty == mats[1].ty
+        && mats[1].ty == mats[2].ty
+    {
+        mm_qkv_kernel_for(mats[0].ty)
+            .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned()))
+    } else {
+        None
+    };
     let prep_state = gpu.pipelines[&("qk_prep_batch", 1, 1)].to_owned();
     let attend_state = gpu.pipelines[&(attend_rows_kernel(), 1, 1)].to_owned();
 
@@ -7662,14 +7726,51 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
         } else {
             (&gpu.x_arena, hs_at)
         };
-        matmul(
-            enc, &states[0], &mats[0], hidden, wq_out, hs_buf, hs_off, q_at,
-        );
-        cstamp!(gpu, enc, "wq");
-        matmul(enc, &states[1], &mats[1], hidden, kv, hs_buf, hs_off, k_at);
-        cstamp!(gpu, enc, "wk");
-        matmul(enc, &states[2], &mats[2], hidden, kv, hs_buf, hs_off, v_at);
-        cstamp!(gpu, enc, "wv");
+        if let Some(qkv_pipe) = &qkv_state {
+            enc.set_compute_pipeline_state(qkv_pipe);
+            enc.set_buffer(0, Some(&gpu.chunks[mats[0].chunk].buf), 0);
+            enc.set_buffer(1, Some(&gpu.chunks[mats[1].chunk].buf), 0);
+            enc.set_buffer(2, Some(&gpu.chunks[mats[2].chunk].buf), 0);
+            enc.set_buffer(3, Some(hs_buf), e(hs_off));
+            enc.set_buffer(4, Some(y), 0);
+            let qkv_args = MmQkvArgs {
+                n_in: hidden as u32,
+                n_q: wq_out as u32,
+                n_k: kv as u32,
+                n_v: kv as u32,
+                wq_off: mats[0].w_off,
+                wk_off: mats[1].w_off,
+                wv_off: mats[2].w_off,
+                q_off: e(q_at),
+                k_off: e(k_at),
+                v_off: e(v_at),
+                m: req.m as u32,
+                pad: 0,
+            };
+            enc.set_bytes(
+                5,
+                std::mem::size_of::<MmQkvArgs>() as u64,
+                &qkv_args as *const MmQkvArgs as *const _,
+            );
+            enc.dispatch_thread_groups(
+                MTLSize::new(
+                    ((wq_out + 2 * kv) as u64).div_ceil(64),
+                    (req.m as u64).div_ceil(32),
+                    1,
+                ),
+                MTLSize::new(128, 1, 1),
+            );
+            cstamp!(gpu, enc, "qkv");
+        } else {
+            matmul(
+                enc, &states[0], &mats[0], hidden, wq_out, hs_buf, hs_off, q_at,
+            );
+            cstamp!(gpu, enc, "wq");
+            matmul(enc, &states[1], &mats[1], hidden, kv, hs_buf, hs_off, k_at);
+            cstamp!(gpu, enc, "wk");
+            matmul(enc, &states[2], &mats[2], hidden, kv, hs_buf, hs_off, v_at);
+            cstamp!(gpu, enc, "wv");
+        }
         split_here!("qkv");
         if !no_barrier() {
             enc.memory_barrier_with_resources(&[y]);
@@ -8054,6 +8155,12 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 .to_owned(),
         );
     }
+    let qkvz_state = if channels % 64 == 0 && value_dim % 64 == 0 && mats[0].ty == mats[1].ty {
+        mm_qkv_kernel_for(mats[0].ty)
+            .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned()))
+    } else {
+        None
+    };
     let conv1d = {
         let addr = req.conv1d.as_ptr() as usize;
         if addr % 4 != 0 {
@@ -8225,13 +8332,50 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
         if !no_barrier() {
             enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
         }
-        matmul(
-            enc, &states[0], &mats[0], hidden, channels, &gpu.pf_hs, 0, qkv_at,
-        );
-        cstamp!(gpu, enc, "wqkv");
-        matmul(
-            enc, &states[1], &mats[1], hidden, value_dim, &gpu.pf_hs, 0, z_at,
-        );
+        if let Some(qkvz_pipe) = &qkvz_state {
+            enc.set_compute_pipeline_state(qkvz_pipe);
+            enc.set_buffer(0, Some(&gpu.chunks[mats[0].chunk].buf), 0);
+            enc.set_buffer(1, Some(&gpu.chunks[mats[1].chunk].buf), 0);
+            enc.set_buffer(2, Some(&gpu.chunks[mats[1].chunk].buf), 0);
+            enc.set_buffer(3, Some(&gpu.pf_hs), 0);
+            enc.set_buffer(4, Some(y), 0);
+            let qkv_args = MmQkvArgs {
+                n_in: hidden as u32,
+                n_q: channels as u32,
+                n_k: value_dim as u32,
+                n_v: 0,
+                wq_off: mats[0].w_off,
+                wk_off: mats[1].w_off,
+                wv_off: 0,
+                q_off: e(qkv_at),
+                k_off: e(z_at),
+                v_off: 0,
+                m: req.m as u32,
+                pad: 0,
+            };
+            enc.set_bytes(
+                5,
+                std::mem::size_of::<MmQkvArgs>() as u64,
+                &qkv_args as *const MmQkvArgs as *const _,
+            );
+            enc.dispatch_thread_groups(
+                MTLSize::new(
+                    ((channels + value_dim) as u64).div_ceil(64),
+                    (req.m as u64).div_ceil(32),
+                    1,
+                ),
+                MTLSize::new(128, 1, 1),
+            );
+            cstamp!(gpu, enc, "wqkv");
+        } else {
+            matmul(
+                enc, &states[0], &mats[0], hidden, channels, &gpu.pf_hs, 0, qkv_at,
+            );
+            cstamp!(gpu, enc, "wqkv");
+            matmul(
+                enc, &states[1], &mats[1], hidden, value_dim, &gpu.pf_hs, 0, z_at,
+            );
+        }
         matmul(
             enc,
             &states[2],
@@ -9013,15 +9157,27 @@ fn serial_dispatch() -> metal::MTLDispatchType {
     }
 }
 
+/// Use specialized BN=16 grouped MoE tile when average rows per active expert
+/// <= 24 (or forced via `ALLPAKA_MMID_BN16=1`, disabled via `=0`).
+fn mmid_use_bn16(avg_rows: usize) -> bool {
+    static FORCE: OnceLock<Option<bool>> = OnceLock::new();
+    match *FORCE.get_or_init(|| {
+        std::env::var("ALLPAKA_MMID_BN16").ok().map(|v| v != "0")
+    }) {
+        Some(b) => b,
+        None => mm_ll() && !(mm_k64() || mmid_k64()) && avg_rows <= 24,
+    }
+}
+
 /// Down-projection kernel with swiglu folded into B staging: gate and up
 /// stay raw in y, the mm applies silu(g)*u while loading. q4_k only;
 /// anything else keeps the standalone swiglu pass.
-fn mmid_swiglu_kernel_for(ty: GgmlType) -> Option<(&'static str, usize)> {
+fn mmid_swiglu_kernel_for(ty: GgmlType, bn16: bool) -> Option<(&'static str, usize)> {
     if !mm_ll() || mm_k64() {
         return None;
     }
-    match ty {
-        GgmlType::Q4K => Some((
+    match (ty, bn16) {
+        (GgmlType::Q4K, false) => Some((
             if mm_pipe() {
                 "mmllps_id_q4_k"
             } else {
@@ -9029,13 +9185,48 @@ fn mmid_swiglu_kernel_for(ty: GgmlType) -> Option<(&'static str, usize)> {
             },
             64,
         )),
+        (GgmlType::Q4K, true) => Some((
+            if mm_pipe() {
+                "mmllps_id_q4_k_bn16"
+            } else {
+                "mmlls_id_q4_k_bn16"
+            },
+            64,
+        )),
         _ => None,
     }
 }
 
-fn mmid_kernel_for(ty: GgmlType, gather: bool) -> Option<(&'static str, usize)> {
+fn mmid_kernel_for(ty: GgmlType, gather: bool, bn16: bool) -> Option<(&'static str, usize)> {
     if mm_ll() {
-        let name = match (ty, gather, mm_k64() || mmid_k64()) {
+        let k64 = mm_k64() || mmid_k64();
+        if bn16 && !k64 {
+            let name = match (ty, gather) {
+                (GgmlType::Q8_0, false) => "mmll_id_q8_0_bn16",
+                (GgmlType::Q2K, false) => "mmll_id_q2_k_bn16",
+                (GgmlType::Q3K, false) => "mmll_id_q3_k_bn16",
+                (GgmlType::Q4K, false) => "mmll_id_q4_k_bn16",
+                (GgmlType::Q5K, false) => "mmll_id_q5_k_bn16",
+                (GgmlType::Q6K, false) => "mmll_id_q6_k_bn16",
+                (GgmlType::Q5_0, false) => "mmll_id_q5_0_bn16",
+                (GgmlType::Q8_0, true) => "mmllg_id_q8_0_bn16",
+                (GgmlType::Q2K, true) => "mmllg_id_q2_k_bn16",
+                (GgmlType::Q3K, true) => "mmllg_id_q3_k_bn16",
+                (GgmlType::Q4K, true) => {
+                    if mm_pipe() {
+                        "mmllpg_id_q4_k_bn16"
+                    } else {
+                        "mmllg_id_q4_k_bn16"
+                    }
+                }
+                (GgmlType::Q5K, true) => "mmllg_id_q5_k_bn16",
+                (GgmlType::Q6K, true) => "mmllg_id_q6_k_bn16",
+                (GgmlType::Q5_0, true) => "mmllg_id_q5_0_bn16",
+                _ => return None,
+            };
+            return Some((name, 64));
+        }
+        let name = match (ty, gather, k64) {
             (GgmlType::Q8_0, false, false) => "mmll_id_q8_0",
             (GgmlType::Q2K, false, false) => "mmll_id_q2_k",
             (GgmlType::Q3K, false, false) => "mmll_id_q3_k",
@@ -9154,20 +9345,28 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         (req.up.1.len() / req.n_expert) as u64,
         (req.down.1.len() / req.n_expert) as u64,
     ];
+    let n_active_experts = if route_mode {
+        req.n_expert.max(1)
+    } else {
+        req.groups.len().max(1)
+    };
+    let avg_rows = req.total_rows / n_active_experts;
+    let bn16 = mmid_use_bn16(avg_rows);
+    let bn = if bn16 { 16usize } else { 32usize };
     let mut states = Vec::with_capacity(3);
     let mut bms = [32u64; 3];
     let mut fused_swiglu = false;
     for (i, mat) in mats.iter().enumerate() {
         let (name, bm) = if i == 2 {
-            match mmid_swiglu_kernel_for(mat.ty) {
+            match mmid_swiglu_kernel_for(mat.ty, bn16) {
                 Some(nb) => {
                     fused_swiglu = true;
                     nb
                 }
-                None => mmid_kernel_for(mat.ty, false)?,
+                None => mmid_kernel_for(mat.ty, false, bn16)?,
             }
         } else {
-            mmid_kernel_for(mat.ty, true)?
+            mmid_kernel_for(mat.ty, true, bn16)?
         };
         bms[i] = bm as u64;
         states.push(gpu.pipeline(name, 1, 1)?.to_owned());
@@ -9189,7 +9388,8 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     // Measured SLOWER than the two-dispatch path on M4 Max (317 vs 331 tok/s
     // pp480, GLM-4.5-Air) - one kernel doing 2x work per threadgroup loses to
     // two back-to-back dispatches. Kept behind ALLPAKA_DUAL=1 for reference.
-    let dual_state = if fused_swiglu
+    let dual_state = if !bn16
+        && fused_swiglu
         && strides[0] == strides[1]
         && req.ffn % 64 == 0
         && std::env::var_os("ALLPAKA_DUAL").is_some()
@@ -9202,7 +9402,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
 
     let (row_tiles, n_groups) = if route_mode {
         // Group sizes exist only on the GPU. The mmid kernels stride over
-        // row tiles (r1 += grid.y * 32), so any grid covers every row;
+        // row tiles (r1 += grid.y * bn), so any grid covers every row;
         // launch ~2x the average to skip a storm of empty threadgroups
         // without looping in the common case.
         let avg = (req.total_rows / req.n_expert.max(1)) as u64;
@@ -9211,7 +9411,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         // threadgroups retire for free, while a small grid serialises the
         // hot experts through the striding loop. ALLPAKA_MMID_RTILES pins
         // the grid for A/B tests.
-        let auto = (m_fused as u64).div_ceil(32).max(1);
+        let auto = (m_fused as u64).div_ceil(bn as u64).max(1);
         let rt = std::env::var("ALLPAKA_MMID_RTILES")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -9219,7 +9419,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         (rt, req.n_expert as u64)
     } else {
         let max_rows = req.groups.iter().map(|g| g[2]).max()? as usize;
-        (max_rows.div_ceil(32) as u64, req.groups.len() as u64)
+        (max_rows.div_ceil(bn) as u64, req.groups.len() as u64)
     };
 
     // Arenas: x rows then the group table in x; gate, up, down out in y.
