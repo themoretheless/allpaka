@@ -158,6 +158,7 @@
         </select></label>
         
         <label title="JSON-режим DeepSeek (deepseek-chat)"><input type="checkbox" id="json-mode"> JSON</label>
+        <label title="Глубина рассуждений: OpenAI/Grok/Gemini — reasoning_effort, OpenRouter — reasoning.effort, Claude — extended thinking. DeepSeek/Kimi/локальная модель игнорируют">Effort <select id="effort"><option value="" selected>Авто</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
         <label title="Максимум выходных токенов на запрос; допустимое значение зависит от модели">Токены <input id="output-tokens" type="number" value="8192" min="256" max="393216" step="256"></label>
         <label>Шаги <input id="steps" type="number" value="12" min="1" max="50"></label>
         <button id="layout-convert" type="button" title="Преобразовать раскладку в поле (RU ↔ EN)" aria-label="Преобразовать раскладку"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 5.5h11m0 0L11 3m2.5 2.5L11 8M13.5 10.5h-11m0 0L5 8m-2.5 2.5L5 13"/></svg></button>

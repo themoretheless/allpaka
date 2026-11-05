@@ -149,6 +149,7 @@ pub(crate) async fn judge(
         .transpose()
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
     request.settings.max_output_tokens = request.settings.max_output_tokens.min(4096);
+    // reasoning_effort is honoured as requested: it is part of the receipt's pinned settings.
     let id = crate::evaluation::new_id();
     let trace = app
         .observability

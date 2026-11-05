@@ -50,6 +50,7 @@ function savePrefs() {
       compactThreshold: Number($('compact-threshold').value),
       writes: $('writes').checked,
       jsonMode: $('json-mode').checked,
+      effort: $('effort').value,
       swarm: collectSwarm(),
       layoutFix
     }));
@@ -72,6 +73,7 @@ function applyPrefs() {
   if (Number.isFinite(threshold) && threshold >= 4096 && threshold <= 1000000) $('compact-threshold').value = threshold;
   $('writes').checked = prefs.writes === true;
   $('json-mode').checked = prefs.jsonMode === true;
+  $('effort').value = ['low', 'medium', 'high'].includes(prefs.effort) ? prefs.effort : '';
   layoutFix = prefs.layoutFix === true;
   $('layout-toggle')?.classList.toggle('active', layoutFix);
   applySwarm(prefs.swarm);
@@ -277,7 +279,7 @@ function swarmState(report){
   if(status==='running')return {label:report.step>1?`работает · шаг ${report.step}`:'работает',className:'swarm-run'};
   return {label:'в очереди',className:'muted'};
 }
-function settings() {return {guardrails:$('chat-guardrails-enabled').checked?{input_policy_sha256:$('chat-guardrails-input').value.trim(),output_policy_sha256:$('chat-guardrails-output').value.trim(),action:$('chat-guardrails-action').value}:null,verbosity:$('verbosity').value,project_id:$('project').value,provider:$('provider').value,model:$('model').value.trim(),mode:$('mode').value,max_steps:Number($('steps').value),max_output_tokens:Number($('output-tokens').value),auto_compact:$('auto-compact').checked,compact_threshold:$('compact-threshold').value?Number($('compact-threshold').value):24000,allow_writes:$('writes').checked,json_mode:$('json-mode').checked,swarm:collectSwarm()};}
+function settings() {return {guardrails:$('chat-guardrails-enabled').checked?{input_policy_sha256:$('chat-guardrails-input').value.trim(),output_policy_sha256:$('chat-guardrails-output').value.trim(),action:$('chat-guardrails-action').value}:null,verbosity:$('verbosity').value,project_id:$('project').value,provider:$('provider').value,model:$('model').value.trim(),mode:$('mode').value,max_steps:Number($('steps').value),max_output_tokens:Number($('output-tokens').value),auto_compact:$('auto-compact').checked,compact_threshold:$('compact-threshold').value?Number($('compact-threshold').value):24000,allow_writes:$('writes').checked,json_mode:$('json-mode').checked,reasoning_effort:$('effort').value||null,swarm:collectSwarm()};}
 async function loadConfig() {
   config=await api('config');
   $('project').replaceChildren(...config.projects.map(p=>{const o=node('option',p.name);o.value=p.id;return o;}));
@@ -404,7 +406,7 @@ function renderStatus(status) {
 }
 async function openChat(id) {
   active=id;lastMessages='';messageCache=[];pendingSend=null;pendingRev++;const s=await api('sessions/'+id);if(active!==id)return;
-  $('verbosity').value=s.settings.verbosity||'normal';$('auto-compact').checked=s.settings.auto_compact??true;$('compact-threshold').value=s.settings.compact_threshold??24000;current=s;$('history-folder').value=s.folder||'active';$('project').value=s.settings.project_id;$('provider').value=s.settings.provider;$('model').value=s.settings.model;$('mode').value=s.settings.mode;$('steps').value=s.settings.max_steps;$('output-tokens').value=s.settings.max_output_tokens??8192;$('writes').checked=s.settings.allow_writes;$('json-mode').checked=!!s.settings.json_mode;$('chat-guardrails-enabled').checked=!!s.settings.guardrails;$('chat-guardrails-input').value=s.settings.guardrails?.input_policy_sha256||'';$('chat-guardrails-output').value=s.settings.guardrails?.output_policy_sha256||'';$('chat-guardrails-action').value=s.settings.guardrails?.action||'block';applySwarm(s.settings.swarm);
+  $('verbosity').value=s.settings.verbosity||'normal';$('auto-compact').checked=s.settings.auto_compact??true;$('compact-threshold').value=s.settings.compact_threshold??24000;current=s;$('history-folder').value=s.folder||'active';$('project').value=s.settings.project_id;$('provider').value=s.settings.provider;$('model').value=s.settings.model;$('mode').value=s.settings.mode;$('steps').value=s.settings.max_steps;$('output-tokens').value=s.settings.max_output_tokens??8192;$('writes').checked=s.settings.allow_writes;$('json-mode').checked=!!s.settings.json_mode;$('effort').value=s.settings.reasoning_effort||'';$('chat-guardrails-enabled').checked=!!s.settings.guardrails;$('chat-guardrails-input').value=s.settings.guardrails?.input_policy_sha256||'';$('chat-guardrails-output').value=s.settings.guardrails?.output_policy_sha256||'';$('chat-guardrails-action').value=s.settings.guardrails?.action||'block';applySwarm(s.settings.swarm);
   savePrefs();
   renderModelInfo();renderContext();modeHelp();render(s);await listChats();
 }
@@ -485,7 +487,16 @@ function withStreamCaret(box){
 }
 function renderSingleMessage(s,m,index,openKey,detailState){
   const div=node('article',undefined,'message '+m.role);div.dataset.messageIndex=index;
-  const header=node('div',m.role==='user'?'ВЫ':m.role==='tool'?'ИНСТРУМЕНТ':'ALLPAKA','role');
+  // Подпись «ALLPAKA · модель» нужна только в начале хода: шаги того же хода
+  // после вызовов инструментов той же модели её не повторяют.
+  let continued=false;
+  if(m.role==='assistant'){
+    let k=index-1;
+    while(k>=0&&s.messages[k]?.role==='tool')k--;
+    const prev=s.messages[k];
+    continued=k<index-1&&prev?.role==='assistant'&&(prev.provider||'')===(m.provider||'')&&(prev.model||'')===(m.model||'');
+  }
+  const header=node('div',m.role==='user'?'ВЫ':m.role==='tool'?'ИНСТРУМЕНТ':continued?undefined:'ALLPAKA','role');
   if(m.role==='assistant' && m.reasoning_content && $('analysis-display').value!=='hidden'){
     const reasoning=node('details',undefined,'reasoning');
     const reasoningKey=openKey();
@@ -497,8 +508,8 @@ function renderSingleMessage(s,m,index,openKey,detailState){
     const copy=node('button','Копировать анализ');copy.onclick=async()=>{try{await navigator.clipboard.writeText(m.reasoning_content);notify('Анализ скопирован');}catch{notify('Не удалось скопировать');}};
     body.append(copy);reasoning.append(body);header.append(reasoning);
   }
-  if(m.role==='assistant'&&(m.model||m.provider))header.append(node('span',modelLabel(m.provider,m.model),'model-tag'));
-  div.append(header);
+  if(m.role==='assistant'&&!continued&&(m.model||m.provider))header.append(node('span',modelLabel(m.provider,m.model),'model-tag'));
+  if(header.childNodes.length)div.append(header);
   if(m.role==='tool'){
     const call=toolCallFor(s,index);
     const name=call?.function?.name||'Инструмент';
@@ -3060,6 +3071,7 @@ $('auto-compact').onchange=savePrefs;
 $('compact-threshold').oninput=savePrefs;
 $('writes').onchange=savePrefs;
 $('json-mode').onchange=savePrefs;
+$('effort').onchange=savePrefs;
 $('swarm-add-member').onclick=()=>{const provider=$('provider').value||((providerList()[0]||{}).id||'');swarmPanel().append(swarmRow({label:'',role:'',provider,model:$('model').value.trim()}));updateSwarmCost();savePrefs();};
 $('swarm-fill-defaults').onclick=()=>fillSwarmDefaults(true);
 $('swarm-rounds').onchange=$('swarm-critic').onchange=$('swarm-steps').oninput=$('swarm-report-kb').oninput=()=>{updateSwarmCost();savePrefs();};

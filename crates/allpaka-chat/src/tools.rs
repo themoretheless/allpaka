@@ -343,6 +343,7 @@ mod tests {
             auto_compact: true,
             compact_threshold: 24000,
             json_mode: false,
+            reasoning_effort: None,
         };
         assert_eq!(schemas(&s, false).len(), 4);
         assert!(execute(

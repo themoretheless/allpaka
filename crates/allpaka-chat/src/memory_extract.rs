@@ -186,6 +186,7 @@ pub(crate) async fn extract(
         .transpose()
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
     input.settings.max_output_tokens = input.settings.max_output_tokens.min(4096);
+    // reasoning_effort is honoured as requested: it is part of the receipt's pinned settings.
     let proposal_id = crate::evaluation::new_id();
     let trace = app
         .observability
@@ -320,6 +321,7 @@ pub(crate) async fn consolidate(
         .transpose()
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
     input.settings.max_output_tokens = input.settings.max_output_tokens.min(4096);
+    // reasoning_effort is honoured as requested: it is part of the receipt's pinned settings.
     let proposal_id = crate::evaluation::new_id();
     let trace = app
         .observability

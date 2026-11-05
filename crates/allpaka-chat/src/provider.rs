@@ -1,4 +1,4 @@
-use crate::types::{Message, Settings};
+use crate::types::{Effort, Message, Settings};
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -243,6 +243,7 @@ pub async fn models(client: &reqwest::Client, p: &Provider) -> Result<Vec<Value>
     Ok(catalog)
 }
 
+#[cfg(test)]
 pub fn body(
     p: &Provider,
     model: &str,
@@ -250,6 +251,26 @@ pub fn body(
     messages: &[Message],
     tools: &[Value],
     max_output_tokens: u32,
+) -> Value {
+    body_with_effort(p, model, system, messages, tools, max_output_tokens, None)
+}
+
+/// Anthropic thinking budget for `effort`, kept below `max_tokens` with room for the answer.
+fn thinking_budget(effort: Effort, max_output_tokens: u32) -> Option<u32> {
+    let budget = effort
+        .thinking_budget()
+        .min(max_output_tokens.saturating_sub(1024));
+    (budget >= 1024).then_some(budget)
+}
+
+pub fn body_with_effort(
+    p: &Provider,
+    model: &str,
+    system: &str,
+    messages: &[Message],
+    tools: &[Value],
+    max_output_tokens: u32,
+    effort: Option<Effort>,
 ) -> Value {
     if p.anthropic {
         let mut wire: Vec<Value> = vec![];
@@ -263,6 +284,21 @@ pub fn body(
                 ),
                 "assistant" => {
                     let mut b = vec![];
+                    // Signed thinking blocks must lead the turn and only replay to the model that made them.
+                    if m.provider.as_deref() == Some(p.id.as_str())
+                        && m.model.as_deref() == Some(model)
+                        && !m.truncated
+                    {
+                        b.extend(
+                            m.reasoning_details
+                                .iter()
+                                .filter(|d| {
+                                    d["type"] == "thinking" && d["signature"].is_string()
+                                        || d["type"] == "redacted_thinking"
+                                })
+                                .cloned(),
+                        );
+                    }
                     if !m.content.is_empty() {
                         b.push(json!({"type":"text","text":m.content}));
                     }
@@ -294,6 +330,9 @@ pub fn body(
         let mut body = json!({"model":model,"system":system,"messages":wire,"max_tokens":max_output_tokens,"stream":true});
         if !tools.is_empty() {
             body["tools"] = json!(tools.iter().map(|t| json!({"name":t["function"]["name"],"description":t["function"]["description"],"input_schema":t["function"]["parameters"]})).collect::<Vec<_>>());
+        }
+        if let Some(budget) = effort.and_then(|e| thinking_budget(e, max_output_tokens)) {
+            body["thinking"] = json!({"type":"enabled","budget_tokens":budget});
         }
         body
     } else {
@@ -357,6 +396,14 @@ pub fn body(
         if p.id == "deepseek" {
             body["stream_options"] = json!({"include_usage": true});
         }
+        if let Some(effort) = effort {
+            match p.id.as_str() {
+                "openai" | "xai" | "gemini" => body["reasoning_effort"] = json!(effort.as_str()),
+                "openrouter" => body["reasoning"] = json!({"effort": effort.as_str()}),
+                // DeepSeek, Kimi, local and custom endpoints have no portable effort knob.
+                _ => {}
+            }
+        }
         body
     }
 }
@@ -367,6 +414,7 @@ pub struct Accumulator {
     pub reasoning: String,
     pub reasoning_details: Vec<Value>,
     reasoning_bytes: usize,
+    thinking_blocks: BTreeMap<usize, Value>,
     pub calls: BTreeMap<usize, Value>,
     pub usage: Value,
     pub done: bool,
@@ -390,6 +438,21 @@ impl Accumulator {
                     let b = &v["content_block"];
                     self.calls.insert(index,json!({"id":b["id"],"type":"function","function":{"name":b["name"],"arguments":""}}));
                 }
+                "content_block_start" if v["content_block"]["type"] == "thinking" => {
+                    let thinking = v["content_block"]["thinking"].as_str().unwrap_or("");
+                    self.reasoning.push_str(thinking);
+                    self.thinking_blocks.insert(
+                        index,
+                        json!({"type":"thinking","thinking":thinking,"signature":v["content_block"]["signature"].as_str().unwrap_or("")}),
+                    );
+                }
+                "content_block_start" if v["content_block"]["type"] == "redacted_thinking" => {
+                    self.reasoning_bytes += v["content_block"]["data"].as_str().map_or(0, str::len);
+                    self.thinking_blocks.insert(
+                        index,
+                        json!({"type":"redacted_thinking","data":v["content_block"]["data"]}),
+                    );
+                }
                 "content_block_start" if v["content_block"]["type"] == "text" => {
                     text = v["content_block"]["text"].as_str().unwrap_or("").into();
                 }
@@ -400,9 +463,20 @@ impl Accumulator {
                             append(&mut c["function"]["arguments"], &v["delta"]["partial_json"]);
                         }
                     }
-                    "thinking_delta" => self
-                        .reasoning
-                        .push_str(v["delta"]["thinking"].as_str().unwrap_or("")),
+                    "thinking_delta" => {
+                        self.reasoning
+                            .push_str(v["delta"]["thinking"].as_str().unwrap_or(""));
+                        if let Some(b) = self.thinking_blocks.get_mut(&index) {
+                            append(&mut b["thinking"], &v["delta"]["thinking"]);
+                        }
+                    }
+                    "signature_delta" => {
+                        if let Some(b) = self.thinking_blocks.get_mut(&index) {
+                            self.reasoning_bytes +=
+                                v["delta"]["signature"].as_str().map_or(0, str::len);
+                            append(&mut b["signature"], &v["delta"]["signature"]);
+                        }
+                    }
                     _ => {}
                 },
                 "message_start" => self.usage = v["message"]["usage"].clone(),
@@ -467,7 +541,9 @@ impl Accumulator {
             }
         }
         self.text.push_str(&text);
-        if self.text.len() + self.reasoning.len() > 2_000_000
+        if self.text.len() + self.reasoning.len() + self.reasoning_bytes > 4_000_000
+            || self.thinking_blocks.len() > 1024
+            || self.text.len() + self.reasoning.len() > 2_000_000
             || self.calls.len() > 64
             || self.calls.values().any(|v| v.to_string().len() > 1_000_000)
         {
@@ -475,7 +551,9 @@ impl Accumulator {
         }
         Ok(text)
     }
-    pub fn finish(self) -> Result<(Message, Value)> {
+    pub fn finish(mut self) -> Result<(Message, Value)> {
+        let thinking = std::mem::take(&mut self.thinking_blocks);
+        self.reasoning_details.extend(thinking.into_values());
         if !self.done {
             bail!("Provider stream disconnected before completion; partial text was retained");
         }
@@ -559,13 +637,14 @@ where
     } else {
         "/chat/completions"
     };
-    let mut request_body = body(
+    let mut request_body = body_with_effort(
         provider,
         &settings.model,
         system,
         messages,
         tools,
         max_output_tokens,
+        settings.reasoning_effort,
     );
     if settings.json_mode
         && provider.id == "deepseek"
@@ -1447,5 +1526,96 @@ mod tests {
             };
             assert_eq!(b[field], 12288, "{}", p.id);
         }
+    }
+
+    fn provider(id: &str) -> Provider {
+        defaults().into_iter().find(|p| p.id == id).unwrap()
+    }
+    #[test]
+    fn no_effort_keeps_request_body_unchanged() {
+        for p in defaults() {
+            let msgs = [Message::text("user", "hi")];
+            assert_eq!(
+                body(&p, "m", "sys", &msgs, &[], 8192),
+                body_with_effort(&p, "m", "sys", &msgs, &[], 8192, None),
+                "{}",
+                p.id
+            );
+        }
+    }
+    #[test]
+    fn effort_maps_to_each_provider_wire_format() {
+        let msgs = [Message::text("user", "hi")];
+        let b = |id: &str, e, max| {
+            body_with_effort(&provider(id), "m", "sys", &msgs, &[], max, Some(e))
+        };
+        for id in ["openai", "xai", "gemini"] {
+            assert_eq!(
+                b(id, Effort::High, 8192)["reasoning_effort"],
+                "high",
+                "{id}"
+            );
+        }
+        assert_eq!(
+            b("openrouter", Effort::Low, 8192)["reasoning"],
+            json!({"effort":"low"})
+        );
+        assert!(b("openrouter", Effort::Low, 8192)
+            .get("reasoning_effort")
+            .is_none());
+        for id in ["deepseek", "kimi", "local"] {
+            let v = b(id, Effort::High, 8192);
+            assert!(
+                v.get("reasoning_effort").is_none() && v.get("reasoning").is_none(),
+                "{id}"
+            );
+        }
+        let claude = b("anthropic", Effort::Medium, 32000);
+        assert_eq!(
+            claude["thinking"],
+            json!({"type":"enabled","budget_tokens":8192})
+        );
+        // Budget is clamped below max_tokens, and dropped when too small to be valid.
+        assert_eq!(
+            b("anthropic", Effort::High, 8192)["thinking"]["budget_tokens"],
+            7168
+        );
+        assert!(b("anthropic", Effort::Low, 1500).get("thinking").is_none());
+        assert!(claude.get("reasoning_effort").is_none());
+    }
+    #[test]
+    fn claude_thinking_signature_is_collected_and_replayed_to_same_model() {
+        let mut a = Accumulator::default();
+        for event in [
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me "}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"think"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig=="}}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"c1","name":"read_file","input":{}}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
+            json!({"type":"message_stop"}),
+        ] {
+            a.event(&event.to_string(), true).unwrap();
+        }
+        let (mut m, _) = a.finish().unwrap();
+        assert_eq!(m.reasoning_content.as_deref(), Some("let me think"));
+        assert_eq!(
+            m.reasoning_details,
+            vec![json!({"type":"thinking","thinking":"let me think","signature":"sig=="})]
+        );
+        m.provider = Some("anthropic".into());
+        m.model = Some("claude-x".into());
+        let p = provider("anthropic");
+        let msgs = [Message::text("user", "go"), m.clone()];
+        let same = body_with_effort(&p, "claude-x", "s", &msgs, &[], 16384, Some(Effort::Low));
+        assert_eq!(same["messages"][1]["content"][0]["type"], "thinking");
+        assert_eq!(same["messages"][1]["content"][0]["signature"], "sig==");
+        assert_eq!(same["messages"][1]["content"][1]["type"], "tool_use");
+        let other = body(&p, "claude-y", "s", &msgs, &[], 16384);
+        assert_eq!(other["messages"][1]["content"][0]["type"], "tool_use");
+        // Anthropic thinking blocks never leak into OpenAI-compatible requests.
+        let router = body(&provider("openrouter"), "claude-x", "s", &msgs, &[], 16384);
+        assert!(router["messages"][1].get("reasoning_details").is_none());
     }
 }

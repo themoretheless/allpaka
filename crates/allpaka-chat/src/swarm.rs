@@ -1585,4 +1585,23 @@ mod tests {
         assert!(!merge.allow_writes);
         assert!(!merge.json_mode);
     }
+
+    #[test]
+    fn member_and_merge_settings_inherit_reasoning_effort() {
+        let mut settings: Settings = serde_json::from_value(json!({
+            "provider": "openai",
+            "model": "big",
+            "mode": "swarm",
+            "reasoning_effort": "high"
+        }))
+        .unwrap();
+        settings.swarm = config(2);
+        let member = member_settings(&settings, &settings.swarm.members[0], &settings.swarm);
+        assert_eq!(member.reasoning_effort, Some(crate::types::Effort::High));
+        let merge = merge_settings(&settings, &settings.swarm);
+        assert_eq!(merge.reasoning_effort, Some(crate::types::Effort::High));
+        let legacy: Settings =
+            serde_json::from_value(json!({"provider": "openai", "model": "big"})).unwrap();
+        assert_eq!(legacy.reasoning_effort, None);
+    }
 }

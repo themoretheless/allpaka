@@ -165,6 +165,8 @@ async fn run_body(
         }
     }
     let mut settings = s.settings.clone();
+    // Summaries need their whole output budget; thinking would compete with it.
+    settings.reasoning_effort = None;
     let guards = settings
         .guardrails
         .as_ref()

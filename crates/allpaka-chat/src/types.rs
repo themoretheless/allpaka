@@ -200,6 +200,34 @@ pub struct Settings {
     pub compact_threshold: usize,
     #[serde(default)]
     pub json_mode: bool,
+    /// Requested reasoning depth; None keeps the provider default.
+    #[serde(default)]
+    pub reasoning_effort: Option<Effort>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+}
+impl Effort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+        }
+    }
+    /// Anthropic extended-thinking budget for this effort level.
+    pub fn thinking_budget(self) -> u32 {
+        match self {
+            Effort::Low => 2048,
+            Effort::Medium => 8192,
+            Effort::High => 24576,
+        }
+    }
 }
 fn default_auto_compact() -> bool {
     true
