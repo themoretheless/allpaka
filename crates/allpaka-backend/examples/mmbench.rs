@@ -344,12 +344,10 @@ fn main() {
             .new_compute_pipeline_state_with_function(&fun)
             .unwrap();
         if std::env::var("MM_ID").is_ok_and(|v| v == "2") {
-            // llama.cpp kernel_mul_mm_id_q4_K harness (MIT). Needs
-            // /tmp/mm_id_llama.metal assembled from ggml-metal.metal - the
-            // extraction never compiled (modern template plumbing) and the
-            // question was closed by inspection instead: the kernels are
-            // structurally identical. Kept for a future retry.
-            let src = std::fs::read_to_string("/tmp/mm_id_llama.metal").unwrap();
+            // llama.cpp kernel_mul_mm_id_q4_K_f32 (MIT), extracted to
+            // /tmp/mm_llama.metal. Grid is (tile, col-tile): the prepass
+            // (emulated here) emits one descriptor per non-empty 32-row tile.
+            let src = std::fs::read_to_string("/tmp/mm_llama.metal").unwrap();
             let llib = device
                 .new_library_with_source(&src, &CompileOptions::new())
                 .unwrap_or_else(|e| panic!("llama mm_id compile: {e}"));
@@ -366,34 +364,45 @@ fn main() {
                 nb12: u64,
                 nb13: u64,
                 ne20: i32,
-                ne21: i32,
                 ne0: i32,
                 ne1: i32,
                 r2: i16,
                 r3: i16,
             }
-            // id = token index (ne20 = 1 flattens the used-slot dim).
-            let n_tok = m;
-            let mut tpe = vec![0u32; n_exp];
-            let mut ids = vec![0i32; n_exp * n_tok];
+            let rows_per = (m * n_used / n_act).max(1);
+            let total_rows = rows_per * n_act;
+            // One 32-row tile per active expert (rows_per <= 32 here).
+            let tiles_per_exp = rows_per.div_ceil(32);
+            let n_tiles = n_act * tiles_per_exp;
+            let mut tpe = vec![0u32; 1 + 3 * n_tiles];
+            tpe[0] = n_tiles as u32;
+            let mut ids = vec![0i32; n_tiles * 32];
+            let mut t = 0usize;
             for e in 0..n_act {
-                tpe[e] = rows_per as u32;
-                for j in 0..rows_per.min(n_tok) {
-                    ids[e * n_tok + j] = j as i32;
+                for k in 0..tiles_per_exp {
+                    let idb = t * 32;
+                    let rows = (rows_per - k * 32).min(32);
+                    tpe[1 + 3 * t] = e as u32;
+                    tpe[1 + 3 * t + 1] = idb as u32;
+                    tpe[1 + 3 * t + 2] = rows as u32;
+                    for j in 0..rows {
+                        ids[idb + j] = ((e * rows_per + k * 32 + j) % m) as i32;
+                    }
+                    t += 1;
                 }
             }
             let tpe_buf = device.new_buffer_with_data(
                 tpe.as_ptr() as *const _,
-                (n_exp * 4) as u64,
+                (tpe.len() * 4) as u64,
                 MTLResourceOptions::StorageModeShared,
             );
             let ids_buf = device.new_buffer_with_data(
                 ids.as_ptr() as *const _,
-                (n_exp * n_tok * 4) as u64,
+                (ids.len() * 4) as u64,
                 MTLResourceOptions::StorageModeShared,
             );
             let dst_buf = device.new_buffer(
-                (n_tok * n_out * 4) as u64,
+                (m * n_out * 4) as u64,
                 MTLResourceOptions::StorageModeShared,
             );
             let largs = LlamaIdArgs {
@@ -404,26 +413,16 @@ fn main() {
                 nb03: 0,
                 ne11: 1,
                 nb10: 4,
-                nb11: 4,
+                nb11: (n_in * 4) as u64,
                 nb12: (n_in * 4) as u64,
                 nb13: 0,
                 ne20: 1,
-                ne21: n_tok as i32,
                 ne0: n_out as i32,
                 ne1: 1,
                 r2: 1,
                 r3: 1,
             };
-            let bc = false;
-            let consts = FunctionConstantValues::new();
-            consts.set_constant_value_at_index(
-                &bc as *const bool as *const _,
-                MTLDataType::Bool,
-                700,
-            );
-            let lfun = llib
-                .get_function("llama_mul_mm_id_q4_K", Some(consts))
-                .unwrap_or_else(|e| panic!("llama mm_id fc: {e}"));
+            let lfun = llib.get_function("llama_mm_id_q4_K", None).unwrap();
             let lpipe = device
                 .new_compute_pipeline_state_with_function(&lfun)
                 .unwrap();
@@ -443,11 +442,7 @@ fn main() {
                     enc.set_buffer(5, Some(&dst_buf), 0);
                     enc.set_threadgroup_memory_length(0, 8192);
                     enc.dispatch_thread_groups(
-                        MTLSize::new(
-                            (n_tok as u64).div_ceil(32),
-                            (n_out as u64).div_ceil(64),
-                            n_exp as u64,
-                        ),
+                        MTLSize::new(n_tiles as u64, (n_out as u64).div_ceil(64), 1),
                         MTLSize::new(128, 1, 1),
                     );
                 },
@@ -455,7 +450,7 @@ fn main() {
             );
             let fl = 2.0 * (total_rows * n_in * n_out) as f64;
             println!(
-                "llama mul_mm_id_q4_K act={n_act}/{n_exp}: {:.3} ms, {:.2} TFLOPS-effective",
+                "llama mm_id_q4_K act={n_act}/{n_exp} tiles={n_tiles}: {:.3} ms, {:.2} TFLOPS-effective",
                 t * 1e3,
                 fl / t / 1e12
             );

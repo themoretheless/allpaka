@@ -53,11 +53,25 @@ same grid, `MM_LLAMA=1` in `examples/mmbench.rs`:
 (d/16 + unshifted mask) plus a uint4 vector load. The residual pp gap on
 30B is therefore NOT the plain-mm kernel. Candidates, in order:
 
-1. mmid grouped regime: our mmid loses ~7% vs plain at 30 rows/expert
-   (10.8 vs 11.6 TFLOPS-effective, `MM_ID=1 MM_EXP=128`); llama's
-   mm_id + map0 compaction may lose less.
-2. Attention path at pp480 (llama FA kernels vs ours) — needs per-phase
-   GPU timing to confirm.
+1. mmid grouped regime: head-to-head DONE (2026-11-06): llama
+   `kernel_mul_mm_id_q4_K_f32` (same extract file) vs our `mmllg_id_q4_k`
+   at 128 experts, 30 rows/expert, 2048→768: **llama 11.42-11.45 vs ours
+   11.10-11.13 TFLOPS-effective — llama +3%**, not the missing 10%.
+   Their grid is (non-empty tile, col-tile) from the map0 prepass; ours is
+   worst-case (col-tile, row-tile, expert) with early exit.
+2. Attention path at pp480 (llama FA kernels vs ours) — measured:
+   attention is 29% of layer GPU time (1.58 ms/layer), FFN 71%.
+
+### Where the pp gap actually lives (2026-11-06, Qwen3-30B pp480)
+
+Per pass: attention 76 ms + FFN 185 ms = 261 ms, but GPU busy is 321 ms.
+**~60 ms/pass (19%) is small-kernel time** — norms, rope, router, combine,
+embed: ~10 dispatches per layer, each paying launch/occupancy ramp.
+llama's total pass is 294 ms: if their fusion batch (topk_moe,
+moe_reduce, RMS_NORM+SCALE, ADD chains) cuts their small-op time to
+~30 ms, the numbers line up exactly with kernels tying. The next lever is
+fusing our per-layer small kernels (residual_norm+rope, combine+residual,
+router chain), not the mm or mmid kernels.
 
 ## Verdict
 
