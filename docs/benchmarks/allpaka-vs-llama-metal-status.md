@@ -17,6 +17,32 @@ warm-up, not bn16). Machine warms through the morning: 1227 → 1393 → 1481.
 So: no allpaka prefill regression, the gap is llama.cpp's own progress.
 Decode on 30B is now a solid win.
 
+### Where llama's +11% came from (source diff b ~Sep-12 → 0.9.0 cd959bae9)
+
+- **mm kernels essentially unchanged** — mul_mm.metal diff is int64
+  overflow fixes plus a two-pass `mul_mm_id_map0`. The new
+  `mpp::tensor_ops::matmul2d` kernel is gated off on M4 Max
+  ("tensor API disabled for pre-M5").
+- The gain is **graph fusion** (ggml-metal-fusion.cpp, PR #28948 and on):
+  topk_moe (SOFT_MAX+ARGSORT+GET_ROWS+norm+scale in one kernel),
+  moe_reduce 2..8 (MUL+ADD chain), RMS_NORM+SCALE/MUL/ADD, ADD chains,
+  MUL_MAT+ADD, and mul_mm_id amax-rescale removal (#30924).
+- **allpaka already has equivalents** of every one of these (GPU route
+  pick/scan/scatter, fused combine, fused residual-norm, fused
+  swiglu-down) — this convergence is exactly why llama caught up from
+  0.98× to 1.10× on pp.
+- allpaka pp480 runs 481 dispatches in ONE command buffer, GPU busy
+  321/322 ms — no CPU/launch overhead left. The residual ~10% on 30B is
+  kernel-vs-kernel mm throughput.
+
+### Next lever for pp on 30B
+
+Head-to-head microbench: llama legacy `kernel_mul_mm_q4_K_f32` vs allpaka
+`mmll_q4_k` on identical shapes (m=480-class tiles) via `mmbench` — if
+llama's inner loop wins in isolation, port the difference; if it ties,
+the gap is in mm_id grid/expert-slice strategy (llama compacts tokens per
+expert via map0 and skips empty token-tile halves).
+
 ## Verdict
 
 **Metal GPU path works and is fast in absolute terms, but allpaka is not
