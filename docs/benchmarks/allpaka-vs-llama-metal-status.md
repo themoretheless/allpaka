@@ -37,11 +37,27 @@ Decode on 30B is now a solid win.
 
 ### Next lever for pp on 30B
 
-Head-to-head microbench: llama legacy `kernel_mul_mm_q4_K_f32` vs allpaka
-`mmll_q4_k` on identical shapes (m=480-class tiles) via `mmbench` — if
-llama's inner loop wins in isolation, port the difference; if it ties,
-the gap is in mm_id grid/expert-slice strategy (llama compacts tokens per
-expert via map0 and skips empty token-tile halves).
+Head-to-head microbench DONE (2026-11-06): llama legacy
+`kernel_mul_mm_q4_K_f32` (extracted standalone, MIT, from
+kernels/mul_mm.metal @ cd959bae9) vs allpaka mm kernels, same data,
+same grid, `MM_LLAMA=1` in `examples/mmbench.rs`:
+
+| shape (m=480) | best allpaka | llama | Δ |
+| --- | ---: | ---: | ---: |
+| 2048→768 (30B expert) | 11.58 | 11.57 | 0% |
+| 4096→1408 (GLM gate/up) | 12.25 | 12.00 | **+2% ours** |
+| 1408→4096 (GLM down) | 12.42 | 12.50 | −1% |
+| 2048→6144 (dense FFN) | 12.29 | 12.49 | −2% |
+
+**The mm kernels tie (±2%).** Our dequant already uses llama's tricks
+(d/16 + unshifted mask) plus a uint4 vector load. The residual pp gap on
+30B is therefore NOT the plain-mm kernel. Candidates, in order:
+
+1. mmid grouped regime: our mmid loses ~7% vs plain at 30 rows/expert
+   (10.8 vs 11.6 TFLOPS-effective, `MM_ID=1 MM_EXP=128`); llama's
+   mm_id + map0 compaction may lose less.
+2. Attention path at pp480 (llama FA kernels vs ours) — needs per-phase
+   GPU timing to confirm.
 
 ## Verdict
 

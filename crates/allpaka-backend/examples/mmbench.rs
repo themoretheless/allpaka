@@ -238,6 +238,76 @@ fn main() {
         );
     }
 
+    // --- MM_LLAMA=1: llama.cpp legacy kernel_mul_mm_q4_K_f32 (MIT), from
+    // /tmp/mm_llama.metal extracted out of ggml-metal kernels/mul_mm.metal.
+    // Same data, same tile count; grid transposed (x = token tiles).
+    if std::env::var("MM_LLAMA").is_ok_and(|v| v == "1") {
+        let lsrc =
+            std::fs::read_to_string("/tmp/mm_llama.metal").expect("/tmp/mm_llama.metal");
+        let llib = device
+            .new_library_with_source(&lsrc, &CompileOptions::new())
+            .unwrap_or_else(|e| panic!("llama mm compile: {e}"));
+        let fun = llib.get_function("llama_mm_q4_K", None).unwrap();
+        let pipe = device
+            .new_compute_pipeline_state_with_function(&fun)
+            .unwrap();
+        #[repr(C)]
+        struct LlamaMmArgs2 {
+            ne00: i32,
+            ne02: i32,
+            nb01: u64,
+            nb02: u64,
+            nb03: u64,
+            ne12: i32,
+            nb10: u64,
+            nb11: u64,
+            nb12: u64,
+            nb13: u64,
+            ne0: i32,
+            ne1: i32,
+            r2: i16,
+            r3: i16,
+        }
+        let args = LlamaMmArgs2 {
+            ne00: n_in as i32,
+            ne02: 1,
+            nb01: row_bytes as u64,
+            nb02: 0,
+            nb03: 0,
+            ne12: 1,
+            nb10: 4,
+            nb11: (n_in * 4) as u64,
+            nb12: 0,
+            nb13: 0,
+            ne0: n_out as i32,
+            ne1: m as i32,
+            r2: 1,
+            r3: 1,
+        };
+        let iter_no = std::cell::Cell::new(0u64);
+        let t = time_kernel(
+            &queue,
+            |enc| {
+                let wo = iter_no.get() * w_step as u64;
+                iter_no.set(iter_no.get() + 1);
+                enc.set_compute_pipeline_state(&pipe);
+                enc.set_bytes(0, std::mem::size_of::<LlamaMmArgs2>() as u64,
+                    &args as *const LlamaMmArgs2 as *const _);
+                enc.set_buffer(1, Some(&w_buf), wo);
+                enc.set_buffer(2, Some(&x_buf), 0);
+                enc.set_buffer(3, Some(y_buf), 0);
+                enc.set_threadgroup_memory_length(0, 8192);
+                enc.dispatch_thread_groups(
+                    MTLSize::new((m as u64).div_ceil(32), (n_out as u64).div_ceil(64), 1),
+                    MTLSize::new(128, 1, 1),
+                );
+            },
+            10,
+        );
+        let fl = 2.0 * (m * n_in * n_out) as f64;
+        println!("llama kernel_mul_mm_q4_K_f32: {:.3} ms, {:.2} TFLOPS", t * 1e3, fl / t / 1e12);
+    }
+
     // --- mmid (grouped) mode ---
     if id_mode {
         let lib = device
