@@ -62,7 +62,20 @@ same grid, `MM_LLAMA=1` in `examples/mmbench.rs`:
 2. Attention path at pp480 (llama FA kernels vs ours) — measured:
    attention is 29% of layer GPU time (1.58 ms/layer), FFN 71%.
 
-### Where the pp gap actually lives (2026-11-06, Qwen3-30B pp480)
+### Where the pp gap actually lives (2026-11-07 update, Qwen3-30B pp480)
+
+Direct probes on the onebuf path:
+- **Stage barriers cost 5.5%**: `ALLPAKA_NO_STAGE_BARRIER=1` (racy, timing
+  only) 1539 vs 1458 t/s = ~27 ms/pass of pipeline drain between FFN
+  stages. Removing them safely needs per-expert producer-consumer sync
+  (the route barrier is load-bearing — dropping it gives phantom 726 t/s).
+- Router is already one fused kernel (`route_fused`, default on); combine
+  is `combine_rows`; shared-expert swiglu is a standalone pass (~0.08
+  ms/layer); `route_patch_shared_w` one more small dispatch.
+- Fusible remainder (shared swiglu into shared down mm via a non-id
+  SWIGLU variant, patch into combine) is ~6-10 ms/pass ≈ +2-3%.
+
+Original note:
 
 Per pass: attention 76 ms + FFN 185 ms = 261 ms, but GPU busy is 321 ms.
 **~60 ms/pass (19%) is small-kernel time** — norms, rope, router, combine,
