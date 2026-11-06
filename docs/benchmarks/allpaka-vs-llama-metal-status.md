@@ -3,6 +3,20 @@
 Canonical cool matrix: [matrix-2026-09-12.md](matrix-2026-09-12.md)
 (artifacts `.rbench/matrix-20260912-195149/`). MEGA off. `ALLPAKA_BENCH_SKIP_MTP=1`.
 
+## Recapture 2026-11-06 (qwen3-30b Q4_K_M, pp480/tg32)
+
+Artifacts: `.rbench/rerun-r2-on/`, `.rbench/rerun-r2-off/` (paired
+`ALLPAKA_MMID_BN16` on/off — no effect, heuristic does not trigger at
+avg 30 rows/expert; the 1136 outlier earlier that morning was page-cache
+warm-up, not bn16). Machine warms through the morning: 1227 → 1393 → 1481.
+
+- allpaka pp 1481 vs llama 1633 = **0.90×** (was 1.02× on 2026-09-12:
+  allpaka flat 1480-1500, **llama.cpp updated +11%** 1465 → 1633)
+- allpaka tg 147 vs llama 124 = **1.21×** (was 0.96×: allpaka 115 → 147)
+
+So: no allpaka prefill regression, the gap is llama.cpp's own progress.
+Decode on 30B is now a solid win.
+
 ## Verdict
 
 **Metal GPU path works and is fast in absolute terms, but allpaka is not
@@ -12,12 +26,14 @@ decode wins on some MoE shapes and loses on others.
 | Model | Prefill (allpaka/llama) | Decode (allpaka/llama) |
 | --- | ---: | ---: |
 | qwen3-0.6b Q8_0 | 0.51× | **1.13×** |
-| qwen3-30b Q4_K_M | **1.02×** | 0.96× |
+| qwen3-30b Q4_K_M | **1.02×** → 0.90× ¹ | 0.96× → **1.21×** ¹ |
 | Qwen3.6-35B Q4_K_M | **1.03×** | **1.35×** |
 | GLM-4.5-Air Q4_K_M | **~1.4×** | **0.86×** (39.0 vs 45.5) |
 | qwen3-235b Q2_K_XL | ~1.0× | **0.72×** (20.0 vs 27.8) |
 
 Unsupported on disk (skipped): dense Qwen3.8, Gemma4 `head_dim=512`.
+
+¹ Recapture 2026-11-06 (see above): allpaka pp flat, llama.cpp updated.
 
 ## What already landed (absolute Metal wins)
 
