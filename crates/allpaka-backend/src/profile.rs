@@ -35,6 +35,7 @@ impl RuntimeProfile {
                 prefill_one_buffer: false,
                 gpu_route: true,
                 mm_pipeline: false,
+                ..RuntimePolicy::default()
             },
             Self::MaxPerformance => RuntimePolicy {
                 normflag: true,
@@ -44,6 +45,7 @@ impl RuntimeProfile {
                 prefill_one_buffer: true,
                 gpu_route: true,
                 mm_pipeline: true,
+                ..RuntimePolicy::default()
             },
             Self::Deterministic => RuntimePolicy {
                 normflag: false,
@@ -53,6 +55,7 @@ impl RuntimeProfile {
                 prefill_one_buffer: true,
                 gpu_route: true,
                 mm_pipeline: false,
+                ..RuntimePolicy::default()
             },
         };
         ResolvedRuntime {

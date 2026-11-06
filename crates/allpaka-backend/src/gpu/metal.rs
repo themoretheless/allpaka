@@ -1331,21 +1331,13 @@ fn lanes_per_row(ty: GgmlType, n_in: usize) -> usize {
 /// Threadgroup size for matvec dispatch. Default 128; sweep with
 /// `ALLPAKA_MV_TG` ∈ {64,128,256} (geometry only — NR0 stays 2).
 fn mv_tg() -> u64 {
-    static TG: OnceLock<u64> = OnceLock::new();
-    *TG.get_or_init(|| {
-        std::env::var("ALLPAKA_MV_TG")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|n: &u64| matches!(n, 64 | 128 | 256))
-            .unwrap_or(128)
-    })
+    crate::runtime::get().mv_tg
 }
 
 /// Llama-style `mul_mv_id` grid for INDEXED decode matvecs (`grid.z = slots`).
 /// Default ON. `ALLPAKA_MV_ID=0` restores flat `n_out * slots` 1D packing.
 fn mv_id_grid() -> bool {
-    static S: OnceLock<bool> = OnceLock::new();
-    *S.get_or_init(|| std::env::var("ALLPAKA_MV_ID").map_or(true, |v| v != "0"))
+    crate::runtime::get().mv_id_grid
 }
 
 /// Dispatch geometry for a matvec pipeline (LPR × rows, TG via `mv_tg`).
@@ -2336,8 +2328,7 @@ fn mega_tg() -> u32 {
 }
 
 fn mega_debug() -> bool {
-    static M: OnceLock<bool> = OnceLock::new();
-    *M.get_or_init(|| std::env::var("ALLPAKA_MEGA_DEBUG").is_ok_and(|v| v == "1"))
+    crate::runtime::get().mega_debug
 }
 
 /// MEGA stays off. A live multi-TG device-atomic `mega_sync` soft-locked the
@@ -8822,8 +8813,7 @@ fn pf_onebuf() -> bool {
 /// old path: it is not what this was measured on.
 /// `ALLPAKA_PF_OBUF_DENSE=0` reverts.
 fn dense_obuf() -> bool {
-    static D: OnceLock<bool> = OnceLock::new();
-    *D.get_or_init(|| std::env::var("ALLPAKA_PF_OBUF_DENSE").map_or(true, |v| v != "0"))
+    crate::runtime::get().dense_obuf
 }
 
 /// ALLPAKA_GPU_COUNTERS=1: per-dispatch GPUTimestamp sampling in the fused
@@ -8832,8 +8822,7 @@ fn dense_obuf() -> bool {
 /// ("not supported on this device"), so the mode is a silent no-op here.
 /// Kept as the probe harness for a device that supports it.
 fn gpu_counters() -> bool {
-    static C: OnceLock<bool> = OnceLock::new();
-    *C.get_or_init(|| std::env::var("ALLPAKA_GPU_COUNTERS").is_ok_and(|v| v == "1"))
+    crate::runtime::get().gpu_counters
 }
 
 /// Whether sampleCountersInBuffer works on compute encoders here
@@ -8852,14 +8841,12 @@ const CSTAMP_CAP: usize = 1024;
 /// for this format; the port only won for q3_k, whose old kernel still
 /// assembled ushort pairs).
 fn q2_mv() -> bool {
-    static MV: OnceLock<bool> = OnceLock::new();
-    *MV.get_or_init(|| std::env::var("ALLPAKA_Q2_MV").is_ok_and(|v| v == "1"))
+    crate::runtime::get().q2_mv
 }
 
 /// Same switch for the q3_k llama-structure kernel: `ALLPAKA_Q3_MV=0` off.
 fn q3_mv() -> bool {
-    static MV: OnceLock<bool> = OnceLock::new();
-    *MV.get_or_init(|| std::env::var("ALLPAKA_Q3_MV").map_or(true, |v| v != "0"))
+    crate::runtime::get().q3_mv
 }
 
 fn q3_kernel() -> &'static str {
@@ -8873,8 +8860,7 @@ fn q3_kernel() -> &'static str {
 /// The q4_k llama-structure matvec. Default ON: decode 30B 90 -> 102 tok/s,
 /// 235B 22.2 -> 24.3 (q4_k attention weights). `ALLPAKA_Q4_MV=0` reverts.
 fn q4_mv() -> bool {
-    static MV: OnceLock<bool> = OnceLock::new();
-    *MV.get_or_init(|| std::env::var("ALLPAKA_Q4_MV").map_or(true, |v| v != "0"))
+    crate::runtime::get().q4_mv
 }
 
 fn q4_kernel() -> &'static str {
@@ -8889,8 +8875,7 @@ fn q4_kernel() -> &'static str {
 /// M4 Max measured 133.4 versus 131.6 tok/s with decode parity preserved.
 /// `ALLPAKA_Q6_MV=0` restores the reference kernel.
 fn q6_mv() -> bool {
-    static MV: OnceLock<bool> = OnceLock::new();
-    *MV.get_or_init(|| std::env::var("ALLPAKA_Q6_MV").map_or(true, |v| v != "0"))
+    crate::runtime::get().q6_mv
 }
 
 fn q6_kernel() -> &'static str {
@@ -8906,8 +8891,7 @@ fn q6_kernel() -> &'static str {
 /// the down projection. `ALLPAKA_Q5_MV=0` restores the reference
 /// block-per-lane kernel. Needs Mac A/B confirmation on glm/qwen35 shapes.
 fn q5_mv() -> bool {
-    static MV: OnceLock<bool> = OnceLock::new();
-    *MV.get_or_init(|| std::env::var("ALLPAKA_Q5_MV").map_or(true, |v| v != "0"))
+    crate::runtime::get().q5_mv
 }
 
 fn q5_kernel() -> &'static str {
@@ -8922,8 +8906,7 @@ fn q5_kernel() -> &'static str {
 /// qwen35moe GDN/attn projections. Carries SWIGLU_X for decode fusion.
 /// `ALLPAKA_Q8_MV=0` restores the packed-load reference kernel.
 fn q8_mv() -> bool {
-    static MV: OnceLock<bool> = OnceLock::new();
-    *MV.get_or_init(|| std::env::var("ALLPAKA_Q8_MV").map_or(true, |v| v != "0"))
+    crate::runtime::get().q8_mv
 }
 
 fn q8_kernel() -> &'static str {
@@ -8939,8 +8922,7 @@ fn q8_kernel() -> &'static str {
 /// 0.278 vs 0.742 ms/dispatch for attend_rows_t8 at m=480 (qwen3-30b
 /// shape), exact to 1e-5. `ALLPAKA_ATTN_MM=0` reverts.
 fn attend_mm() -> bool {
-    static A: OnceLock<bool> = OnceLock::new();
-    *A.get_or_init(|| std::env::var("ALLPAKA_ATTN_MM").map_or(true, |v| v != "0"))
+    crate::runtime::get().attend_mm
 }
 
 /// Prefill attention row tiling: `ALLPAKA_ATTN_T4=0` reverts to the
@@ -9035,8 +9017,7 @@ fn gpu_route() -> bool {
 /// down rows with one thread's latency chain, which costs more than the
 /// dispatch and barrier it removes. `ALLPAKA_CFUSE=1` re-enables.
 fn cfuse() -> bool {
-    static C: OnceLock<bool> = OnceLock::new();
-    *C.get_or_init(|| std::env::var("ALLPAKA_CFUSE").is_ok_and(|v| v == "1"))
+    crate::runtime::get().cfuse
 }
 
 /// The decode gate+up dual dispatch: one INDEXED launch covers both
@@ -9044,8 +9025,7 @@ fn cfuse() -> bool {
 /// 105.0 tok/s versus 113.7 for two concurrent dispatches on M4 Max.
 /// `ALLPAKA_DECODE_GUFUSE=1` enables the diagnostic variant.
 fn gufuse() -> bool {
-    static G: OnceLock<bool> = OnceLock::new();
-    *G.get_or_init(|| std::env::var("ALLPAKA_DECODE_GUFUSE").is_ok_and(|v| v == "1"))
+    crate::runtime::get().gufuse
 }
 
 /// The fused single-threadgroup router_topk in decode. OFF by default: the
@@ -9055,8 +9035,7 @@ fn gufuse() -> bool {
 /// tok/s decode (265 vs 388 ms GPU executing over 32 tokens).
 /// `ALLPAKA_RTOPK=1` re-enables the fused kernel.
 fn rtopk_fused() -> bool {
-    static R: OnceLock<bool> = OnceLock::new();
-    *R.get_or_init(|| std::env::var("ALLPAKA_RTOPK").is_ok_and(|v| v == "1"))
+    crate::runtime::get().rtopk_fused
 }
 
 /// The decode-side fold of the FFN residual norm into the router top-k
@@ -9065,16 +9044,14 @@ fn rtopk_fused() -> bool {
 /// despite fewer dispatches. `ALLPAKA_RFUSE=1` enables only when
 /// `normflag` is also off (`moe_plain`).
 fn rfuse() -> bool {
-    static R: OnceLock<bool> = OnceLock::new();
-    *R.get_or_init(|| std::env::var("ALLPAKA_RFUSE").is_ok_and(|v| v == "1"))
+    crate::runtime::get().rfuse
 }
 
 /// Fold the GLM shared expert's Q8_0 down into the indexed expert-down
 /// launch (+1 parallel slot). OFF by default until cool A/B confirms a win;
 /// `ALLPAKA_SHARED_TAIL=1` enables.
 fn shared_tail() -> bool {
-    static S: OnceLock<bool> = OnceLock::new();
-    *S.get_or_init(|| std::env::var("ALLPAKA_SHARED_TAIL").is_ok_and(|v| v == "1"))
+    crate::runtime::get().shared_tail
 }
 
 /// Stagger GLM shared Q5 gate/up out of the expert Q4 window: expert
@@ -9084,27 +9061,18 @@ fn shared_tail() -> bool {
 /// enables. Disabled automatically when `SHARED_TAIL` folds shared down
 /// into the indexed expert-down launch (shared gate/up must finish first).
 fn shared_stagger() -> bool {
-    static S: OnceLock<bool> = OnceLock::new();
-    *S.get_or_init(|| std::env::var("ALLPAKA_SHARED_STAGGER").is_ok_and(|v| v == "1"))
+    crate::runtime::get().shared_stagger
 }
 
 /// Rows per SIMD group for `matvec_q8_0_mv` (NR0 = 32/LPR). Default 2;
 /// sweep with `ALLPAKA_Q8_NR0` ∈ {1,2,4} (GLM expert down is the hot shape).
 fn q8_nr0() -> usize {
-    static NR0: OnceLock<usize> = OnceLock::new();
-    *NR0.get_or_init(|| {
-        std::env::var("ALLPAKA_Q8_NR0")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|n: &usize| [1, 2, 4].contains(n))
-            .unwrap_or(2)
-    })
+    crate::runtime::get().q8_nr0
 }
 
 /// K-step 64 for the LL mm kernels: `ALLPAKA_MM_K64=1` to enable.
 fn mm_k64() -> bool {
-    static K: OnceLock<bool> = OnceLock::new();
-    *K.get_or_init(|| std::env::var("ALLPAKA_MM_K64").is_ok_and(|v| v != "0"))
+    crate::runtime::get().mm_k64
 }
 
 /// The software-pipelined double-buffer K-loop in the q4_k mm kernels
@@ -9118,13 +9086,11 @@ fn mm_pipe() -> bool {
 /// K-loop runs 128 iterations at NK=32 with two threadgroup barriers each;
 /// halving them costs shared memory but the MoE stages are latency-bound.
 fn mmid_k64() -> bool {
-    static K: OnceLock<bool> = OnceLock::new();
-    *K.get_or_init(|| std::env::var("ALLPAKA_MMID_K64").is_ok_and(|v| v != "0"))
+    crate::runtime::get().mmid_k64
 }
 
 fn mm_ll() -> bool {
-    static LL: OnceLock<bool> = OnceLock::new();
-    *LL.get_or_init(|| std::env::var("ALLPAKA_MM_LL").map_or(true, |v| v != "0"))
+    crate::runtime::get().mm_ll
 }
 
 /// ALLPAKA_NO_BARRIER=1 skips in-buffer memory barriers (FFN path only) to
@@ -9133,16 +9099,12 @@ fn mm_ll() -> bool {
 /// (route and combine barriers stay, so the mm stages still do full work
 /// on valid tables; the down stage may read torn gate data - timing only).
 fn no_stage_barrier() -> bool {
-    static NB: OnceLock<bool> = OnceLock::new();
-    *NB.get_or_init(|| std::env::var_os("ALLPAKA_NO_STAGE_BARRIER").is_some())
+    crate::runtime::get().no_stage_barrier
 }
 
 fn no_barrier() -> bool {
-    static NB: OnceLock<bool> = OnceLock::new();
-    *NB.get_or_init(|| {
-        std::env::var_os("ALLPAKA_NO_BARRIER").is_some()
-            || std::env::var_os("ALLPAKA_SERIAL").is_some()
-    })
+    let p = crate::runtime::get();
+    p.no_barrier_probe || p.serial
 }
 
 /// ALLPAKA_SERIAL=1: encode the prefill command buffers with
@@ -9150,8 +9112,7 @@ fn no_barrier() -> bool {
 /// gives in-order execution (ordering without the full pipeline flush that
 /// memory_barrier_with_resources pays). llama.cpp encodes this way.
 fn serial_dispatch() -> metal::MTLDispatchType {
-    static S: OnceLock<bool> = OnceLock::new();
-    if *S.get_or_init(|| std::env::var_os("ALLPAKA_SERIAL").is_some()) {
+    if crate::runtime::get().serial {
         metal::MTLDispatchType::Serial
     } else {
         metal::MTLDispatchType::Concurrent
