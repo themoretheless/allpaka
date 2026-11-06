@@ -479,6 +479,7 @@ fn init_device() -> Option<Gpu> {
         "route_pick",
         "route_scan",
         "route_scatter",
+        "route_fused",
         "argmax_f32",
         "argmax_final",
         "embed_row_f32_dtoken",
@@ -9724,41 +9725,59 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             let rb = &gpu.route_buf;
             let tgs = (m_fused as u64).div_ceil(256);
             let lg_buf = if lg_tag == "route" { rb } else { y };
-            enc.set_compute_pipeline_state(&gpu.pipelines[&("route_pick", 1, 1)]);
-            enc.set_buffer(0, Some(lg_buf), e(lg_off));
-            enc.set_buffer(1, Some(rb), e(rl.bias));
-            enc.set_buffer(2, Some(rb), e(rl.counts));
-            enc.set_buffer(3, Some(rb), e(rl.picks));
-            enc.set_buffer(4, Some(rb), e(rl.pickw));
-            enc.set_bytes(5, psz, pp);
-            enc.dispatch_thread_groups(MTLSize::new(tgs, 1, 1), MTLSize::new(256, 1, 1));
-            cstamp!(gpu, enc, "rp");
-            if !no_barrier() {
-                enc.memory_barrier_with_resources(&[rb]);
+            let use_route_fused = req.n_expert <= 256
+                && std::env::var_os("ALLPAKA_NO_ROUTE_FUSED").is_none();
+            if use_route_fused {
+                enc.set_compute_pipeline_state(&gpu.pipelines[&("route_fused", 1, 1)]);
+                enc.set_buffer(0, Some(lg_buf), e(lg_off));
+                enc.set_buffer(1, Some(rb), e(rl.bias));
+                enc.set_buffer(2, Some(rb), e(rl.picks));
+                enc.set_buffer(3, Some(rb), e(rl.pickw));
+                enc.set_buffer(4, Some(rb), e(rl.table));
+                enc.set_buffer(5, Some(rb), e(rl.tok));
+                enc.set_buffer(6, Some(rb), e(rl.hit_row));
+                enc.set_buffer(7, Some(rb), e(rl.hit_w));
+                enc.set_buffer(8, Some(rb), e(rl.tok_off));
+                enc.set_bytes(9, psz, pp);
+                enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(256, 1, 1));
+                cstamp!(gpu, enc, "rc");
+            } else {
+                enc.set_compute_pipeline_state(&gpu.pipelines[&("route_pick", 1, 1)]);
+                enc.set_buffer(0, Some(lg_buf), e(lg_off));
+                enc.set_buffer(1, Some(rb), e(rl.bias));
+                enc.set_buffer(2, Some(rb), e(rl.counts));
+                enc.set_buffer(3, Some(rb), e(rl.picks));
+                enc.set_buffer(4, Some(rb), e(rl.pickw));
+                enc.set_bytes(5, psz, pp);
+                enc.dispatch_thread_groups(MTLSize::new(tgs, 1, 1), MTLSize::new(256, 1, 1));
+                cstamp!(gpu, enc, "rp");
+                if !no_barrier() {
+                    enc.memory_barrier_with_resources(&[rb]);
+                }
+                enc.set_compute_pipeline_state(&gpu.pipelines[&("route_scan", 1, 1)]);
+                enc.set_buffer(0, Some(rb), e(rl.counts));
+                enc.set_buffer(1, Some(rb), e(rl.table));
+                enc.set_buffer(2, Some(rb), e(rl.counters));
+                let ne32 = req.n_expert as u32;
+                enc.set_bytes(3, 4, &ne32 as *const u32 as *const _);
+                enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(32, 1, 1));
+                cstamp!(gpu, enc, "rs");
+                if !no_barrier() {
+                    enc.memory_barrier_with_resources(&[rb]);
+                }
+                enc.set_compute_pipeline_state(&gpu.pipelines[&("route_scatter", 1, 1)]);
+                enc.set_buffer(0, Some(rb), e(rl.picks));
+                enc.set_buffer(1, Some(rb), e(rl.pickw));
+                enc.set_buffer(2, Some(rb), e(rl.table));
+                enc.set_buffer(3, Some(rb), e(rl.counters));
+                enc.set_buffer(4, Some(rb), e(rl.tok));
+                enc.set_buffer(5, Some(rb), e(rl.hit_row));
+                enc.set_buffer(6, Some(rb), e(rl.hit_w));
+                enc.set_buffer(7, Some(rb), e(rl.tok_off));
+                enc.set_bytes(8, psz, pp);
+                enc.dispatch_thread_groups(MTLSize::new(tgs, 1, 1), MTLSize::new(256, 1, 1));
+                cstamp!(gpu, enc, "rc");
             }
-            enc.set_compute_pipeline_state(&gpu.pipelines[&("route_scan", 1, 1)]);
-            enc.set_buffer(0, Some(rb), e(rl.counts));
-            enc.set_buffer(1, Some(rb), e(rl.table));
-            enc.set_buffer(2, Some(rb), e(rl.counters));
-            let ne32 = req.n_expert as u32;
-            enc.set_bytes(3, 4, &ne32 as *const u32 as *const _);
-            enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(32, 1, 1));
-            cstamp!(gpu, enc, "rs");
-            if !no_barrier() {
-                enc.memory_barrier_with_resources(&[rb]);
-            }
-            enc.set_compute_pipeline_state(&gpu.pipelines[&("route_scatter", 1, 1)]);
-            enc.set_buffer(0, Some(rb), e(rl.picks));
-            enc.set_buffer(1, Some(rb), e(rl.pickw));
-            enc.set_buffer(2, Some(rb), e(rl.table));
-            enc.set_buffer(3, Some(rb), e(rl.counters));
-            enc.set_buffer(4, Some(rb), e(rl.tok));
-            enc.set_buffer(5, Some(rb), e(rl.hit_row));
-            enc.set_buffer(6, Some(rb), e(rl.hit_w));
-            enc.set_buffer(7, Some(rb), e(rl.tok_off));
-            enc.set_bytes(8, psz, pp);
-            enc.dispatch_thread_groups(MTLSize::new(tgs, 1, 1), MTLSize::new(256, 1, 1));
-            cstamp!(gpu, enc, "rc");
             // The gate stage reads the table/tok from route_buf and route_pick
             // read the logits from y - order both against what follows.
             if !no_barrier() {

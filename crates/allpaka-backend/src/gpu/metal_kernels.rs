@@ -1764,13 +1764,27 @@ kernel void norm_rows(
     device const float* dr = delta + (ulong)row * n;
     device float* hr = h + (ulong)row * n;
     float acc = 0.0f;
-    for (uint i = tid; i < n; i += 256) {
-        float v = xr[i];
-        if (use_delta != 0) {
-            v += dr[i];
-            xr[i] = v;
+    if ((n & 3u) == 0u) {
+        uint n4 = n >> 2;
+        device float4* xr4 = (device float4*)xr;
+        device const float4* dr4 = (device const float4*)dr;
+        for (uint i = tid; i < n4; i += 256) {
+            float4 v = xr4[i];
+            if (use_delta != 0) {
+                v += dr4[i];
+                xr4[i] = v;
+            }
+            acc += dot(v, v);
         }
-        acc += v * v;
+    } else {
+        for (uint i = tid; i < n; i += 256) {
+            float v = xr[i];
+            if (use_delta != 0) {
+                v += dr[i];
+                xr[i] = v;
+            }
+            acc += v * v;
+        }
     }
     float s = simd_sum(acc);
     if (lane == 0) {
@@ -1782,8 +1796,18 @@ kernel void norm_rows(
         total += partial[i];
     }
     float scale = rsqrt(total / (float)n + eps);
-    for (uint i = tid; i < n; i += 256) {
-        hr[i] = xr[i] * scale * w[i];
+    if ((n & 3u) == 0u) {
+        uint n4 = n >> 2;
+        device const float4* xr4 = (device const float4*)xr;
+        device const float4* w4 = (device const float4*)w;
+        device float4* hr4 = (device float4*)hr;
+        for (uint i = tid; i < n4; i += 256) {
+            hr4[i] = xr4[i] * scale * w4[i];
+        }
+    } else {
+        for (uint i = tid; i < n; i += 256) {
+            hr[i] = xr[i] * scale * w[i];
+        }
     }
 }
 
@@ -1803,12 +1827,25 @@ kernel void combine_rows(
     uint h0 = tok_off[token];
     uint h1 = tok_off[token + 1];
     device float* xr = x + (ulong)token * hidden;
-    for (uint i = tid; i < hidden; i += 256) {
-        float acc = xr[i];
-        for (uint h = h0; h < h1; h++) {
-            acc += hit_w[h] * flat[(ulong)hit_row[h] * hidden + i];
+    if ((hidden & 3u) == 0u) {
+        uint h4 = hidden >> 2;
+        device float4* xr4 = (device float4*)xr;
+        device const float4* flat4 = (device const float4*)flat;
+        for (uint i = tid; i < h4; i += 256) {
+            float4 acc = xr4[i];
+            for (uint h = h0; h < h1; h++) {
+                acc += hit_w[h] * flat4[(ulong)hit_row[h] * h4 + i];
+            }
+            xr4[i] = acc;
         }
-        xr[i] = acc;
+    } else {
+        for (uint i = tid; i < hidden; i += 256) {
+            float acc = xr[i];
+            for (uint h = h0; h < h1; h++) {
+                acc += hit_w[h] * flat[(ulong)hit_row[h] * hidden + i];
+            }
+            xr[i] = acc;
+        }
     }
 }
 
@@ -2089,6 +2126,139 @@ kernel void route_scatter(
     }
     tok_off[token] = token * stride;
     if (token == 0) {
+        tok_off[p.m] = p.m * stride;
+    }
+}
+
+// Single-threadgroup fused prefill routing (route_pick + route_scan +
+// route_scatter) for n_expert <= 256: keeps per-expert counts, prefix-sum
+// offsets, and scatter counters in threadgroup SRAM, eliminating two
+// intermediate kernel dispatches and two device-memory barriers per MoE layer.
+kernel void route_fused(
+    device const float* logits [[buffer(0)]],
+    device const float* bias [[buffer(1)]],
+    device uint* picks [[buffer(2)]],
+    device float* pickw [[buffer(3)]],
+    device MmGroup* table [[buffer(4)]],
+    device uint* tok [[buffer(5)]],
+    device uint* hit_row [[buffer(6)]],
+    device float* hit_w [[buffer(7)]],
+    device uint* tok_off [[buffer(8)]],
+    constant RouteParams& p [[buffer(9)]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    threadgroup atomic_uint tg_counts[256];
+    threadgroup uint tg_row0[256];
+    threadgroup atomic_uint tg_counters[256];
+    threadgroup uint sg_sums[8];
+
+    atomic_store_explicit(&tg_counts[tid], 0u, memory_order_relaxed);
+    atomic_store_explicit(&tg_counters[tid], 0u, memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint token = tid; token < p.m; token += 256) {
+        device const float* row = logits + (ulong)token * p.n_expert;
+        float bs[8];
+        uint be[8];
+        for (uint i = 0; i < 8; i++) {
+            bs[i] = -INFINITY;
+            be[i] = 0xFFFFFFFF;
+        }
+        float full_mx = -INFINITY;
+        float full_denom = 1.0f;
+        if (!p.sigmoid && (!p.norm || p.has_bias)) {
+            for (uint e = 0; e < p.n_expert; e++) {
+                full_mx = max(full_mx, row[e]);
+            }
+            float sum_exp = 0.0f;
+            for (uint e = 0; e < p.n_expert; e++) {
+                sum_exp += exp(row[e] - full_mx);
+            }
+            full_denom = sum_exp > 0.0f ? sum_exp : 1.0f;
+        }
+        for (uint e = 0; e < p.n_expert; e++) {
+            float s = p.sigmoid
+                ? 1.0f / (1.0f + exp(-row[e]))
+                : (p.has_bias ? exp(row[e] - full_mx) / full_denom : row[e]);
+            float sel = p.has_bias ? s + bias[e] : s;
+            if (sel < bs[7] || (sel == bs[7] && e >= be[7])) {
+                continue;
+            }
+            uint j = 7;
+            while (j > 0 && (sel > bs[j - 1] || (sel == bs[j - 1] && e < be[j - 1]))) {
+                bs[j] = bs[j - 1];
+                be[j] = be[j - 1];
+                j--;
+            }
+            bs[j] = sel;
+            be[j] = e;
+        }
+        float tot = 0.0f;
+        float sc[8];
+        float mx = -INFINITY;
+        if (!p.sigmoid && p.norm) {
+            for (uint i = 0; i < p.n_used; i++) {
+                mx = max(mx, row[be[i]]);
+            }
+        }
+        for (uint i = 0; i < p.n_used; i++) {
+            sc[i] = p.sigmoid
+                ? 1.0f / (1.0f + exp(-row[be[i]]))
+                : (p.norm ? exp(row[be[i]] - mx) : exp(row[be[i]] - full_mx) / full_denom);
+            tot += sc[i];
+        }
+        for (uint i = 0; i < p.n_used; i++) {
+            float w = p.norm ? (tot > 0.0f ? sc[i] / tot : 1.0f / p.n_used) : sc[i];
+            picks[token * p.n_used + i] = be[i];
+            pickw[token * p.n_used + i] = w * p.scale;
+            atomic_fetch_add_explicit(&tg_counts[be[i]], 1u, memory_order_relaxed);
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint cnt = tid < p.n_expert
+        ? atomic_load_explicit(&tg_counts[tid], memory_order_relaxed)
+        : 0u;
+    uint sg_pref = simd_prefix_exclusive_sum(cnt);
+    uint sg_tot = simd_sum(cnt);
+    if (lane == 0) {
+        sg_sums[sg] = sg_tot;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint base = 0u;
+    for (uint s = 0; s < sg; s++) {
+        base += sg_sums[s];
+    }
+    uint row0 = base + sg_pref;
+    if (tid < p.n_expert) {
+        tg_row0[tid] = row0;
+        table[tid].expert = tid;
+        table[tid].row0 = row0;
+        table[tid].rows = cnt;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint stride = p.n_used + p.shared;
+    for (uint token = tid; token < p.m; token += 256) {
+        for (uint i = 0; i < p.n_used; i++) {
+            uint e = picks[token * p.n_used + i];
+            uint pos = atomic_fetch_add_explicit(&tg_counters[e], 1u, memory_order_relaxed);
+            uint row = tg_row0[e] + pos;
+            tok[row] = token;
+            hit_row[token * stride + i] = row;
+            hit_w[token * stride + i] = pickw[token * p.n_used + i];
+        }
+        if (p.shared) {
+            hit_row[token * stride + p.n_used] = p.total_rows + token;
+            hit_w[token * stride + p.n_used] = 1.0f;
+        }
+        tok_off[token] = token * stride;
+    }
+    if (tid == 0) {
         tok_off[p.m] = p.m * stride;
     }
 }

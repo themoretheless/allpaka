@@ -388,3 +388,191 @@ fn fused_qkv_kernels_match_separate_dispatches() {
         }
     }
 }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RouteParams {
+    m: u32,
+    n_expert: u32,
+    n_used: u32,
+    norm: u32,
+    has_bias: u32,
+    sigmoid: u32,
+    shared: u32,
+    scale: f32,
+    total_rows: u32,
+}
+
+#[test]
+fn route_fused_matches_three_stage_router() {
+    let Some(device) = Device::system_default() else {
+        return;
+    };
+    let lib = device
+        .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
+        .expect("KERNELS failed to compile");
+    let queue = device.new_command_queue();
+
+    let pipeline = |name: &str| {
+        let f = lib.get_function(name, None).unwrap();
+        device.new_compute_pipeline_state_with_function(&f).unwrap()
+    };
+    let buf = |data: &[f32]| {
+        device.new_buffer_with_data(
+            data.as_ptr().cast(),
+            (data.len() * 4) as u64,
+            MTLResourceOptions::StorageModeShared,
+        )
+    };
+    let zbuf = |bytes: u64| {
+        let b = device.new_buffer(bytes, MTLResourceOptions::StorageModeShared);
+        unsafe { std::ptr::write_bytes(b.contents().cast::<u8>(), 0, bytes as usize) };
+        b
+    };
+
+    let p_pick = pipeline("route_pick");
+    let p_scan = pipeline("route_scan");
+    let p_scat = pipeline("route_scatter");
+    let p_fused = pipeline("route_fused");
+
+    let m = 480u32;
+    let n_expert = 128u32;
+    let n_used = 8u32;
+    let shared = 1u32;
+    let total_rows = m * n_used;
+    let stride = n_used + shared;
+    let hit_len = (m * stride) as usize;
+
+    let mut logits = vec![0.0f32; (m * n_expert) as usize];
+    for (i, v) in logits.iter_mut().enumerate() {
+        *v = (((i * 73 + 19) % 997) as f32 - 498.0) * 0.01;
+    }
+    let bias = vec![0.0f32; n_expert as usize];
+    let params = RouteParams {
+        m,
+        n_expert,
+        n_used,
+        norm: 1,
+        has_bias: 0,
+        sigmoid: 0,
+        shared,
+        scale: 1.0,
+        total_rows,
+    };
+
+    let lg_b = buf(&logits);
+    let bias_b = buf(&bias);
+
+    let counts_a = zbuf((n_expert * 4) as u64);
+    let counters_a = zbuf((n_expert * 4) as u64);
+    let picks_a = zbuf((total_rows * 4) as u64);
+    let pickw_a = zbuf((total_rows * 4) as u64);
+    let table_a = zbuf((n_expert * 12) as u64);
+    let tok_a = zbuf((total_rows * 4) as u64);
+    let hit_row_a = zbuf((hit_len * 4) as u64);
+    let hit_w_a = zbuf((hit_len * 4) as u64);
+    let tok_off_a = zbuf(((m + 1) * 4) as u64);
+
+    let picks_b = zbuf((total_rows * 4) as u64);
+    let pickw_b = zbuf((total_rows * 4) as u64);
+    let table_b = zbuf((n_expert * 12) as u64);
+    let tok_b = zbuf((total_rows * 4) as u64);
+    let hit_row_b = zbuf((hit_len * 4) as u64);
+    let hit_w_b = zbuf((hit_len * 4) as u64);
+    let tok_off_b = zbuf(((m + 1) * 4) as u64);
+
+    let psz = std::mem::size_of::<RouteParams>() as u64;
+    let pp = (&params as *const RouteParams).cast();
+    let tgs = (m as u64).div_ceil(256);
+
+    let cmd = queue.new_command_buffer();
+    let enc = cmd.new_compute_command_encoder();
+
+    enc.set_compute_pipeline_state(&p_pick);
+    enc.set_buffer(0, Some(&lg_b), 0);
+    enc.set_buffer(1, Some(&bias_b), 0);
+    enc.set_buffer(2, Some(&counts_a), 0);
+    enc.set_buffer(3, Some(&picks_a), 0);
+    enc.set_buffer(4, Some(&pickw_a), 0);
+    enc.set_bytes(5, psz, pp);
+    enc.dispatch_thread_groups(MTLSize::new(tgs, 1, 1), MTLSize::new(256, 1, 1));
+    enc.memory_barrier_with_resources(&[&counts_a, &picks_a, &pickw_a]);
+
+    enc.set_compute_pipeline_state(&p_scan);
+    enc.set_buffer(0, Some(&counts_a), 0);
+    enc.set_buffer(1, Some(&table_a), 0);
+    enc.set_buffer(2, Some(&counters_a), 0);
+    enc.set_bytes(3, 4, (&n_expert as *const u32).cast());
+    enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(32, 1, 1));
+    enc.memory_barrier_with_resources(&[&table_a, &counters_a]);
+
+    enc.set_compute_pipeline_state(&p_scat);
+    enc.set_buffer(0, Some(&picks_a), 0);
+    enc.set_buffer(1, Some(&pickw_a), 0);
+    enc.set_buffer(2, Some(&table_a), 0);
+    enc.set_buffer(3, Some(&counters_a), 0);
+    enc.set_buffer(4, Some(&tok_a), 0);
+    enc.set_buffer(5, Some(&hit_row_a), 0);
+    enc.set_buffer(6, Some(&hit_w_a), 0);
+    enc.set_buffer(7, Some(&tok_off_a), 0);
+    enc.set_bytes(8, psz, pp);
+    enc.dispatch_thread_groups(MTLSize::new(tgs, 1, 1), MTLSize::new(256, 1, 1));
+
+    enc.set_compute_pipeline_state(&p_fused);
+    enc.set_buffer(0, Some(&lg_b), 0);
+    enc.set_buffer(1, Some(&bias_b), 0);
+    enc.set_buffer(2, Some(&picks_b), 0);
+    enc.set_buffer(3, Some(&pickw_b), 0);
+    enc.set_buffer(4, Some(&table_b), 0);
+    enc.set_buffer(5, Some(&tok_b), 0);
+    enc.set_buffer(6, Some(&hit_row_b), 0);
+    enc.set_buffer(7, Some(&hit_w_b), 0);
+    enc.set_buffer(8, Some(&tok_off_b), 0);
+    enc.set_bytes(9, psz, pp);
+    enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(256, 1, 1));
+
+    enc.end_encoding();
+    cmd.commit();
+    cmd.wait_until_completed();
+    assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+    let tab_a = unsafe { std::slice::from_raw_parts(table_a.contents().cast::<[u32; 3]>(), n_expert as usize) };
+    let tab_b = unsafe { std::slice::from_raw_parts(table_b.contents().cast::<[u32; 3]>(), n_expert as usize) };
+    assert_eq!(tab_a, tab_b, "group tables differ");
+
+    let off_a = unsafe { std::slice::from_raw_parts(tok_off_a.contents().cast::<u32>(), (m + 1) as usize) };
+    let off_b = unsafe { std::slice::from_raw_parts(tok_off_b.contents().cast::<u32>(), (m + 1) as usize) };
+    assert_eq!(off_a, off_b, "tok_off differs");
+
+    let hw_a = unsafe { std::slice::from_raw_parts(hit_w_a.contents().cast::<f32>(), hit_len) };
+    let hw_b = unsafe { std::slice::from_raw_parts(hit_w_b.contents().cast::<f32>(), hit_len) };
+    for (i, (&a, &b)) in hw_a.iter().zip(hw_b).enumerate() {
+        assert_eq!(a.to_bits(), b.to_bits(), "hit_w[{i}] differs");
+    }
+
+    let tk_a = unsafe { std::slice::from_raw_parts(tok_a.contents().cast::<u32>(), total_rows as usize) };
+    let tk_b = unsafe { std::slice::from_raw_parts(tok_b.contents().cast::<u32>(), total_rows as usize) };
+    let hr_a = unsafe { std::slice::from_raw_parts(hit_row_a.contents().cast::<u32>(), hit_len) };
+    let hr_b = unsafe { std::slice::from_raw_parts(hit_row_b.contents().cast::<u32>(), hit_len) };
+
+    for e in 0..n_expert as usize {
+        let row0 = tab_b[e][1] as usize;
+        let rows = tab_b[e][2] as usize;
+        let mut s_a = tk_a[row0..row0 + rows].to_vec();
+        let mut s_b = tk_b[row0..row0 + rows].to_vec();
+        s_a.sort_unstable();
+        s_b.sort_unstable();
+        assert_eq!(s_a, s_b, "expert {e} token set differs");
+    }
+
+    for t in 0..m as usize {
+        let base = t * stride as usize;
+        for i in 0..n_used as usize {
+            let r_a = hr_a[base + i] as usize;
+            let r_b = hr_b[base + i] as usize;
+            assert_eq!(tk_a[r_a], t as u32);
+            assert_eq!(tk_b[r_b], t as u32);
+        }
+        assert_eq!(hr_a[base + n_used as usize], hr_b[base + n_used as usize]);
+    }
+}
