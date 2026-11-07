@@ -12,6 +12,10 @@ warm-up, not bn16). Machine warms through the morning: 1227 → 1393 → 1481.
 
 - allpaka pp 1481 vs llama 1633 = **0.90×** (was 1.02× on 2026-09-12:
   allpaka flat 1480-1500, **llama.cpp updated +11%** 1465 → 1633)
+- 2026-11-07, after the mmid tile-descriptor grid (+1.5%): pp **0.916×**
+  (1462 vs 1596), tg **1.16×** (143 vs 124). Stage barriers re-measured
+  post-tiles: ~2% (were 5.5% pre-tiles — the drain was straggler
+  imbalance, the tiles fixed most of it).
 - allpaka tg 147 vs llama 124 = **1.21×** (was 0.96×: allpaka 115 → 147)
 
 So: no allpaka prefill regression, the gap is llama.cpp's own progress.
