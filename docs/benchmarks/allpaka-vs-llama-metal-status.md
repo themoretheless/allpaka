@@ -68,6 +68,14 @@ same grid, `MM_LLAMA=1` in `examples/mmbench.rs`:
 
 ### Where the pp gap actually lives (2026-11-07 update, Qwen3-30B pp480)
 
+Post-tiles accounting per pass (321 ms GPU busy): attention mm + FFN mm
+261 ms, logits head ~25 ms (298 GFLOP, identical work for llama), norms /
+rope / router / combine ~35 ms. Stage barriers now ~2% (probe
+NO_STAGE_BARRIER: 1492 vs 1463). ALL barriers (racy probe): 1477 vs 1477
+— nothing. The mm kernels tie llama's in microbench, but in-model the
+mmid stages reach only ~8-10 TFLOPS vs 11.1 isolated: routing imbalance
+plus cold weights, not fixed by tiles alone.
+
 Direct probes on the onebuf path:
 - **Stage barriers cost 5.5%**: `ALLPAKA_NO_STAGE_BARRIER=1` (racy, timing
   only) 1539 vs 1458 t/s = ~27 ms/pass of pipeline drain between FFN
