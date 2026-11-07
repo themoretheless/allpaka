@@ -16,6 +16,13 @@ warm-up, not bn16). Machine warms through the morning: 1227 → 1393 → 1481.
   (1462 vs 1596), tg **1.16×** (143 vs 124). Stage barriers re-measured
   post-tiles: ~2% (were 5.5% pre-tiles — the drain was straggler
   imbalance, the tiles fixed most of it).
+- 2026-11-07, `attend_mm_fq` (qk_prep folded into attend_mm, producer
+  groups publish K/V to a device counter, consumers spin; one dispatch +
+  one barrier per layer-chunk removed): pp 1502.9 vs 1497.2 paired
+  median = **+0.4%** (wins every pair). Kill switch `ALLPAKA_PF_FQK=0`.
+  This was the last identified structural dispatch fusion; the residual
+  pp gap (~8%) is diffuse ramp/bubble cost across ~10 dispatches/layer,
+  with every individual mm kernel at parity ±3% against llama's.
 - allpaka tg 147 vs llama 124 = **1.21×** (was 0.96×: allpaka 115 → 147)
 
 So: no allpaka prefill regression, the gap is llama.cpp's own progress.
