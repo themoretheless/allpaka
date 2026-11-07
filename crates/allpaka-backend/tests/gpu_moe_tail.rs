@@ -401,6 +401,7 @@ struct RouteParams {
     shared: u32,
     scale: f32,
     total_rows: u32,
+    tile_bound: u32,
 }
 
 #[test]
@@ -458,6 +459,7 @@ fn route_fused_matches_three_stage_router() {
         shared,
         scale: 1.0,
         total_rows,
+        tile_bound: n_expert + total_rows / 32,
     };
 
     let lg_b = buf(&logits);
@@ -480,6 +482,7 @@ fn route_fused_matches_three_stage_router() {
     let hit_row_b = zbuf((hit_len * 4) as u64);
     let hit_w_b = zbuf((hit_len * 4) as u64);
     let tok_off_b = zbuf(((m + 1) * 4) as u64);
+    let tiles_b = zbuf(((n_expert + total_rows / 32) * 12) as u64);
 
     let psz = std::mem::size_of::<RouteParams>() as u64;
     let pp = (&params as *const RouteParams).cast();
@@ -529,6 +532,7 @@ fn route_fused_matches_three_stage_router() {
     enc.set_buffer(7, Some(&hit_w_b), 0);
     enc.set_buffer(8, Some(&tok_off_b), 0);
     enc.set_bytes(9, psz, pp);
+    enc.set_buffer(10, Some(&tiles_b), 0);
     enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(256, 1, 1));
 
     enc.end_encoding();
@@ -574,5 +578,27 @@ fn route_fused_matches_three_stage_router() {
             assert_eq!(tk_b[r_b], t as u32);
         }
         assert_eq!(hr_a[base + n_used as usize], hr_b[base + n_used as usize]);
+    }
+
+    // Tile descriptors: exact cover of each expert's rows in 32-row chunks,
+    // experts in order, then a rows=0 tail up to tile_bound.
+    let tile_bound = (n_expert + total_rows / 32) as usize;
+    let tiles = unsafe {
+        std::slice::from_raw_parts(tiles_b.contents().cast::<[u32; 3]>(), tile_bound)
+    };
+    let mut t = 0usize;
+    for e in 0..n_expert as usize {
+        let row0 = tab_b[e][1];
+        let rows = tab_b[e][2];
+        let n_chunks = rows.div_ceil(32) as usize;
+        for k in 0..n_chunks {
+            assert_eq!(tiles[t][0], e as u32, "tile {t} expert");
+            assert_eq!(tiles[t][1], row0 + 32 * k as u32, "tile {t} row0");
+            assert_eq!(tiles[t][2], (rows - 32 * k as u32).min(32), "tile {t} rows");
+            t += 1;
+        }
+    }
+    for (i, tile) in tiles.iter().enumerate().skip(t) {
+        assert_eq!(tile[2], 0, "stale tile {i} resurrected work");
     }
 }

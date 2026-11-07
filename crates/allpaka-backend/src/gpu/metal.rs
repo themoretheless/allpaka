@@ -256,6 +256,8 @@ struct RouteLayout {
     tok_off: usize,
     logits: usize,
     bias: usize,
+    tiles: usize,
+    tile_bound: usize,
     total: usize,
 }
 
@@ -273,7 +275,11 @@ fn route_layout(m: usize, n_expert: usize, n_used: usize, shared: bool) -> Route
     let tok_off = hit_w + align(m * hits);
     let logits = tok_off + align(m + 1);
     let bias = logits + align(m * n_expert);
-    let total = bias + align(n_expert);
+    // Tight mmid grid: one descriptor per non-empty 32-row chunk.
+    // ceil sum bound: total/32 + one partial chunk per expert.
+    let tile_bound = n_expert + (m * n_used) / 32;
+    let tiles = bias + align(n_expert);
+    let total = tiles + align(tile_bound * 3);
     RouteLayout {
         counts,
         counters,
@@ -286,6 +292,8 @@ fn route_layout(m: usize, n_expert: usize, n_used: usize, shared: bool) -> Route
         tok_off,
         logits,
         bias,
+        tiles,
+        tile_bound,
         total,
     }
 }
@@ -9362,13 +9370,19 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     };
     let dual = dual_state.is_some();
 
-    let (row_tiles, n_groups) = if route_mode {
-        // Group sizes exist only on the GPU. The mmid kernels stride over
-        // row tiles (r1 += grid.y * bn), so any grid covers every row;
-        // launch ~2x the average to skip a storm of empty threadgroups
-        // without looping in the common case.
-        let avg = (req.total_rows / req.n_expert.max(1)) as u64;
-        let _ = avg;
+    let use_route_fused = route_mode
+        && req.n_expert <= 256
+        && std::env::var_os("ALLPAKA_NO_ROUTE_FUSED").is_none();
+    // Tile-descriptor grid (llama-style): route_fused emits one MmGroup per
+    // non-empty 32-row chunk, so the grid covers real work exactly - at
+    // pp480/128exp this is ~250 z-slices instead of 15 row-tiles x 128
+    // experts of mostly empty threadgroups. bn16 strides 16 rows per tile
+    // and would miss the upper half of a 32-row tile, so it keeps the old
+    // grid. ALLPAKA_MMID_TILES=0 reverts.
+    let tiles_mode = use_route_fused && !bn16 && crate::runtime::get().mmid_tiles;
+    let (row_tiles, n_groups) = if tiles_mode {
+        (1, (req.n_expert + req.total_rows / 32) as u64)
+    } else if route_mode {
         // Worst-case grid: measured FASTER than a tight one - empty
         // threadgroups retire for free, while a small grid serialises the
         // hot experts through the striding loop. ALLPAKA_MMID_RTILES pins
@@ -9603,6 +9617,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         // Group table, gather and CSR: route_buf on the GPU-routing path,
         // x_arena otherwise.
         let (tab_buf, tab_off, tk_buf, tk_off) = match &rl {
+            Some(rl) if tiles_mode => (&gpu.route_buf, rl.tiles, &gpu.route_buf, rl.tok),
             Some(rl) => (&gpu.route_buf, rl.table, &gpu.route_buf, rl.tok),
             None => (&gpu.x_arena, table_at, &gpu.x_arena, tok_at),
         };
@@ -9669,6 +9684,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 shared: u32,
                 scale: f32,
                 total_rows: u32,
+                tile_bound: u32,
             }
             let params = RouteParams {
                 m: m_fused as u32,
@@ -9680,14 +9696,13 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 shared: req.shared.is_some() as u32,
                 scale: r.scale,
                 total_rows: req.total_rows as u32,
+                tile_bound: rl.tile_bound as u32,
             };
             let pp = &params as *const RouteParams as *const _;
             let psz = std::mem::size_of::<RouteParams>() as u64;
             let rb = &gpu.route_buf;
             let tgs = (m_fused as u64).div_ceil(256);
             let lg_buf = if lg_tag == "route" { rb } else { y };
-            let use_route_fused = req.n_expert <= 256
-                && std::env::var_os("ALLPAKA_NO_ROUTE_FUSED").is_none();
             if use_route_fused {
                 enc.set_compute_pipeline_state(&gpu.pipelines[&("route_fused", 1, 1)]);
                 enc.set_buffer(0, Some(lg_buf), e(lg_off));
@@ -9700,6 +9715,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 enc.set_buffer(7, Some(rb), e(rl.hit_w));
                 enc.set_buffer(8, Some(rb), e(rl.tok_off));
                 enc.set_bytes(9, psz, pp);
+                enc.set_buffer(10, Some(rb), e(rl.tiles));
                 enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(256, 1, 1));
                 cstamp!(gpu, enc, "rc");
             } else {
@@ -9931,6 +9947,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                     shared: u32,
                     scale: f32,
                     total_rows: u32,
+                    tile_bound: u32,
                 }
                 let r = req.route.as_ref().expect("route mode");
                 let params = RouteParams {
@@ -9943,6 +9960,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                     shared: req.shared.is_some() as u32,
                     scale: r.scale,
                     total_rows: req.total_rows as u32,
+                    tile_bound: rl.as_ref().map_or(0, |l| l.tile_bound as u32),
                 };
                 let rl = rl.as_ref().expect("route mode layout");
                 enc.set_compute_pipeline_state(&gpu.pipelines[&("route_patch_shared_w", 1, 1)]);

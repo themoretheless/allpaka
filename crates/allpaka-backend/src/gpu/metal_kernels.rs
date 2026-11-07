@@ -1997,6 +1997,7 @@ struct RouteParams {
     uint shared;
     float scale;
     uint total_rows;
+    uint tile_bound;
 };
 
 kernel void route_pick(
@@ -2145,6 +2146,7 @@ kernel void route_fused(
     device float* hit_w [[buffer(7)]],
     device uint* tok_off [[buffer(8)]],
     constant RouteParams& p [[buffer(9)]],
+    device MmGroup* tiles [[buffer(10)]],
     uint tid [[thread_position_in_threadgroup]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]])
@@ -2260,6 +2262,39 @@ kernel void route_fused(
     }
     if (tid == 0) {
         tok_off[p.m] = p.m * stride;
+    }
+
+    // Tile descriptors for the tight mmid grid: one entry per non-empty
+    // 32-row chunk, then rows=0 padding up to tile_bound so stale entries
+    // from the previous layer can never resurrect work.
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint my_cnt = tid < p.n_expert ? table[tid].rows : 0u;
+    const uint my_tiles = (my_cnt + 31) / 32;
+    const uint tp = simd_prefix_exclusive_sum(my_tiles);
+    const uint tt = simd_sum(my_tiles);
+    if (lane == 0) {
+        sg_sums[sg] = tt;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint tbase = 0u;
+    uint total_tiles = 0u;
+    for (uint s = 0; s < 8; s++) {
+        if (s < sg) {
+            tbase += sg_sums[s];
+        }
+        total_tiles += sg_sums[s];
+    }
+    tbase += tp;
+    if (tid < p.n_expert) {
+        const uint r0 = tg_row0[tid];
+        for (uint k = 0; k < my_tiles; k++) {
+            tiles[tbase + k].expert = tid;
+            tiles[tbase + k].row0 = r0 + 32 * k;
+            tiles[tbase + k].rows = min(my_cnt - 32 * k, 32u);
+        }
+    }
+    for (uint i = total_tiles + tid; i < p.tile_bound; i += 256) {
+        tiles[i].rows = 0u;
     }
 }
 
