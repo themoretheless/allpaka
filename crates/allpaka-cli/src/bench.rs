@@ -138,6 +138,9 @@ fn print_capability_report(model: &allpaka_model::Model<'_>, file: &allpaka_gguf
         "    gpu: backend={accel} attached={}",
         allpaka_backend::gpu::is_attached()
     );
+    if let Some(e) = allpaka_backend::gpu::init_error() {
+        println!("    gpu init error: {e}");
+    }
     println!(
         "    weights: gpu-resident={}",
         allpaka_backend::gpu::is_attached()

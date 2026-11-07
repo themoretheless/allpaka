@@ -216,6 +216,9 @@ pub struct Gpu {
     /// gathered token ids and the combine CSR, all produced on-device.
     route_buf: Buffer,
     route_cap: usize,
+    /// Debug: (table word-offset, n_expert) of the last fused routing, for
+    /// ALLPAKA_ROWS_DEBUG to dump the per-expert row histogram after prefill.
+    dbg_route: std::cell::Cell<Option<(usize, usize)>>,
     /// The bias pointer (0 = none) route_buf's counters were last zeroed
     /// and staged for; route_scan self-cleans them on the GPU between
     /// layers, so CPU re-staging is needed only on realloc or a bias change
@@ -554,6 +557,7 @@ fn init_device() -> Option<Gpu> {
         pf_hs_normed: std::cell::Cell::new(false),
         route_buf,
         route_cap: 1 << 12,
+        dbg_route: std::cell::Cell::new(None),
         route_staged: None,
         pf_ev,
         pf_ev_val: 0,
@@ -7322,6 +7326,27 @@ fn prefill_complete(gpu: &mut Gpu) {
         CALLS.fetch_add(1, Ordering::Relaxed);
     }
     gpu.prefill_drain();
+    if let (Some((tab, n_ex)), true) = (
+        gpu.dbg_route.get(),
+        std::env::var_os("ALLPAKA_ROWS_DEBUG").is_some(),
+    ) {
+        let rb = gpu.route_buf.contents() as *const u32;
+        let mut rows: Vec<u32> = (0..n_ex).map(|i| unsafe { *rb.add(tab + i * 3 + 2) }).collect();
+        rows.sort_unstable_by(|a, b| b.cmp(a));
+        let total: u32 = rows.iter().sum();
+        let nz: Vec<u32> = rows.iter().copied().filter(|&r| r > 0).collect();
+        let tiles: u32 = nz.iter().map(|&r| r.div_ceil(32)).sum();
+        eprintln!(
+            "rows/expert (sorted, top12): {:?}{} | nonzero {}/{} total {} tiles {} waste {:.1}%",
+            &nz[..nz.len().min(12)],
+            if nz.len() > 12 { " ..." } else { "" },
+            nz.len(),
+            n_ex,
+            total,
+            tiles,
+            100.0 * (tiles * 32 - total) as f64 / (tiles * 32).max(1) as f64
+        );
+    }
     gpu.cstamps_report(cal);
 }
 
@@ -8566,7 +8591,8 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
         if !no_barrier() {
             enc.memory_barrier_with_resources(&[y]);
         }
-        // xs += ssm_out output, then the FFN norm and the router matmul.
+        // xs += ssm_out output, then the FFN norm and the router matmul -
+        // one fused dispatch when the router is present.
         norm_rows(enc, &f.ffn_norm, 1, out_at);
         cstamp!(gpu, enc, "fnorm");
         if !no_barrier() {
@@ -9745,6 +9771,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 enc.set_buffer(10, Some(rb), e(rl.tiles));
                 enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(256, 1, 1));
                 cstamp!(gpu, enc, "rc");
+                gpu.dbg_route.set(Some((rl.table, req.n_expert)));
             } else {
                 enc.set_compute_pipeline_state(&gpu.pipelines[&("route_pick", 1, 1)]);
                 enc.set_buffer(0, Some(lg_buf), e(lg_off));
