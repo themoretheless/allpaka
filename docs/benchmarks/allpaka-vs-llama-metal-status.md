@@ -123,6 +123,17 @@ router chain), not the mm or mmid kernels.
 - Attention decomposition (PF_SPLIT, pp480, per layer): qkv 0.67 ms,
   wo 0.53 ms (both ~15 TFLOPS, mm parity), attend 0.23 ms, prep 0.04 ms,
   fnorm+router 0.13 ms — no attention-side gap left to fuse.
+- **Dense datapoint (Qwen3-0.6B Q8_0, 2026-11-07): pp 10749 vs llama
+  10848 = 0.99x, tg 440 vs 332 = 1.32x.** Core mm/attention path is at
+  parity; the 30B pp gap is MoE-path-specific (routing/mmid structure),
+  not kernel quality: mmllp vs llama kernel_mul_mm_q4_K_f32 on all four
+  30B shapes (5120/2048/768 out) is +/-3%. Cold-weight streaming
+  (MM_WSPAN=400MiB) does NOT explain in-model mmid cost (11.1 TFLOPS
+  warm and cold). gate+up combined mmid in-model ~15.6 TFLOPS-effective
+  (FFN_SPLIT) — actually ABOVE microbench. The residual ~8% is diffuse:
+  ~480 dispatches/chunk of ramp + stage bubbles, no single addressable
+  kernel. buffer modes re-verified: onebuf 1464-1471 > defer 1427-1433 >
+  wait 1405-1407.
 
 ## Verdict
 
@@ -132,7 +143,7 @@ decode wins on some MoE shapes and loses on others.
 
 | Model | Prefill (allpaka/llama) | Decode (allpaka/llama) |
 | --- | ---: | ---: |
-| qwen3-0.6b Q8_0 | 0.51× | **1.13×** |
+| qwen3-0.6b Q8_0 | 0.99× (10749 vs 10848) | **1.32×** (440 vs 332) |
 | qwen3-30b Q4_K_M | **1.02×** → 0.90× ¹ | 0.96× → **1.21×** ¹ |
 | Qwen3.6-35B Q4_K_M | **1.03×** | **1.35×** |
 | GLM-4.5-Air Q4_K_M | **~1.4×** | **0.86×** (39.0 vs 45.5) |
