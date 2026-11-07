@@ -115,6 +115,14 @@ router chain), not the mm or mmid kernels.
   same way, so this is parity, not a gap — do not chase it via tile sorting.
 - bench prints the Metal init error when the backend stays unattached
   (a kernel compile break previously surfaced as a silent 7x slowdown).
+- 16-row mmid tiles (437b1de, `ALLPAKA_MMID_BN16=1`): slightly WORSE
+  (1470-1485 vs 1490-1492). Decisive: **the FFN mmid stage is
+  weight-bandwidth-bound, not compute-bound** — each hot expert's weights
+  stream fully regardless of row count, so tile padding costs nothing.
+  Side benefit: bn16 (avg_rows<=24) now uses the tight tile grid too.
+- Attention decomposition (PF_SPLIT, pp480, per layer): qkv 0.67 ms,
+  wo 0.53 ms (both ~15 TFLOPS, mm parity), attend 0.23 ms, prep 0.04 ms,
+  fnorm+router 0.13 ms — no attention-side gap left to fuse.
 
 ## Verdict
 
