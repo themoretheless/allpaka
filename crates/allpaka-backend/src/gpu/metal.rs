@@ -269,7 +269,7 @@ struct RouteLayout {
     total: usize,
 }
 
-fn route_layout(m: usize, n_expert: usize, n_used: usize, shared: bool) -> RouteLayout {
+fn route_layout(m: usize, n_expert: usize, n_used: usize, shared: bool, tile_w: usize) -> RouteLayout {
     let align = |n: usize| (n + 63) & !63;
     let hits = n_used + shared as usize;
     let counts = 0;
@@ -285,7 +285,7 @@ fn route_layout(m: usize, n_expert: usize, n_used: usize, shared: bool) -> Route
     let bias = logits + align(m * n_expert);
     // Tight mmid grid: one descriptor per non-empty 32-row chunk.
     // ceil sum bound: total/32 + one partial chunk per expert.
-    let tile_bound = n_expert + (m * n_used) / 32;
+    let tile_bound = n_expert + (m * n_used) / tile_w;
     let tiles = bias + align(n_expert);
     let total = tiles + align(tile_bound * 3);
     RouteLayout {
@@ -9427,14 +9427,15 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         && req.n_expert <= 256
         && std::env::var_os("ALLPAKA_NO_ROUTE_FUSED").is_none();
     // Tile-descriptor grid (llama-style): route_fused emits one MmGroup per
-    // non-empty 32-row chunk, so the grid covers real work exactly - at
-    // pp480/128exp this is ~250 z-slices instead of 15 row-tiles x 128
-    // experts of mostly empty threadgroups. bn16 strides 16 rows per tile
-    // and would miss the upper half of a 32-row tile, so it keeps the old
-    // grid. ALLPAKA_MMID_TILES=0 reverts.
-    let tiles_mode = use_route_fused && !bn16 && crate::runtime::get().mmid_tiles;
+    // non-empty tile_w-row chunk (32, or 16 for bn16), so the grid covers
+    // real work exactly - at pp480/128exp this is ~250 z-slices instead of
+    // 15 row-tiles x 128 experts of mostly empty threadgroups. The chunk
+    // width must equal the consumer kernel's row stride.
+    // ALLPAKA_MMID_TILES=0 reverts.
+    let tiles_mode = use_route_fused && crate::runtime::get().mmid_tiles;
+    let tile_w: usize = if bn16 { 16 } else { 32 };
     let (row_tiles, n_groups) = if tiles_mode {
-        (1, (req.n_expert + req.total_rows / 32) as u64)
+        (1, (req.n_expert + req.total_rows / tile_w) as u64)
     } else if route_mode {
         // Worst-case grid: measured FASTER than a tight one - empty
         // threadgroups retire for free, while a small grid serialises the
@@ -9493,7 +9494,15 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     let rl = req
         .route
         .as_ref()
-        .map(|r| route_layout(m_fused, req.n_expert, r.n_used, req.shared.is_some()));
+        .map(|r| {
+            route_layout(
+                m_fused,
+                req.n_expert,
+                r.n_used,
+                req.shared.is_some(),
+                if bn16 { 16 } else { 32 },
+            )
+        });
     let mut logits_at: Option<(&'static str, usize)> = None;
     // One-buffer rescue: (old y_arena, logits offset, logits target, count).
     let mut obuf_rescue: Option<(Buffer, usize, usize, usize)> = None;
@@ -9738,6 +9747,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 scale: f32,
                 total_rows: u32,
                 tile_bound: u32,
+                tile_w: u32,
             }
             let params = RouteParams {
                 m: m_fused as u32,
@@ -9750,6 +9760,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 scale: r.scale,
                 total_rows: req.total_rows as u32,
                 tile_bound: rl.tile_bound as u32,
+                tile_w: tile_w as u32,
             };
             let pp = &params as *const RouteParams as *const _;
             let psz = std::mem::size_of::<RouteParams>() as u64;
@@ -10002,6 +10013,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                     scale: f32,
                     total_rows: u32,
                     tile_bound: u32,
+                    tile_w: u32,
                 }
                 let r = req.route.as_ref().expect("route mode");
                 let params = RouteParams {
@@ -10015,6 +10027,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                     scale: r.scale,
                     total_rows: req.total_rows as u32,
                     tile_bound: rl.as_ref().map_or(0, |l| l.tile_bound as u32),
+                    tile_w: tile_w as u32,
                 };
                 let rl = rl.as_ref().expect("route mode layout");
                 enc.set_compute_pipeline_state(&gpu.pipelines[&("route_patch_shared_w", 1, 1)]);

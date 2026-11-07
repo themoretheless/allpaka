@@ -2076,6 +2076,7 @@ struct RouteParams {
     float scale;
     uint total_rows;
     uint tile_bound;
+    uint tile_w;
 };
 
 kernel void route_pick(
@@ -2347,7 +2348,7 @@ kernel void route_fused(
     // from the previous layer can never resurrect work.
     threadgroup_barrier(mem_flags::mem_threadgroup);
     const uint my_cnt = tid < p.n_expert ? table[tid].rows : 0u;
-    const uint my_tiles = (my_cnt + 31) / 32;
+    const uint my_tiles = (my_cnt + p.tile_w - 1) / p.tile_w;
     const uint tp = simd_prefix_exclusive_sum(my_tiles);
     const uint tt = simd_sum(my_tiles);
     if (lane == 0) {
@@ -2367,8 +2368,8 @@ kernel void route_fused(
         const uint r0 = tg_row0[tid];
         for (uint k = 0; k < my_tiles; k++) {
             tiles[tbase + k].expert = tid;
-            tiles[tbase + k].row0 = r0 + 32 * k;
-            tiles[tbase + k].rows = min(my_cnt - 32 * k, 32u);
+            tiles[tbase + k].row0 = r0 + p.tile_w * k;
+            tiles[tbase + k].rows = min(my_cnt - p.tile_w * k, p.tile_w);
         }
     }
     for (uint i = total_tiles + tid; i < p.tile_bound; i += 256) {

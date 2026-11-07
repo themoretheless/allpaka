@@ -402,6 +402,7 @@ struct RouteParams {
     scale: f32,
     total_rows: u32,
     tile_bound: u32,
+    tile_w: u32,
 }
 
 #[test]
@@ -460,6 +461,7 @@ fn route_fused_matches_three_stage_router() {
         scale: 1.0,
         total_rows,
         tile_bound: n_expert + total_rows / 32,
+        tile_w: 32,
     };
 
     let lg_b = buf(&logits);
