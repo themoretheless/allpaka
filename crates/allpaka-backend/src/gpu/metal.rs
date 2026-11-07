@@ -207,6 +207,11 @@ pub struct Gpu {
     pf_spare: std::sync::Arc<Mutex<Option<Buffer>>>,
     pf_hs: Buffer,
     pf_hs_cap: usize,
+    /// The fused FFN combine already wrote the NEXT layer's attn-normed
+    /// rows into pf_hs (combine_rows_resnorm): the next fused attention /
+    /// GDN block skips its norm_rows dispatch. Cell because the norm
+    /// closures in those blocks hold a shared borrow of `gpu`.
+    pf_hs_normed: std::cell::Cell<bool>,
     /// GPU-side MoE routing scratch: counters, the group table, picks,
     /// gathered token ids and the combine CSR, all produced on-device.
     route_buf: Buffer,
@@ -467,6 +472,7 @@ fn init_device() -> Option<Gpu> {
         "residual_norm_sig",
         "norm_rows",
         "combine_rows",
+        "combine_rows_resnorm",
         "softmax_topk",
         "sigmoid_topk",
         "router_topk",
@@ -545,6 +551,7 @@ fn init_device() -> Option<Gpu> {
         pf_spare: Default::default(),
         pf_hs,
         pf_hs_cap: 1 << 12,
+        pf_hs_normed: std::cell::Cell::new(false),
         route_buf,
         route_cap: 1 << 12,
         route_staged: None,
@@ -7288,6 +7295,7 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
     // chunk opens the shared command buffer (see prefill_attn_block), an
     // ineligible layer seals it again (pf_obuf_seal). Nothing to arm here.
     gpu.pf_obuf_cmd = None;
+    gpu.pf_hs_normed.set(false);
     gpu.ensure_prefill(xs.len() * 4);
     unsafe {
         std::ptr::copy_nonoverlapping(xs.as_ptr(), gpu.pf_x.contents() as *mut f32, xs.len());
@@ -7426,6 +7434,7 @@ pub fn prefill_abort() {
             // A partial one-buffer chunk was never committed; dropping the
             // retained handle discards it.
             gpu.pf_obuf_cmd = None;
+            gpu.pf_hs_normed.set(false);
             gpu.prefill_drain();
             gpu.pf_active_len = None;
         }
@@ -7717,10 +7726,17 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 // live on the same command buffer now - order them.
                 enc.memory_barrier_with_resources(&[y, &gpu.pf_x, &gpu.pf_hs, &gpu.route_buf]);
             }
-            norm_rows(enc, &f.attn_norm, 0, out_at);
-            cstamp!(gpu, enc, "anorm");
-            if !no_barrier() {
-                enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
+            // The FFN combine may already have written the attn-normed rows
+            // (combine_rows_resnorm); only the onebuf barrier above orders
+            // them then.
+            if gpu.pf_hs_normed.take() {
+                cstamp!(gpu, enc, "anorm_fused");
+            } else {
+                norm_rows(enc, &f.attn_norm, 0, out_at);
+                cstamp!(gpu, enc, "anorm");
+                if !no_barrier() {
+                    enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
+                }
             }
             (&gpu.pf_hs, 0)
         } else {
@@ -8327,10 +8343,16 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             ]);
         }
         // h = rmsnorm(xs) * attn_norm, then the four projections off it.
-        norm_rows(enc, &f.attn_norm, 0, out_at);
-        cstamp!(gpu, enc, "anorm");
-        if !no_barrier() {
-            enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
+        // The previous layer's fused combine may already have written those
+        // rows (combine_rows_resnorm).
+        if gpu.pf_hs_normed.take() {
+            cstamp!(gpu, enc, "anorm_fused");
+        } else {
+            norm_rows(enc, &f.attn_norm, 0, out_at);
+            cstamp!(gpu, enc, "anorm");
+            if !no_barrier() {
+                enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
+            }
         }
         if let Some(qkvz_pipe) = &qkvz_state {
             enc.set_compute_pipeline_state(qkvz_pipe);
@@ -8793,6 +8815,11 @@ pub struct GroupedCombine<'a> {
     pub hit_row: &'a [u32],
     pub hit_w: &'a [f32],
     pub m: usize,
+    /// The NEXT layer's attention-norm weight (raw F32) plus rms eps: the
+    /// combine dispatch then also writes the normed rows to pf_hs
+    /// (combine_rows_resnorm), and the next attention block skips its own
+    /// norm. None for the last layer (the output norm stays on the CPU).
+    pub next_norm: Option<(&'a [u8], f32)>,
 }
 
 /// Deferred fused-prefill commits: layer buffers chain through an
@@ -9979,15 +10006,38 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                     enc.memory_barrier_with_resources(&[&gpu.route_buf]);
                 }
             }
-            enc.set_compute_pipeline_state(&gpu.pipelines[&("combine_rows", 1, 1)]);
-            enc.set_buffer(0, Some(&gpu.pf_x), 0);
-            enc.set_buffer(1, Some(y), e(out_at));
-            enc.set_buffer(2, Some(off_buf), e(off_off));
-            enc.set_buffer(3, Some(hr_buf), e(hr_off));
-            enc.set_buffer(4, Some(hw_buf), e(hw_off));
-            let h32 = req.hidden as u32;
-            enc.set_bytes(5, 4, &h32 as *const u32 as *const _);
-            enc.dispatch_thread_groups(MTLSize::new(c.m as u64, 1, 1), MTLSize::new(256, 1, 1));
+            // With the next layer's attention-norm weight known, the combine
+            // also emits the normed rows for it; the attention block then
+            // skips its norm_rows dispatch.
+            let next_norm = c
+                .next_norm
+                .filter(|_| crate::runtime::get().pf_combine_resnorm)
+                .and_then(|(raw, eps)| resolve_norm(&gpu, raw, req.hidden).map(|n| (n, eps)));
+            if let Some((nref, eps)) = next_norm {
+                enc.set_compute_pipeline_state(&gpu.pipelines[&("combine_rows_resnorm", 1, 1)]);
+                enc.set_buffer(0, Some(&gpu.pf_x), 0);
+                enc.set_buffer(1, Some(y), e(out_at));
+                enc.set_buffer(2, Some(off_buf), e(off_off));
+                enc.set_buffer(3, Some(hr_buf), e(hr_off));
+                enc.set_buffer(4, Some(hw_buf), e(hw_off));
+                let h32 = req.hidden as u32;
+                enc.set_bytes(5, 4, &h32 as *const u32 as *const _);
+                enc.set_buffer(6, Some(&gpu.pf_hs), 0);
+                enc.set_buffer(7, Some(&gpu.chunks[nref.chunk].buf), nref.off);
+                enc.set_bytes(8, 4, &eps as *const f32 as *const _);
+                enc.dispatch_thread_groups(MTLSize::new(c.m as u64, 1, 1), MTLSize::new(256, 1, 1));
+                gpu.pf_hs_normed.set(true);
+            } else {
+                enc.set_compute_pipeline_state(&gpu.pipelines[&("combine_rows", 1, 1)]);
+                enc.set_buffer(0, Some(&gpu.pf_x), 0);
+                enc.set_buffer(1, Some(y), e(out_at));
+                enc.set_buffer(2, Some(off_buf), e(off_off));
+                enc.set_buffer(3, Some(hr_buf), e(hr_off));
+                enc.set_buffer(4, Some(hw_buf), e(hw_off));
+                let h32 = req.hidden as u32;
+                enc.set_bytes(5, 4, &h32 as *const u32 as *const _);
+                enc.dispatch_thread_groups(MTLSize::new(c.m as u64, 1, 1), MTLSize::new(256, 1, 1));
+            }
             cstamp!(gpu, enc, "cb");
         }
         enc.end_encoding();

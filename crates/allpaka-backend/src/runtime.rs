@@ -105,6 +105,7 @@ flags! {
     mm_k64: bool = false, env "ALLPAKA_MM_K64", set;
     mmid_k64: bool = false, env "ALLPAKA_MMID_K64", set;
     mmid_tiles: bool = true, env "ALLPAKA_MMID_TILES", on;
+    pf_combine_resnorm: bool = true, env "ALLPAKA_PF_COMBINE_RESNORM", on;
     no_stage_barrier: bool = false, env "ALLPAKA_NO_STAGE_BARRIER", present;
     no_barrier_probe: bool = false, env "ALLPAKA_NO_BARRIER", present;
     serial: bool = false, env "ALLPAKA_SERIAL", present;

@@ -2144,6 +2144,14 @@ impl<'a> Model<'a> {
             drop(router_span);
 
             let _f = profile::span(profile::Phase::Ffn);
+            // The FFN combine folds in the NEXT layer's attention norm
+            // (combine_rows_resnorm); the last layer leaves the output norm
+            // to the CPU.
+            let next_norm = self
+                .layers
+                .get(li + 1)
+                .map(|l| (l.attn_norm_raw, c.rms_eps))
+                .filter(|(raw, _)| !raw.is_empty());
             QuantMat::ffn_grouped(
                 gate_m,
                 up_m,
@@ -2160,6 +2168,7 @@ impl<'a> Model<'a> {
                     hit_row: &hit_row,
                     hit_w: &hit_w,
                     m,
+                    next_norm,
                 }),
                 sh_m,
                 gpu_route,

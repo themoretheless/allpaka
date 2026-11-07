@@ -427,6 +427,8 @@ pub struct GroupedCombine<'a> {
     pub hit_row: &'a [u32],
     pub hit_w: &'a [f32],
     pub m: usize,
+    /// Metal-only fusion (combine + next attention norm); ignored here.
+    pub next_norm: Option<(&'a [u8], f32)>,
 }
 
 pub struct GroupedFfnReq<'a> {

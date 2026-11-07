@@ -1849,6 +1849,84 @@ kernel void combine_rows(
     }
 }
 
+// combine_rows with the next layer's RMSNorm folded in: token t's residual
+// row gains the weighted expert down-rows, then h gets rmsnorm(x) * w in the
+// same dispatch. Removes one norm_rows dispatch and one barrier per fused
+// prefill layer. One threadgroup per token; like norm_rows, the norm pass
+// re-reads the updated row from device memory (hidden up to 16k does not
+// fit threadgroup SRAM), so the two passes are separated by a device-scope
+// threadgroup barrier.
+kernel void combine_rows_resnorm(
+    device float* x [[buffer(0)]],
+    device const float* flat [[buffer(1)]],
+    device const uint* tok_off [[buffer(2)]],
+    device const uint* hit_row [[buffer(3)]],
+    device const float* hit_w [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    device float* h [[buffer(6)]],
+    device const float* w [[buffer(7)]],
+    constant float& eps [[buffer(8)]],
+    uint token [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    uint h0 = tok_off[token];
+    uint h1 = tok_off[token + 1];
+    device float* xr = x + (ulong)token * hidden;
+    threadgroup float partial[8];
+    float acc = 0.0f;
+    if ((hidden & 3u) == 0u) {
+        uint h4 = hidden >> 2;
+        device float4* xr4 = (device float4*)xr;
+        device const float4* flat4 = (device const float4*)flat;
+        for (uint i = tid; i < h4; i += 256) {
+            float4 v = xr4[i];
+            for (uint k = h0; k < h1; k++) {
+                v += hit_w[k] * flat4[(ulong)hit_row[k] * h4 + i];
+            }
+            xr4[i] = v;
+            acc += dot(v, v);
+        }
+    } else {
+        for (uint i = tid; i < hidden; i += 256) {
+            float v = xr[i];
+            for (uint k = h0; k < h1; k++) {
+                v += hit_w[k] * flat[(ulong)hit_row[k] * hidden + i];
+            }
+            xr[i] = v;
+            acc += v * v;
+        }
+    }
+    float s = simd_sum(acc);
+    if (lane == 0) {
+        partial[sg] = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = 0.0f;
+    for (uint i = 0; i < 8; i++) {
+        total += partial[i];
+    }
+    float scale = rsqrt(total / (float)hidden + eps);
+    // Make the pass-1 device writes of every thread visible before pass 2
+    // re-reads the row.
+    threadgroup_barrier(mem_flags::mem_device);
+    device float* hr = h + (ulong)token * hidden;
+    if ((hidden & 3u) == 0u) {
+        uint h4 = hidden >> 2;
+        device const float4* xr4 = (device const float4*)xr;
+        device const float4* w4 = (device const float4*)w;
+        device float4* hr4 = (device float4*)hr;
+        for (uint i = tid; i < h4; i += 256) {
+            hr4[i] = xr4[i] * scale * w4[i];
+        }
+    } else {
+        for (uint i = tid; i < hidden; i += 256) {
+            hr[i] = xr[i] * scale * w[i];
+        }
+    }
+}
+
 // residual_norm plus the epoch publish for the spin-flag scheme.
 kernel void residual_norm_sig(
     device float* x [[buffer(0)]],
