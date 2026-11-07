@@ -6977,6 +6977,278 @@ kernel void attend_mm(
     }
 }
 
+struct FqPrepArgs {
+    float eps;
+    uint has_qk_norm;
+    uint rot_dim;
+    uint has_bias;
+    uint n_kv_heads;
+    uint wait_base;
+};
+
+// attend_mm with qk_prep_batch folded in (fused prefill, head_dim 128): one
+// dispatch per layer-chunk replaces the prep dispatch AND its pipeline
+// barrier. Producer threadgroups (q head < 2*n_kv_heads) norm+rope this
+// tile's 8 K rows and copy its V rows into the cache, then publish to a
+// device counter; every group then spins until all tiles up to its own are
+// published. Producers sit at the low-x end of the grid (x = head, the
+// fastest-varying axis), so a spinning consumer's producers always launched
+// earlier and are already resident or done. Q norm+rope folds into the sq
+// staging, so nothing of qk_prep remains. ALLPAKA_PF_FQK=0 keeps the old
+// two-dispatch path.
+kernel void attend_mm_fq(
+    device half* kc [[buffer(0)]],
+    device half* vc [[buffer(1)]],
+    device const float* q [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant uint& kv_dim [[buffer(4)]],
+    constant uint& head_dim [[buffer(5)]],
+    constant uint& base [[buffer(6)]],
+    constant uint& group [[buffer(7)]],
+    constant float& scale [[buffer(8)]],
+    constant ulong& k_base [[buffer(9)]],
+    constant ulong& v_base [[buffer(10)]],
+    constant uint& n_q_heads [[buffer(11)]],
+    constant uint& n_rows [[buffer(12)]],
+    device const float* k_in [[buffer(13)]],
+    device const float* v_in [[buffer(14)]],
+    constant FqPrepArgs& pa [[buffer(15)]],
+    constant float* qw [[buffer(16)]],
+    constant float* kw [[buffer(17)]],
+    device const float2* ropes [[buffer(18)]],
+    device const float* qb [[buffer(19)]],
+    device const float* kb [[buffer(20)]],
+    device const float* vb [[buffer(21)]],
+    device atomic_uint* sync [[buffer(22)]],
+    uint2 tg [[threadgroup_position_in_grid]],
+    ushort tiitg [[thread_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]],
+    ushort sgitg [[simdgroup_index_in_threadgroup]])
+{
+    threadgroup half sq[8 * 128];
+    threadgroup float so[8 * 128];
+    threadgroup float ss[8 * 64];    // raw scores, then P in place (float)
+    const uint qh = tg.x;
+    const uint row0 = tg.y * 8;
+    const uint kv_head = qh / group;
+    const uint q_dim = n_q_heads * head_dim;
+    const uint max_row = min(row0 + 7, n_rows - 1);
+    const uint max_pos = base + max_row + 1;
+    // Fully-masked 8-position blocks read this in-span block instead (the
+    // chunk's own K/V is written by the producer groups below). Blocks that
+    // intersect the valid range are never clamped - clamping would alias
+    // stale data into valid positions.
+    const uint span8 = (base + n_rows) > 8 ? base + n_rows - 8 : 0;
+    const uint rot_h = pa.rot_dim / 2;
+
+    // Producer half of the folded prep: heads [0, n_kv) write K (bias +
+    // qk-norm + rope), heads [n_kv, 2*n_kv) write V (bias + narrow to half).
+    // Each simdgroup owns rows sgitg and sgitg + 4 of the tile, the lane
+    // holding elements lane, lane+32, lane+64, lane+96 - exactly
+    // qk_prep_batch's element mapping, so the norm reductions sum
+    // identically.
+    const uint n_prod = 2 * pa.n_kv_heads;
+    if (qh < n_prod) {
+        const bool is_k = qh < pa.n_kv_heads;
+        const uint kvh = is_k ? qh : qh - pa.n_kv_heads;
+        for (ushort ri = 0; ri < 2; ri++) {
+            uint row = row0 + sgitg + ri * 4;
+            bool valid = row < n_rows;
+            uint rc = valid ? row : n_rows - 1;
+            if (is_k) {
+                device const float* xh = k_in + (ulong)rc * kv_dim + kvh * 128;
+                device const float2* rope = ropes + (ulong)rc * rot_h;
+                float e0 = xh[lane];
+                float e1 = xh[lane + 32];
+                float e2 = xh[lane + 64];
+                float e3 = xh[lane + 96];
+                if (pa.has_bias != 0) {
+                    e0 += kb[kvh * 128 + lane];
+                    e1 += kb[kvh * 128 + lane + 32];
+                    e2 += kb[kvh * 128 + lane + 64];
+                    e3 += kb[kvh * 128 + lane + 96];
+                }
+                if (pa.has_qk_norm != 0) {
+                    float ms = simd_sum(e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3)
+                        / 128.0f;
+                    float sc = rsqrt(ms + pa.eps);
+                    e0 *= sc * kw[lane];
+                    e1 *= sc * kw[lane + 32];
+                    e2 *= sc * kw[lane + 64];
+                    e3 *= sc * kw[lane + 96];
+                }
+                QK_PREP_ROPE(rot_h)
+                if (valid) {
+                    device half* dst = kc + k_base
+                        + (ulong)(base + row) * kv_dim + kvh * 128;
+                    dst[lane] = (half)e0;
+                    dst[lane + 32] = (half)e1;
+                    dst[lane + 64] = (half)e2;
+                    dst[lane + 96] = (half)e3;
+                }
+            } else if (valid) {
+                device const float* src = v_in + (ulong)rc * kv_dim + kvh * 128;
+                device half* dst = vc + v_base
+                    + (ulong)(base + row) * kv_dim + kvh * 128;
+                float f0 = src[lane];
+                float f1 = src[lane + 32];
+                float f2 = src[lane + 64];
+                float f3 = src[lane + 96];
+                if (pa.has_bias != 0) {
+                    f0 += vb[kvh * 128 + lane];
+                    f1 += vb[kvh * 128 + lane + 32];
+                    f2 += vb[kvh * 128 + lane + 64];
+                    f3 += vb[kvh * 128 + lane + 96];
+                }
+                dst[lane] = (half)f0;
+                dst[lane + 32] = (half)f1;
+                dst[lane + 64] = (half)f2;
+                dst[lane + 96] = (half)f3;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_device);
+        if (tiitg == 0) {
+            DEVICE_FENCE();
+            atomic_fetch_add_explicit(sync, 1, memory_order_relaxed);
+        }
+    }
+
+    // Stage Q as half with bias + qk-norm + rope folded in (clamped row
+    // reads, same lane mapping as the producer), zero O.
+    for (ushort ri = 0; ri < 2; ri++) {
+        uint r = sgitg + ri * 4;
+        uint rr = min(row0 + r, n_rows - 1);
+        device const float* xh = q + (ulong)rr * q_dim + qh * head_dim;
+        device const float2* rope = ropes + (ulong)rr * rot_h;
+        float e0 = xh[lane];
+        float e1 = xh[lane + 32];
+        float e2 = xh[lane + 64];
+        float e3 = xh[lane + 96];
+        if (pa.has_bias != 0) {
+            e0 += qb[qh * 128 + lane];
+            e1 += qb[qh * 128 + lane + 32];
+            e2 += qb[qh * 128 + lane + 64];
+            e3 += qb[qh * 128 + lane + 96];
+        }
+        if (pa.has_qk_norm != 0) {
+            float ms = simd_sum(e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3)
+                / 128.0f;
+            float sc = rsqrt(ms + pa.eps);
+            e0 *= sc * qw[lane];
+            e1 *= sc * qw[lane + 32];
+            e2 *= sc * qw[lane + 64];
+            e3 *= sc * qw[lane + 96];
+        }
+        QK_PREP_ROPE(rot_h)
+        sq[r * 128 + lane] = (half)e0;
+        sq[r * 128 + lane + 32] = (half)e1;
+        sq[r * 128 + lane + 64] = (half)e2;
+        sq[r * 128 + lane + 96] = (half)e3;
+    }
+    for (uint i = tiitg; i < 8 * 128; i += 128) {
+        so[i] = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Wait for this tile's K/V (and every earlier tile's) before the first
+    // cache read.
+    if (tiitg == 0) {
+        uint need = pa.wait_base + n_prod * (tg.y + 1);
+        while (atomic_load_explicit(sync, memory_order_relaxed) < need) {
+        }
+        DEVICE_FENCE();
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+
+    // This simdgroup owns rows sgitg and sgitg + 4 for the softmax.
+    float M[2] = {-INFINITY, -INFINITY};
+    float S[2] = {0.0f, 0.0f};
+
+    for (uint ic = 0; ic < max_pos; ic += 64) {
+        // Q . K^T: each simdgroup scores ALL 8 rows against its two
+        // 8-position strips of the tile, K straight from device memory.
+        for (ushort cc = 0; cc < 2; cc++) {
+            uint pb = sgitg * 2 + cc;
+            uint pstart = ic + pb * 8;
+            ulong p0 = pstart < max_pos ? pstart : min(pstart, span8);
+            device const half* pk =
+                kc + k_base + p0 * kv_dim + (ulong)kv_head * head_dim;
+            simdgroup_float8x8 mqk = make_filled_simdgroup_matrix<float, 8>(0.0f);
+            for (ushort i = 0; i < 16; i++) {
+                simdgroup_half8x8 mq;
+                simdgroup_half8x8 mk;
+                simdgroup_load(mq, sq + 8 * i, 128, 0, false);
+                simdgroup_load(mk, pk + 8 * i, kv_dim, 0, true); // dims x pos
+                simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
+            }
+            simdgroup_store(mqk, ss + pb * 8, 64, 0, false);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Online softmax per owned row; P to sp; rescale the row of O.
+        for (ushort jj = 0; jj < 2; jj++) {
+            uint j = jj * 4 + sgitg;
+            uint valid = base + min(row0 + j, max_row) + 1;
+            float2 s2 = ((threadgroup float2*)(ss + j * 64))[lane];
+            uint t = ic + lane * 2;
+            s2 = float2(t < valid ? s2.x : -INFINITY,
+                        t + 1 < valid ? s2.y : -INFINITY);
+            float m = simd_max(max(s2.x, s2.y));
+            float mold = M[jj];
+            M[jj] = max(M[jj], m);
+            float ms = mold == -INFINITY ? 1.0f : exp((mold - M[jj]) * scale);
+            float2 p2 = float2(t < valid ? exp((s2.x - M[jj]) * scale) : 0.0f,
+                               t + 1 < valid ? exp((s2.y - M[jj]) * scale) : 0.0f);
+            S[jj] = S[jj] * ms + simd_sum(p2.x + p2.y);
+            // P stays float for the PV MMA (mixed float x half is legal);
+            // in-place over the scores, each lane rewriting its own pair.
+            ((threadgroup float2*)(ss + j * 64))[lane] = p2;
+            if (ms != 1.0f) {
+                ((threadgroup float4*)(so + j * 128))[lane] *= ms;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // O += P . V: each simdgroup accumulates its 32-dim strip for all 8
+        // rows; V straight from device memory, O round-trips once per tile.
+        simdgroup_float8x8 lo[4];
+        for (ushort ii = 0; ii < 4; ii++) {
+            simdgroup_load(lo[ii], so + sgitg * 32 + ii * 8, 128, 0, false);
+        }
+        for (ushort cc = 0; cc < 8; cc++) {
+            uint pstart = ic + cc * 8;
+            ulong p0 = pstart < max_pos ? pstart : min(pstart, span8);
+            device const half* pv = vc + v_base + p0 * kv_dim
+                + (ulong)kv_head * head_dim + sgitg * 32;
+            simdgroup_float8x8 pa2;
+            simdgroup_load(pa2, ss + cc * 8, 64, 0, false);
+            for (ushort ii = 0; ii < 4; ii++) {
+                simdgroup_half8x8 mv;
+                simdgroup_load(mv, pv + ii * 8, kv_dim, 0, false);
+                simdgroup_multiply_accumulate(lo[ii], pa2, mv, lo[ii]);
+            }
+        }
+        for (ushort ii = 0; ii < 4; ii++) {
+            simdgroup_store(lo[ii], so + sgitg * 32 + ii * 8, 128, 0, false);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Epilogue: divide by the denominator, store with row bounds. Each
+    // simdgroup writes its two owned rows (one float4 per lane).
+    for (ushort jj = 0; jj < 2; jj++) {
+        uint j = jj * 4 + sgitg;
+        uint row = row0 + j;
+        if (row < n_rows && S[jj] > 0.0f) {
+            float inv = 1.0f / S[jj];
+            device float4* o4 =
+                (device float4*)(out + (ulong)row * q_dim + qh * head_dim);
+            threadgroup float4* s4 = (threadgroup float4*)(so + j * 128);
+            o4[lane] = s4[lane] * inv;
+        }
+    }
+}
+
 // attend_mm for head_dim 256 (qwen35moe): same structure - 8 query rows per
 // threadgroup, K/V in 64-position tiles read directly from device memory,
 // scores in threadgroup f32, online softmax per row, O in threadgroup with

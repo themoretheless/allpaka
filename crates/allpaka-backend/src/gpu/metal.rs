@@ -212,6 +212,13 @@ pub struct Gpu {
     /// GDN block skips its norm_rows dispatch. Cell because the norm
     /// closures in those blocks hold a shared borrow of `gpu`.
     pf_hs_normed: std::cell::Cell<bool>,
+    /// attend_mm_fq producer/consumer sync: a monotonic device counter the
+    /// K/V producer threadgroups publish to (one increment per producer per
+    /// tile), plus the host-side total of all past increments, passed to the
+    /// next dispatch as its wait base. Never reset; u32 wrap needs ~180k
+    /// prefills.
+    pf_attn_sync: Buffer,
+    pf_attn_epoch: std::cell::Cell<u32>,
     /// GPU-side MoE routing scratch: counters, the group table, picks,
     /// gathered token ids and the combine CSR, all produced on-device.
     route_buf: Buffer,
@@ -471,6 +478,7 @@ fn init_device() -> Option<Gpu> {
         "attend_rows_t4",
         "attend_rows_t8",
         "attend_mm",
+        "attend_mm_fq",
         "residual_norm",
         "residual_norm_sig",
         "norm_rows",
@@ -535,6 +543,8 @@ fn init_device() -> Option<Gpu> {
     let pf_x = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
     let pf_hs = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
     let route_buf = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
+    let pf_attn_sync = device.new_buffer(64, MTLResourceOptions::StorageModeShared);
+    unsafe { std::ptr::write_bytes(pf_attn_sync.contents() as *mut u8, 0, 64) };
     let pf_ev = device.new_shared_event();
 
     Some(Gpu {
@@ -555,6 +565,8 @@ fn init_device() -> Option<Gpu> {
         pf_hs,
         pf_hs_cap: 1 << 12,
         pf_hs_normed: std::cell::Cell::new(false),
+        pf_attn_sync,
+        pf_attn_epoch: std::cell::Cell::new(0),
         route_buf,
         route_cap: 1 << 12,
         dbg_route: std::cell::Cell::new(None),
@@ -7015,6 +7027,16 @@ struct QkPrepArgs {
 }
 
 #[repr(C)]
+struct FqPrepArgs {
+    eps: f32,
+    has_qk_norm: u32,
+    rot_dim: u32,
+    has_bias: u32,
+    n_kv_heads: u32,
+    wait_base: u32,
+}
+
+#[repr(C)]
 struct QkPrep256Args {
     n_heads: u32,
     n_kv_heads: u32,
@@ -7915,6 +7937,84 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             cstamp!(gpu, enc, "attend");
             split_here!("attend");
         } else {
+            // Fused prep+attention (attend_mm_fq): one dispatch does the
+            // qk-norm/rope/cache prep and the MMA attention, producer groups
+            // synced to consumers by a device counter instead of a pipeline
+            // barrier. gate_in_q (GLM) keeps the two-dispatch path: its q
+            // rows are double-wide, which this kernel does not handle.
+            let fused_qk = attend_mm()
+                && crate::runtime::get().pf_fused_qk
+                && !req.gate_in_q;
+            if fused_qk {
+                enc.set_compute_pipeline_state(&gpu.pipelines[&("attend_mm_fq", 1, 1)]);
+                enc.set_buffer(0, Some(&req.cache.buf), 0);
+                enc.set_buffer(1, Some(&req.cache.buf), 0);
+                enc.set_buffer(2, Some(y), e(q_at));
+                enc.set_buffer(3, Some(y), e(attn_at));
+                for (index, value) in [
+                    (4u64, req.kv_dim as u32),
+                    (5, hd as u32),
+                    (6, req.base as u32),
+                    (7, (req.n_heads / req.n_kv_heads.max(1)) as u32),
+                ] {
+                    enc.set_bytes(index, 4, &value as *const u32 as *const _);
+                }
+                enc.set_bytes(8, 4, &req.scale as *const f32 as *const _);
+                for (index, value) in [(9u64, req.k_off as u64), (10, req.v_off as u64)] {
+                    enc.set_bytes(index, 8, &value as *const u64 as *const _);
+                }
+                let heads32 = req.n_heads as u32;
+                enc.set_bytes(11, 4, &heads32 as *const u32 as *const _);
+                let rows32 = req.m as u32;
+                enc.set_bytes(12, 4, &rows32 as *const u32 as *const _);
+                enc.set_buffer(13, Some(y), e(k_at));
+                enc.set_buffer(14, Some(y), e(v_at));
+                let fargs = FqPrepArgs {
+                    eps: req.eps,
+                    has_qk_norm: req.q_norm.is_some() as u32,
+                    rot_dim: req.rot_dim as u32,
+                    has_bias: req.attn_bias.is_some() as u32,
+                    n_kv_heads: req.n_kv_heads as u32,
+                    wait_base: gpu.pf_attn_epoch.get(),
+                };
+                enc.set_bytes(
+                    15,
+                    std::mem::size_of::<FqPrepArgs>() as u64,
+                    &fargs as *const FqPrepArgs as *const _,
+                );
+                let ones = [1.0f32; ATTN_HEAD_DIM];
+                let qw = req.q_norm.unwrap_or(&ones);
+                let kw = req.k_norm.unwrap_or(&ones);
+                enc.set_bytes(16, (hd * 4) as u64, qw.as_ptr() as *const _);
+                enc.set_bytes(17, (hd * 4) as u64, kw.as_ptr() as *const _);
+                enc.set_buffer(18, Some(&gpu.x_arena), e(ropes_at));
+                match &bias_refs {
+                    Some((qb, kb, vb)) => {
+                        enc.set_buffer(19, Some(&gpu.chunks[qb.chunk].buf), qb.w_off);
+                        enc.set_buffer(20, Some(&gpu.chunks[kb.chunk].buf), kb.w_off);
+                        enc.set_buffer(21, Some(&gpu.chunks[vb.chunk].buf), vb.w_off);
+                    }
+                    None => {
+                        for index in 19u64..=21 {
+                            enc.set_buffer(index, Some(&req.cache.buf), 0);
+                        }
+                    }
+                }
+                enc.set_buffer(22, Some(&gpu.pf_attn_sync), 0);
+                enc.dispatch_thread_groups(
+                    MTLSize::new(req.n_heads as u64, (req.m as u64).div_ceil(8), 1),
+                    MTLSize::new(128, 1, 1),
+                );
+                let tiles = (req.m as u32).div_ceil(8);
+                gpu.pf_attn_epoch
+                    .set(gpu.pf_attn_epoch.get() + 2 * req.n_kv_heads as u32 * tiles);
+                cstamp!(gpu, enc, "attend");
+                if !no_barrier() {
+                    enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
+                }
+                split_here!("attend");
+            }
+            if !fused_qk {
             enc.set_compute_pipeline_state(&prep_state);
             enc.set_buffer(0, Some(y), e(q_at));
             enc.set_buffer(1, Some(y), e(k_at));
@@ -8025,6 +8125,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             }
             cstamp!(gpu, enc, "attend");
             split_here!("attend");
+            }
         }
 
         matmul(
