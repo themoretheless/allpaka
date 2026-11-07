@@ -98,6 +98,24 @@ moe_reduce, RMS_NORM+SCALE, ADD chains) cuts their small-op time to
 fusing our per-layer small kernels (residual_norm+rope, combine+residual,
 router chain), not the mm or mmid kernels.
 
+## 2026-11-07: combine+resnorm landed, norm+router falsified, route histogram
+
+- `combine_rows_resnorm` (049171d): the MoE combine now also writes the next
+  layer's attn-normed rows (`pf_hs`), saving 47 `norm_rows` dispatches per
+  pp480 chunk. Verified active (188/188 layer-buffers probed) but **pp-neutral**
+  (1458-1463 both ways) — the removed norm was ~0.2% of the pass. Kept as
+  strictly less work; kill switch `ALLPAKA_PF_COMBINE_RESNORM=0`.
+- `norm_rows_router` (FFN norm + router matmul per row, one dispatch):
+  **1-4% SLOWER** — 480 row-threadgroups re-read the 128x2048 router weights
+  instead of one tile-mm amortising them over all rows. Reverted; dead end.
+- `ALLPAKA_ROWS_DEBUG` (5d8ba56) dumps the per-expert row histogram of the
+  last fused layer. pp480 qwen3-30b: **65/128 experts hot, 3840 rows, 164
+  tiles of 32 → 26.8% tile padding**. That exactly explains in-model mmid
+  ~8.1 vs 11.1 TFLOPS microbench (11.1 × 0.732). llama's mm_id tiles the
+  same way, so this is parity, not a gap — do not chase it via tile sorting.
+- bench prints the Metal init error when the backend stays unattached
+  (a kernel compile break previously surfaced as a silent 7x slowdown).
+
 ## Verdict
 
 **Metal GPU path works and is fast in absolute terms, but allpaka is not
