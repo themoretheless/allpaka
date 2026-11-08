@@ -250,3 +250,51 @@ New harness: `crates/allpaka-backend/tests/gpu_densebench.rs`
 Decode target (≥1.05×) holds on 0.6B and 30B; 8B decode is +4% (within
 noise of the target). Prefill is uniformly −5..−7% on all three — the
 diffuse dispatch-cost story above, not any single kernel.
+
+## 2026-11-09: measurement-instrument hunt for the prefill gap
+
+Target raised to ≥1.06× on every front. Before optimising, we tried to
+localise the remaining ~5-7% prefill deficit with per-stage GPU timing.
+Every instrument on this device fails or distorts:
+
+- `ALLPAKA_PF_SPLIT=1` (commit + wait per stage): real per-buffer
+  GPUStart/EndTime, but each wait idles the GPU and the clock sags, so
+  stages read several × slower than inside a onebuf chunk. Sums came out
+  ABOVE the whole-chunk GPU-busy time — unusable.
+- `ALLPAKA_PF_CHAIN=1` (new, this session: per-stage commits, queued
+  back-to-back, waited once per layer): the driver pre-assigns queued
+  buffers, so GPUStartTime ≈ submission time and per-buffer spans absorb
+  the queue wait — garbage. kernelStartTime/kernelEndTime are no better
+  (a "gate" stage read 240 TFLOPS, physically impossible).
+- `MTLCounterSampleBuffer` (`ALLPAKA_GPU_COUNTERS=1`, cstamp! hooks at
+  every stage boundary): the device reports atDispatchBoundary sampling
+  UNSUPPORTED (the check `gpu_counters_supported` gates it off); the
+  atCommandBoundary-only mode cannot timestamp inside the onebuf chunk.
+- The one trustworthy whole-chunk number: onebuf GPU busy == wall
+  (637 ms for 480 tok on 8B, "executing 637, scheduling 0, idle 0") —
+  the GPU never idles inside the chunk, so there are NO inter-dispatch
+  gaps to reclaim. The deficit lives inside kernel execution time.
+
+What survives (trustworthy):
+
+- `mmbench` was silently poisoned: pseudo-random weight bytes leave f16
+  scale fields denormal/NaN, dragging every kernel to 2-3 TFLOPS with
+  4x run-to-run spread. New `MM_SANE=1` fills valid q4_k blocks
+  (d=1.0, small sub-scales): our mmll_q4_k then reads ~12.6 TFLOPS on
+  8B shapes and beats llama's kernel_mul_mm_q4_K_f32 at every dense
+  shape tried (qkv 6144-out, gate/up 12288-out, down 12288-in).
+  So the prefill deficit is NOT the mm kernels in isolation.
+- New elimination probe `ALLPAKA_PF_SKIP=qkv,attend,wo,fnorm,gate_up,
+  down,combine` drops a stage while keeping the command-buffer
+  structure: wall(baseline) − wall(skip) prices the stage in real
+  onebuf conditions. Bench aborts on non-finite logits, so the probe
+  build (worktree .kimi-worktrees/perf-elim) downgrades that check to a
+  warning when ALLPAKA_PF_SKIP is set.
+
+External condition: a foreign agent build (another session) kept the
+machine at 100-460% CPU for hours; every series above had to be taken
+under DRAM/thermal contention and its absolute values are junk (same
+config swung 123..751 tok/s). Elimination ranking across reps matches
+the FLOP order (gate_up biggest, attention ~free) but magnitudes are
+noise. Rerun the series when the machine is quiet; the script is
+/tmp/elim8b4.sh (5 reps x 8 configs, interleaved, TG=1).

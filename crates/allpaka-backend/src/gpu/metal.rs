@@ -7674,13 +7674,19 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
         // ALLPAKA_PF_SPLIT=1: commit after every stage and print its GPU
         // time. Debug-only; serialises the stages, so wall time degrades.
         let split = std::env::var_os("ALLPAKA_PF_SPLIT").is_some();
+        // ALLPAKA_PF_CHAIN=1: a commit per stage like PF_SPLIT, but the
+        // stage buffers are only queued, never waited - the in-order queue
+        // runs them back-to-back at full clock, so the per-stage
+        // GPUStart/EndTime deltas (printed at the end of the layer) are
+        // free of the DVFS sag that makes PF_SPLIT numbers unusable.
+        let chain = !split && std::env::var_os("ALLPAKA_PF_CHAIN").is_some();
         // One-buffer chunk (ALLPAKA_PF_ONEBUF=1, default): encode into the
         // chunk's shared command buffer - a sequential encoder per stage,
         // the commit happens once in prefill_end. The segment arms lazily
         // on the first eligible layer; a layer that stays off it seals the
         // open segment first, so its own buffer stays ordered after the
         // work already encoded there.
-        let onebuf = fusion.is_some() && gpu_route() && pf_onebuf() && !split;
+        let onebuf = fusion.is_some() && gpu_route() && pf_onebuf() && !split && !chain;
         if !onebuf {
             gpu.pf_obuf_seal();
         } else {
@@ -7690,10 +7696,11 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
         // the shared event instead of a CPU wait. Only the fused GPU-routing
         // path qualifies - it reads nothing back. PF_SPLIT keeps the old
         // waits (its per-stage commits are a different buffer shape anyway).
-        let defer = !onebuf && fusion.is_some() && gpu_route() && pf_defer() && !split;
+        let defer = !onebuf && fusion.is_some() && gpu_route() && pf_defer() && !split && !chain;
         if defer {
             cmd.encode_wait_for_event(&gpu.pf_ev, gpu.pf_ev_val);
         }
+        let mut staged: Vec<(&'static str, metal::CommandBuffer)> = Vec::new();
         let mut enc = if onebuf {
             gpu.pf_obuf_cmd
                 .as_deref()
@@ -7704,14 +7711,18 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
         };
         macro_rules! split_here {
             ($label:expr) => {
-                if split {
+                if split || chain {
                     use objc::{msg_send, sel, sel_impl};
                     enc.end_encoding();
                     cmd.commit();
-                    cmd.wait_until_completed();
-                    let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
-                    let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
-                    eprintln!("attn {}: {:.3} ms", $label, (ge - gs) * 1e3);
+                    if chain {
+                        staged.push(($label, cmd.to_owned()));
+                    } else {
+                        cmd.wait_until_completed();
+                        let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
+                        let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
+                        eprintln!("attn {}: {:.3} ms", $label, (ge - gs) * 1e3);
+                    }
                     cmd = queue.new_command_buffer();
                     enc = cmd.compute_command_encoder_with_dispatch_type(
                         metal::MTLDispatchType::Concurrent,
@@ -7789,7 +7800,9 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
         } else {
             (&gpu.x_arena, hs_at)
         };
-        if let Some(qkv_pipe) = &qkv_state {
+        if pf_skip("qkv") {
+            // Priced by absence: buffer structure unchanged, stage gone.
+        } else if let Some(qkv_pipe) = &qkv_state {
             enc.set_compute_pipeline_state(qkv_pipe);
             enc.set_buffer(0, Some(&gpu.chunks[mats[0].chunk].buf), 0);
             enc.set_buffer(1, Some(&gpu.chunks[mats[1].chunk].buf), 0);
@@ -7945,7 +7958,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             let fused_qk = attend_mm()
                 && crate::runtime::get().pf_fused_qk
                 && !req.gate_in_q;
-            if fused_qk {
+            if fused_qk && !pf_skip("attend") {
                 enc.set_compute_pipeline_state(&gpu.pipelines[&("attend_mm_fq", 1, 1)]);
                 enc.set_buffer(0, Some(&req.cache.buf), 0);
                 enc.set_buffer(1, Some(&req.cache.buf), 0);
@@ -8014,7 +8027,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 }
                 split_here!("attend");
             }
-            if !fused_qk {
+            if !fused_qk && !pf_skip("attend") {
             enc.set_compute_pipeline_state(&prep_state);
             enc.set_buffer(0, Some(y), e(q_at));
             enc.set_buffer(1, Some(y), e(k_at));
@@ -8128,16 +8141,18 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             }
         }
 
-        matmul(
-            enc,
-            &states[3],
-            &mats[3],
-            q_dim,
-            hidden,
-            &gpu.y_arena,
-            attn_at,
-            out_at,
-        );
+        if !pf_skip("wo") {
+            matmul(
+                enc,
+                &states[3],
+                &mats[3],
+                q_dim,
+                hidden,
+                &gpu.y_arena,
+                attn_at,
+                out_at,
+            );
+        }
         cstamp!(gpu, enc, "wo");
         split_here!("wo");
         if let Some(f) = &fusion {
@@ -8146,7 +8161,9 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             }
             // xs += wo output, then the FFN norm - one fused pass - and the
             // router matmul, all before the single wait.
-            norm_rows(enc, &f.ffn_norm, 1, out_at);
+            if !pf_skip("fnorm") {
+                norm_rows(enc, &f.ffn_norm, 1, out_at);
+            }
             cstamp!(gpu, enc, "fnorm");
             if !no_barrier() {
                 enc.memory_barrier_with_resources(&[&gpu.pf_hs]);
@@ -8174,6 +8191,24 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             // Nothing: the chunk commits once, in prefill_end.
         } else if defer {
             gpu.commit_chained(cmd);
+        } else if chain {
+            cmd.commit();
+            cmd.wait_until_completed();
+            note_gpu_times(cmd);
+            use objc::{msg_send, sel, sel_impl};
+            let mut prev_ke: Option<f64> = None;
+            for (label, c) in &staged {
+                let c: &metal::CommandBufferRef = c;
+                let ks: f64 = unsafe { msg_send![c, kernelStartTime] };
+                let ke: f64 = unsafe { msg_send![c, kernelEndTime] };
+                let gap = prev_ke.map_or(0.0, |p| (ks - p).max(0.0) * 1e3);
+                eprintln!("attn {}: {:.3} ms (gap {:.3})", label, (ke - ks) * 1e3, gap);
+                prev_ke = Some(ke);
+            }
+            let ks: f64 = unsafe { msg_send![cmd, kernelStartTime] };
+            let ke: f64 = unsafe { msg_send![cmd, kernelEndTime] };
+            let gap = prev_ke.map_or(0.0, |p| (ks - p).max(0.0) * 1e3);
+            eprintln!("attn tail: {:.3} ms (gap {:.3})", (ke - ks) * 1e3, gap);
         } else {
             cmd.commit();
             cmd.wait_until_completed();
@@ -9269,6 +9304,26 @@ fn no_barrier() -> bool {
     p.no_barrier_probe || p.serial
 }
 
+/// ALLPAKA_PF_SKIP="qkv,attend,wo,fnorm,gate_up,down,combine,norms": drop the
+/// named prefill dispatches (same command-buffer structure, stage just never
+/// encodes). Wall(baseline) - wall(skip) prices that stage in real onebuf
+/// conditions - the only per-stage measurement this device supports (counter
+/// sampling is dispatch-boundary-only, which this GPU lacks). Results are
+/// numerically wrong by construction; timings are the point.
+fn pf_skip(stage: &str) -> bool {
+    static SKIP: OnceLock<Vec<String>> = OnceLock::new();
+    SKIP.get_or_init(|| {
+        std::env::var("ALLPAKA_PF_SKIP")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim().to_owned())
+            .collect()
+    })
+    .iter()
+    .any(|s| s == stage)
+}
+
 /// ALLPAKA_SERIAL=1: encode the prefill command buffers with
 /// MTLDispatchType::Serial and drop the explicit barriers - serial dispatch
 /// gives in-order execution (ordering without the full pipeline flush that
@@ -9693,6 +9748,10 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         // ALLPAKA_FFN_SPLIT=1: commit after every stage and print its GPU
         // time. Debug-only; serialises the stages, so wall time degrades.
         let split = std::env::var_os("ALLPAKA_FFN_SPLIT").is_some();
+        // ALLPAKA_PF_CHAIN=1 (shared with the attention block): per-stage
+        // commits queued back-to-back without waits - per-stage GPU times
+        // without the DVFS sag of the serialising FFN_SPLIT.
+        let chain = !split && std::env::var_os("ALLPAKA_PF_CHAIN").is_some();
         // One-buffer chunk (ALLPAKA_PF_ONEBUF=1, default): encode into the
         // chunk's shared command buffer, lazily armed by the first
         // eligible layer; the commit happens once in prefill_end. A layer
@@ -9701,7 +9760,8 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         // the work already encoded there.
         let onebuf = (route_mode || (dense_obuf() && req.route.is_none() && req.fused.is_some()))
             && pf_onebuf()
-            && !split;
+            && !split
+            && !chain;
         if !onebuf {
             gpu.pf_obuf_seal();
         } else {
@@ -9711,7 +9771,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         // the shared event instead of a CPU wait. Any fused-path buffer
         // qualifies - it reads nothing back (the combine lands in pf_x).
         // FFN_SPLIT keeps the old waits.
-        let defer = !onebuf && req.fused.is_some() && pf_defer() && !split;
+        let defer = !onebuf && req.fused.is_some() && pf_defer() && !split && !chain;
         // Cloned queue handle: command buffers borrow it, leaving `gpu`
         // free for the deferred commit bookkeeping.
         let queue = gpu.queue.clone();
@@ -9720,6 +9780,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         if defer {
             cmd.encode_wait_for_event(&gpu.pf_ev, gpu.pf_ev_val);
         }
+        let mut staged: Vec<(&'static str, metal::CommandBuffer)> = Vec::new();
         let mut enc = if onebuf {
             gpu.pf_obuf_cmd
                 .as_deref()
@@ -9730,14 +9791,18 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         };
         macro_rules! split_here {
             ($label:expr) => {
-                if split {
+                if split || chain {
                     use objc::{msg_send, sel, sel_impl};
                     enc.end_encoding();
                     cmd.commit();
-                    cmd.wait_until_completed();
-                    let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
-                    let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
-                    eprintln!("ffn {}: {:.3} ms", $label, (ge - gs) * 1e3);
+                    if chain {
+                        staged.push(($label, cmd.to_owned()));
+                    } else {
+                        cmd.wait_until_completed();
+                        let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
+                        let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
+                        eprintln!("ffn {}: {:.3} ms", $label, (ge - gs) * 1e3);
+                    }
                     cmd = queue.new_command_buffer();
                     enc = cmd.compute_command_encoder_with_dispatch_type(
                         metal::MTLDispatchType::Concurrent,
@@ -9969,7 +10034,9 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         };
         // Phase 1: everything reading pf_hs - expert gate/up plus the shared
         // expert's gate/up. No barriers between them, they run concurrently.
-        if dual {
+        if pf_skip("gate_up") {
+            // Priced by absence.
+        } else if dual {
             let ds = dual_state.as_ref().unwrap();
             enc.set_compute_pipeline_state(ds);
             enc.set_buffer(0, Some(&gpu.chunks[mats[0].chunk].buf), 0);
@@ -10044,22 +10111,24 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         split_here!("swiglu");
         // The fused down kernel applies swiglu while staging B, so it reads
         // the raw gate and up regions; the plain kernel reads post-swiglu.
-        stage(
-            enc,
-            2,
-            req.ffn,
-            req.hidden,
-            &gpu.y_arena,
-            gate_at,
-            out_at,
-            if dual {
-                Some((gate_at + req.ffn, 2 * req.ffn))
-            } else if fused_swiglu {
-                Some((up_at, req.ffn))
-            } else {
-                None
-            },
-        );
+        if !pf_skip("down") {
+            stage(
+                enc,
+                2,
+                req.ffn,
+                req.hidden,
+                &gpu.y_arena,
+                gate_at,
+                out_at,
+                if dual {
+                    Some((gate_at + req.ffn, 2 * req.ffn))
+                } else if fused_swiglu {
+                    Some((up_at, req.ffn))
+                } else {
+                    None
+                },
+            );
+        }
         cstamp!(gpu, enc, "dn");
         if let Some(sh) = &req.shared {
             enc.set_compute_pipeline_state(&swiglu_state);
@@ -10154,7 +10223,9 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 .next_norm
                 .filter(|_| crate::runtime::get().pf_combine_resnorm)
                 .and_then(|(raw, eps)| resolve_norm(&gpu, raw, req.hidden).map(|n| (n, eps)));
-            if let Some((nref, eps)) = next_norm {
+            if pf_skip("combine") {
+                // Priced by absence; the next layer re-does its own norm.
+            } else if let Some((nref, eps)) = next_norm {
                 enc.set_compute_pipeline_state(&gpu.pipelines[&("combine_rows_resnorm", 1, 1)]);
                 enc.set_buffer(0, Some(&gpu.pf_x), 0);
                 enc.set_buffer(1, Some(y), e(out_at));
@@ -10189,6 +10260,24 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             // Nothing: the chunk commits once, in prefill_end.
         } else if defer {
             gpu.commit_chained(cmd);
+        } else if chain {
+            cmd.commit();
+            cmd.wait_until_completed();
+            note_gpu_times(cmd);
+            use objc::{msg_send, sel, sel_impl};
+            let mut prev_ke: Option<f64> = None;
+            for (label, c) in &staged {
+                let c: &metal::CommandBufferRef = c;
+                let ks: f64 = unsafe { msg_send![c, kernelStartTime] };
+                let ke: f64 = unsafe { msg_send![c, kernelEndTime] };
+                let gap = prev_ke.map_or(0.0, |p| (ks - p).max(0.0) * 1e3);
+                eprintln!("ffn {}: {:.3} ms (gap {:.3})", label, (ke - ks) * 1e3, gap);
+                prev_ke = Some(ke);
+            }
+            let ks: f64 = unsafe { msg_send![cmd, kernelStartTime] };
+            let ke: f64 = unsafe { msg_send![cmd, kernelEndTime] };
+            let gap = prev_ke.map_or(0.0, |p| (ks - p).max(0.0) * 1e3);
+            eprintln!("ffn tail: {:.3} ms (gap {:.3})", (ke - ks) * 1e3, gap);
         } else {
             cmd.commit();
             cmd.wait_until_completed();

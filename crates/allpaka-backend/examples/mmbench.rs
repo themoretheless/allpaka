@@ -134,6 +134,33 @@ fn main() {
     for (i, b) in w.iter_mut().enumerate() {
         *b = (i as u32).wrapping_mul(2654435761).rotate_left(13) as u8;
     }
+    // MM_SANE=1: refill the weights so every block dequantises to small
+    // finite values. The random fill above leaves f16 scale fields at
+    // arbitrary bit patterns - denormal/NaN scale factors poison the FMA
+    // pipeline and slow every kernel by several x, making the head-to-head
+    // useless. Per 256-value block: d=1.0 (f16 0x3C00), dmin=0, scale
+    // bytes 0x11, quant bytes 0x77.
+    if std::env::var("MM_SANE").is_ok_and(|v| v == "1") {
+        let block = match fmt.as_str() {
+            "q8_0" => 34usize,  // d f16 + 32 quants
+            "q5_k" => 176,
+            _ => 144,           // q4_k: d, dmin, 12 scale bytes, 128 quants
+        };
+        for chunk in w.chunks_mut(block) {
+            for b in chunk.iter_mut() {
+                *b = 0x77;
+            }
+            chunk[0] = 0x00;
+            chunk[1] = 0x3C; // d = 1.0
+            if block != 34 {
+                chunk[2] = 0x00;
+                chunk[3] = 0x00; // dmin = 0
+                for b in &mut chunk[4..block.min(16)] {
+                    *b = 0x11; // sub-scales
+                }
+            }
+        }
+    }
     // zero out scale bytes a bit to keep floats sane is unnecessary for timing
     let x: Vec<f32> = (0..m * if id_mode { n_used } else { 1 } * n_in)
         .map(|i| ((i % 97) as f32) * 0.01)
