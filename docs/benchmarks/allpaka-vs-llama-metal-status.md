@@ -351,3 +351,46 @@ kernel structure!) - the delta lives in per-layer non-mm losses
 (stage boundaries, tails) or in measurement asymmetry. Next:
 quiet-machine per-stage GPU timing, then attack the largest real
 stage-boundary cost.
+
+## 2026-11-09 (later): llama pp480 concurrency map + head parity verified
+
+Source of truth: `GGML_METAL_GRAPH_DEBUG=1 llama-bench -v` (homebrew
+v0.9.0, Qwen3-8B-Q4_K_M pp480) prints per-node concurrent/barrier
+decisions and fused-op counts; log archived at
+/tmp/llama-graph-debug.log (regenerable).
+
+Per-layer node map (llama, dense 8B): RMS_NORM+MUL fused (1 dispatch),
+then MUL_MAT Qcur (barrier), Vcur (barrier), Kcur (concurrent with V),
+RMS_NORM q (barrier), RMS_NORM k (barrier), SET_ROWS cache_v
+(concurrent), ROPE q (barrier), ROPE k (concurrent with rope q),
+SET_ROWS cache_k, FLASH_ATTN_EXT, MUL_MAT wo, ADD ffn_inp, RMS_NORM+MUL
+ffn, MUL_MAT gate (barrier), MUL_MAT up (CONCURRENT with gate), GLU
+swiglu, MUL_MAT down, ADD l_out. = ~18 real dispatches, ~15 barrier
+transitions per layer. Our fused path: ~8-10 dispatches, ~8-10
+barriers per layer. We fuse every sibling pair they only overlap
+(qkv, qk norm+rope+cache store in qk_prep, gate_up, resnorm).
+Dispatch count and barrier count are NOT their edge.
+
+Kernel selection at our shapes: plain `kernel_mul_mm_q4_K_f32` (+`_bci`
+bounds-check variant only when K%32 != 0; 8B shapes all divide by 32).
+No hidden faster variant. FA = `flash_attn_ext_f16_dk128_dv128`.
+Norms = `kernel_rms_norm_mul_f32_4`. Adds = `kernel_bin_fuse_*` chains.
+
+Head parity VERIFIED in source: llama-bench's `common_batch_get_one`
+(common.cpp:2342) marks `output = (i == n_tokens-1)` - logits only for
+the LAST token, so their lm_head is a 1-token mul_mv (Q6_K). Our bench
+`forward_batch` (model.rs:1340) likewise heads only the last row
+(`matmul_activation(&xs, last_offset, 1)`). The old "~25 ms head,
+identical work" note referred to full-480 head math; current bench
+paths on BOTH sides are last-token. No asymmetry to reclaim.
+
+MUL_MAT+ADD fusion (`ggml_metal_fusion_check_mul_mat_add`) requires
+`ggml_metal_op_mul_mat_may_use_mma` - mma is ne11<=16 only, so the
+fusion NEVER fires in pp480. Residual adds are standalone dispatches
+on both sides. Parity.
+
+Net: on the dense path every structural lever checked is parity or in
+our favour; the 8B pp gap (0.946x) remains empirically unexplained by
+source diff. Next instrument: PF_SPLIT per-stage GPU times on a quiet
+machine, stage-by-stage against llama's map (llama pp per-layer
+15.1 ms vs ours 15.9 ms => ~0.8 ms/layer to find).
