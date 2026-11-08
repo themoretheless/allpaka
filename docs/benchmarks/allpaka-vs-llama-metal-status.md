@@ -298,3 +298,56 @@ config swung 123..751 tok/s). Elimination ranking across reps matches
 the FLOP order (gate_up biggest, attention ~free) but magnitudes are
 noise. Rerun the series when the machine is quiet; the script is
 /tmp/elim8b4.sh (5 reps x 8 configs, interleaved, TG=1).
+
+## 2026-11-09: llama pp kernel identified; grid-transpose experiment (negative)
+
+Question carried over: which kernel does llama v0.9.0 actually run for
+dense prefill mul_mat, and is it structurally better than mmllp_q4_k?
+
+Findings (source: /tmp/llama-src @ cd959bae9 = homebrew v0.9.0):
+
+- The `mul_mv_mma` simdgroup-MMA path
+  (ggml-metal-ops.cpp ggml_metal_op_mul_mat_mma) is gated by
+  `src1->ne[1] >= rows_min && <= GGML_METAL_MMA_ROWS_MAX` with
+  MMA_ROWS_MAX = 16 (ggml-metal-common.cpp:53,143-154). It is a
+  few-row kernel for decode/small batches only. pp480 never takes it.
+- Dense prefill falls to `kernel_mul_mm` (use_mm path, ops.cpp:2853),
+  non-tensor variant on M4 Max (tensor API is M5+/A19+ only;
+  ggml-metal-device.m gates GGML_METAL_HAS_TENSOR).
+- kernel_mul_mm (mul_mm.metal:155+) is STRUCTURALLY IDENTICAL to our
+  mmll_q4_k: same 64x32 tile, NK=32, same sa/sb staging layout
+  (`sa + 64*ib + 8*ly + lx`), same ma[4]/mb[2]/mc[8] sgitg-split MMA
+  loop, same 2 threadgroup barriers per K-block. Our mmllp_* adds
+  double-buffered staging (1 barrier/block) - strictly ahead on paper.
+- llama's dispatch grid: x = token tiles (ne11/32), y = weight tiles
+  (ne01/64). Ours was x = weight tiles, y = token tiles.
+
+Experiment (grid transposition, patch archived at /tmp/mm-transpose.patch):
+all dense mmll*/mmllp*/mmll_qkv*/matmul* kernels and their 7 dispatch
+sites + tests + mmbench were transposed to llama's orientation (x =
+token tiles) so concurrent threadgroups share one weight strip through
+L2 instead of re-streaming the matrix per token tile.
+
+- Correctness: full backend suite passes (gpu_parity incl.
+  f32_router, gpu_moe_tail incl. fused-qkv bit-equality), e2e argmax
+  unchanged (319).
+- Performance: NEUTRAL. Interleaved kernel A/B in the same quiet
+  window: 10.89 vs 10.98 TFLOPS (old vs new, <1%). e2e pp480 A/B under
+  load: no consistent direction. Conclusion: the M4 Max memory system
+  (SLC) already absorbs the per-token-tile weight re-reads; Metal's
+  threadgroup rasterization order is not the pp bottleneck.
+  NOT ADOPTED; reverted from the tree.
+
+- test-backend-ops perf is not a usable production proxy for mm:
+  m=4096,n=512,k=14336 q4_K reports 19.5 ms/run (~3 TFLOPS), which
+  contradicts llama-bench's own pp throughput (~14.5 TFLOPS effective);
+  per-run graph/alloc overhead dominates. Do not cite it for kernel
+  quality.
+
+Implication for the 6% pp gap on 8B (836 vs 884): it is NOT the dense
+mm kernel structure and NOT grid rasterization. Our per-layer mm
+throughput in production is ~11.6 TFLOPS vs ~12.3 for llama (same
+kernel structure!) - the delta lives in per-layer non-mm losses
+(stage boundaries, tails) or in measurement asymmetry. Next:
+quiet-machine per-stage GPU timing, then attack the largest real
+stage-boundary cost.
