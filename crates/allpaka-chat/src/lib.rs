@@ -89,6 +89,30 @@ pub(crate) struct App {
     pub(crate) plugins: plugins::Registry,
     pub(crate) harness_jobs: harness_refine::Manager,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommandExecution {
+    Disabled,
+    TrustedUnsandboxed,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ExecutionPolicy {
+    pub(crate) commands: CommandExecution,
+    pub(crate) external_tools: bool,
+}
+impl ExecutionPolicy {
+    pub(crate) const fn files_only() -> Self {
+        Self {
+            commands: CommandExecution::Disabled,
+            external_tools: false,
+        }
+    }
+    pub(crate) const fn trusted_unsandboxed() -> Self {
+        Self {
+            commands: CommandExecution::TrustedUnsandboxed,
+            external_tools: true,
+        }
+    }
+}
 /// What a headless session runs with instead of the registry: its own
 /// project (a probe works on copied roots), an explicit harness and an extra
 /// system prompt for a subagent. `nested` turns cannot delegate again.
@@ -98,10 +122,8 @@ pub(crate) struct Ephemeral {
     pub(crate) harness: Option<harness::Tree>,
     pub(crate) system: Option<String>,
     pub(crate) nested: bool,
-    /// Only file tools: no commands, background tasks, MCP or RAG. Harness
-    /// proposers run like this, because the evidence they read may contain
-    /// commands.
-    pub(crate) restricted: bool,
+    /// Applies to tool schemas and direct calls, and is inherited by subagents.
+    pub(crate) policy: ExecutionPolicy,
 }
 #[derive(Deserialize)]
 struct Action {
@@ -1580,10 +1602,15 @@ async fn turn_traced(
     };
     let harness_hooks = harness::hooks(&harness_tree)?;
     let nested = ephemeral.as_ref().is_some_and(|e| e.nested);
-    let restricted = ephemeral.as_ref().is_some_and(|e| e.restricted);
+    let policy = ephemeral.as_ref().map_or_else(
+        || ExecutionPolicy::trusted_unsandboxed(),
+        |e| e.policy,
+    );
+    let restricted = !policy.external_tools;
     let mut tool_settings = settings.clone();
     tool_settings.allow_writes &= project.roots.iter().any(|r| r.writable);
-    let cmd_enabled = plugins::tool_unlocked(&app.plugins, "run_command") && !restricted;
+    let cmd_enabled = plugins::tool_unlocked(&app.plugins, "run_command")
+        && policy.commands != CommandExecution::Disabled;
     let mut schemas = tools::schemas(&tool_settings, cmd_enabled);
     schemas.push(conversation_search::schema());
     schemas.push(memory::schema());
@@ -1910,10 +1937,11 @@ async fn turn_traced(
                     Err(anyhow::anyhow!("Blocked by a harness hook: {reason}"))
                 } else if name == "background" {
                     if !matches!(settings.mode, Mode::Auto | Mode::Goal)
-                        || !plugins::tool_unlocked(&app.plugins, "run_command")
+                        || !cmd_enabled
+                        || ephemeral.is_some()
                     {
                         Err(anyhow::anyhow!(
-                            "Background commands require Auto/Goal mode and the command plugin"
+                            "Background commands require a non-headless Auto/Goal turn with command execution enabled"
                         ))
                     } else {
                         let root = project.roots.first().context("No project root available")?;
@@ -1928,6 +1956,7 @@ async fn turn_traced(
                         &settings,
                         &project,
                         &harness_tree,
+                        policy,
                         &args,
                         trace,
                         parent_span,
@@ -1979,9 +2008,7 @@ async fn turn_traced(
                 } else if let Some((client, tool)) = mcp_lookup(&app, name).filter(|_| !restricted)
                 {
                     client.call(&tool, &args).await
-                } else if name == "run_command"
-                    && plugins::tool_unlocked(&app.plugins, "run_command")
-                {
+                } else if name == "run_command" && cmd_enabled {
                     let root = project
                         .roots
                         .first()
@@ -2234,6 +2261,7 @@ async fn run_subagent(
     settings: &Settings,
     project: &context::Project,
     tree: &harness::Tree,
+    policy: ExecutionPolicy,
     args: &Value,
     trace: &observability::Trace,
     parent_span: usize,
@@ -2259,7 +2287,7 @@ async fn run_subagent(
         harness: Some(tree.clone()),
         system: Some(format!("You are the `{}` subagent, working on a task handed to you by another agent. Finish it and reply with the final result only; your reply is returned to that agent.\n{}", agent.name, agent.prompt.trim())),
         nested: true,
-        restricted: false,
+        policy,
     }));
     session.messages.push(Message::text("user", task));
     let shared: SharedSession = Arc::new(Mutex::new(session));

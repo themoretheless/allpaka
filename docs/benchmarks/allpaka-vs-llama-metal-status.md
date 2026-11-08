@@ -212,3 +212,41 @@ Do **not** add fuse env knobs before those numbers.
 Hot or interleaved runs (e.g. `.rbench/beat-llama-20260913-091533`: allpaka
 decode ~34 vs llama ~39) understate cool ceilings; prefer matrix cool ratios
 for claims.
+
+## 2026-11-08: Qwen3-8B-Q4_K_M (dense middle front)
+
+Model: `~/.cache/allpaka/models/Qwen3-8B-Q4_K_M.gguf` (4.7 GiB, HF
+`Qwen/Qwen3-8B-GGUF`). Fits in the 12 GiB free disk; the MoE flagships
+(80B-A3B ~46 GiB, GLM-4.5-Air ~61 GiB) still do not.
+
+Clean matrix (REPEATS=3, `.rbench/lock-8b-final`, machine cool, nothing
+else running): **pp 836 vs 884 = 0.946×, tg 87 vs 84 = 1.039×**.
+
+### Measurement-contamination lesson (do not re-learn)
+
+Right after the download the same matrix showed tg 0.73×, then 1.38×,
+then 0.64× across consecutive runs. Causes: (1) cold page cache — the
+first bench process pays the SSD read of a just-written 4.7 GiB file;
+(2) memory pressure (30 GiB in compressor, <100 MiB unused) — interleaved
+engine processes evict each other's weights; (3) thermal drift after
+hours of benching (±10%+ between rounds, late rounds faster as pressure
+clears, then slower as the SoC heats). Standalone Q4_K matvec at dense
+shapes: 298 GB/s (q8_0 control 487 GB/s) — kernels were never the
+problem. Barrier probe `ALLPAKA_SKIP=bar/barn/barf/bara` on a cool
+machine: decode 87.3 vs 87.9 t/s — barriers cost <1% on dense decode.
+
+New harness: `crates/allpaka-backend/tests/gpu_densebench.rs`
+(`--ignored`) measures flat Q4_K matvec bandwidth at dense 8B shapes
+([12288×4096], [4096×12288], [6144×4096]) with a Q8_0 control.
+
+### Standing on all fronts (clean matrices)
+
+| front | pp | tg |
+|---|---|---|
+| Qwen3-0.6B Q8_0 | 1.013× | 1.350× |
+| Qwen3-8B Q4_K_M | 0.946× | 1.039× |
+| Qwen3-30B-A3B Q4_K_M | 0.928× | 1.164× |
+
+Decode target (≥1.05×) holds on 0.6B and 30B; 8B decode is +4% (within
+noise of the target). Prefill is uniformly −5..−7% on all three — the
+diffuse dispatch-cost story above, not any single kernel.

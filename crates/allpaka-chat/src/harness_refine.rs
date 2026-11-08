@@ -99,6 +99,8 @@ pub struct RunView {
     /// Diff of the files the run changed in its copy of the workspace.
     pub changes: String,
     pub trajectory: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -176,6 +178,8 @@ pub struct RunSummary {
     pub label: String,
     pub delivered: bool,
     pub outcome: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 // ---- evidence ----------------------------------------------------------------
@@ -201,8 +205,13 @@ fn render_tree(tree: &Tree) -> String {
         .collect()
 }
 fn render_run(run: &RunView, budget: usize) -> String {
+    let warnings = if run.warnings.is_empty() {
+        String::new()
+    } else {
+        format!("### execution warnings\n{}\n", run.warnings.join("\n"))
+    };
     format!(
-        "## rollout {} (delivered: {}, outcome: {})\n### trajectory\n{}\n### final answer\n{}\n### file changes\n{}\n",
+        "## rollout {} (delivered: {}, outcome: {})\n{warnings}### trajectory\n{}\n### final answer\n{}\n### file changes\n{}\n",
         run.label,
         if run.delivered { "yes" } else { "NO" },
         run.outcome,
@@ -733,6 +742,7 @@ pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
             label: r.label.clone(),
             delivered: r.delivered,
             outcome: r.outcome.clone(),
+            warnings: r.warnings.clone(),
         })
         .collect();
     runs.dedup_by(|a, b| a.label == b.label);
@@ -1043,6 +1053,30 @@ struct StudioEngine {
     task: String,
     scratch: PathBuf,
     external: Option<External>,
+    execution: crate::ExecutionPolicy,
+}
+
+impl StudioEngine {
+    fn policy_warnings(&self, tree: &Tree) -> Result<Vec<String>> {
+        if self.execution.commands != crate::CommandExecution::Disabled {
+            return Ok(vec![]);
+        }
+        let hooks = harness::hooks(tree)?;
+        let command_hooks = [&hooks.pre_tool, &hooks.post_tool, &hooks.stop]
+            .into_iter()
+            .flatten()
+            .any(|hook| {
+                hook.command.as_ref().is_some_and(|s| !s.trim().is_empty())
+                    || hook.transform.as_ref().is_some_and(|s| !s.trim().is_empty())
+            });
+        if harness::scripts(tree).is_empty() && !command_hooks {
+            Ok(vec![])
+        } else {
+            Ok(vec![
+                "Command scripts, command hooks and transforms were disabled by the files-only execution policy.".into(),
+            ])
+        }
+    }
 }
 
 const COPY_MAX_FILES: usize = 20_000;
@@ -1345,6 +1379,7 @@ impl Engine for StudioEngine {
                     root.path = copies.last().unwrap().2.clone();
                 }
             }
+            let warnings = self.policy_warnings(tree)?;
             let mut session = Session::new(crate::evaluation::new_id(), self.executor.clone());
             session.title = format!("harness probe {label}");
             session.ephemeral = Some(Arc::new(crate::Ephemeral {
@@ -1352,7 +1387,7 @@ impl Engine for StudioEngine {
                 harness: Some(tree.clone()),
                 system: None,
                 nested: false,
-                restricted: false,
+                policy: self.execution,
             }));
             session
                 .messages
@@ -1389,6 +1424,7 @@ impl Engine for StudioEngine {
                 answer,
                 changes,
                 trajectory: trajectory(&state.messages[1..]),
+                warnings,
             })
         })
     }
@@ -1462,7 +1498,7 @@ impl Engine for StudioEngine {
                     harness: Some(Tree::new()),
                     system: Some(system.to_string()),
                     nested: true,
-                    restricted: true,
+                    policy: crate::ExecutionPolicy::files_only(),
                 }));
                 session.messages.push(Message::text("user", mission));
                 let shared = Arc::new(Mutex::new(session));
@@ -1507,6 +1543,9 @@ impl StudioEngine {
         label: &str,
         tree: &Tree,
     ) -> Result<RunView> {
+        if self.execution != crate::ExecutionPolicy::trusted_unsandboxed() {
+            bail!("An external executor requires execution=trusted_unsandboxed. Workspace copies do not sandbox shell commands.");
+        }
         let workdir = self.scratch.join(label);
         let _ = std::fs::remove_dir_all(&workdir);
         let result =
@@ -1576,6 +1615,7 @@ impl StudioEngine {
                         clip(&stdout, 60_000),
                         clip(&stderr, 20_000)
                     ),
+                    warnings: vec![],
                 })
             }
             .await;
@@ -1629,7 +1669,7 @@ impl StudioEngine {
                 harness: Some(Tree::new()),
                 system: Some(system.to_string()),
                 nested: true,
-                restricted: true,
+                policy: crate::ExecutionPolicy::files_only(),
             }));
             session.messages.push(Message::text("user", mission));
             let shared = Arc::new(Mutex::new(session));
@@ -1687,6 +1727,13 @@ fn read_files(root: &std::path::Path) -> Result<Tree> {
 
 // ---- jobs ----------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProbeExecution {
+    FilesOnly,
+    TrustedUnsandboxed,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StartRequest {
@@ -1716,10 +1763,25 @@ pub(crate) struct StartRequest {
     /// the rubric judge as the reference.
     #[serde(default)]
     dataset: Option<DatasetRef>,
+    /// Internal probes are files-only unless command execution is explicitly
+    /// trusted. Workspace copies are not a security sandbox.
+    #[serde(default)]
+    execution: Option<ProbeExecution>,
     /// Run rollouts with an external agent CLI instead of Studio's loop.
-    /// Needs the command plugin, like every command Studio runs.
+    /// Needs the command plugin and explicit trusted_unsandboxed execution.
     #[serde(default)]
     external: Option<External>,
+}
+
+impl StartRequest {
+    fn policy(&self) -> crate::ExecutionPolicy {
+        match self.execution {
+            Some(ProbeExecution::TrustedUnsandboxed) => {
+                crate::ExecutionPolicy::trusted_unsandboxed()
+            }
+            Some(ProbeExecution::FilesOnly) | None => crate::ExecutionPolicy::files_only(),
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1847,8 +1909,21 @@ fn spawn(app: App, id: String) {
         .insert(id, handle.abort_handle());
 }
 
+const LEGACY_EXTERNAL_WARNING: &str = "Legacy external executor job resumed as trusted_unsandboxed; workspace copies do not sandbox shell commands.";
+
 async fn execute(app: &App, id: &str) -> Result<()> {
+    let mut legacy_external = false;
     let job = update_job(&app.data, id, |j| {
+        legacy_external = j.request.external.is_some() && j.request.execution.is_none();
+        if legacy_external {
+            j.request.execution = Some(ProbeExecution::TrustedUnsandboxed);
+            if !j.warnings.iter().any(|w| w == LEGACY_EXTERNAL_WARNING) {
+                j.warnings.push(LEGACY_EXTERNAL_WARNING.into());
+            }
+            if !j.events.iter().any(|e| e == LEGACY_EXTERNAL_WARNING) {
+                j.events.push(LEGACY_EXTERNAL_WARNING.into());
+            }
+        }
         j.status = "running".into();
         j.error = None;
         j.events.push("started".into());
@@ -1909,6 +1984,7 @@ async fn execute(app: &App, id: &str) -> Result<()> {
             task: task.clone(),
             scratch: scratch.clone(),
             external: job.request.external.clone(),
+            execution: job.request.policy(),
         };
         let entry_id = format!("{id}-{index}");
         let library = harness_library::context_for(
@@ -1995,7 +2071,7 @@ async fn execute(app: &App, id: &str) -> Result<()> {
                 library_entry,
             });
             j.results.sort_by_key(|r| r.index);
-            j.warnings = stream_warnings(&j.results);
+            j.warnings = stream_warnings(&j.results, legacy_external);
         })?;
     }
     Ok(())
@@ -2003,8 +2079,12 @@ async fn execute(app: &App, id: &str) -> Result<()> {
 
 /// Across a stream of tasks (after Harness² report.py): refinement that
 /// keeps choosing the base harness is not adapting anything.
-fn stream_warnings(results: &[TaskResult]) -> Vec<String> {
-    let mut out = vec![];
+fn stream_warnings(results: &[TaskResult], legacy_external: bool) -> Vec<String> {
+    let mut out = if legacy_external {
+        vec![LEGACY_EXTERNAL_WARNING.into()]
+    } else {
+        vec![]
+    };
     if results.len() >= 2 {
         let base = results
             .iter()
@@ -2035,7 +2115,7 @@ fn bad(e: impl ToString) -> (StatusCode, Json<Value>) {
 }
 pub(crate) async fn start_api(
     State(app): State<App>,
-    Json(request): Json<StartRequest>,
+    Json(mut request): Json<StartRequest>,
 ) -> ApiResult<Value> {
     if !(1..=4).contains(&request.k) {
         return Err(bad("k must be between 1 and 4"));
@@ -2121,6 +2201,11 @@ pub(crate) async fn start_api(
         return Err(bad("A task exceeds 16000 bytes"));
     }
     if let Some(external) = &request.external {
+        if request.execution != Some(ProbeExecution::TrustedUnsandboxed) {
+            return Err(bad(
+                "An external executor requires execution=trusted_unsandboxed. Workspace copies do not sandbox shell commands.",
+            ));
+        }
         if external.command.trim().is_empty() || external.command.len() > 2000 {
             return Err(bad("The external command must be 1–2000 bytes"));
         }
@@ -2129,6 +2214,8 @@ pub(crate) async fn start_api(
                 "An external executor runs a command: enable the command plugin first",
             ));
         }
+    } else if request.execution.is_none() {
+        request.execution = Some(ProbeExecution::FilesOnly);
     }
     match executor.mode {
         Mode::Swarm => {
