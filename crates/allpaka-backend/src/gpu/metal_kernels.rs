@@ -4875,7 +4875,7 @@ kernel void mmllp_q5_k(
     }
 }
 
-#define STAGE_BLOCK_4(b_arg, blk_arg) do {                            \
+#define STAGE_BLOCK_Q6K(b_arg, blk_arg) do {                          \
     const uint stage_b_ = (b_arg);                                    \
     const uint stage_blk_ = (blk_arg);                                \
     const uint b = stage_b_;                                          \
@@ -4951,13 +4951,13 @@ kernel void mmllp_q6_k(
         mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
     }
     const uint nblk = n_in / NK;
-    STAGE_BLOCK_4(0, 0);
+    STAGE_BLOCK_Q6K(0, 0);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint blk = 0; blk < nblk; blk++) {
         const uint cur = blk & 1;
         if (blk + 1 < nblk) {
             // Shadow-stage the next block; its device loads overlap the MMA.
-            STAGE_BLOCK_4(1 - cur, blk + 1);
+            STAGE_BLOCK_Q6K(1 - cur, blk + 1);
         }
         threadgroup const half* sa = sab[cur];
         threadgroup const half* sb = sa + 64 * NK;
@@ -5825,6 +5825,178 @@ DEFINE_MM_ID_LL_NK(mm64llg_id_q5_0, BlkQ5_0, 2, dqll_q5_0, (n_in / 32) * 22, 1, 
             }                                                           \
         }                                                               \
 } while (0)
+
+// Q6_K sibling of STAGE_BLOCK_4: identical B-side (incl. the swiglu fold),
+// A-side dequants BlkQ6K superblocks (210 bytes, NL=16 chunks).
+#define STAGE_BLOCK_Q6K_SW(b_arg, blk_arg, swiglu) do {                         \
+    const uint stage_b_ = (b_arg);                                      \
+    const uint stage_blk_ = (blk_arg);                                  \
+    const uint b = stage_b_;                                            \
+    const uint blk = stage_blk_;                                        \
+        threadgroup half* sa = sab[b];                                  \
+        threadgroup half* sb = sa + 64 * NK;                            \
+        uint chunk0 = blk * (NK / 16);                                  \
+        for (short c = 0; c < NK / 32; c++) {                           \
+            half4x4 temp_a;                                             \
+            uint cg = chunk0 + il0 * (NK / 32) + c;                     \
+            dqll_q6_k(bx0 + cg / 16, (short)(cg % 16), temp_a);         \
+            const short kc = il0 * (NK / 32) + c;                       \
+            _Pragma("clang loop unroll(full)")                          \
+            for (short i = 0; i < 16; i++) {                            \
+                const short sx = 2 * kc + i / 8;                        \
+                const short sy = (tiitg / 2) / 8;                       \
+                const short lx = (tiitg / 2) % 8;                       \
+                const short ly = i % 8;                                 \
+                const short ib = 8 * sx + sy;                           \
+                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];   \
+            }                                                           \
+        }                                                               \
+        device const float* byk = by + (ulong)blk * NK;                 \
+        device const float* by2k = by2 + (ulong)blk * NK;               \
+        for (short c = 0; c < NK / 32; c++) {                           \
+            const short sx = tiitg % 4 + 4 * c;                         \
+            const short sy = (tiitg / 4) / 8;                           \
+            const short ly = (tiitg / 4) % 8;                           \
+            const short ib = 4 * sx + sy;                               \
+            if (swiglu) {                                                 \
+                float2x4 gv = *(device const float2x4*)(byk + 32 * c);  \
+                float2x4 uv = *(device const float2x4*)(by2k + 32 * c); \
+                half2x4 hv;                                             \
+                _Pragma("clang loop unroll(full)")                      \
+                for (short q = 0; q < 2; q++) {                         \
+                    float4 g = gv[q];                                   \
+                    float4 u = uv[q];                                   \
+                    hv[q] = half4(g / (1.0f + exp(-g)) * u);            \
+                }                                                       \
+                *(threadgroup half2x4*)(sb + 64 * ib + 8 * ly) = hv;    \
+            } else {                                                    \
+                *(threadgroup half2x4*)(sb + 64 * ib + 8 * ly) =        \
+                    half2x4(*(device const float2x4*)(byk + 32 * c));   \
+            }                                                           \
+        }                                                               \
+} while (0)
+
+// Software-pipelined grouped mm (q6_k): same double-buffered K-loop as
+// mmllp_q6_k plus the MmGroup indirection and the optional swiglu fold.
+// The 8B dense model's Q6_K down projections ride this (one group covering
+// the whole chunk); MoE q6_k experts keep the unpipelined kernels.
+#define DEFINE_MM_ID_PIPE_Q6K(NAME, GATHER, SWIGLU)                            \
+kernel void NAME(                                                              \
+    device const uchar* w [[buffer(0)]],                                       \
+    device const float* x [[buffer(1)]],                                       \
+    device float* y [[buffer(2)]],                                             \
+    constant uint& n_in [[buffer(3)]],                                         \
+    constant uint& n_out [[buffer(4)]],                                        \
+    constant ulong& w_off [[buffer(5)]],                                       \
+    device const MmGroup* table [[buffer(6)]],                                 \
+    constant ulong& estride [[buffer(7)]],                                     \
+    device const uint* tok [[buffer(8)]],                                      \
+    device const float* up_in [[buffer(9)]],                                   \
+    device const uchar* w2 [[buffer(10)]],                                     \
+    constant ulong& w2_off [[buffer(11)]],                                     \
+    constant uint& b_stride [[buffer(12)]],                                    \
+    uint3 tg [[threadgroup_position_in_grid]],                                 \
+    uint3 tgd [[threadgroups_per_grid]],                                       \
+    ushort tiitg [[thread_index_in_threadgroup]],                              \
+    ushort sgitg [[simdgroup_index_in_threadgroup]])                           \
+{                                                                              \
+    MmGroup grp = table[tg.z];                                                 \
+    for (uint r1 = tg.y * 32; r1 < grp.rows; r1 += tgd.y * 32) {               \
+    constexpr short NK = 32;                                                   \
+    threadgroup float shmem_f[3072];                                           \
+    threadgroup half* sab[2] = {                                               \
+        (threadgroup half*)shmem_f,                                            \
+        (threadgroup half*)shmem_f + 96 * NK,                                  \
+    };                                                                         \
+    const uint r0 = tg.x * 64;                                                 \
+    const uint m = grp.rows;                                                   \
+    const uint bstr = SWIGLU ? b_stride : n_in;                                \
+    device const float* xin = GATHER ? x : x + (ulong)grp.row0 * bstr;         \
+    device float* yg = y + (ulong)grp.row0 * n_out;                            \
+    const short nr0 = (n_out - r0 < 64) ? (short)(n_out - r0) : 64;            \
+    const short nr1 = (m - r1 < 32) ? (short)(m - r1) : 32;                    \
+    const short lr0 = ((short)(tiitg / 2) < nr0) ? (short)(tiitg / 2) : nr0 - 1; \
+    const short lr1 = ((short)(tiitg / 4) < nr1) ? (short)(tiitg / 4) : nr1 - 1; \
+    const short il0 = tiitg % 2;                                               \
+    const ulong nb01 = (ulong)((n_in / 256) * 210);                            \
+    device const BlkQ6K* bx0 = (device const BlkQ6K*)                          \
+        (w + w_off + (ulong)grp.expert * estride + nb01 * (r0 + lr0));         \
+    const short iy = 8 * (tiitg % 4);                                          \
+    const ulong brow = GATHER ? (ulong)tok[grp.row0 + r1 + lr1]                \
+                              : (ulong)(r1 + lr1);                             \
+    device const float* by = xin + brow * bstr + iy;                           \
+    device const float* by2 = up_in;                                           \
+    if (SWIGLU) {                                                              \
+        by2 = up_in + ((ulong)grp.row0 + brow) * bstr + iy;                    \
+    }                                                                          \
+    simdgroup_half8x8 ma[4];                                                   \
+    simdgroup_half8x8 mb[2];                                                   \
+    simdgroup_float8x8 mc[8];                                                  \
+    for (short i = 0; i < 8; i++) {                                            \
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);                   \
+    }                                                                          \
+    const uint nblk = n_in / NK;                                               \
+    STAGE_BLOCK_Q6K_SW(0, 0, SWIGLU);                                          \
+    threadgroup_barrier(mem_flags::mem_threadgroup);                           \
+    for (uint blk = 0; blk < nblk; blk++) {                                    \
+        const uint cur = blk & 1;                                              \
+        if (blk + 1 < nblk) {                                                  \
+            STAGE_BLOCK_Q6K_SW(1 - cur, blk + 1, SWIGLU);                      \
+        }                                                                      \
+        threadgroup const half* sa = sab[cur];                                 \
+        threadgroup const half* sb = sa + 64 * NK;                             \
+        threadgroup const half* lsma = sa + 4 * 64 * (sgitg % 2);              \
+        threadgroup const half* lsmb = sb + 2 * 64 * (sgitg / 2);              \
+        _Pragma("clang loop unroll(full)")                                     \
+        for (short ik = 0; ik < NK / 8; ik++) {                                \
+            simdgroup_barrier(mem_flags::mem_none);                            \
+            for (short i = 0; i < 4; i++) {                                    \
+                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);             \
+            }                                                                  \
+            simdgroup_barrier(mem_flags::mem_none);                            \
+            for (short i = 0; i < 2; i++) {                                    \
+                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);             \
+            }                                                                  \
+            simdgroup_barrier(mem_flags::mem_none);                            \
+            _Pragma("clang loop unroll(full)")                                 \
+            for (short i = 0; i < 8; i++) {                                    \
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]); \
+            }                                                                  \
+            lsma += 8 * 64;                                                    \
+            lsmb += 4 * 64;                                                    \
+        }                                                                      \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+    }                                                                          \
+    if (r0 + 64 <= n_out && r1 + 32 <= m) {                                    \
+        device float* C = yg + (r0 + 32 * (sgitg & 1))                         \
+            + (ulong)(r1 + 16 * (sgitg >> 1)) * n_out;                         \
+        for (short i = 0; i < 8; i++) {                                        \
+            simdgroup_store(mc[i], C + 8 * (i % 4) + 8 * (ulong)n_out * (i / 4), \
+                            n_out, 0, false);                                  \
+        }                                                                      \
+    } else {                                                                   \
+        threadgroup float* temp_str = shmem_f + sgitg * 64;                    \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+        for (short i = 0; i < 8; i++) {                                        \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
+            simdgroup_store(mc[i], temp_str, 8, 0, false);                     \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
+            const short cc0 = 8 * (i % 4) + 32 * (sgitg & 1);                  \
+            const short rr0 = 8 * (i / 4) + 16 * (sgitg >> 1);                 \
+            for (short e = tiitg % 32; e < 64; e += 32) {                      \
+                const short cc = cc0 + (e % 8);                                \
+                const short rr = rr0 + (e / 8);                                \
+                if (cc < nr0 && rr < nr1) {                                    \
+                    yg[(ulong)(r1 + rr) * n_out + r0 + cc] = temp_str[e];      \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+    }                                                                          \
+    }                                                                          \
+}
+
+DEFINE_MM_ID_PIPE_Q6K(mmllps_id_q6_k, 0, 1)
 
 // Software-pipelined grouped mm (q4_k): same double-buffered K-loop as
 // mmllp_q4_k - dequant/stage block i+1 into the shadow set while the MMA

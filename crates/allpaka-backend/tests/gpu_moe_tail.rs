@@ -78,6 +78,9 @@ fn grouped_tail_stores_match_conservative_barriers() {
                 .map(str::to_owned),
             );
         }
+        if suffix == "q6_k" {
+            kernels.push("mmllps_id_q6_k".to_owned());
+        }
         for name in kernels {
             let outputs = libs.each_ref().map(|_| {
                 device.new_buffer(

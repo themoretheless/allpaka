@@ -501,6 +501,7 @@ fn init_device() -> Option<Gpu> {
         "mmllp_qkv_q4k_q6k",
         "mmllpg_id_q4_k",
         "mmllps_id_q4_k",
+        "mmllps_id_q6_k",
         "mmllpg_id_q4_k_bn16",
         "mmllps_id_q4_k_bn16",
         "route_pick",
@@ -9348,6 +9349,17 @@ fn mmid_swiglu_kernel_for(ty: GgmlType, bn16: bool) -> Option<(&'static str, usi
             },
             64,
         )),
+        // The 8B dense's Q6_K down (18/36 layers): pipelined + swiglu fold.
+        (GgmlType::Q6K, false) => {
+            if mm_pipe() {
+                if debug_qkv() {
+                    eprintln!("debug-qkv: mmllps_id_q6_k selected");
+                }
+                Some(("mmllps_id_q6_k", 64))
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
