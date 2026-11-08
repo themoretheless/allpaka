@@ -495,8 +495,10 @@ fn init_device() -> Option<Gpu> {
         "mmllr64_q4_k",
         "mmllp_q4_k",
         "mmllp_q8_0",
+        "mmllp_q6_k",
         "mmllp_qkv_q4_k",
         "mmllp_qkv_q8_0",
+        "mmllp_qkv_q4k_q6k",
         "mmllpg_id_q4_k",
         "mmllps_id_q4_k",
         "mmllpg_id_q4_k_bn16",
@@ -1482,7 +1484,19 @@ fn mm_kernel_for(ty: GgmlType, m: usize) -> Option<(&'static str, usize, usize)>
                 }
             }
             (GgmlType::Q5K, false) => "mmll_q5_k",
-            (GgmlType::Q6K, false) => "mmll_q6_k",
+            (GgmlType::Q6K, false) => {
+                // The 8B dense keeps attn_v + ffn_down on Q6_K for half its
+                // layers (and the output head); the pipe halves the barrier
+                // count on its 12288-long K loop. `ALLPAKA_MM_PIPE=0` reverts.
+                if mm_pipe() {
+                    if debug_qkv() {
+                        eprintln!("debug-qkv: mmllp_q6_k selected");
+                    }
+                    "mmllp_q6_k"
+                } else {
+                    "mmll_q6_k"
+                }
+            }
             (GgmlType::Q8_0, true) => "mm64ll_q8_0",
             (GgmlType::Q5_0, true) => "mm64ll_q5_0",
             (GgmlType::Q2K, true) => "mm64ll_q2_k",
@@ -7567,13 +7581,24 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 .to_owned(),
         );
     }
-    let qkv_state = if wq_out % 64 == 0
-        && kv % 64 == 0
-        && mats[0].ty == mats[1].ty
-        && mats[1].ty == mats[2].ty
-    {
-        mm_qkv_kernel_for(mats[0].ty)
-            .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned()))
+    let qkv_state = if wq_out % 64 == 0 && kv % 64 == 0 {
+        if mats[0].ty == mats[1].ty && mats[1].ty == mats[2].ty {
+            mm_qkv_kernel_for(mats[0].ty)
+                .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned()))
+        } else if mm_pipe()
+            && mats[0].ty == GgmlType::Q4K
+            && mats[1].ty == GgmlType::Q4K
+            && mats[2].ty == GgmlType::Q6K
+        {
+            // Qwen3-8B's odd layers: v stays Q6_K where q/k are Q4_K.
+            if debug_qkv() {
+                eprintln!("debug-qkv: mixed q4k/q6k fused selected");
+            }
+            gpu.pipeline("mmllp_qkv_q4k_q6k", 1, 1)
+                .map(|p| p.to_owned())
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -9242,6 +9267,12 @@ fn mm_k64() -> bool {
 /// to the two-barrier llama-structure loop.
 fn mm_pipe() -> bool {
     crate::runtime::get().mm_pipeline
+}
+
+/// ALLPAKA_DEBUG_QKV=1: log pipelined-Q6_K / mixed-QKV kernel selection.
+fn debug_qkv() -> bool {
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| std::env::var_os("ALLPAKA_DEBUG_QKV").is_some())
 }
 
 /// K-step 64 for the mmid (MoE) kernels only: `ALLPAKA_MMID_K64=1`. The FFN

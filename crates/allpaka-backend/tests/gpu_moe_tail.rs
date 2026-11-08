@@ -389,6 +389,155 @@ fn fused_qkv_kernels_match_separate_dispatches() {
     }
 }
 
+/// Mixed-format fused QKV: q/k on Q4_K, v on Q6_K (Qwen3-8B's odd layers).
+/// Bit-exact against three separate pipelined single-matrix dispatches.
+#[test]
+fn fused_qkv_mixed_q4k_q6k_matches_separate() {
+    #[repr(C)]
+    struct MmQkvArgs {
+        n_in: u32,
+        n_q: u32,
+        n_k: u32,
+        n_v: u32,
+        wq_off: u64,
+        wk_off: u64,
+        wv_off: u64,
+        q_off: u64,
+        k_off: u64,
+        v_off: u64,
+        m: u32,
+        pad: u32,
+    }
+
+    let Some(device) = Device::system_default() else {
+        return;
+    };
+    let queue = device.new_command_queue();
+    let lib = device
+        .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
+        .unwrap();
+
+    let ni = 256u32;
+    let n_q = 128u32;
+    let n_k = 64u32;
+    let n_v = 64u32;
+    let m = 45u32; // full 32-row tile + 13-row tail
+    let x: Vec<f32> = (0..(m * ni) as usize)
+        .map(|i| (i % 89) as f32 * 0.004 - 0.15)
+        .collect();
+    let buffer = |p, n| device.new_buffer_with_data(p, n, MTLResourceOptions::StorageModeShared);
+    let xb = buffer(x.as_ptr().cast(), (x.len() * 4) as u64);
+
+    // One 256-value block per row: q4_k rows are 144 B, q6_k rows 210 B.
+    let qk_bytes = 144usize;
+    let v_bytes = 210usize;
+    let wq_off = 0u64;
+    let wk_off = n_q as u64 * qk_bytes as u64;
+    let wv_off = wk_off + n_k as u64 * qk_bytes as u64;
+    let total_w = wv_off as usize + n_v as usize * v_bytes;
+    let mut weights = vec![0u8; total_w];
+    for (i, v) in weights.iter_mut().enumerate() {
+        *v = (i.wrapping_mul(59) + i / 97) as u8;
+    }
+    // Sane f16 scales so the outputs stay finite: d/dmin at 0/2 in q4_k,
+    // d at 208 in q6_k.
+    for r in 0..(n_q + n_k) as usize {
+        let b = wq_off as usize + r * qk_bytes;
+        weights[b..b + 2].copy_from_slice(&0x211fu16.to_le_bytes());
+        weights[b + 2..b + 4].copy_from_slice(&0x211fu16.to_le_bytes());
+    }
+    for r in 0..n_v as usize {
+        let b = wv_off as usize + r * v_bytes;
+        weights[b + 208..b + 210].copy_from_slice(&0x211fu16.to_le_bytes());
+    }
+    let wb = buffer(weights.as_ptr().cast(), weights.len() as u64);
+
+    let q_elems = (m * n_q) as usize;
+    let k_elems = (m * n_k) as usize;
+    let v_elems = (m * n_v) as usize;
+    let total_out = q_elems + k_elems + v_elems;
+    let ref_out = device.new_buffer((total_out * 4) as u64, MTLResourceOptions::StorageModeShared);
+    let fused_out = device.new_buffer((total_out * 4) as u64, MTLResourceOptions::StorageModeShared);
+
+    let cmd = queue.new_command_buffer();
+    let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+    for (name, n_out, w_off, y_off) in [
+        ("mmllp_q4_k", n_q, wq_off, 0u64),
+        ("mmllp_q4_k", n_k, wk_off, (q_elems * 4) as u64),
+        ("mmllp_q6_k", n_v, wv_off, ((q_elems + k_elems) * 4) as u64),
+    ] {
+        let f = lib.get_function(name, None).unwrap();
+        let p = device
+            .new_compute_pipeline_state_with_function(&f)
+            .unwrap();
+        enc.set_compute_pipeline_state(&p);
+        enc.set_buffer(0, Some(&wb), 0);
+        enc.set_buffer(1, Some(&xb), 0);
+        enc.set_buffer(2, Some(&ref_out), y_off);
+        enc.set_bytes(3, 4, (&ni as *const u32).cast());
+        enc.set_bytes(4, 4, (&n_out as *const u32).cast());
+        enc.set_bytes(5, 8, (&w_off as *const u64).cast());
+        enc.set_bytes(6, 4, (&m as *const u32).cast());
+        enc.dispatch_thread_groups(
+            MTLSize::new((n_out as u64).div_ceil(64), (m as u64).div_ceil(32), 1),
+            MTLSize::new(128, 1, 1),
+        );
+    }
+
+    let args = MmQkvArgs {
+        n_in: ni,
+        n_q,
+        n_k,
+        n_v,
+        wq_off,
+        wk_off,
+        wv_off,
+        q_off: 0,
+        k_off: (q_elems * 4) as u64,
+        v_off: ((q_elems + k_elems) * 4) as u64,
+        m,
+        pad: 0,
+    };
+    let f_mixed = lib.get_function("mmllp_qkv_q4k_q6k", None).unwrap();
+    let p_mixed = device
+        .new_compute_pipeline_state_with_function(&f_mixed)
+        .unwrap();
+    enc.set_compute_pipeline_state(&p_mixed);
+    enc.set_buffer(0, Some(&wb), 0);
+    enc.set_buffer(1, Some(&wb), 0);
+    enc.set_buffer(2, Some(&wb), 0);
+    enc.set_buffer(3, Some(&xb), 0);
+    enc.set_buffer(4, Some(&fused_out), 0);
+    enc.set_bytes(
+        5,
+        std::mem::size_of::<MmQkvArgs>() as u64,
+        (&args as *const MmQkvArgs).cast(),
+    );
+    enc.dispatch_thread_groups(
+        MTLSize::new(
+            ((n_q + n_k + n_v) as u64).div_ceil(64),
+            (m as u64).div_ceil(32),
+            1,
+        ),
+        MTLSize::new(128, 1, 1),
+    );
+    enc.end_encoding();
+    cmd.commit();
+    cmd.wait_until_completed();
+    assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+    let s_ref = unsafe { std::slice::from_raw_parts(ref_out.contents().cast::<f32>(), total_out) };
+    let s_fused =
+        unsafe { std::slice::from_raw_parts(fused_out.contents().cast::<f32>(), total_out) };
+    for (i, (&a, &b)) in s_ref.iter().zip(s_fused).enumerate() {
+        assert!(
+            a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
+            "mmllp_qkv_q4k_q6k[{i}]: {b} != {a}"
+        );
+    }
+}
+
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct RouteParams {
