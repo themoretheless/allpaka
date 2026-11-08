@@ -350,9 +350,12 @@
   <details><summary>Ревизии</summary><div id="harness-revisions"></div></details>
   <details><summary>Импорт навыка (SKILL.md)</summary><textarea id="harness-import-text" rows="6" spellcheck="false" placeholder="---&#10;name: имя&#10;description: когда применять&#10;---&#10;Инструкции"></textarea><button id="harness-import" type="button">Импортировать навык</button></details>
   <h3>Улучшить на задаче этого разговора</h3>
-  <p>Propose → Probe → Compose без эталонных ответов: k базовых прогонов, кандидаты INV (как агент работает) и DOM (что знает практик), каждый проверяется одним прогоном, затем композиция и слепой выбор по результату. Прогоны идут на копиях записываемых папок и стоят 4k ходов агента и 3k вызовов модели. Результат не включается сам — его нужно принять.</p>
+  <p>Propose → Probe → Compose без эталонных ответов: k базовых прогонов, кандидаты INV (как агент работает) и DOM (что знает практик), каждый проверяется одним прогоном, затем композиция и слепой выбор по результату. Прогоны идут на копиях записываемых папок и стоят 4k ходов агента и 3k вызовов модели. После выбора свежие пары Base/Champion независимо проверяют результат; они не входят в поисковый бюджет. Результат не включается сам — его нужно принять.</p>
   <label>Бюджет k<input id="harness-k" type="number" min="1" max="4" value="1"></label>
+  <label>Пары независимой проверки<input id="harness-validation-runs" type="number" min="0" max="4" step="1" value="1"><span class="muted">0 отключает проверку; каждая пара добавляет два свежих прогона</span></label>
   <label>Режим<select id="harness-mode"><option value="parallel">Параллельный: шире</option><option value="sequential">Последовательный: глубже</option></select></label>
+  <label>Исполнение проб<select id="harness-execution"><option value="files_only">Только файлы (по умолчанию)</option><option value="trusted_unsandboxed">Доверенные команды без песочницы</option></select></label>
+  <p class="muted">Копия рабочей папки не изолирует команды: доверенный режим и внешний CLI получают доступ к системе и сети с правами Studio. Внешний CLI требует явно выбрать доверенный режим.</p>
   <label>Модель предложений, необязательно<input id="harness-model" maxlength="200" placeholder="Как в разговоре"></label>
   <label><input id="harness-agentic" type="checkbox" checked> Предлагающие работают как агенты с файлами (как в Harness²); без галочки — один JSON-ответ модели</label>
   <label>Рубрика для отчёта, необязательно<textarea id="harness-rubric" rows="2" maxlength="16000" placeholder="Оценки базы и выбранного результата попадут в отчёт; на выбор не влияют"></textarea></label>

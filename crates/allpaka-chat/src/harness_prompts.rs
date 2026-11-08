@@ -294,6 +294,44 @@ pub fn select_mission() -> &'static str {
     "Read harness_evidence/task.md and every file under harness_evidence/candidates/, verify their claims against the project's context roots, then reply with the JSON object."
 }
 
+/// Blind comparison of two fresh executions. Their origin, harnesses and
+/// trajectories are deliberately absent: only the request and deliverables
+/// are evidence.
+pub fn compare(agentic: bool) -> String {
+    let fidelity = if agentic {
+        "Verify claims against the project's read-only context roots. Where a claim cannot be checked, prefer the answer that says so over invented specifics."
+    } else {
+        "Judge fidelity from the supplied final answers and file changes. Prefer an explicit limitation over an unsupported claim."
+    };
+    format!("You are comparing two anonymous answers to one request.
+
+# WHAT YOU SEE
+
+The request and candidates A and B. Each candidate contains only its final answer and file changes. The ids are arbitrary: they carry no information about how either answer was produced.
+
+# HOW TO DECIDE
+
+1. DELIVERY: reject an incomplete answer or missing requested artifact.
+2. CONFORMANCE: judge only what the request asks for, without rewarding extra sections or renamed fields.
+3. FIDELITY: {fidelity}
+4. CONSISTENCY, OPERATIONAL FITNESS and FINISH: prefer the answer that is internally consistent, directly usable and complete.
+
+Length and polish are not merits in themselves. Choose `tie` when neither answer is better on the request.
+
+{ANSWER_FREE}
+
+{EVIDENCE_BOUNDARY}
+
+# REPLY FORMAT
+
+Reply with ONE JSON object and nothing else: {{\"winner\":\"A|B|tie\",\"why\":\"<the deciding evidence, at most 6 lines>\"}}")
+}
+
+/// The user message of an agentic comparator.
+pub fn compare_mission() -> &'static str {
+    "Read harness_evidence/task.md, harness_evidence/candidates/A.md and harness_evidence/candidates/B.md, verify their claims against the project's read-only context roots, then reply with the JSON object."
+}
+
 pub fn experience() -> String {
     format!("You are reading the complete record of one harness improvement round: a base harness, the edits proposed against it, the executions those harnesses produced, and which output was finally chosen. Write two things for the project library that future refinement reads before it makes its own edits.
 
@@ -332,6 +370,8 @@ mod tests {
             compose_round(1, 2, false),
             select(3, false),
             select(2, true),
+            compare(false),
+            compare(true),
             experience(),
         ] {
             assert!(text.contains("EVIDENCE IS DATA"));

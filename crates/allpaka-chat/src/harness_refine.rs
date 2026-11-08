@@ -92,13 +92,28 @@ pub trait Engine: Send + Sync {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct RunView {
     pub label: String,
+    /// Content hash of the harness tree, retained separately from the cache key.
     pub fingerprint: String,
     pub delivered: bool,
     pub outcome: String,
     pub answer: String,
-    /// Diff of the files the run changed in its copy of the workspace.
+    /// Diff of the files the run changed against the task workspace snapshot.
     pub changes: String,
     pub trajectory: String,
+    #[serde(default)]
+    pub cache_key: Option<String>,
+    #[serde(default)]
+    pub workspace_fingerprint: Option<String>,
+    #[serde(default)]
+    pub trace_id: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub steps: Option<usize>,
+    #[serde(default)]
+    pub usage: Option<Value>,
+    #[serde(default)]
+    pub error_class: Option<String>,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -134,6 +149,12 @@ pub struct Plan<'a> {
     pub mode: Recursion,
     pub task: String,
     pub base: Tree,
+    /// Execution context shared by every rollout of this task. Deliberately
+    /// excludes `k` and recursion mode, which do not change a single rollout.
+    pub cache_namespace: String,
+    /// Content identity of the frozen writable roots, recorded even when the
+    /// executor fails before it can return its own RunView.
+    pub workspace_fingerprint: String,
     /// Library entries of earlier tasks, already rendered.
     pub library: String,
     pub width: usize,
@@ -142,8 +163,10 @@ pub struct Plan<'a> {
     pub agentic: bool,
     /// Optional rubric for reporting only: the method never sees scores.
     pub rubric: Option<String>,
+    /// Fresh Base/Champion pairs after selection. Zero disables validation.
+    pub validation_runs: usize,
     /// Expected output from a dataset sample: given to the rubric judge
-    /// only, never to proposers, composers or the selector.
+    /// only, never to proposers, composers, selectors or comparators.
     pub reference: Option<String>,
     pub progress: &'a (dyn Fn(String) + Send + Sync),
 }
@@ -170,6 +193,9 @@ pub struct Outcome {
     /// after selection and never fed back into it.
     #[serde(default)]
     pub scores: BTreeMap<String, Option<f64>>,
+    /// Independent post-selection validation. Missing only in legacy outcomes.
+    #[serde(default)]
+    pub validation: Option<ValidationReport>,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -179,6 +205,78 @@ pub struct RunSummary {
     pub delivered: bool,
     pub outcome: String,
     #[serde(default)]
+    pub trace_id: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub steps: Option<usize>,
+    #[serde(default)]
+    pub error_class: Option<String>,
+    /// Fresh validation score, when a rubric was supplied. Search scores stay
+    /// in `Outcome::scores` and are never shown to the comparator.
+    #[serde(default)]
+    pub score: Option<f64>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+fn summarize(run: &RunView) -> RunSummary {
+    RunSummary {
+        label: run.label.clone(),
+        delivered: run.delivered,
+        outcome: run.outcome.clone(),
+        trace_id: run.trace_id.clone(),
+        duration_ms: run.duration_ms,
+        steps: run.steps,
+        error_class: run.error_class.clone(),
+        score: None,
+        warnings: run.warnings.clone(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationStatus {
+    NotRun,
+    Unchanged,
+    ImprovementObserved,
+    NoObservedDifference,
+    RegressionObserved,
+    Inconclusive,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PairVerdict {
+    Base,
+    Champion,
+    Tie,
+    Inconclusive,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ValidationPair {
+    pub index: usize,
+    pub base: RunSummary,
+    pub champion: RunSummary,
+    /// `None` means the comparator failed and can be retried on resume.
+    pub verdict: Option<PairVerdict>,
+    pub why: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ValidationReport {
+    pub status: ValidationStatus,
+    pub champion: String,
+    pub base_tree: String,
+    pub champion_tree: String,
+    pub requested_runs: usize,
+    pub rollout_count: usize,
+    pub wins: usize,
+    pub losses: usize,
+    pub ties: usize,
+    pub pairs: Vec<ValidationPair>,
+    pub reason: String,
     pub warnings: Vec<String>,
 }
 
@@ -395,6 +493,57 @@ struct Ledger {
     fallbacks: Mutex<Vec<String>>,
 }
 
+/// Downstream model calls must not outlive the rollout/context that produced
+/// their inputs. Legacy unkeyed records intentionally fail this deserialization
+/// and are recomputed once.
+#[derive(Debug, Serialize, Deserialize)]
+struct Cached<T> {
+    cache_key: String,
+    value: T,
+}
+
+fn downstream_cache_key(plan: &Plan<'_>, kind: &str, input: Value) -> String {
+    harness::fingerprint(&Tree::from([
+        ("cache_namespace".to_string(), plan.cache_namespace.clone()),
+        ("cache_kind".to_string(), kind.to_string()),
+        ("input".to_string(), input.to_string()),
+    ]))
+}
+
+fn rollout_role(label: &str) -> &'static str {
+    if label.starts_with("validation-base-") {
+        "validation_base"
+    } else if label.starts_with("validation-champion-") {
+        "validation_champion"
+    } else if label.starts_with("base") {
+        "base"
+    } else if label.starts_with("inv") || label.starts_with("dom") {
+        "probe"
+    } else if label.starts_with("agg") || label.starts_with('c') {
+        "final"
+    } else {
+        "rollout"
+    }
+}
+fn rollout_attempt(label: &str) -> &str {
+    let start = label
+        .rfind(|c: char| !c.is_ascii_digit())
+        .map_or(0, |index| index + 1);
+    if start == label.len() {
+        "0"
+    } else {
+        &label[start..]
+    }
+}
+fn rollout_cache_key(plan: &Plan<'_>, label: &str, tree_fingerprint: &str) -> String {
+    harness::fingerprint(&Tree::from([
+        ("cache_namespace".to_string(), plan.cache_namespace.clone()),
+        ("tree_fingerprint".to_string(), tree_fingerprint.to_string()),
+        ("rollout_role".to_string(), rollout_role(label).to_string()),
+        ("attempt".to_string(), rollout_attempt(label).to_string()),
+    ]))
+}
+
 async fn roll(
     plan: &Plan<'_>,
     ledger: &Ledger,
@@ -405,21 +554,42 @@ async fn roll(
     *ledger.rollouts.lock().unwrap() += 1;
     let path = plan.dir.join("rollouts").join(format!("{label}.json"));
     let fingerprint = harness::fingerprint(tree);
-    if let Some(run) = read_json::<RunView>(&path).filter(|r| r.fingerprint == fingerprint) {
+    let cache_key = rollout_cache_key(plan, label, &fingerprint);
+    if let Some(run) =
+        read_json::<RunView>(&path).filter(|r| r.cache_key.as_deref() == Some(cache_key.as_str()))
+    {
         return Ok(run);
     }
     let _permit = gate.acquire().await?;
     (plan.progress)(format!("rollout {label}"));
+    let started = std::time::Instant::now();
     let mut run = match plan.engine.rollout(label, tree).await {
         Ok(run) => run,
         // A failed execution is evidence too: it delivered nothing.
-        Err(e) => RunView {
-            outcome: format!("error: {e:#}"),
-            ..RunView::default()
-        },
+        Err(e) => {
+            let message = format!("{e:#}");
+            RunView {
+                outcome: format!("error: {message}"),
+                error_class: Some(turn_error_class(&message).into()),
+                ..RunView::default()
+            }
+        }
     };
     run.label = label.into();
     run.fingerprint = fingerprint;
+    run.cache_key = Some(cache_key);
+    run.duration_ms.get_or_insert_with(|| elapsed_ms(started));
+    run.workspace_fingerprint
+        .get_or_insert_with(|| plan.workspace_fingerprint.clone());
+    run.error_class.get_or_insert_with(|| {
+        if run.delivered {
+            "complete".into()
+        } else if run.answer.trim().is_empty() {
+            "empty_answer".into()
+        } else {
+            "turn_error".into()
+        }
+    });
     write_json(&path, &run)?;
     Ok(run)
 }
@@ -454,6 +624,7 @@ async fn stage(
     *ledger.stages.lock().unwrap() += 1;
     let path = plan.dir.join("stages").join(format!("{label}.json"));
     let key = harness::fingerprint(&Tree::from([
+        ("cache_namespace".to_string(), plan.cache_namespace.clone()),
         ("system".to_string(), system.to_string()),
         (
             "evidence".to_string(),
@@ -532,6 +703,9 @@ async fn stage(
 pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
     if !(1..=4).contains(&plan.k) {
         bail!("k must be between 1 and 4");
+    }
+    if plan.validation_runs > 4 {
+        bail!("validation.runs must be between 0 and 4");
     }
     let ledger = Ledger {
         rollouts: Mutex::new(0),
@@ -731,20 +905,14 @@ pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
         .find(|(s, _)| s.label == chosen)
         .map(|(s, _)| s.tree.clone())
         .unwrap_or_else(|| plan.base.clone());
+    // Validation has its own ledger and never enters the search evidence,
+    // primary selection or reflection below.
+    let validation = validate_champion(&plan, &chosen, &tree).await?;
     let similarity = harness::similarity(&finals.iter().map(|(s, _)| &s.tree).collect::<Vec<_>>());
     all_stages.extend(finals.iter().map(|(s, _)| s.clone()));
     all_runs.extend(finals.iter().map(|(_, r)| r.clone()));
     let reflection = reflect(&plan, &bases, &all_stages, &all_runs, &chosen, &why).await;
-    let mut runs: Vec<RunSummary> = bases
-        .iter()
-        .chain(&all_runs)
-        .map(|r| RunSummary {
-            label: r.label.clone(),
-            delivered: r.delivered,
-            outcome: r.outcome.clone(),
-            warnings: r.warnings.clone(),
-        })
-        .collect();
+    let mut runs: Vec<RunSummary> = bases.iter().chain(&all_runs).map(summarize).collect();
     runs.dedup_by(|a, b| a.label == b.label);
     let fallbacks = ledger.fallbacks.lock().unwrap().clone();
     let mut scored: Vec<&RunView> = bases.iter().collect();
@@ -793,6 +961,7 @@ pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
             .collect(),
         reflection,
         scores,
+        validation: Some(validation),
         warnings,
     })
 }
@@ -802,7 +971,23 @@ pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
 /// them. A failed judgement is None, never zero.
 async fn score(plan: &Plan<'_>, rubric: &str, runs: &[&RunView]) -> BTreeMap<String, Option<f64>> {
     let path = plan.dir.join("scores.json");
-    let mut saved: BTreeMap<String, Option<f64>> = read_json(&path).unwrap_or_default();
+    let cache_key = downstream_cache_key(
+        plan,
+        "scores",
+        json!({
+            "judge_system": crate::judge::SYSTEM,
+            "rubric": rubric,
+            "task": plan.task,
+            "reference": plan.reference,
+            "runs": runs.iter().map(|run| {
+                json!({"label": run.label, "rollout_cache_key": run.cache_key})
+            }).collect::<Vec<_>>(),
+        }),
+    );
+    let mut saved = read_json::<Cached<BTreeMap<String, Option<f64>>>>(&path)
+        .filter(|cached| cached.cache_key.as_str() == cache_key.as_str())
+        .map(|cached| cached.value)
+        .unwrap_or_default();
     for run in runs {
         if saved.get(&run.label).is_some_and(Option::is_some) {
             continue;
@@ -838,7 +1023,13 @@ async fn score(plan: &Plan<'_>, rubric: &str, runs: &[&RunView]) -> BTreeMap<Str
         .ok();
         saved.insert(run.label.clone(), value);
     }
-    let _ = write_json(&path, &saved);
+    let _ = write_json(
+        &path,
+        &Cached {
+            cache_key,
+            value: &saved,
+        },
+    );
     saved
 }
 
@@ -909,9 +1100,6 @@ async fn select(plan: &Plan<'_>, finals: &[(Stage, RunView)]) -> (String, String
         _ => {}
     }
     let path = plan.dir.join("selection.json");
-    if let Some(saved) = read_json::<(String, String)>(&path) {
-        return (saved.0, "final".into(), saved.1);
-    }
     // Shuffle deterministically by the task so ids say nothing about labels.
     let mut order: Vec<&(Stage, RunView)> = delivered.clone();
     let seed = harness::fingerprint(&Tree::from([("task".to_string(), plan.task.clone())]));
@@ -947,6 +1135,27 @@ async fn select(plan: &Plan<'_>, finals: &[(Stage, RunView)]) -> (String, String
             }
         ));
     }
+    let cache_key = downstream_cache_key(
+        plan,
+        "selection",
+        json!({
+            "agentic": plan.agentic,
+            "system": prompts::select(order.len(), plan.agentic),
+            "mission": plan.agentic.then(prompts::select_mission),
+            "user": user,
+            "files": files,
+            "candidates": order.iter().map(|(stage, run)| {
+                json!({"label": stage.label, "rollout_cache_key": run.cache_key})
+            }).collect::<Vec<_>>(),
+        }),
+    );
+    if let Some(saved) = read_json::<Cached<(String, String)>>(&path)
+        .filter(|cached| cached.cache_key.as_str() == cache_key.as_str())
+        .map(|cached| cached.value)
+        .filter(|(label, _)| order.iter().any(|(stage, _)| stage.label == *label))
+    {
+        return (saved.0, "final".into(), saved.1);
+    }
     let result = async {
         let text = if plan.agentic {
             plan.engine
@@ -980,7 +1189,13 @@ async fn select(plan: &Plan<'_>, finals: &[(Stage, RunView)]) -> (String, String
     .await;
     match result {
         Ok((label, why)) => {
-            let _ = write_json(&path, &(label.clone(), why.clone()));
+            let _ = write_json(
+                &path,
+                &Cached {
+                    cache_key,
+                    value: (label.clone(), why.clone()),
+                },
+            );
             (label, "final".into(), why)
         }
         Err(e) => (
@@ -989,6 +1204,390 @@ async fn select(plan: &Plan<'_>, finals: &[(Stage, RunView)]) -> (String, String
             format!("Selector failed ({e:#}); first delivering final kept."),
         ),
     }
+}
+
+fn validation_report_key(
+    plan: &Plan<'_>,
+    chosen: &str,
+    base_tree: &str,
+    champion_tree: &str,
+) -> String {
+    downstream_cache_key(
+        plan,
+        "validation",
+        json!({
+            "champion": chosen,
+            "base_tree": base_tree,
+            "champion_tree": champion_tree,
+            "runs": plan.validation_runs,
+            "comparison_system": prompts::compare(plan.agentic),
+            "comparison_mission": plan.agentic.then(prompts::compare_mission),
+            "agentic": plan.agentic,
+            "rubric": plan.rubric,
+            "reference": plan.reference,
+            "judge_system": crate::judge::SYSTEM,
+        }),
+    )
+}
+
+fn validation_candidate(run: &RunView) -> String {
+    format!(
+        "# Final answer\n{}\n\n# File changes\n{}\n",
+        run.answer,
+        if run.changes.is_empty() {
+            "(none)"
+        } else {
+            &run.changes
+        }
+    )
+}
+
+/// A fresh rubric judgement for validation. Unlike `score`, this never writes
+/// the search-level scores.json; the value lives in its ValidationPair.
+async fn validation_judge(plan: &Plan<'_>, rubric: &str, run: &RunView) -> Result<f64> {
+    let answer = if run.changes.is_empty() {
+        run.answer.clone()
+    } else {
+        format!(
+            "{}\n\nFile changes:\n{}",
+            run.answer,
+            clip(&run.changes, 24_000)
+        )
+    };
+    let input = json!({
+        "rubric": rubric,
+        "input": plan.task,
+        "answer": clip(&answer, 60_000),
+        "reference": plan.reference,
+        "contexts": [],
+    });
+    let text = plan
+        .engine
+        .call(
+            &format!("judge-{}", run.label),
+            crate::judge::SYSTEM,
+            &input.to_string(),
+        )
+        .await?;
+    let score = json_object(&text)?["score"]
+        .as_f64()
+        .context("Judge reply has no score")?;
+    if !(0.0..=1.0).contains(&score) {
+        bail!("Judge score out of bounds");
+    }
+    Ok(score)
+}
+
+/// Independent post-selection validation. Search rollouts are never reused as
+/// validation evidence, and validation itself never becomes search evidence.
+async fn validate_champion(
+    plan: &Plan<'_>,
+    chosen: &str,
+    champion_tree: &Tree,
+) -> Result<ValidationReport> {
+    let selected_tree = champion_tree.clone();
+    let base_tree = harness::fingerprint(&plan.base);
+    let champion_tree = harness::fingerprint(champion_tree);
+    let path = plan.dir.join("validation.json");
+    let cache_key = validation_report_key(plan, chosen, &base_tree, &champion_tree);
+    if let Some(saved) = read_json::<Cached<ValidationReport>>(&path)
+        .filter(|cached| cached.cache_key == cache_key)
+        .map(|cached| cached.value)
+        .filter(|report| report.pairs.iter().all(|pair| pair.verdict.is_some()))
+    {
+        return Ok(saved);
+    }
+
+    let empty_report = |status, reason: &str| ValidationReport {
+        status,
+        champion: chosen.into(),
+        base_tree: base_tree.clone(),
+        champion_tree: champion_tree.clone(),
+        requested_runs: plan.validation_runs,
+        rollout_count: 0,
+        wins: 0,
+        losses: 0,
+        ties: 0,
+        pairs: vec![],
+        reason: reason.into(),
+        warnings: vec![],
+    };
+    if plan.validation_runs == 0 {
+        let report = empty_report(
+            ValidationStatus::NotRun,
+            "Additional validation was disabled; search results are unchanged.",
+        );
+        write_json(
+            &path,
+            &Cached {
+                cache_key,
+                value: &report,
+            },
+        )?;
+        return Ok(report);
+    }
+    if base_tree == champion_tree {
+        let report = empty_report(
+            ValidationStatus::Unchanged,
+            "The selected tree is identical to Base; no additional rollouts were needed.",
+        );
+        write_json(
+            &path,
+            &Cached {
+                cache_key,
+                value: &report,
+            },
+        )?;
+        return Ok(report);
+    }
+
+    let ledger = Ledger {
+        rollouts: Mutex::new(0),
+        stages: Mutex::new(0),
+        fallbacks: Mutex::new(vec![]),
+    };
+    let gate = tokio::sync::Semaphore::new(plan.width.max(1));
+    let mut pairs = vec![];
+    let mut report_warnings = vec![];
+    for index in 1..=plan.validation_runs {
+        let labels = (
+            format!("validation-base-{index}"),
+            format!("validation-champion-{index}"),
+        );
+        let runs = roll_many(
+            plan,
+            &ledger,
+            &gate,
+            &[
+                (labels.0.clone(), plan.base.clone()),
+                (labels.1.clone(), selected_tree.clone()),
+            ],
+        )
+        .await?;
+        let (base, champion) = (&runs[0], &runs[1]);
+        let seed = harness::fingerprint(&Tree::from([
+            ("task".to_string(), plan.task.clone()),
+            ("pair_index".to_string(), index.to_string()),
+            ("base_tree".to_string(), base_tree.clone()),
+            ("champion_tree".to_string(), champion_tree.clone()),
+        ]));
+        let champion_is_a = seed.as_bytes()[0] & 1 == 0;
+        let (a, b) = if champion_is_a {
+            (champion, base)
+        } else {
+            (base, champion)
+        };
+        let files = BTreeMap::from([
+            ("task.md".to_string(), plan.task.clone()),
+            ("candidates/A.md".to_string(), validation_candidate(a)),
+            ("candidates/B.md".to_string(), validation_candidate(b)),
+        ]);
+        let mut user = format!("# REQUEST (verbatim)\n{}\n", plan.task);
+        for (id, run) in [("A", a), ("B", b)] {
+            user.push_str(&format!(
+                "\n# CANDIDATE {id}\n## final answer\n{}\n## file changes\n{}\n",
+                clip(&run.answer, 16_000),
+                if run.changes.is_empty() {
+                    "(none)".into()
+                } else {
+                    clip(&run.changes, 16_000)
+                }
+            ));
+        }
+        let system = prompts::compare(plan.agentic);
+        let comparison_key = downstream_cache_key(
+            plan,
+            "validation-comparison",
+            json!({
+                "pair_index": index,
+                "base_rollout_cache_key": base.cache_key,
+                "champion_rollout_cache_key": champion.cache_key,
+                "champion_is_a": champion_is_a,
+                "system": system,
+                "mission": plan.agentic.then(prompts::compare_mission),
+                "agentic": plan.agentic,
+                "user": user,
+                "files": files,
+                "rubric": plan.rubric,
+                "reference": plan.reference,
+                "judge_system": crate::judge::SYSTEM,
+            }),
+        );
+        let comparison_path = plan.dir.join("comparisons").join(format!("{index}.json"));
+        let saved = read_json::<Cached<ValidationPair>>(&comparison_path)
+            .filter(|cached| cached.cache_key == comparison_key)
+            .map(|cached| cached.value);
+        if let Some(done) = saved.as_ref().filter(|pair| pair.verdict.is_some()) {
+            pairs.push(done.clone());
+            continue;
+        }
+        let mut pair = ValidationPair {
+            index,
+            base: summarize(base),
+            champion: summarize(champion),
+            verdict: None,
+            why: None,
+        };
+        if let Some(previous) = saved {
+            pair.base.score = previous.base.score;
+            pair.champion.score = previous.champion.score;
+        }
+        if let Some(rubric) = &plan.rubric {
+            for (run, summary) in [(base, &mut pair.base), (champion, &mut pair.champion)] {
+                if summary.score.is_some() {
+                    continue;
+                }
+                match validation_judge(plan, rubric, run).await {
+                    Ok(score) => summary.score = Some(score),
+                    Err(e) => report_warnings
+                        .push(format!("Validation judge failed for {}: {e:#}", run.label)),
+                }
+            }
+        }
+
+        let result = if !base.delivered && !champion.delivered {
+            Ok((
+                PairVerdict::Inconclusive,
+                "Neither fresh run delivered; no winner is inferred.".to_string(),
+            ))
+        } else if base.delivered && !champion.delivered {
+            Ok((
+                PairVerdict::Base,
+                "Base delivered and Champion did not.".to_string(),
+            ))
+        } else if !base.delivered && champion.delivered {
+            Ok((
+                PairVerdict::Champion,
+                "Champion delivered and Base did not.".to_string(),
+            ))
+        } else {
+            async {
+                (plan.progress)(format!("validation compare {index}"));
+                let text = if plan.agentic {
+                    plan.engine
+                        .inspect(
+                            &format!("compare-{index}"),
+                            &system,
+                            prompts::compare_mission(),
+                            &files,
+                        )
+                        .await?
+                } else {
+                    plan.engine
+                        .call(&format!("compare-{index}"), &system, &user)
+                        .await?
+                };
+                let reply = json_object(&text)?;
+                let winner = reply["winner"]
+                    .as_str()
+                    .context("Comparison has no winner")?;
+                let verdict = match winner {
+                    "A" => {
+                        if champion_is_a {
+                            PairVerdict::Champion
+                        } else {
+                            PairVerdict::Base
+                        }
+                    }
+                    "B" => {
+                        if champion_is_a {
+                            PairVerdict::Base
+                        } else {
+                            PairVerdict::Champion
+                        }
+                    }
+                    "tie" => PairVerdict::Tie,
+                    _ => bail!("Comparison winner must be A, B or tie"),
+                };
+                Ok::<_, anyhow::Error>((verdict, reply["why"].as_str().unwrap_or("").to_string()))
+            }
+            .await
+        };
+        match result {
+            Ok((verdict, why)) => {
+                pair.verdict = Some(verdict);
+                pair.why = Some(why);
+            }
+            Err(e) => {
+                let message =
+                    format!("Comparator failed for pair {index}: {e:#}; no winner inferred.");
+                pair.why = Some(message.clone());
+                report_warnings.push(message);
+            }
+        }
+        write_json(
+            &comparison_path,
+            &Cached {
+                cache_key: comparison_key,
+                value: &pair,
+            },
+        )?;
+        pairs.push(pair);
+    }
+
+    let wins = pairs
+        .iter()
+        .filter(|pair| pair.verdict == Some(PairVerdict::Champion))
+        .count();
+    let losses = pairs
+        .iter()
+        .filter(|pair| pair.verdict == Some(PairVerdict::Base))
+        .count();
+    let ties = pairs
+        .iter()
+        .filter(|pair| pair.verdict == Some(PairVerdict::Tie))
+        .count();
+    let unresolved = pairs
+        .iter()
+        .any(|pair| pair.verdict.is_none() || pair.verdict == Some(PairVerdict::Inconclusive));
+    let (status, reason) = if unresolved {
+        (
+            ValidationStatus::Inconclusive,
+            "Fresh comparisons were inconclusive; no automatic winner is inferred.",
+        )
+    } else if wins > 0 && losses == 0 {
+        (
+            ValidationStatus::ImprovementObserved,
+            "Champion outperformed Base in the fresh comparisons; improvement is observed, not proven.",
+        )
+    } else if losses > 0 && wins == 0 {
+        (
+            ValidationStatus::RegressionObserved,
+            "Base outperformed Champion in the fresh comparisons; regression is observed, not proven.",
+        )
+    } else if wins == 0 && losses == 0 && ties > 0 {
+        (
+            ValidationStatus::NoObservedDifference,
+            "No difference was observed in the fresh comparisons.",
+        )
+    } else {
+        (
+            ValidationStatus::Inconclusive,
+            "Fresh comparisons mixed wins and losses; the result is inconclusive.",
+        )
+    };
+    let report = ValidationReport {
+        status,
+        champion: chosen.into(),
+        base_tree,
+        champion_tree,
+        requested_runs: plan.validation_runs,
+        rollout_count: *ledger.rollouts.lock().unwrap(),
+        wins,
+        losses,
+        ties,
+        pairs,
+        reason: reason.into(),
+        warnings: report_warnings,
+    };
+    write_json(
+        &path,
+        &Cached {
+            cache_key,
+            value: &report,
+        },
+    )?;
+    Ok(report)
 }
 
 /// Harnessing-level evidence: what each edit did, and at most one lesson.
@@ -1001,9 +1600,6 @@ async fn reflect(
     why: &str,
 ) -> Option<Value> {
     let path = plan.dir.join("reflection.json");
-    if let Some(saved) = read_json::<Value>(&path) {
-        return Some(saved);
-    }
     let mut user = format!(
         "# TASK (verbatim)\n{}\n\n# BASE HARNESS\n{}\n# BASE ROLLOUTS\n",
         plan.task,
@@ -1029,6 +1625,25 @@ async fn reflect(
         user.push_str(&render_run(run, 6_000));
     }
     user.push_str(&format!("\n# SELECTION\nchosen: {chosen}\nwhy: {why}\n"));
+    let cache_key = downstream_cache_key(
+        plan,
+        "reflection",
+        json!({
+            "system": prompts::experience(),
+            "user": user,
+            "base_rollouts": bases.iter().map(|run| {
+                json!({"label": run.label, "rollout_cache_key": run.cache_key})
+            }).collect::<Vec<_>>(),
+            "rollouts": runs.iter().map(|run| {
+                json!({"label": run.label, "rollout_cache_key": run.cache_key})
+            }).collect::<Vec<_>>(),
+        }),
+    );
+    if let Some(saved) = read_json::<Cached<Value>>(&path)
+        .filter(|cached| cached.cache_key.as_str() == cache_key.as_str())
+    {
+        return Some(saved.value);
+    }
     let text = plan
         .engine
         .call("reflect", &prompts::experience(), &user)
@@ -1036,7 +1651,13 @@ async fn reflect(
         .ok()?;
     let value = json_object(&text).ok()?;
     value.get("edits")?.as_array()?;
-    let _ = write_json(&path, &value);
+    let _ = write_json(
+        &path,
+        &Cached {
+            cache_key,
+            value: &value,
+        },
+    );
     Some(value)
 }
 
@@ -1050,10 +1671,90 @@ struct StudioEngine {
     proposer_agent: Settings,
     proposer_provider: crate::provider::Provider,
     project: context::Project,
+    workspace: WorkspaceSnapshot,
     task: String,
     scratch: PathBuf,
     external: Option<External>,
     execution: crate::ExecutionPolicy,
+    rollout_timeout: std::time::Duration,
+}
+
+#[derive(Clone, Debug)]
+struct WorkspaceSnapshot {
+    roots: Vec<SnapshotRoot>,
+    fingerprint: String,
+}
+#[derive(Clone, Debug)]
+struct SnapshotRoot {
+    alias: String,
+    original: PathBuf,
+    snapshot: PathBuf,
+    writable: bool,
+}
+impl WorkspaceSnapshot {
+    /// Capture writable roots once per task. The hash depends only on stable
+    /// root/file identities and bytes, never on directory iteration order.
+    fn capture(project: &context::Project, directory: &std::path::Path) -> Result<Self> {
+        use sha2::{Digest, Sha256};
+
+        if directory.exists() {
+            std::fs::remove_dir_all(directory)?;
+        }
+        std::fs::create_dir_all(directory)?;
+        let mut roots = vec![];
+        let mut hasher = Sha256::new();
+        let (mut files, mut bytes) = (0, 0);
+        for root in &project.roots {
+            hasher.update((root.alias.len() as u64).to_le_bytes());
+            hasher.update(root.alias.as_bytes());
+            hasher.update([u8::from(root.writable)]);
+            let snapshot = if root.writable {
+                let destination = directory.join(&root.alias);
+                copy_root_observed(
+                    &root.path,
+                    &destination,
+                    &mut files,
+                    &mut bytes,
+                    "",
+                    &mut |path, content| {
+                        hasher.update((path.len() as u64).to_le_bytes());
+                        hasher.update(path.as_bytes());
+                        hasher.update((content.len() as u64).to_le_bytes());
+                        hasher.update(content);
+                    },
+                )?;
+                destination.canonicalize()?
+            } else {
+                root.path.clone()
+            };
+            roots.push(SnapshotRoot {
+                alias: root.alias.clone(),
+                original: root.path.clone(),
+                snapshot,
+                writable: root.writable,
+            });
+        }
+        Ok(Self {
+            roots,
+            fingerprint: crate::evaluation::hex_sha256(hasher),
+        })
+    }
+
+    /// Writable roots resolve to the snapshot; other roots remain where they
+    /// are, but callers can downgrade every root to read-only for inspection.
+    fn project(&self, template: &context::Project) -> context::Project {
+        let mut project = template.clone();
+        for root in &mut project.roots {
+            if let Some(saved) = self.roots.iter().find(|saved| saved.alias == root.alias) {
+                root.path = if saved.writable {
+                    saved.snapshot.clone()
+                } else {
+                    saved.original.clone()
+                };
+            }
+        }
+        project
+    }
 }
 
 impl StudioEngine {
@@ -1067,7 +1768,10 @@ impl StudioEngine {
             .flatten()
             .any(|hook| {
                 hook.command.as_ref().is_some_and(|s| !s.trim().is_empty())
-                    || hook.transform.as_ref().is_some_and(|s| !s.trim().is_empty())
+                    || hook
+                        .transform
+                        .as_ref()
+                        .is_some_and(|s| !s.trim().is_empty())
             });
         if harness::scripts(tree).is_empty() && !command_hooks {
             Ok(vec![])
@@ -1090,23 +1794,49 @@ fn copy_root(
     files: &mut usize,
     bytes: &mut u64,
 ) -> Result<()> {
+    copy_root_observed(from, to, files, bytes, "", &mut |_, _| {})
+}
+fn copy_root_observed(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    files: &mut usize,
+    bytes: &mut u64,
+    prefix: &str,
+    observe: &mut impl FnMut(&str, &[u8]),
+) -> Result<()> {
     std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
+    let mut entries = std::fs::read_dir(from)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let name = entry.file_name().to_string_lossy().to_string();
         let kind = entry.file_type()?;
         if skipped(&name) || kind.is_symlink() {
             continue;
         }
+        let relative = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
         if kind.is_dir() {
-            copy_root(&entry.path(), &to.join(&name), files, bytes)?;
+            copy_root_observed(
+                &entry.path(),
+                &to.join(&name),
+                files,
+                bytes,
+                &relative,
+                observe,
+            )?;
         } else if kind.is_file() {
+            let length = entry.metadata()?.len();
             *files += 1;
-            *bytes += entry.metadata()?.len();
+            *bytes = bytes.saturating_add(length);
             if *files > COPY_MAX_FILES || *bytes > COPY_MAX_BYTES {
                 bail!("Writable context is too large to copy for a probe (over {COPY_MAX_FILES} files or 256 MiB)");
             }
-            std::fs::copy(entry.path(), to.join(&name))?;
+            let content = std::fs::read(entry.path())?;
+            observe(&relative, &content);
+            std::fs::write(to.join(&name), content)?;
         }
     }
     Ok(())
@@ -1140,19 +1870,19 @@ fn files_under(root: &std::path::Path) -> BTreeMap<String, PathBuf> {
     walk(root, "", &mut out);
     out
 }
-/// What a probe changed in its copy, against the real root.
-fn changes(alias: &str, original: &std::path::Path, copy: &std::path::Path) -> String {
-    changes_over(alias, original, copy, &BTreeMap::new())
+/// What a probe changed in its copy, against the task's frozen snapshot.
+fn changes(alias: &str, snapshot: &std::path::Path, copy: &std::path::Path) -> String {
+    changes_over(alias, snapshot, copy, &BTreeMap::new())
 }
 /// Like `changes`, but files the harness materialized into the copy count
 /// as already present with that content.
 fn changes_over(
     alias: &str,
-    original: &std::path::Path,
+    snapshot: &std::path::Path,
     copy: &std::path::Path,
     overlay: &BTreeMap<String, String>,
 ) -> String {
-    let before = files_under(original);
+    let before = files_under(snapshot);
     let after = files_under(copy);
     let mut out = String::new();
     for (rel, path) in &after {
@@ -1360,27 +2090,50 @@ pub(crate) fn trajectory(messages: &[Message]) -> String {
     out
 }
 
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+fn turn_error_class(message: &str) -> &'static str {
+    let lower = message.to_lowercase();
+    if lower.contains("step limit reached") {
+        "step_limit"
+    } else if lower.contains("cancelled") {
+        "cancelled"
+    } else if lower.contains("provider")
+        || lower.contains("stream")
+        || lower.contains("connection")
+        || lower.contains("sending request")
+    {
+        "provider_error"
+    } else {
+        "turn_error"
+    }
+}
+
 impl Engine for StudioEngine {
     fn rollout<'a>(&'a self, label: &'a str, tree: &'a Tree) -> BoxFuture<'a, Result<RunView>> {
         Box::pin(async move {
+            let started = std::time::Instant::now();
             if let Some(external) = &self.external {
                 return self.external_rollout(external, label, tree).await;
             }
             let workdir = self.scratch.join(label);
             let _ = std::fs::remove_dir_all(&workdir);
-            let mut project = self.project.clone();
+            let mut project = self.workspace.project(&self.project);
             let (mut files, mut bytes) = (0, 0);
             let mut copies = vec![];
             for root in &mut project.roots {
                 if root.writable {
+                    let baseline = root.path.clone();
                     let copy = workdir.join(&root.alias);
-                    copy_root(&root.path, &copy, &mut files, &mut bytes)?;
-                    copies.push((root.alias.clone(), root.path.clone(), copy.canonicalize()?));
+                    copy_root(&baseline, &copy, &mut files, &mut bytes)?;
+                    copies.push((root.alias.clone(), baseline, copy.canonicalize()?));
                     root.path = copies.last().unwrap().2.clone();
                 }
             }
             let warnings = self.policy_warnings(tree)?;
-            let mut session = Session::new(crate::evaluation::new_id(), self.executor.clone());
+            let session_id = crate::evaluation::new_id();
+            let mut session = Session::new(session_id.clone(), self.executor.clone());
             session.title = format!("harness probe {label}");
             session.ephemeral = Some(Arc::new(crate::Ephemeral {
                 project,
@@ -1394,14 +2147,27 @@ impl Engine for StudioEngine {
                 .push(Message::text("user", self.task.clone()));
             let shared = Arc::new(Mutex::new(session));
             let outcome = tokio::time::timeout(
-                std::time::Duration::from_secs(15 * 60),
+                self.rollout_timeout,
                 crate::turn(self.app.clone(), shared.clone(), None),
             )
             .await;
-            let outcome = match outcome {
-                Ok(Ok(o)) => format!("{o:?}"),
-                Ok(Err(e)) => format!("error: {e:#}"),
-                Err(_) => "timeout".into(),
+            let (outcome, mut error_class) = match outcome {
+                Ok(Ok(outcome)) => {
+                    let class = match outcome {
+                        crate::TurnOutcome::Complete => None,
+                        crate::TurnOutcome::NoProgress
+                        | crate::TurnOutcome::GoalIncomplete
+                        | crate::TurnOutcome::TokenLimit
+                        | crate::TurnOutcome::Compacted => Some("turn_error".to_string()),
+                    };
+                    (format!("{outcome:?}"), class)
+                }
+                Ok(Err(e)) => {
+                    let message = format!("{e:#}");
+                    let class = turn_error_class(&message).to_string();
+                    (format!("error: {message}"), Some(class))
+                }
+                Err(_) => ("timeout".into(), Some("timeout".into())),
             };
             let state = shared.lock().unwrap().clone();
             let answer = state
@@ -1411,20 +2177,37 @@ impl Engine for StudioEngine {
                 .find(|m| m.role == "assistant" && !m.content.trim().is_empty())
                 .map(|m| m.content.clone())
                 .unwrap_or_default();
+            if outcome == "Complete" {
+                error_class = Some(
+                    if answer.trim().is_empty() {
+                        "empty_answer"
+                    } else {
+                        "complete"
+                    }
+                    .into(),
+                );
+            }
+            let delivered = outcome == "Complete" && error_class.as_deref() == Some("complete");
             let changes: String = copies
                 .iter()
-                .map(|(alias, original, copy)| changes(alias, original, copy))
+                .map(|(alias, snapshot, copy)| changes(alias, snapshot, copy))
                 .collect();
             let _ = std::fs::remove_dir_all(&workdir);
             Ok(RunView {
                 label: label.into(),
-                fingerprint: String::new(),
-                delivered: outcome == "Complete" && !answer.trim().is_empty(),
+                delivered,
                 outcome,
                 answer,
                 changes,
                 trajectory: trajectory(&state.messages[1..]),
+                workspace_fingerprint: Some(self.workspace.fingerprint.clone()),
+                trace_id: Some(session_id),
+                duration_ms: Some(elapsed_ms(started)),
+                steps: Some(state.step),
+                usage: (!state.usage.is_null()).then_some(state.usage.clone()),
+                error_class,
                 warnings,
+                ..RunView::default()
             })
         })
     }
@@ -1546,79 +2329,101 @@ impl StudioEngine {
         if self.execution != crate::ExecutionPolicy::trusted_unsandboxed() {
             bail!("An external executor requires execution=trusted_unsandboxed. Workspace copies do not sandbox shell commands.");
         }
+        let started = std::time::Instant::now();
         let workdir = self.scratch.join(label);
         let _ = std::fs::remove_dir_all(&workdir);
-        let result =
-            async {
-                let root =
-                    self.project.roots.iter().find(|r| r.writable).context(
-                        "An external executor needs a writable context folder to work in",
-                    )?;
-                let copy = workdir.join(&root.alias);
-                let (mut files, mut bytes) = (0, 0);
-                copy_root(&root.path, &copy, &mut files, &mut bytes)?;
-                let existing = std::fs::read_to_string(root.path.join("AGENTS.md")).ok();
-                let overlay = materialize(tree, external.layout, existing.as_deref());
-                for (path, text) in &overlay {
-                    let file = copy.join(path);
-                    std::fs::create_dir_all(file.parent().context("No parent directory")?)?;
-                    std::fs::write(file, text)?;
-                }
-                let mut child = tokio::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&external.command)
-                    .current_dir(&copy)
-                    .env("ALLPAKA_TASK", &self.task)
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .kill_on_drop(true)
-                    .spawn()
-                    .context("Failed to start the external executor")?;
-                let mut stdin = child.stdin.take().context("No stdin")?;
-                let task = self.task.clone().into_bytes();
-                let writer = tokio::spawn(async move {
-                    use tokio::io::AsyncWriteExt;
-                    let _ = stdin.write_all(&task).await;
-                });
-                let output = tokio::time::timeout(
-                    std::time::Duration::from_secs(15 * 60),
-                    child.wait_with_output(),
-                )
-                .await;
-                let _ = writer.await;
-                let (outcome, stdout, stderr) = match output {
-                    Ok(Ok(out)) => (
-                        if out.status.success() {
-                            "Complete".to_string()
-                        } else {
-                            format!("exit {:?}", out.status.code())
-                        },
-                        String::from_utf8_lossy(&out.stdout).into_owned(),
-                        String::from_utf8_lossy(&out.stderr).into_owned(),
-                    ),
-                    Ok(Err(e)) => (format!("error: {e}"), String::new(), String::new()),
-                    Err(_) => ("timeout".into(), String::new(), String::new()),
-                };
-                let changes = changes_over(&root.alias, &root.path, &copy, &overlay);
-                let answer = clip(stdout.trim(), 64_000);
-                Ok(RunView {
-                    label: label.into(),
-                    fingerprint: String::new(),
-                    delivered: outcome == "Complete" && !answer.is_empty(),
-                    outcome,
-                    answer,
-                    changes,
-                    trajectory: format!(
-                        "[EXTERNAL] {}\n[STDOUT]\n{}\n[STDERR]\n{}\n",
-                        external.command,
-                        clip(&stdout, 60_000),
-                        clip(&stderr, 20_000)
-                    ),
-                    warnings: vec![],
-                })
+        let result = async {
+            let root = self
+                .workspace
+                .roots
+                .iter()
+                .find(|r| r.writable)
+                .context("An external executor needs a writable context folder to work in")?;
+            let copy = workdir.join(&root.alias);
+            let (mut files, mut bytes) = (0, 0);
+            copy_root(&root.snapshot, &copy, &mut files, &mut bytes)?;
+            let existing = std::fs::read_to_string(root.snapshot.join("AGENTS.md")).ok();
+            let overlay = materialize(tree, external.layout, existing.as_deref());
+            for (path, text) in &overlay {
+                let file = copy.join(path);
+                std::fs::create_dir_all(file.parent().context("No parent directory")?)?;
+                std::fs::write(file, text)?;
             }
-            .await;
+            let mut child = tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&external.command)
+                .current_dir(&copy)
+                .env("ALLPAKA_TASK", &self.task)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .context("Failed to start the external executor")?;
+            let mut stdin = child.stdin.take().context("No stdin")?;
+            let task = self.task.clone().into_bytes();
+            let writer = tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(&task).await;
+            });
+            let output = tokio::time::timeout(self.rollout_timeout, child.wait_with_output()).await;
+            let _ = writer.await;
+            let (outcome, stdout, stderr, mut error_class) = match output {
+                Ok(Ok(out)) => (
+                    if out.status.success() {
+                        "Complete".to_string()
+                    } else {
+                        format!("exit {:?}", out.status.code())
+                    },
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                    (!out.status.success()).then(|| "external_exit".to_string()),
+                ),
+                Ok(Err(e)) => (
+                    format!("error: {e}"),
+                    String::new(),
+                    String::new(),
+                    Some("turn_error".to_string()),
+                ),
+                Err(_) => (
+                    "timeout".into(),
+                    String::new(),
+                    String::new(),
+                    Some("timeout".to_string()),
+                ),
+            };
+            let changes = changes_over(&root.alias, &root.snapshot, &copy, &overlay);
+            let answer = clip(stdout.trim(), 64_000);
+            if outcome == "Complete" {
+                error_class = Some(
+                    if answer.is_empty() {
+                        "empty_answer"
+                    } else {
+                        "complete"
+                    }
+                    .into(),
+                );
+            }
+            Ok(RunView {
+                label: label.into(),
+                delivered: outcome == "Complete" && error_class.as_deref() == Some("complete"),
+                outcome,
+                answer,
+                changes,
+                trajectory: format!(
+                    "[EXTERNAL] {}\n[STDOUT]\n{}\n[STDERR]\n{}\n",
+                    external.command,
+                    clip(&stdout, 60_000),
+                    clip(&stderr, 20_000)
+                ),
+                workspace_fingerprint: Some(self.workspace.fingerprint.clone()),
+                duration_ms: Some(elapsed_ms(started)),
+                usage: Some(json!({"available": false})),
+                error_class,
+                ..RunView::default()
+            })
+        }
+        .await;
         let _ = std::fs::remove_dir_all(&workdir);
         result
     }
@@ -1636,8 +2441,8 @@ impl StudioEngine {
         let result = async {
             let evidence = dir.join("harness_evidence");
             write_files(&evidence, files)?;
-            let mut roots: Vec<context::Root> = self
-                .project
+            let snapshot_project = self.workspace.project(&self.project);
+            let mut roots: Vec<context::Root> = snapshot_project
                 .roots
                 .iter()
                 .filter(|r| r.alias != "harness_evidence")
@@ -1734,6 +2539,21 @@ pub(crate) enum ProbeExecution {
     TrustedUnsandboxed,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ValidationRequest {
+    #[serde(default = "default_validation_runs")]
+    runs: usize,
+}
+
+impl Default for ValidationRequest {
+    fn default() -> Self {
+        Self {
+            runs: default_validation_runs(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StartRequest {
@@ -1754,6 +2574,9 @@ pub(crate) struct StartRequest {
     /// report only.
     #[serde(default)]
     rubric: Option<String>,
+    /// Independent fresh Base/Champion comparisons after selection.
+    #[serde(default)]
+    validation: ValidationRequest,
     /// A stream of tasks refined in order; each sees the library entries of
     /// the ones before it. Empty means the conversation's own task.
     #[serde(default)]
@@ -1783,6 +2606,46 @@ impl StartRequest {
         }
     }
 }
+
+const ROLLOUT_CACHE_SCHEMA: &str = "harness-rollout-cache-v2";
+#[allow(clippy::too_many_arguments)]
+fn cache_namespace(
+    task: &str,
+    executor: &Settings,
+    proposer_provider: &str,
+    proposer_model: &str,
+    external: Option<&External>,
+    execution: crate::ExecutionPolicy,
+    workspace_fingerprint: &str,
+    sample_id: Option<&str>,
+) -> Result<String> {
+    Ok(harness::fingerprint(&Tree::from([
+        ("cache_schema".to_string(), ROLLOUT_CACHE_SCHEMA.to_string()),
+        ("task".to_string(), task.to_string()),
+        (
+            "executor_settings".to_string(),
+            serde_json::to_string(executor)?,
+        ),
+        ("executor_provider".to_string(), executor.provider.clone()),
+        ("executor_model".to_string(), executor.model.clone()),
+        (
+            "proposer_provider".to_string(),
+            proposer_provider.to_string(),
+        ),
+        ("proposer_model".to_string(), proposer_model.to_string()),
+        ("external".to_string(), serde_json::to_string(&external)?),
+        ("execution_policy".to_string(), format!("{execution:?}")),
+        (
+            "workspace_fingerprint".to_string(),
+            workspace_fingerprint.to_string(),
+        ),
+        (
+            "dataset_sample_id".to_string(),
+            sample_id.unwrap_or("").to_string(),
+        ),
+    ])))
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DatasetRef {
@@ -1797,6 +2660,9 @@ fn default_k() -> usize {
 }
 fn default_agentic() -> bool {
     true
+}
+fn default_validation_runs() -> usize {
+    1
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct TaskResult {
@@ -1815,6 +2681,9 @@ pub(crate) struct JobRecord {
     /// Dataset references, parallel to `tasks`; empty without a dataset.
     #[serde(default)]
     references: Vec<Option<String>>,
+    /// Stable dataset sample IDs, parallel to `tasks`; empty without a dataset.
+    #[serde(default)]
+    sample_ids: Vec<Option<String>>,
     executor: Settings,
     base_revision: Option<String>,
     created_ms: u64,
@@ -1973,7 +2842,21 @@ async fn execute(app: &App, id: &str) -> Result<()> {
         } else {
             String::new()
         };
-        let scratch = std::env::temp_dir().join("allpaka-harness").join(id);
+        let scratch = std::env::temp_dir()
+            .join("allpaka-harness")
+            .join(id)
+            .join(index.to_string());
+        let workspace = WorkspaceSnapshot::capture(&project, &scratch.join("snapshot"))?;
+        let cache_namespace = cache_namespace(
+            task,
+            &job.executor,
+            &proposer.provider,
+            &proposer.model,
+            job.request.external.as_ref(),
+            job.request.policy(),
+            &workspace.fingerprint,
+            job.sample_ids.get(index).and_then(Option::as_deref),
+        )?;
         let engine = StudioEngine {
             app: app.clone(),
             executor: job.executor.clone(),
@@ -1981,10 +2864,12 @@ async fn execute(app: &App, id: &str) -> Result<()> {
             proposer_agent: proposer_agent.clone(),
             proposer_provider: proposer_provider.clone(),
             project: project.clone(),
+            workspace,
             task: task.clone(),
             scratch: scratch.clone(),
             external: job.request.external.clone(),
             execution: job.request.policy(),
+            rollout_timeout: std::time::Duration::from_secs(15 * 60),
         };
         let entry_id = format!("{id}-{index}");
         let library = harness_library::context_for(
@@ -2012,10 +2897,13 @@ async fn execute(app: &App, id: &str) -> Result<()> {
             mode: job.request.mode,
             task: task.clone(),
             base: base.clone(),
+            cache_namespace,
+            workspace_fingerprint: engine.workspace.fingerprint.clone(),
             library,
             width: 2,
             agentic: job.request.agentic,
             rubric: job.request.rubric.clone(),
+            validation_runs: job.request.validation.runs,
             reference: job.references.get(index).cloned().flatten(),
             progress: &progress,
         })
@@ -2120,6 +3008,9 @@ pub(crate) async fn start_api(
     if !(1..=4).contains(&request.k) {
         return Err(bad("k must be between 1 and 4"));
     }
+    if request.validation.runs > 4 {
+        return Err(bad("validation.runs must be between 0 and 4"));
+    }
     if request.tasks.len() > 20
         || request
             .tasks
@@ -2165,7 +3056,7 @@ pub(crate) async fn start_api(
             .unwrap_or_default();
         (s.settings.clone(), task)
     };
-    let (tasks, references) = match &request.dataset {
+    let (tasks, references, sample_ids) = match &request.dataset {
         Some(source) => {
             if !request.tasks.is_empty() {
                 return Err(bad("Give either tasks or a dataset, not both"));
@@ -2187,12 +3078,24 @@ pub(crate) async fn start_api(
                     if !sample.contexts.is_empty() {
                         task.push_str(&format!("\n\nContext:\n{}", sample.contexts.join("\n\n")));
                     }
-                    (task, sample.expected_output.clone())
+                    (
+                        task,
+                        sample.expected_output.clone(),
+                        Some(sample.id.clone()),
+                    )
                 })
-                .unzip()
+                .fold(
+                    (vec![], vec![], vec![]),
+                    |(mut tasks, mut references, mut sample_ids), (task, reference, sample_id)| {
+                        tasks.push(task);
+                        references.push(reference);
+                        sample_ids.push(sample_id);
+                        (tasks, references, sample_ids)
+                    },
+                )
         }
-        None if request.tasks.is_empty() => (vec![task], vec![]),
-        None => (request.tasks.clone(), vec![]),
+        None if request.tasks.is_empty() => (vec![task], vec![], vec![]),
+        None => (request.tasks.clone(), vec![], vec![]),
     };
     if tasks.is_empty() || tasks[0].trim().is_empty() {
         return Err(bad("The conversation has no task to refine on"));
@@ -2237,6 +3140,7 @@ pub(crate) async fn start_api(
         request,
         tasks,
         references,
+        sample_ids,
         executor,
         base_revision,
         created_ms: harness::now_ms(),
@@ -2326,6 +3230,18 @@ pub(crate) async fn adopt_api(
         Some(index) => job.results.iter().find(|r| r.index as u64 == index),
         None => job.results.iter().rev().find(|r| r.revision.is_some()),
     };
+    if result.is_some_and(|r| {
+        r.outcome
+            .validation
+            .as_ref()
+            .is_some_and(|validation| validation.status == ValidationStatus::RegressionObserved)
+    }) && body.get("override_regression").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "Fresh validation observed a regression. Adopt only after reviewing the comparisons; to override, set override_regression=true.",
+        ));
+    }
     let revision = result
         .and_then(|r| r.revision.clone())
         .ok_or_else(|| bad("The job kept the current harness; nothing to adopt"))?;
@@ -2445,7 +3361,7 @@ mod tests {
         }
     }
     fn plan<'a>(
-        engine: &'a Scripted,
+        engine: &'a dyn Engine,
         dir: &std::path::Path,
         mode: Recursion,
         progress: &'a (dyn Fn(String) + Send + Sync),
@@ -2457,10 +3373,13 @@ mod tests {
             mode,
             task: "Summarise the repo".into(),
             base: Tree::from([("system.md".to_string(), "Be exact.".to_string())]),
+            cache_namespace: "scripted-cache-v2".into(),
+            workspace_fingerprint: "scripted-workspace".into(),
             library: String::new(),
             width: 2,
             agentic: false,
             rubric: None,
+            validation_runs: 0,
             reference: None,
             progress,
         }
@@ -2470,6 +3389,339 @@ mod tests {
             std::env::temp_dir().join(format!("allpaka-refine-{}", crate::evaluation::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    struct ValidationEngine {
+        rollouts: Mutex<Vec<String>>,
+        calls: Mutex<Vec<String>>,
+        inputs: Mutex<Vec<String>>,
+        verdicts: Mutex<Vec<PairVerdict>>,
+        fail_comparisons: Mutex<usize>,
+        base_delivered: bool,
+        champion_delivered: bool,
+    }
+
+    fn validator(verdicts: &[PairVerdict]) -> ValidationEngine {
+        ValidationEngine {
+            rollouts: Mutex::new(vec![]),
+            calls: Mutex::new(vec![]),
+            inputs: Mutex::new(vec![]),
+            verdicts: Mutex::new(verdicts.to_vec()),
+            fail_comparisons: Mutex::new(0),
+            base_delivered: true,
+            champion_delivered: true,
+        }
+    }
+
+    impl Engine for ValidationEngine {
+        fn rollout<'a>(
+            &'a self,
+            label: &'a str,
+            _tree: &'a Tree,
+        ) -> BoxFuture<'a, Result<RunView>> {
+            Box::pin(async move {
+                self.rollouts.lock().unwrap().push(label.to_string());
+                let base = label.starts_with("validation-base-");
+                Ok(RunView {
+                    delivered: if base {
+                        self.base_delivered
+                    } else {
+                        self.champion_delivered
+                    },
+                    outcome: "Complete".into(),
+                    answer: if base {
+                        "alpha artifact"
+                    } else {
+                        "omega artifact"
+                    }
+                    .into(),
+                    trajectory: "secret-trajectory".into(),
+                    ..RunView::default()
+                })
+            })
+        }
+
+        fn call<'a>(
+            &'a self,
+            label: &'a str,
+            system: &'a str,
+            user: &'a str,
+        ) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(label.to_string());
+                self.inputs
+                    .lock()
+                    .unwrap()
+                    .push(format!("{label}\n{system}\n{user}"));
+                if label.starts_with("judge-validation-") {
+                    return Ok(json!({
+                        "score": if user.contains("omega artifact") { 1.0 } else { 0.5 },
+                        "reason": "validation fixture",
+                    })
+                    .to_string());
+                }
+                assert!(label.starts_with("compare-"), "unexpected call {label}");
+                for forbidden in [
+                    "secret-base-tree",
+                    "secret-champion-tree",
+                    "secret-trajectory",
+                    "secret-rubric",
+                    "secret-reference",
+                    "validation-base-",
+                    "validation-champion-",
+                    "agg1",
+                    "selection_why",
+                ] {
+                    assert!(
+                        !user.contains(forbidden),
+                        "comparator received forbidden input {forbidden}"
+                    );
+                }
+                {
+                    let mut failures = self.fail_comparisons.lock().unwrap();
+                    if *failures > 0 {
+                        *failures -= 1;
+                        bail!("comparator offline");
+                    }
+                }
+                let verdict = {
+                    let mut verdicts = self.verdicts.lock().unwrap();
+                    if verdicts.is_empty() {
+                        PairVerdict::Tie
+                    } else {
+                        verdicts.remove(0)
+                    }
+                };
+                let candidate = |answer: &str| {
+                    if user.contains(&format!("# CANDIDATE A\n## final answer\n{answer}")) {
+                        "A"
+                    } else {
+                        assert!(user.contains(&format!("# CANDIDATE B\n## final answer\n{answer}")));
+                        "B"
+                    }
+                };
+                let winner = match verdict {
+                    PairVerdict::Base => candidate("alpha artifact"),
+                    PairVerdict::Champion => candidate("omega artifact"),
+                    PairVerdict::Tie => "tie",
+                    PairVerdict::Inconclusive => unreachable!(),
+                };
+                Ok(json!({"winner": winner, "why": "fixture comparison"}).to_string())
+            })
+        }
+    }
+
+    fn changed_tree(plan: &Plan<'_>) -> Tree {
+        let mut tree = plan.base.clone();
+        tree.insert("memory.md".into(), "secret-champion-tree".into());
+        tree
+    }
+
+    #[tokio::test]
+    async fn validation_disabled_and_unchanged_do_not_roll_out() {
+        let dir = temp();
+        let engine = validator(&[]);
+        let quiet = |_: String| {};
+        let mut plan = plan(&engine, &dir, Recursion::Parallel, &quiet);
+        let champion = changed_tree(&plan);
+        let report = validate_champion(&plan, "agg1", &champion).await.unwrap();
+        assert_eq!(report.status, ValidationStatus::NotRun);
+        assert_eq!(report.rollout_count, 0);
+        assert!(dir.join("validation.json").exists());
+
+        plan.validation_runs = 2;
+        let base = plan.base.clone();
+        let report = validate_champion(&plan, "agg1", &base).await.unwrap();
+        assert_eq!(report.status, ValidationStatus::Unchanged);
+        assert_eq!(report.rollout_count, 0);
+        assert!(engine.rollouts.lock().unwrap().is_empty());
+        assert!(engine.calls.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn validation_aggregates_fresh_pairs_with_an_exact_budget() {
+        let quiet = |_: String| {};
+        for (verdicts, expected, counts) in [
+            (
+                vec![PairVerdict::Champion],
+                ValidationStatus::ImprovementObserved,
+                (1, 0, 0),
+            ),
+            (
+                vec![PairVerdict::Base],
+                ValidationStatus::RegressionObserved,
+                (0, 1, 0),
+            ),
+            (
+                vec![PairVerdict::Tie],
+                ValidationStatus::NoObservedDifference,
+                (0, 0, 1),
+            ),
+            (
+                vec![PairVerdict::Champion, PairVerdict::Base],
+                ValidationStatus::Inconclusive,
+                (1, 1, 0),
+            ),
+        ] {
+            let dir = temp();
+            let engine = validator(&verdicts);
+            let mut plan = plan(&engine, &dir, Recursion::Parallel, &quiet);
+            plan.validation_runs = verdicts.len();
+            let champion = changed_tree(&plan);
+            let report = validate_champion(&plan, "agg1", &champion).await.unwrap();
+            assert_eq!(report.status, expected);
+            assert_eq!((report.wins, report.losses, report.ties), counts);
+            assert_eq!(report.rollout_count, 2 * verdicts.len());
+            assert_eq!(engine.rollouts.lock().unwrap().len(), 2 * verdicts.len());
+            assert_eq!(engine.calls.lock().unwrap().len(), verdicts.len());
+            assert_eq!(report.pairs.len(), verdicts.len());
+            for index in 1..=verdicts.len() {
+                assert!(dir.join(format!("comparisons/{index}.json")).exists());
+                assert!(dir
+                    .join(format!("rollouts/validation-base-{index}.json"))
+                    .exists());
+                assert!(dir
+                    .join(format!("rollouts/validation-champion-{index}.json"))
+                    .exists());
+            }
+            assert!(report.reason.contains("observed") || report.reason.contains("inconclusive"));
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn validation_delivery_is_decided_before_the_comparator() {
+        let quiet = |_: String| {};
+        for (base, champion, status, verdict) in [
+            (
+                true,
+                false,
+                ValidationStatus::RegressionObserved,
+                PairVerdict::Base,
+            ),
+            (
+                false,
+                true,
+                ValidationStatus::ImprovementObserved,
+                PairVerdict::Champion,
+            ),
+            (
+                false,
+                false,
+                ValidationStatus::Inconclusive,
+                PairVerdict::Inconclusive,
+            ),
+        ] {
+            let dir = temp();
+            let mut engine = validator(&[]);
+            engine.base_delivered = base;
+            engine.champion_delivered = champion;
+            let mut plan = plan(&engine, &dir, Recursion::Parallel, &quiet);
+            plan.validation_runs = 1;
+            let tree = changed_tree(&plan);
+            let report = validate_champion(&plan, "agg1", &tree).await.unwrap();
+            assert_eq!(report.status, status);
+            assert_eq!(report.pairs[0].verdict, Some(verdict));
+            assert_eq!(report.rollout_count, 2);
+            assert!(engine.calls.lock().unwrap().is_empty());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn validation_retries_only_a_failed_comparator_on_resume() {
+        let dir = temp();
+        let first = validator(&[PairVerdict::Champion]);
+        *first.fail_comparisons.lock().unwrap() = 1;
+        let quiet = |_: String| {};
+        let mut plan = plan(&first, &dir, Recursion::Parallel, &quiet);
+        plan.validation_runs = 1;
+        let champion = changed_tree(&plan);
+        let report = validate_champion(&plan, "agg1", &champion).await.unwrap();
+        assert_eq!(report.status, ValidationStatus::Inconclusive);
+        assert_eq!(report.pairs[0].verdict, None);
+        assert_eq!(first.rollouts.lock().unwrap().len(), 2);
+        assert_eq!(first.calls.lock().unwrap().as_slice(), ["compare-1"]);
+
+        let second = validator(&[PairVerdict::Champion]);
+        let mut plan = self::plan(&second, &dir, Recursion::Parallel, &quiet);
+        plan.validation_runs = 1;
+        let report = validate_champion(&plan, "agg1", &champion).await.unwrap();
+        assert_eq!(report.status, ValidationStatus::ImprovementObserved);
+        assert!(second.rollouts.lock().unwrap().is_empty());
+        assert_eq!(second.calls.lock().unwrap().as_slice(), ["compare-1"]);
+
+        let third = validator(&[]);
+        let mut plan = self::plan(&third, &dir, Recursion::Parallel, &quiet);
+        plan.validation_runs = 1;
+        let report = validate_champion(&plan, "agg1", &champion).await.unwrap();
+        assert_eq!(report.status, ValidationStatus::ImprovementObserved);
+        assert!(third.rollouts.lock().unwrap().is_empty());
+        assert!(third.calls.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn validation_champion_change_reuses_only_the_base_rollout() {
+        let dir = temp();
+        let first = validator(&[PairVerdict::Champion]);
+        let quiet = |_: String| {};
+        let mut plan = plan(&first, &dir, Recursion::Parallel, &quiet);
+        plan.validation_runs = 1;
+        let champion = changed_tree(&plan);
+        validate_champion(&plan, "agg1", &champion).await.unwrap();
+
+        let second = validator(&[PairVerdict::Champion]);
+        let mut plan = self::plan(&second, &dir, Recursion::Parallel, &quiet);
+        plan.validation_runs = 1;
+        let mut changed = champion.clone();
+        changed.insert("memory.md".into(), "another champion".into());
+        validate_champion(&plan, "agg1", &changed).await.unwrap();
+        assert_eq!(
+            second.rollouts.lock().unwrap().as_slice(),
+            ["validation-champion-1"]
+        );
+        assert_eq!(second.calls.lock().unwrap().as_slice(), ["compare-1"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn validation_scores_fresh_runs_without_leaking_the_rubric() {
+        let dir = temp();
+        let engine = validator(&[PairVerdict::Tie]);
+        let quiet = |_: String| {};
+        let mut plan = plan(&engine, &dir, Recursion::Parallel, &quiet);
+        plan.base
+            .insert("system.md".into(), "secret-base-tree".into());
+        plan.validation_runs = 1;
+        plan.rubric = Some("secret-rubric".into());
+        plan.reference = Some("secret-reference".into());
+        let champion = changed_tree(&plan);
+        let report = validate_champion(&plan, "agg1", &champion).await.unwrap();
+        assert_eq!(report.pairs[0].base.score, Some(0.5));
+        assert_eq!(report.pairs[0].champion.score, Some(1.0));
+        let calls = engine.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("judge-validation-"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("compare-"))
+                .count(),
+            1
+        );
+        let inputs = engine.inputs.lock().unwrap();
+        assert!(inputs
+            .iter()
+            .filter(|input| input.starts_with("judge-validation-"))
+            .all(|input| input.contains("secret-rubric") && input.contains("secret-reference")));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -2523,6 +3775,299 @@ mod tests {
         assert!(again.calls.lock().unwrap().is_empty());
         assert_eq!(resumed.chosen, outcome.chosen);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rollout_cache_reuses_only_the_same_tree_and_execution_context() {
+        let dir = temp();
+        let engine = Scripted {
+            calls: Mutex::new(vec![]),
+            rollouts: Mutex::new(vec![]),
+            reject_first: false,
+        };
+        let quiet = |_: String| {};
+        let mut plan = plan(&engine, &dir, Recursion::Parallel, &quiet);
+        let ledger = Ledger {
+            rollouts: Mutex::new(0),
+            stages: Mutex::new(0),
+            fallbacks: Mutex::new(vec![]),
+        };
+        let gate = tokio::sync::Semaphore::new(1);
+        let tree = plan.base.clone();
+
+        let first = roll(&plan, &ledger, &gate, "base1", &tree).await.unwrap();
+        assert_eq!(first.fingerprint, harness::fingerprint(&tree));
+        assert!(first.cache_key.is_some());
+        roll(&plan, &ledger, &gate, "base1", &tree).await.unwrap();
+        assert_eq!(engine.rollouts.lock().unwrap().len(), 1);
+
+        // Another rollout is independent, and changing base1 does not rerun it.
+        roll(&plan, &ledger, &gate, "inv1", &tree).await.unwrap();
+        roll(&plan, &ledger, &gate, "inv1", &tree).await.unwrap();
+        assert_eq!(engine.rollouts.lock().unwrap().len(), 2);
+        let changed = Tree::from([("system.md".to_string(), "Changed".to_string())]);
+        roll(&plan, &ledger, &gate, "base1", &changed)
+            .await
+            .unwrap();
+        roll(&plan, &ledger, &gate, "inv1", &tree).await.unwrap();
+        assert_eq!(engine.rollouts.lock().unwrap().len(), 3);
+
+        // Restoring the original tree after a different tree was saved reruns
+        // it once; subsequent identical resumes are cached again.
+        roll(&plan, &ledger, &gate, "base1", &tree).await.unwrap();
+        roll(&plan, &ledger, &gate, "base1", &tree).await.unwrap();
+        assert_eq!(engine.rollouts.lock().unwrap().len(), 4);
+
+        // A pre-metrics record deserializes, but its missing cache key never
+        // authorizes reuse even when the old tree fingerprint matches.
+        let legacy_path = dir.join("rollouts/dom1.json");
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy_path,
+            serde_json::to_vec(&json!({
+                "label":"dom1",
+                "fingerprint":harness::fingerprint(&tree),
+                "delivered":true,
+                "outcome":"Complete",
+                "answer":"legacy",
+                "changes":"",
+                "trajectory":""
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let legacy: RunView = read_json(&legacy_path).unwrap();
+        assert!(legacy.cache_key.is_none() && legacy.duration_ms.is_none());
+        assert!(legacy.workspace_fingerprint.is_none() && legacy.usage.is_none());
+        roll(&plan, &ledger, &gate, "dom1", &tree).await.unwrap();
+        assert_eq!(engine.rollouts.lock().unwrap().len(), 5);
+        let rerun: RunView = read_json(&legacy_path).unwrap();
+        assert!(rerun.cache_key.is_some());
+
+        plan.cache_namespace = "another-model".into();
+        roll(&plan, &ledger, &gate, "base1", &tree).await.unwrap();
+        assert_eq!(engine.rollouts.lock().unwrap().len(), 6);
+        plan.cache_namespace = "another-execution-policy".into();
+        roll(&plan, &ledger, &gate, "base1", &tree).await.unwrap();
+        assert_eq!(engine.rollouts.lock().unwrap().len(), 7);
+        assert!(
+            legacy_path.exists(),
+            "cache invalidation does not delete a job"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cache_namespace_covers_every_execution_context_component() {
+        let settings: Settings = serde_json::from_value(
+            json!({"provider":"executor-provider","model":"executor-model","project_id":"p","mode":"auto"}),
+        )
+        .unwrap();
+        let external = External {
+            command: "agent run".into(),
+            layout: Layout::Codex,
+        };
+        let make = |task: &str,
+                    executor: &Settings,
+                    proposer_provider: &str,
+                    proposer_model: &str,
+                    external: Option<&External>,
+                    execution: crate::ExecutionPolicy,
+                    workspace: &str,
+                    sample: Option<&str>| {
+            cache_namespace(
+                task,
+                executor,
+                proposer_provider,
+                proposer_model,
+                external,
+                execution,
+                workspace,
+                sample,
+            )
+            .unwrap()
+        };
+        let base = make(
+            "task",
+            &settings,
+            "proposer-provider",
+            "proposer-model",
+            Some(&external),
+            crate::ExecutionPolicy::files_only(),
+            "workspace-v1",
+            Some("sample-1"),
+        );
+        assert_eq!(
+            base,
+            make(
+                "task",
+                &settings,
+                "proposer-provider",
+                "proposer-model",
+                Some(&external),
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v1",
+                Some("sample-1"),
+            )
+        );
+        let mut executor_settings = settings.clone();
+        executor_settings.max_steps += 1;
+        let mut executor_model = settings.clone();
+        executor_model.model = "other-model".into();
+        let mut executor_provider = settings.clone();
+        executor_provider.provider = "other-provider".into();
+        let other_layout = External {
+            command: external.command.clone(),
+            layout: Layout::Opencode,
+        };
+        let other_command = External {
+            command: "other-agent run".into(),
+            layout: external.layout,
+        };
+        let variants = vec![
+            make(
+                "other task",
+                &settings,
+                "proposer-provider",
+                "proposer-model",
+                Some(&external),
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v1",
+                Some("sample-1"),
+            ),
+            make(
+                "task",
+                &executor_settings,
+                "proposer-provider",
+                "proposer-model",
+                Some(&external),
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v1",
+                Some("sample-1"),
+            ),
+            make(
+                "task",
+                &executor_model,
+                "proposer-provider",
+                "proposer-model",
+                Some(&external),
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v1",
+                Some("sample-1"),
+            ),
+            make(
+                "task",
+                &executor_provider,
+                "proposer-provider",
+                "proposer-model",
+                Some(&external),
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v1",
+                Some("sample-1"),
+            ),
+            make(
+                "task",
+                &settings,
+                "other-proposer",
+                "proposer-model",
+                Some(&external),
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v1",
+                Some("sample-1"),
+            ),
+            make(
+                "task",
+                &settings,
+                "proposer-provider",
+                "other-proposer-model",
+                Some(&external),
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v1",
+                Some("sample-1"),
+            ),
+            make(
+                "task",
+                &settings,
+                "proposer-provider",
+                "proposer-model",
+                Some(&other_layout),
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v1",
+                Some("sample-1"),
+            ),
+            make(
+                "task",
+                &settings,
+                "proposer-provider",
+                "proposer-model",
+                Some(&other_command),
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v1",
+                Some("sample-1"),
+            ),
+            make(
+                "task",
+                &settings,
+                "proposer-provider",
+                "proposer-model",
+                None,
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v1",
+                Some("sample-1"),
+            ),
+            make(
+                "task",
+                &settings,
+                "proposer-provider",
+                "proposer-model",
+                Some(&external),
+                crate::ExecutionPolicy::trusted_unsandboxed(),
+                "workspace-v1",
+                Some("sample-1"),
+            ),
+            make(
+                "task",
+                &settings,
+                "proposer-provider",
+                "proposer-model",
+                Some(&external),
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v2",
+                Some("sample-1"),
+            ),
+            make(
+                "task",
+                &settings,
+                "proposer-provider",
+                "proposer-model",
+                Some(&external),
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v1",
+                Some("sample-2"),
+            ),
+            make(
+                "task",
+                &settings,
+                "proposer-provider",
+                "proposer-model",
+                Some(&external),
+                crate::ExecutionPolicy::files_only(),
+                "workspace-v1",
+                None,
+            ),
+        ];
+        assert!(
+            variants.iter().all(|variant| variant != &base),
+            "a context component did not invalidate the cache: {variants:?}"
+        );
+        assert_eq!(rollout_role("base1"), "base");
+        assert_eq!(rollout_role("inv2"), "probe");
+        assert_eq!(rollout_role("agg1"), "final");
+        assert_eq!(rollout_attempt("validation-base-12"), "12");
+        assert_eq!(turn_error_class("Step limit reached (12)"), "step_limit");
+        assert_eq!(turn_error_class("Provider stopped"), "provider_error");
+        assert_eq!(turn_error_class("Tool cancelled"), "cancelled");
+        assert_eq!(turn_error_class("Invalid tool arguments"), "turn_error");
     }
 
     #[tokio::test]
@@ -2606,8 +4151,13 @@ mod tests {
             stage_notes: BTreeMap::new(),
             reflection: None,
             scores: BTreeMap::new(),
+            validation: None,
             warnings: vec![],
         };
+        let mut legacy = serde_json::to_value(outcome("base", vec![])).unwrap();
+        legacy.as_object_mut().unwrap().remove("validation");
+        let legacy: Outcome = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.validation.is_none());
         let result = |i: usize, kind: &str, fallbacks: Vec<String>| TaskResult {
             index: i,
             task: format!("t{i}"),
@@ -2615,14 +4165,21 @@ mod tests {
             revision: None,
             library_entry: None,
         };
-        assert!(stream_warnings(&[result(0, "base", vec![])]).is_empty());
-        let w = stream_warnings(&[
-            result(0, "base", vec![]),
-            result(1, "base", vec!["dom1".into()]),
-            result(2, "base", vec![]),
-            result(3, "base", vec![]),
-            result(4, "final", vec![]),
-        ]);
+        assert!(stream_warnings(&[result(0, "base", vec![])], false).is_empty());
+        assert_eq!(
+            stream_warnings(&[], true),
+            vec![LEGACY_EXTERNAL_WARNING.to_string()]
+        );
+        let w = stream_warnings(
+            &[
+                result(0, "base", vec![]),
+                result(1, "base", vec!["dom1".into()]),
+                result(2, "base", vec![]),
+                result(3, "base", vec![]),
+                result(4, "final", vec![]),
+            ],
+            false,
+        );
         assert_eq!(
             w,
             vec![
@@ -2666,6 +4223,132 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[tokio::test]
+    async fn downstream_caches_do_not_mix_models_or_rollouts() {
+        let dir = temp();
+        let engine = Scripted {
+            calls: Mutex::new(vec![]),
+            rollouts: Mutex::new(vec![]),
+            reject_first: false,
+        };
+        let quiet = |_: String| {};
+        let mut plan = plan(&engine, &dir, Recursion::Parallel, &quiet);
+        let stage = |label: &str| Stage {
+            label: label.into(),
+            dimension: "AGG".into(),
+            tree: Tree::new(),
+            notes: format!("{label} notes"),
+            fell_back: false,
+            error: None,
+            key: format!("{label}-stage-key"),
+        };
+        let run = |label: &str, cache_key: &str| RunView {
+            label: label.into(),
+            delivered: true,
+            outcome: "Complete".into(),
+            answer: "completed answer".into(),
+            cache_key: Some(cache_key.into()),
+            ..RunView::default()
+        };
+        let bases = vec![run("base1", "base1-v1"), run("base2", "base2-v1")];
+        let mut finals = vec![
+            (stage("agg1"), run("agg1", "agg1-v1")),
+            (stage("agg2"), run("agg2", "agg2-v1")),
+        ];
+        let stages = vec![finals[0].0.clone(), finals[1].0.clone()];
+        let mut candidate_runs = vec![finals[0].1.clone(), finals[1].1.clone()];
+        let chosen = select(&plan, &finals).await;
+        reflect(
+            &plan,
+            &bases,
+            &stages,
+            &candidate_runs,
+            &chosen.0,
+            &chosen.2,
+        )
+        .await
+        .unwrap();
+        score(
+            &plan,
+            "Complete the task",
+            &[&bases[0], &bases[1], &finals[1].1],
+        )
+        .await;
+        assert_eq!(engine.calls.lock().unwrap().len(), 5);
+
+        // An identical resume reuses all three downstream artifacts.
+        select(&plan, &finals).await;
+        reflect(
+            &plan,
+            &bases,
+            &stages,
+            &candidate_runs,
+            &chosen.0,
+            &chosen.2,
+        )
+        .await;
+        score(
+            &plan,
+            "Complete the task",
+            &[&bases[0], &bases[1], &finals[1].1],
+        )
+        .await;
+        assert_eq!(engine.calls.lock().unwrap().len(), 5);
+
+        // A model/workspace context change invalidates every model decision.
+        plan.cache_namespace = "another-model-or-workspace".into();
+        select(&plan, &finals).await;
+        reflect(
+            &plan,
+            &bases,
+            &stages,
+            &candidate_runs,
+            &chosen.0,
+            &chosen.2,
+        )
+        .await;
+        score(
+            &plan,
+            "Complete the task",
+            &[&bases[0], &bases[1], &finals[1].1],
+        )
+        .await;
+        assert_eq!(engine.calls.lock().unwrap().len(), 10);
+
+        // A new tree under the same execution context also cannot reuse a
+        // selection, reflection or score produced for the previous rollout.
+        finals[1].1.cache_key = Some("agg2-v2".into());
+        candidate_runs[1].cache_key = Some("agg2-v2".into());
+        select(&plan, &finals).await;
+        reflect(
+            &plan,
+            &bases,
+            &stages,
+            &candidate_runs,
+            &chosen.0,
+            &chosen.2,
+        )
+        .await;
+        score(
+            &plan,
+            "Complete the task",
+            &[&bases[0], &bases[1], &finals[1].1],
+        )
+        .await;
+        let calls = engine.calls.lock().unwrap();
+        assert_eq!(calls.iter().filter(|call| *call == "select").count(), 3);
+        assert_eq!(calls.iter().filter(|call| *call == "reflect").count(), 3);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("judge-"))
+                .count(),
+            9
+        );
+        drop(calls);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn hook_model(request: &Value) -> Value {
         let results = results_of(request);
         match results.len() {
@@ -2706,7 +4389,7 @@ mod tests {
             harness: Some(tree),
             system: None,
             nested: false,
-            restricted: false,
+            policy: crate::ExecutionPolicy::trusted_unsandboxed(),
         }));
         session
             .messages
@@ -2846,6 +4529,8 @@ mod tests {
     fn engine(f: &Fixture, task: &str) -> StudioEngine {
         let mut agent = auto_settings();
         agent.max_steps = 40;
+        let scratch = f.root.join("scratch");
+        let workspace = WorkspaceSnapshot::capture(&f.project, &scratch.join("snapshot")).unwrap();
         StudioEngine {
             app: f.app.clone(),
             executor: auto_settings(),
@@ -2853,9 +4538,12 @@ mod tests {
             proposer_agent: agent,
             proposer_provider: f.provider.clone(),
             project: f.project.clone(),
+            workspace,
             task: task.into(),
-            scratch: f.root.join("scratch"),
+            scratch,
             external: None,
+            execution: crate::ExecutionPolicy::files_only(),
+            rollout_timeout: std::time::Duration::from_secs(15 * 60),
         }
     }
 
@@ -2902,6 +4590,7 @@ mod tests {
         let f = fixture(probe_model).await;
         let base = harness::autotrigger(&Tree::from([
             ("skills/note/SKILL.md".to_string(), "---\nname: note\ndescription: the task asks for a note file\n---\nWrite out.txt with the note.\n".to_string()),
+            ("scripts/mark.sh".to_string(), "# Must not run in files-only mode\nprintf pwned > policy-marker.txt\n".to_string()),
             ("hooks.json".to_string(), r#"{"post_tool":[{"matcher":"write_file","inject":"Reopen what you wrote."}],"stop":[{"inject":"Confirm out.txt exists."}]}"#.to_string()),
         ]));
         let engine = engine(&f, "Leave a note");
@@ -2913,10 +4602,13 @@ mod tests {
             mode: Recursion::Parallel,
             task: "Leave a note".into(),
             base: base.clone(),
+            cache_namespace: "studio-fixture-cache-v2".into(),
+            workspace_fingerprint: engine.workspace.fingerprint.clone(),
             library: String::new(),
             width: 2,
             agentic: false,
             rubric: Some("The note exists.".into()),
+            validation_runs: 0,
             reference: None,
             progress: &quiet,
         })
@@ -2936,6 +4628,14 @@ mod tests {
         let base1: RunView = read_json(&f.root.join("job/rollouts/base1.json")).unwrap();
         assert!(base1.delivered, "{base1:?}");
         assert_eq!(base1.answer, "checked: out.txt is complete");
+        let policy_warning = "Command scripts, command hooks and transforms were disabled by the files-only execution policy.";
+        assert_eq!(base1.warnings, vec![policy_warning.to_string()]);
+        assert!(render_run(&base1, 2_000).contains(policy_warning));
+        assert!(outcome
+            .runs
+            .iter()
+            .find(|run| run.label == "base1")
+            .is_some_and(|run| run.warnings == base1.warnings));
         assert!(
             base1
                 .changes
@@ -2961,6 +4661,116 @@ mod tests {
             "probe sessions are not saved"
         );
         assert!(!f.root.join("scratch/base1").exists());
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    #[test]
+    fn workspace_snapshots_are_byte_reproducible() {
+        let root = temp();
+        let original = root.join("original");
+        std::fs::create_dir_all(original.join("src")).unwrap();
+        std::fs::write(original.join("src/a.txt"), "one\n").unwrap();
+        std::fs::write(original.join("z.txt"), "last\n").unwrap();
+        let project = context::Project {
+            id: "snapshot".into(),
+            name: "snapshot".into(),
+            roots: vec![context::Root {
+                alias: "workspace".into(),
+                path: original.canonicalize().unwrap(),
+                writable: true,
+                repository: false,
+            }],
+            instructions: String::new(),
+        };
+        let first = WorkspaceSnapshot::capture(&project, &root.join("one")).unwrap();
+        let second = WorkspaceSnapshot::capture(&project, &root.join("two")).unwrap();
+        assert_eq!(first.fingerprint, second.fingerprint);
+        assert_eq!(first.roots[0].alias, "workspace");
+        assert!(first.roots[0].writable);
+        assert_eq!(
+            std::fs::read(first.roots[0].snapshot.join("src/a.txt")).unwrap(),
+            std::fs::read(second.roots[0].snapshot.join("src/a.txt")).unwrap()
+        );
+
+        std::fs::write(original.join("src/a.txt"), "two\n").unwrap();
+        std::fs::write(original.join("new.txt"), "new\n").unwrap();
+        let changed = WorkspaceSnapshot::capture(&project, &root.join("three")).unwrap();
+        assert_ne!(first.fingerprint, changed.fingerprint);
+        assert_eq!(
+            std::fs::read_to_string(first.roots[0].snapshot.join("src/a.txt")).unwrap(),
+            "one\n"
+        );
+        assert!(!first.roots[0].snapshot.join("new.txt").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rollouts_share_a_frozen_snapshot_and_diff_against_it() {
+        let f = fixture(probe_model).await;
+        let tree = harness::autotrigger(&Tree::from([
+            ("skills/note/SKILL.md".to_string(), "---\nname: note\ndescription: the task asks for a note file\n---\nWrite out.txt with the note.\n".to_string()),
+            ("hooks.json".to_string(), r#"{"post_tool":[{"matcher":"write_file","inject":"Reopen what you wrote."}],"stop":[{"inject":"Confirm out.txt exists."}]}"#.to_string()),
+        ]));
+        let engine = engine(&f, "Leave a note");
+        let base = engine.rollout("base1", &tree).await.unwrap();
+        std::fs::write(f.workspace.join("readme.txt"), "changed later").unwrap();
+        std::fs::write(f.workspace.join("original-only.txt"), "not in snapshot").unwrap();
+        let champion = engine.rollout("agg1", &tree).await.unwrap();
+        f.server.abort();
+
+        assert_eq!(base.workspace_fingerprint, champion.workspace_fingerprint);
+        assert_eq!(
+            base.workspace_fingerprint.as_deref(),
+            Some(engine.workspace.fingerprint.as_str())
+        );
+        assert!(base.trace_id.is_some() && base.trace_id != champion.trace_id);
+        assert!(base.duration_ms.is_some() && base.steps.is_some_and(|steps| steps > 0));
+        assert_eq!(base.error_class.as_deref(), Some("complete"));
+        assert_eq!(base.changes, champion.changes);
+        assert!(base.changes.contains("*** workspace/out.txt (added)"));
+        assert!(!base.changes.contains("readme.txt"));
+        assert!(!base.changes.contains("original-only.txt"));
+        assert_eq!(
+            std::fs::read_to_string(f.workspace.join("readme.txt")).unwrap(),
+            "changed later"
+        );
+        assert!(!f.workspace.join("out.txt").exists());
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    fn timeout_model(_request: &Value) -> Value {
+        static REQUESTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        if REQUESTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+            // The first answer is already in the session; hold up the stop-hook
+            // verification so the timeout must preserve that partial answer.
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
+        say("partial answer")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timeout_preserves_partial_answer_and_observable_metrics() {
+        let f = fixture(timeout_model).await;
+        let mut engine = engine(&f, "Answer, then verify");
+        engine.rollout_timeout = std::time::Duration::from_secs(1);
+        let tree = Tree::from([(
+            "hooks.json".to_string(),
+            r#"{"stop":[{"inject":"Verify the answer."}]}"#.to_string(),
+        )]);
+        let run = engine.rollout("base1", &tree).await.unwrap();
+        f.server.abort();
+
+        assert_eq!(run.outcome, "timeout");
+        assert_eq!(run.error_class.as_deref(), Some("timeout"));
+        assert!(!run.delivered);
+        assert_eq!(run.answer, "partial answer");
+        assert!(run.trace_id.is_some());
+        assert!(run.duration_ms.is_some_and(|duration| duration >= 100));
+        assert!(run.steps.is_some_and(|steps| steps > 0));
+        assert_eq!(
+            run.workspace_fingerprint.as_deref(),
+            Some(engine.workspace.fingerprint.as_str())
+        );
         std::fs::remove_dir_all(&f.root).unwrap();
     }
 
@@ -3031,8 +4841,10 @@ mod tests {
             !f.root
                 .join("scratch")
                 .read_dir()
-                .is_ok_and(|mut d| d.next().is_some()),
-            "proposer workspaces are removed"
+                .unwrap()
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().starts_with("propose-")),
+            "proposer workspaces are removed; the task snapshot remains"
         );
         std::fs::remove_dir_all(&f.root).unwrap();
     }
@@ -3071,6 +4883,7 @@ mod tests {
     async fn agentic_selector_checks_candidates_against_the_source() {
         let f = fixture(selector_model).await;
         let engine = engine(&f, "What does the readme say?");
+        std::fs::write(f.workspace.join("readme.txt"), "changed after snapshot").unwrap();
         let files = BTreeMap::from([
             (
                 "task.md".to_string(),
@@ -3098,7 +4911,8 @@ mod tests {
         assert_eq!(json_object(&answer).unwrap()["choice"], "B");
         assert_eq!(
             std::fs::read_to_string(f.workspace.join("readme.txt")).unwrap(),
-            "hello"
+            "changed after snapshot",
+            "the selector read the snapshot, while the original stayed untouched"
         );
         std::fs::remove_dir_all(&f.root).unwrap();
     }
@@ -3143,7 +4957,7 @@ mod tests {
             harness: Some(tree),
             system: None,
             nested: false,
-            restricted: false,
+            policy: crate::ExecutionPolicy::trusted_unsandboxed(),
         }));
         session
             .messages
@@ -3217,6 +5031,10 @@ mod tests {
             command: "cat > task.txt; test -f .agents/skills/note/SKILL.md && grep -q 'Repo rules' AGENTS.md && grep -q 'Be exact' AGENTS.md && echo \"skill ok: $ALLPAKA_TASK\"".into(),
             layout: Layout::Codex,
         });
+        let blocked = engine.rollout("blocked", &Tree::new()).await.unwrap_err();
+        assert!(blocked.to_string().contains("trusted_unsandboxed"));
+        assert!(!f.workspace.join("task.txt").exists());
+        engine.execution = crate::ExecutionPolicy::trusted_unsandboxed();
         let run = engine
             .rollout("base1", &harness_with_everything())
             .await
@@ -3231,6 +5049,10 @@ mod tests {
             "materialized files are not changes"
         );
         assert!(run.trajectory.starts_with("[EXTERNAL] cat > task.txt"));
+        assert!(run.trace_id.is_none() && run.steps.is_none());
+        assert!(run.duration_ms.is_some());
+        assert_eq!(run.usage.as_ref().unwrap()["available"], false);
+        assert_eq!(run.error_class.as_deref(), Some("complete"));
         assert!(!f.workspace.join("task.txt").exists());
         assert_eq!(
             std::fs::read_to_string(f.workspace.join("AGENTS.md")).unwrap(),
@@ -3242,6 +5064,12 @@ mod tests {
             (failed.outcome.as_str(), failed.delivered),
             ("exit Some(3)", false)
         );
+        assert_eq!(failed.error_class.as_deref(), Some("external_exit"));
+        assert_eq!(failed.answer, "partial");
+        engine.external.as_mut().unwrap().command = ":".into();
+        let empty = engine.rollout("base3", &Tree::new()).await.unwrap();
+        assert_eq!(empty.error_class.as_deref(), Some("empty_answer"));
+        assert!(!empty.delivered);
         std::fs::remove_dir_all(&f.root).unwrap();
     }
 
@@ -3290,7 +5118,7 @@ mod tests {
             harness: Some(tree),
             system: None,
             nested: false,
-            restricted: false,
+            policy: crate::ExecutionPolicy::trusted_unsandboxed(),
         }));
         session
             .messages
@@ -3317,6 +5145,116 @@ mod tests {
             (Some("reader"), Some("Complete"), Some("readme says hello"))
         );
         drop(state);
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    fn files_only_model(request: &Value) -> Value {
+        let (system, tools, results) = (system_of(request), tools_of(request), results_of(request));
+        let command = json!({"command":"printf pwned > policy-marker.txt"});
+        if system.contains("You are the `reader` subagent") {
+            assert!(tools.iter().all(|name| ![
+                "run_command",
+                "run_script",
+                "background",
+                "delegate"
+            ]
+            .contains(&name.as_str())));
+            return if results.is_empty() {
+                call("run_command", command)
+            } else {
+                assert!(results[0].contains("error"), "{}", results[0]);
+                say("child could not execute")
+            };
+        }
+        assert!(tools.contains(&"delegate".to_string()));
+        assert!(tools
+            .iter()
+            .all(|name| !["run_command", "run_script", "background"].contains(&name.as_str())));
+        match results.len() {
+            0 => call("run_command", command),
+            1 => {
+                assert!(results[0].contains("error"), "{}", results[0]);
+                call(
+                    "background",
+                    json!({"action":"start","command":"printf pwned > policy-marker.txt"}),
+                )
+            }
+            2 => {
+                assert!(
+                    results[1].contains("Background commands require"),
+                    "{}",
+                    results[1]
+                );
+                call("run_script", json!({"path":"scripts/mark.sh","args":[]}))
+            }
+            3 => {
+                assert!(results[2].contains("error"), "{}", results[2]);
+                call(
+                    "delegate",
+                    json!({"agent":"reader","task":"Try the command and report."}),
+                )
+            }
+            4 => {
+                assert!(
+                    results[3].contains("child could not execute"),
+                    "{}",
+                    results[3]
+                );
+                say("policy enforced")
+            }
+            _ => panic!("unexpected files-only request"),
+        }
+    }
+
+    /// Hiding schemas is not a security boundary: direct calls and delegated
+    /// turns must enforce the same files-only policy with commands unlocked.
+    #[tokio::test]
+    async fn files_only_blocks_direct_commands_background_scripts_and_subagent_bypass() {
+        let f = fixture(files_only_model).await;
+        let cmd = crate::plugins::defaults()
+            .into_iter()
+            .find(|p| p.unlocks_tool.as_deref() == Some("run_command"))
+            .unwrap();
+        f.app.plugins.write().unwrap().insert(
+            cmd.id.clone(),
+            crate::plugins::PluginState {
+                config: cmd,
+                client: None,
+                error: None,
+            },
+        );
+        let tree = Tree::from([
+            (
+                "scripts/mark.sh".to_string(),
+                "printf pwned > policy-marker.txt\n".to_string(),
+            ),
+            (
+                "subagents/reader/AGENT.md".to_string(),
+                "---\ndescription: tests inherited restrictions\nwrites: false\n---\nDo what the parent asks.\n".to_string(),
+            ),
+        ]);
+        let mut session = Session::new(crate::evaluation::new_id(), auto_settings());
+        session.ephemeral = Some(Arc::new(crate::Ephemeral {
+            project: f.project.clone(),
+            harness: Some(tree),
+            system: None,
+            nested: false,
+            policy: crate::ExecutionPolicy::files_only(),
+        }));
+        session
+            .messages
+            .push(Message::text("user", "Try every execution path"));
+        let shared = Arc::new(Mutex::new(session));
+        let outcome = crate::turn(f.app.clone(), shared.clone(), None)
+            .await
+            .unwrap();
+        f.server.abort();
+        assert!(matches!(outcome, crate::TurnOutcome::Complete));
+        assert_eq!(
+            shared.lock().unwrap().messages.last().unwrap().content,
+            "policy enforced"
+        );
+        assert!(!f.workspace.join("policy-marker.txt").exists());
         std::fs::remove_dir_all(&f.root).unwrap();
     }
 
@@ -3363,7 +5301,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_changes_are_diffed_against_the_real_root() {
+    fn probe_changes_are_diffed_against_the_snapshot() {
         let dir = temp();
         let (a, b) = (dir.join("a"), dir.join("b"));
         std::fs::create_dir_all(a.join("src")).unwrap();

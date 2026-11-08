@@ -3351,10 +3351,46 @@ function harnessResultView(id,r,diff,active){
   box.append(node('p',`Выбран ${o.chosen} (${o.chosen_kind==='base'?'текущий харнесс':'композиция'}) · прогонов ${o.rollouts} · этапов ${o.stages}`+(o.similarity==null?'':` · сходство финалов ${o.similarity.toFixed(2)}`)));
   if(o.selection_why)box.append(node('p',o.selection_why));
   for(const w of o.warnings||[])box.append(node('p','⚠ '+w,'error'));
-  box.append(node('p',o.runs.map(run=>{const sc=o.scores?.[run.label];return `${run.label}: ${run.delivered?'результат есть':'без результата'}`+(sc==null?'':` · оценка ${sc.toFixed(2)}`);}).join(' · '),'muted'));
+  box.append(node('p',o.runs.map(run=>{
+    const sc=o.scores?.[run.label];
+    const duration=Number.isSafeInteger(run.duration_ms)?` · ${run.duration_ms} мс`:'';
+    const steps=Number.isSafeInteger(run.steps)?` · шагов ${run.steps}`:'';
+    const error=run.error_class?` · ${run.error_class}`:'';
+    return `${run.label}: ${run.delivered?'результат есть':'без результата'}${duration}${steps}${error}`+(sc==null?'':` · оценка ${sc.toFixed(2)}`);
+  }).join(' · '),'muted'));
+  for(const run of o.runs)for(const w of run.warnings||[])box.append(node('p',`⚠ ${run.label}: ${w}`,'error'));
+  const v=o.validation;
+  if(v){
+    const statuses={not_run:'Независимая проверка отключена',unchanged:'Дерево не изменилось',improvement_observed:'Наблюдается улучшение',no_observed_difference:'Разницы не обнаружено',regression_observed:'Наблюдается регрессия',inconclusive:'Результат неопределённый'};
+    box.append(node('h5','Независимая проверка Base / Champion'));
+    box.append(node('p',`${statuses[v.status]||v.status} · свежих прогонов ${v.rollout_count} · побед ${v.wins} · поражений ${v.losses} · ничьих ${v.ties}`));
+    if(v.reason)box.append(node('p',v.reason,'muted'));
+    for(const w of v.warnings||[])box.append(node('p','⚠ '+w,'error'));
+    const verdicts={base:'Base',champion:'Champion',tie:'ничья',inconclusive:'неопределённо'};
+    const runText=(title,run)=>{
+      const duration=Number.isSafeInteger(run.duration_ms)?` · ${run.duration_ms} мс`:'';
+      const steps=Number.isSafeInteger(run.steps)?` · шагов ${run.steps}`:'';
+      const trace=run.trace_id?` · trace ${run.trace_id}`:'';
+      const error=run.error_class?` · ${run.error_class}`:'';
+      const score=Number.isFinite(run.score)?` · оценка ${run.score.toFixed(2)}`:'';
+      return `${title} (${run.label}): ${run.delivered?'результат есть':'без результата'} · ${run.outcome}${duration}${steps}${error}${score}${trace}`;
+    };
+    for(const pair of v.pairs||[]){
+      const row=node('details');
+      row.append(node('summary',`Пара ${pair.index}: ${pair.verdict?verdicts[pair.verdict]:'comparator не дал вердикта'}`));
+      row.append(node('p',runText('Base',pair.base)),node('p',runText('Champion',pair.champion)));
+      if(pair.why)row.append(node('pre',pair.why));
+      for(const run of [pair.base,pair.champion])for(const w of run.warnings||[])row.append(node('p',`⚠ ${run.label}: ${w}`,'error'));
+      box.append(row);
+    }
+  }
   const notes=node('details');notes.append(node('summary','Заметки этапов'),node('pre',Object.entries(o.stage_notes).map(([k,v])=>`${k}: ${v}`).join('\n\n')));box.append(notes);
   if(diff){const d=node('details');d.append(node('summary','Изменения харнесса'),node('pre',diff.text||'Без изменений'));box.append(d);}
-  if(r.revision){const b=node('button',active===r.revision?'Принят':'Принять результат');b.type='button';b.disabled=active===r.revision;b.onclick=async()=>{try{await api(`harness/jobs/${id}/adopt`,{task:r.index});await harnessLoad();await harnessShowJob(id);}catch(e){notify(e.message);}};box.append(b);}
+  if(r.revision){
+    const regression=v?.status==='regression_observed';
+    const b=node('button',active===r.revision?'Принят':regression?'Принять несмотря на регрессию':'Принять результат');b.type='button';b.disabled=active===r.revision;
+    b.onclick=async()=>{const body={task:r.index};if(regression){if(!confirm('Свежая проверка наблюдает регрессию. Принять этот результат несмотря на это?'))return;body.override_regression=true;}try{await api(`harness/jobs/${id}/adopt`,body);await harnessLoad();await harnessShowJob(id);}catch(e){notify(e.message);}};box.append(b);
+  }
   return box;
 }
 async function harnessShowJob(id){
@@ -3388,7 +3424,7 @@ $('harness-save').onclick=async()=>{try{const value=await api('harness',{project
 $('harness-import').onclick=async()=>{try{await api('harness/import-skill',{project_id:harnessProject,text:$('harness-import-text').value,activate:true});$('harness-import-text').value='';await harnessLoad();notify('Навык импортирован');}catch(e){notify(e.message);}};
 $('harness-refine').onclick=async()=>{
   if(!active)return notify('Откройте разговор с задачей');
-  const body={session_id:active,k:Number($('harness-k').value)||1,mode:$('harness-mode').value,agentic:$('harness-agentic').checked};const model=$('harness-model').value.trim();if(model)body.model=model;
+  const body={session_id:active,k:Number($('harness-k').value)||1,mode:$('harness-mode').value,agentic:$('harness-agentic').checked,execution:$('harness-execution').value,validation:{runs:Number($('harness-validation-runs').value)}};const model=$('harness-model').value.trim();if(model)body.model=model;
   const rubric=$('harness-rubric').value.trim();if(rubric)body.rubric=rubric;
   const tasks=$('harness-tasks').value.split(/^\s*---\s*$/m).map(t=>t.trim()).filter(Boolean);if(tasks.length)body.tasks=tasks;
   const dataset=$('harness-dataset').value.trim();if(dataset)body.dataset={id:dataset};

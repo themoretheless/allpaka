@@ -25,6 +25,7 @@ use std::{
 
 const SKILL: &str = "---\nname: note\ndescription: the task asks for a note file\n---\nWrite workspace/out.txt with the note, then reread it.\n";
 const MEMORY: &str = "In this workspace notes go to workspace/out.txt.";
+const REGRESSION_MEMORY: &str = "In this workspace notes go to workspace/elsewhere.txt.";
 
 /// What the mock saw. Handlers cannot fail the test themselves, so broken
 /// expectations are collected and asserted at the end.
@@ -33,6 +34,7 @@ struct Seen {
     systems: Vec<String>,
     external: Vec<String>,
     violations: Vec<String>,
+    regression: bool,
 }
 type Shared = Arc<Mutex<Seen>>;
 
@@ -82,6 +84,7 @@ fn studio_reply(seen: &mut Seen, body: &Value) -> Value {
     let n = results.len();
     let proposer =
         system.contains("YOUR DIMENSION") || system.contains("composing THE final harness");
+    let proposed_memory = if seen.regression { REGRESSION_MEMORY } else { MEMORY };
     if proposer && !tools.is_empty() {
         expect(
             !tools
@@ -93,7 +96,7 @@ fn studio_reply(seen: &mut Seen, body: &Value) -> Value {
             if n == 0 {
                 call(
                     "write_file",
-                    json!({"path":"harness/memory.md","content":MEMORY}),
+                    json!({"path":"harness/memory.md","content":proposed_memory}),
                     n,
                 )
             } else {
@@ -114,7 +117,7 @@ fn studio_reply(seen: &mut Seen, body: &Value) -> Value {
             );
             call(
                 "write_file",
-                json!({"path":"harness/memory.md","content":MEMORY}),
+                json!({"path":"harness/memory.md","content":proposed_memory}),
                 n,
             )
         } else {
@@ -123,7 +126,7 @@ fn studio_reply(seen: &mut Seen, body: &Value) -> Value {
     } else if proposer {
         if system.contains("YOUR DIMENSION: INV") {
             say(
-                &json!({"files":{"memory.md":MEMORY},"notes":"base1 searched for the target file"})
+                &json!({"files":{"memory.md":proposed_memory},"notes":"base1 searched for the target file"})
                     .to_string(),
             )
         } else if system.contains("YOUR DIMENSION: DOM") {
@@ -139,7 +142,31 @@ fn studio_reply(seen: &mut Seen, body: &Value) -> Value {
             )
         }
     } else if tools.is_empty() {
-        if system.contains("complete record") {
+        if system.contains("comparing two anonymous answers") {
+            expect(
+                !last.contains(MEMORY)
+                    && !last.contains(REGRESSION_MEMORY)
+                    && !last.contains("The note file exists.")
+                    && !last.contains("a note file exists")
+                    && !last.contains("validation-base")
+                    && !last.contains("validation-champion"),
+                "the comparator is blind to harnesses, references and rollout labels",
+            );
+            let a = last
+                .split("# CANDIDATE A")
+                .nth(1)
+                .and_then(|text| text.split("# CANDIDATE B").next())
+                .unwrap_or("");
+            let b = last.split("# CANDIDATE B").nth(1).unwrap_or("");
+            let a_complete = a.contains("complete note");
+            let b_complete = b.contains("complete note");
+            let winner = match (a_complete, b_complete) {
+                (true, false) => "A",
+                (false, true) => "B",
+                _ => "tie",
+            };
+            say(&json!({"winner":winner,"why":"the complete note is usable"}).to_string())
+        } else if system.contains("complete record") {
             say(&json!({"edits":[{"component":"memory.md","candidates":"inv1","change":"names the note path","observed":"agg1 wrote directly","verdict":"confounded"}],
                         "experience":{"cue":"a task writes a note file","lesson":"state the target path in memory.md","evidence":"inv1 vs base1","confidence":"low: one rollout"}}).to_string())
         } else if system.starts_with("Evaluate the supplied answer") {
@@ -177,7 +204,11 @@ fn studio_reply(seen: &mut Seen, body: &Value) -> Value {
             results[1].contains("[harness hook] Reopen what you wrote."),
             "the post_tool hook note follows write_file",
         );
-        say("wrote the note")
+        if system.contains(&format!("# Long-term memory\n{MEMORY}")) {
+            say("complete note")
+        } else {
+            say("wrote the note")
+        }
     }
 }
 
@@ -474,6 +505,8 @@ async fn harness_end_to_end() {
             Duration::from_secs(60),
         )
         .await;
+    assert_eq!(detail["job"]["request"]["execution"], "files_only");
+    assert_eq!(detail["job"]["request"]["validation"]["runs"], 1);
     let result = &detail["job"]["results"][0];
     let outcome = &result["outcome"];
     assert_eq!(
@@ -484,12 +517,26 @@ async fn harness_end_to_end() {
         ),
         (Some(4), Some(3), Some("agg1"))
     );
+    assert_eq!(outcome["runs"].as_array().unwrap().len(), 4);
+    assert_eq!(outcome["validation"]["status"], "improvement_observed");
+    assert_eq!(outcome["validation"]["requested_runs"], 1);
+    assert_eq!(outcome["validation"]["rollout_count"], 2);
+    assert_eq!(outcome["validation"]["wins"], 1);
+    assert_eq!(outcome["validation"]["losses"], 0);
+    assert_eq!(outcome["validation"]["pairs"].as_array().unwrap().len(), 1);
     assert!(
-        outcome["runs"]
-            .as_array()
+        outcome["validation"]["reason"]
+            .as_str()
             .unwrap()
-            .iter()
-            .all(|r| r["delivered"] == true),
+            .contains("observed, not proven")
+    );
+    assert!(
+        outcome["runs"].as_array().unwrap().iter().all(|r| {
+            r["delivered"] == true
+                && r["duration_ms"].is_number()
+                && r["steps"].is_number()
+                && r["error_class"] == "complete"
+        }),
         "{}",
         outcome["runs"]
     );
@@ -513,12 +560,98 @@ async fn harness_end_to_end() {
         "probes run the candidate harness"
     );
     let job_id = detail["job"]["id"].as_str().unwrap();
+    let rollouts = data
+        .join("harness/jobs")
+        .join(job_id)
+        .join("tasks/0/rollouts");
+    let base_run: Value =
+        serde_json::from_slice(&std::fs::read(rollouts.join("base1.json")).unwrap()).unwrap();
+    let final_run: Value =
+        serde_json::from_slice(&std::fs::read(rollouts.join("agg1.json")).unwrap()).unwrap();
+    assert_eq!(base_run["cache_key"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        base_run["workspace_fingerprint"].as_str().unwrap().len(),
+        64
+    );
+    assert!(!base_run["trace_id"].as_str().unwrap().is_empty());
+    assert!(base_run["duration_ms"].is_number() && base_run["steps"].is_number());
+    assert_eq!(
+        base_run["workspace_fingerprint"],
+        final_run["workspace_fingerprint"]
+    );
+    assert_ne!(base_run["cache_key"], final_run["cache_key"]);
+    let validation_base: Value = serde_json::from_slice(
+        &std::fs::read(rollouts.join("validation-base-1.json")).unwrap(),
+    )
+    .unwrap();
+    let validation_champion: Value = serde_json::from_slice(
+        &std::fs::read(rollouts.join("validation-champion-1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(validation_base["fingerprint"], base_run["fingerprint"]);
+    assert_ne!(validation_base["cache_key"], base_run["cache_key"]);
+    assert_ne!(validation_champion["cache_key"], final_run["cache_key"]);
+    let task_dir = rollouts.parent().unwrap();
+    assert!(task_dir.join("validation.json").exists());
+    assert!(task_dir.join("comparisons/1.json").exists());
+    assert!(
+        !std::env::temp_dir()
+            .join("allpaka-harness")
+            .join(job_id)
+            .join("0/snapshot")
+            .exists(),
+        "the task snapshot is removed after its run"
+    );
     studio
         .post(&format!("harness/jobs/{job_id}/adopt"), json!({}))
         .await;
     let adopted = studio.get(&harness_url).await;
     assert_eq!(adopted["active"], result["revision"]);
     assert_eq!(adopted["current"]["tree"]["memory.md"], MEMORY);
+
+    // A fresh comparison can observe a regression even though primary Select
+    // chose the only delivering final. Adoption is blocked unless explicit.
+    seen.lock().unwrap().regression = true;
+    let regression = studio
+        .job(
+            json!({"session_id":session,"k":1,"agentic":false}),
+            Duration::from_secs(60),
+        )
+        .await;
+    let regression_result = &regression["job"]["results"][0];
+    let regression_outcome = &regression_result["outcome"];
+    assert_eq!(regression_outcome["rollouts"], 4);
+    assert_eq!(regression_outcome["validation"]["rollout_count"], 2);
+    assert_eq!(regression_outcome["validation"]["status"], "regression_observed");
+    assert_eq!(regression_outcome["validation"]["losses"], 1);
+    assert_eq!(regression["active"], adopted["active"]);
+    let regression_id = regression["job"]["id"].as_str().unwrap();
+    let (status, message) = studio
+        .send(&format!("harness/jobs/{regression_id}/adopt"), Some(json!({})))
+        .await;
+    assert_eq!(status, 409, "{message}");
+    assert!(message["error"]
+        .as_str()
+        .unwrap()
+        .contains("override_regression=true"));
+    assert_eq!(studio.get(&harness_url).await["active"], adopted["active"]);
+    studio
+        .post(
+            &format!("harness/jobs/{regression_id}/adopt"),
+            json!({"override_regression":true}),
+        )
+        .await;
+    assert_eq!(
+        studio.get(&harness_url).await["active"],
+        regression_result["revision"]
+    );
+    studio
+        .post(
+            "harness/activate",
+            json!({"project_id":project,"revision":adopted["active"].clone()}),
+        )
+        .await;
+    seen.lock().unwrap().regression = false;
 
     // Agentic proposers over a stream of two tasks, with a report-only rubric.
     let detail = studio
@@ -544,6 +677,8 @@ async fn harness_end_to_end() {
             "{o}"
         );
         assert_eq!(o["fallbacks"], json!([]));
+        assert_eq!(o["validation"]["status"], "unchanged");
+        assert_eq!(o["validation"]["rollout_count"], 0);
         assert_eq!(o["scores"], json!({"base1":0.75,"agg1":0.75}));
         assert!(
             r["revision"].is_null(),
@@ -568,6 +703,7 @@ async fn harness_end_to_end() {
         .await;
     assert_eq!(detail["job"]["tasks"], json!(["Leave a note"]));
     assert_eq!(detail["job"]["references"], json!(["a note file exists"]));
+    assert_eq!(detail["job"]["sample_ids"], json!(["n1"]));
     assert_eq!(
         detail["job"]["results"][0]["outcome"]["scores"],
         json!({"base1":1.0,"agg1":1.0})
@@ -584,7 +720,7 @@ async fn harness_end_to_end() {
 
     // An external agent CLI executes the rollouts on the materialized harness.
     let detail = studio
-        .job(json!({"session_id":session,"agentic":false,"external":{"command":"cat > task.txt; test -f .agents/skills/note/SKILL.md && echo external-ok","layout":"codex"}}), Duration::from_secs(60))
+        .job(json!({"session_id":session,"agentic":false,"execution":"trusted_unsandboxed","external":{"command":"cat > task.txt; test -f .agents/skills/note/SKILL.md && echo external-ok","layout":"codex"}}), Duration::from_secs(60))
         .await;
     let runs = &detail["job"]["results"][0]["outcome"]["runs"];
     assert!(
@@ -596,8 +732,42 @@ async fn harness_end_to_end() {
     );
     assert!(!workspace.join("task.txt").exists());
 
+    // A pre-policy external job remains resumable, but records the trusted
+    // compatibility decision instead of silently treating it as files-only.
+    let legacy_id = detail["job"]["id"].as_str().unwrap().to_string();
+    let legacy_path = data.join("harness/jobs").join(&legacy_id).join("job.json");
+    let mut legacy: Value = serde_json::from_slice(&std::fs::read(&legacy_path).unwrap()).unwrap();
+    legacy["status"] = json!("interrupted");
+    legacy["request"]["execution"] = Value::Null;
+    legacy["warnings"] = json!([]);
+    std::fs::write(&legacy_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    studio
+        .post(&format!("harness/jobs/{legacy_id}/resume"), json!({}))
+        .await;
+    let legacy = studio
+        .until(
+            &format!("harness/jobs/{legacy_id}"),
+            |d| d["job"]["status"] == "completed",
+            Duration::from_secs(10),
+        )
+        .await;
+    assert_eq!(legacy["job"]["request"]["execution"], "trusted_unsandboxed");
+    assert!(legacy["job"]["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w
+            .as_str()
+            .unwrap_or("")
+            .contains("Legacy external executor")));
+    assert!(legacy["job"]["events"].as_array().unwrap().iter().any(|e| e
+        .as_str()
+        .unwrap_or("")
+        .contains("Legacy external executor")));
+
     // Optional: the real Codex and OpenCode CLIs, pointed at the mock.
-    let mut expected_library = 5;
+    let mut expected_library = 6;
     let mut clis = vec![];
     if let Ok(codex) = std::env::var("ALLPAKA_CODEX_BIN") {
         let home = root.join("codex-home");
@@ -615,7 +785,7 @@ async fn harness_end_to_end() {
     for (layout, command) in clis {
         seen.lock().unwrap().external.clear();
         let detail = studio
-            .job(json!({"session_id":session,"agentic":false,"external":{"command":command,"layout":layout}}), Duration::from_secs(300))
+            .job(json!({"session_id":session,"agentic":false,"execution":"trusted_unsandboxed","external":{"command":command,"layout":layout}}), Duration::from_secs(300))
             .await;
         let runs = &detail["job"]["results"][0]["outcome"]["runs"];
         assert!(
@@ -666,6 +836,27 @@ async fn harness_end_to_end() {
             "harness/jobs",
             json!({"session_id":session,"k":9}),
             "k must be between 1 and 4",
+        )
+        .await;
+    studio
+        .reject(
+            "harness/jobs",
+            json!({"session_id":session,"validation":{"runs":5}}),
+            "validation.runs must be between 0 and 4",
+        )
+        .await;
+    studio
+        .reject(
+            "harness/jobs",
+            json!({"session_id":session,"external":{"command":"echo unsafe","layout":"codex"}}),
+            "execution=trusted_unsandboxed",
+        )
+        .await;
+    studio
+        .reject(
+            "harness/jobs",
+            json!({"session_id":session,"execution":"files_only","external":{"command":"echo unsafe","layout":"codex"}}),
+            "execution=trusted_unsandboxed",
         )
         .await;
     studio
