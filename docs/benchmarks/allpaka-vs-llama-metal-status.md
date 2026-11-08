@@ -250,3 +250,48 @@ New harness: `crates/allpaka-backend/tests/gpu_densebench.rs`
 Decode target (≥1.05×) holds on 0.6B and 30B; 8B decode is +4% (within
 noise of the target). Prefill is uniformly −5..−7% on all three — the
 diffuse dispatch-cost story above, not any single kernel.
+
+## 2026-11-09 — Q6_K pipelining for the 8B dense front (commits 9ef6116, 6e955f9)
+
+GGUF dump of Qwen3-8B-Q4_K_M showed mixed quant types: `attn_v.weight`
+and `ffn_down.weight` are Q6_K on 18/36 layers (Q4_K elsewhere), the
+output head is Q6_K. Three follow-on defects, all fixed:
+
+1. `mm_kernel_for` mapped Q6K to the unpipelined `mmll_q6_k`; the
+   12288-long K loop of ffn_down paid two threadgroup barriers per
+   32 values. New `mmllp_q6_k` (double-buffered, one barrier per block).
+2. The fused-QKV guard demanded equal types, so wq/wk Q4_K + wv Q6_K
+   fell back to three separate mm dispatches per mixed layer. New
+   `mmllp_qkv_q4k_q6k` (q/k staged as Q4_K, v tiles take the Q6_K stage
+   path; the branch is threadgroup-uniform). Proven BIT-EXACT against
+   three separate pipelined dispatches
+   (`fused_qkv_mixed_q4k_q6k_matches_separate`).
+3. Dense FFN rides `ffn_batch_grouped` as one group, so the Q6_K down
+   bypassed `mm_kernel_for` entirely: `mmll_id_q6_k` unpipelined and
+   without the swiglu fold. New `mmllps_id_q6_k` (pipelined + swiglu
+   B-staging), wired into `mmid_swiglu_kernel_for`.
+
+Selection verified end-to-end on the 8B model via `ALLPAKA_DEBUG_QKV=1`
+markers (mixed qkv and both Q6_K kernels fire on the expected layers).
+`ALLPAKA_MM_PIPE=0` reverts all three.
+
+### New measurement hazard: prefill logits are NOT run-to-run bit-stable
+
+An FNV-1a checksum over the raw logit bits (bench prints
+`logits-fnv=...`) differs across IDENTICAL reruns of the same binary —
+on pipe=0 and pipe=1 alike, so the race predates the Q6_K work and lives
+in a pre-existing prefill path (concurrent dispatch overlap or an
+unordered reduction). argmax is stable. Consequence: bitwise e2e A/B on
+logits is impossible on this path; kernel changes are arbitrated by the
+parity/tolerance tests plus bit-exact same-shape kernel comparisons
+(fused vs separate), not by end-to-end hashes. Root cause not chased
+(perf-neutral; quality-neutral at argmax level).
+
+### Open: mmbench q6_k anomaly, needs a quiet machine
+
+One noisy-machine run (searchpartyd/rustc storm) showed llama's
+`kernel_mul_mm_q6_K` ahead of `mmll_q6_k` on 12288->4096 m=480 while
+`mmllp_q6_k` landed behind both, and the q4_k control run inverted the
+llama ordering minutes later — i.e. load-contaminated, not actionable.
+Re-measure at top-process <60%: `MM_FMT=q6_k MM_NIN=12288 MM_NOUT=4096
+MM_M=480 MM_LLAMA=1` with the q4_k same-shape control.
