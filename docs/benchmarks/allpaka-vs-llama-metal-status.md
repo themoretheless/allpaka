@@ -545,3 +545,13 @@ Verdict: INCONCLUSIVE - plausible small win on 30B, plausible small loss
 on 8B, noise swamps both. The change is pushed on branch `perf-fa-db`;
 main keeps the single-chain loops until a quiet-machine (top-CPU < 60)
 interleaved A/B via `scripts/quiet-round.sh` gives a real verdict.
+
+**2026-11-10: perf stack merged into main.** The whole perf-elim stack
+(Q6_K pipelining `mmllp_q6_k`/`mmllps_id_q6_k`, decode Q6K folds + fused
+QKV opt-in, attend_mm_fq race fix, MM_PIPE default-on, bench PF_SKIP
+instrumentation + logits-fnv) is merged into `main` at `d6f805f`, on top
+of the upstream Metal module split (`gpu/metal/*`) and rustfmt wave.
+Verified on the merge commit: release build OK, gpu_moe_tail 6/6,
+gpu_parity 8/8, 30B Q4_K_M pp480 logits-fnv `18259760d250fc77`
+(bit-identical). `perf-fa-db` (FA double-buffering) stays a branch pending
+a quiet-machine A/B.
