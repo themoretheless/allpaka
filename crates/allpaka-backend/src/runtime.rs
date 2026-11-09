@@ -91,6 +91,7 @@ flags! {
     q5_mv: bool = true, env "ALLPAKA_Q5_MV", on;
     q6_mv: bool = true, env "ALLPAKA_Q6_MV", on;
     q8_mv: bool = true, env "ALLPAKA_Q8_MV", on;
+    qkv_mv: bool = false, env "ALLPAKA_QKV_MV", off;
     attend_mm: bool = true, env "ALLPAKA_ATTN_MM", on;
     mm_ll: bool = true, env "ALLPAKA_MM_LL", on;
     q2_mv: bool = false, env "ALLPAKA_Q2_MV", off;

@@ -499,6 +499,7 @@ fn init_device() -> Option<Gpu> {
         "mmllp_qkv_q4_k",
         "mmllp_qkv_q8_0",
         "mmllp_qkv_q4k_q6k",
+        "matvec_qkv_q4k_q6k",
         "mmllpg_id_q4_k",
         "mmllps_id_q4_k",
         "mmllps_id_q6_k",
@@ -2411,6 +2412,22 @@ struct GpuIdxArgs {
     n_rows: u32,
 }
 
+/// Args of the fused decode QKV matvec (matvec_qkv_q4k_q6k): three weight
+/// bases, three byte outputs, one shared input. Mirrors the Metal struct.
+#[repr(C)]
+struct GpuMvQkvArgs {
+    n_in: u32,
+    n_q: u32,
+    n_k: u32,
+    n_v: u32,
+    wq_off: u64,
+    wk_off: u64,
+    wv_off: u64,
+    q_off: u64,
+    k_off: u64,
+    v_off: u64,
+}
+
 /// A whole decode token - every layer's attention AND FFN, ending with the
 /// output projection - as ONE command buffer with ONE wait.
 ///
@@ -2748,6 +2765,8 @@ fn resolve_decode_layers(
                             | "matvec_q3_k_mv"
                             | "matvec_q4_k_mv"
                             | "matvec_q5_k_mv"
+                            | "matvec_q6_k"
+                            | "matvec_q6_k_mv"
                             | "matvec_q8_0"
                             | "matvec_q8_0_mv"
                     )
@@ -2757,6 +2776,9 @@ fn resolve_decode_layers(
                 for (i, (mat, n_in)) in mats.iter().zip([hidden, hidden, gate.2]).enumerate() {
                     let lpr = lanes_per_row(mat.ty, n_in);
                     let swiglu = i == 2 && sw_fused;
+                    if swiglu && debug_qkv() {
+                        eprintln!("debug-qkv: decode swiglu-fold on {}", mat.kernel);
+                    }
                     states.push(
                         gpu.pipeline_full(mat.kernel, 1, lpr, false, swiglu)?
                             .to_owned(),
@@ -2823,6 +2845,8 @@ fn resolve_decode_layers(
                             | "matvec_q3_k_mv"
                             | "matvec_q4_k_mv"
                             | "matvec_q5_k_mv"
+                            | "matvec_q6_k"
+                            | "matvec_q6_k_mv"
                             | "matvec_q8_0"
                             | "matvec_q8_0_mv"
                     )
@@ -3228,6 +3252,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     let combine_state = gpu.pipelines[&("moe_combine", 1, 1)].to_owned();
     let combine_resnorm_state = gpu.pipelines[&("combine_resnorm", 1, 1)].to_owned();
     let resnorm_router_state = gpu.pipelines[&("resnorm_router", 1, 1)].to_owned();
+    let qkv_mv_state = gpu.pipelines[&("matvec_qkv_q4k_q6k", 1, 1)].to_owned();
     let argmax_state = gpu.pipelines[&("argmax_f32", 1, 1)].to_owned();
     let argmax_final_state = gpu.pipelines[&("argmax_final", 1, 1)].to_owned();
     let embed_state = gpu.pipelines[&("embed_row_f32_dtoken", 1, 1)].to_owned();
@@ -3783,9 +3808,53 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     .as_ref()
                     .expect("attention layer without mat states");
                 if !probe_skip("qkv") {
-                    matvec(&enc, &astates[0], &amats[0], hidden, l.wq.2, h_at, q_at);
-                    matvec(&enc, &astates[1], &amats[1], hidden, kv, h_at, k_at);
-                    matvec(&enc, &astates[2], &amats[2], hidden, kv, h_at, v_at);
+                    // One dispatch for wq+wk+wv when the layout is the
+                    // Q4_K_M one (q4k/q4k/q6k, even row splits); opt-in -
+                    // see qkv_mv_fuse.
+                    let fused_qkv = qkv_mv_fuse()
+                        && !refs.normflag
+                        && amats[0].kernel == "matvec_q4_k_mv"
+                        && amats[1].kernel == "matvec_q4_k_mv"
+                        && amats[2].kernel == "matvec_q6_k_mv"
+                        && l.wq.2 % 2 == 0
+                        && kv % 2 == 0;
+                    if fused_qkv {
+                        if li == 0 && debug_qkv() {
+                            eprintln!("debug-qkv: decode fused qkv matvec_qkv_q4k_q6k");
+                        }
+                        let args = GpuMvQkvArgs {
+                            n_in: hidden as u32,
+                            n_q: l.wq.2 as u32,
+                            n_k: kv as u32,
+                            n_v: kv as u32,
+                            wq_off: amats[0].w_off,
+                            wk_off: amats[1].w_off,
+                            wv_off: amats[2].w_off,
+                            q_off: e(q_at),
+                            k_off: e(k_at),
+                            v_off: e(v_at),
+                        };
+                        enc.set_compute_pipeline_state(&qkv_mv_state);
+                        enc.set_buffer(0, Some(&gpu.chunks[amats[0].chunk].buf), 0);
+                        enc.set_buffer(1, Some(&gpu.chunks[amats[1].chunk].buf), 0);
+                        enc.set_buffer(2, Some(&gpu.chunks[amats[2].chunk].buf), 0);
+                        enc.set_buffer(3, Some(y), e(h_at));
+                        enc.set_buffer(4, Some(y), 0);
+                        enc.set_bytes(
+                            5,
+                            std::mem::size_of::<GpuMvQkvArgs>() as u64,
+                            &args as *const GpuMvQkvArgs as *const _,
+                        );
+                        let rows = (l.wq.2 + 2 * kv) as u64;
+                        enc.dispatch_thread_groups(
+                            MTLSize::new((rows * 16).div_ceil(mv_tg()), 1, 1),
+                            MTLSize::new(mv_tg(), 1, 1),
+                        );
+                    } else {
+                        matvec(&enc, &astates[0], &amats[0], hidden, l.wq.2, h_at, q_at);
+                        matvec(&enc, &astates[1], &amats[1], hidden, kv, h_at, k_at);
+                        matvec(&enc, &astates[2], &amats[2], hidden, kv, h_at, v_at);
+                    }
                 }
                 bar_c(&enc, b'a');
                 split_here!("qkv");
@@ -9214,6 +9283,15 @@ fn cfuse() -> bool {
 /// `ALLPAKA_DECODE_GUFUSE=1` enables the diagnostic variant.
 fn gufuse() -> bool {
     crate::runtime::get().gufuse
+}
+
+/// The decode fused QKV matvec (matvec_qkv_q4k_q6k): wq/wk/wv as ONE
+/// dispatch over q+k+v rows. OFF by default pending cool A/B - concurrent
+/// separate dispatches overlap, and gufuse measured that fusion can cost
+/// more than the launches it removes. `ALLPAKA_QKV_MV=1` enables for the
+/// Q4_K/Q4_K/Q6_K layout with even row splits.
+fn qkv_mv_fuse() -> bool {
+    crate::runtime::get().qkv_mv
 }
 
 /// The fused single-threadgroup router_topk in decode. OFF by default: the
