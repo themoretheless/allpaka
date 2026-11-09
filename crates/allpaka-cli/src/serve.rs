@@ -865,27 +865,6 @@ fn resolve_model_name(requested: &str, available: &[String]) -> Option<String> {
     matches.next().is_none().then_some(candidate)
 }
 
-#[cfg(test)]
-mod model_resolution_tests {
-    use super::resolve_model_name;
-
-    #[test]
-    fn aliases_must_be_unique_and_exact_names_win() {
-        let names = vec!["qwen3".into(), "qwen3-0.6b".into(), "llama-3".into()];
-
-        assert_eq!(
-            resolve_model_name("qwen3", &names).as_deref(),
-            Some("qwen3")
-        );
-        assert_eq!(
-            resolve_model_name("qwen3-0", &names).as_deref(),
-            Some("qwen3-0.6b")
-        );
-        assert_eq!(resolve_model_name("qwen", &names), None);
-        assert_eq!(resolve_model_name("mistral", &names), None);
-    }
-}
-
 fn dispatch_connection(
     model_name: String,
     connection: QueuedConnection,
@@ -1400,3 +1379,24 @@ fn handle(
 /// Lives as a real .html file so editors and grep see it; embedded at compile
 /// time, so the served bytes are unchanged.
 const CHAT_PAGE: &str = include_str!("../assets/chat.html");
+
+#[cfg(test)]
+mod model_resolution_tests {
+    use super::resolve_model_name;
+
+    #[test]
+    fn aliases_must_be_unique_and_exact_names_win() {
+        let names = vec!["qwen3".into(), "qwen3-0.6b".into(), "llama-3".into()];
+
+        assert_eq!(
+            resolve_model_name("qwen3", &names).as_deref(),
+            Some("qwen3")
+        );
+        assert_eq!(
+            resolve_model_name("qwen3-0", &names).as_deref(),
+            Some("qwen3-0.6b")
+        );
+        assert_eq!(resolve_model_name("qwen", &names), None);
+        assert_eq!(resolve_model_name("mistral", &names), None);
+    }
+}

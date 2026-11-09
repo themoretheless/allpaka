@@ -1952,17 +1952,13 @@ async fn turn_traced(
                 } else if name == "load_skill" && harness_dynamic {
                     harness::load_skill(&harness_tree, args["name"].as_str().unwrap_or(""))
                 } else if name == "delegate" && harness_dynamic && !nested {
-                    run_subagent(
-                        &app,
-                        &settings,
-                        &project,
-                        &harness_tree,
+                    let parent = SubagentParent {
+                        settings: &settings,
+                        project: &project,
+                        tree: &harness_tree,
                         policy,
-                        &args,
-                        trace,
-                        parent_span,
-                    )
-                    .await
+                    };
+                    run_subagent(&app, parent, &args, trace, parent_span).await
                 } else if name == "run_script" && scripts_runnable {
                     let root = project
                         .roots
@@ -2256,17 +2252,28 @@ fn nested_turn<'a>(
     Box::pin(turn_traced(app, s, None, trace, parent_span))
 }
 
+/// What a subagent inherits from the turn that delegated to it.
+struct SubagentParent<'a> {
+    settings: &'a Settings,
+    project: &'a context::Project,
+    tree: &'a harness::Tree,
+    policy: ExecutionPolicy,
+}
+
 /// Run one harness subagent as a nested headless turn and return its answer.
 async fn run_subagent(
     app: &App,
-    settings: &Settings,
-    project: &context::Project,
-    tree: &harness::Tree,
-    policy: ExecutionPolicy,
+    parent: SubagentParent<'_>,
     args: &Value,
     trace: &observability::Trace,
     parent_span: usize,
 ) -> Result<Value> {
+    let SubagentParent {
+        settings,
+        project,
+        tree,
+        policy,
+    } = parent;
     let name = args["agent"].as_str().context("agent is required")?;
     let task = args["task"].as_str().context("task is required")?;
     if task.trim().is_empty() || task.len() > 16000 {

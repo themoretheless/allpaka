@@ -561,9 +561,9 @@ fn route_fused_matches_three_stage_router() {
     let hr_a = unsafe { std::slice::from_raw_parts(hit_row_a.contents().cast::<u32>(), hit_len) };
     let hr_b = unsafe { std::slice::from_raw_parts(hit_row_b.contents().cast::<u32>(), hit_len) };
 
-    for e in 0..n_expert as usize {
-        let row0 = tab_b[e][1] as usize;
-        let rows = tab_b[e][2] as usize;
+    for (e, entry) in tab_b.iter().enumerate().take(n_expert as usize) {
+        let row0 = entry[1] as usize;
+        let rows = entry[2] as usize;
         let mut s_a = tk_a[row0..row0 + rows].to_vec();
         let mut s_b = tk_b[row0..row0 + rows].to_vec();
         s_a.sort_unstable();
@@ -589,9 +589,9 @@ fn route_fused_matches_three_stage_router() {
         std::slice::from_raw_parts(tiles_b.contents().cast::<[u32; 3]>(), tile_bound)
     };
     let mut t = 0usize;
-    for e in 0..n_expert as usize {
-        let row0 = tab_b[e][1];
-        let rows = tab_b[e][2];
+    for (e, entry) in tab_b.iter().enumerate().take(n_expert as usize) {
+        let row0 = entry[1];
+        let rows = entry[2];
         let n_chunks = rows.div_ceil(32) as usize;
         for k in 0..n_chunks {
             assert_eq!(tiles[t][0], e as u32, "tile {t} expert");
