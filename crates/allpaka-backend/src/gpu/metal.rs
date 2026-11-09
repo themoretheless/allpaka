@@ -212,13 +212,12 @@ pub struct Gpu {
     /// GDN block skips its norm_rows dispatch. Cell because the norm
     /// closures in those blocks hold a shared borrow of `gpu`.
     pf_hs_normed: std::cell::Cell<bool>,
-    /// attend_mm_fq producer/consumer sync: a monotonic device counter the
-    /// K/V producer threadgroups publish to (one increment per producer per
-    /// tile), plus the host-side total of all past increments, passed to the
-    /// next dispatch as its wait base. Never reset; u32 wrap needs ~180k
-    /// prefills.
+    /// attend_mm_fq producer/consumer sync: one per-row-block counter
+    /// (producer threadgroups publish one increment each), zeroed before
+    /// every fused dispatch. Per-block because a single global count can be
+    /// reached by later blocks finishing first, letting consumers read
+    /// unwritten K/V.
     pf_attn_sync: Buffer,
-    pf_attn_epoch: std::cell::Cell<u32>,
     /// GPU-side MoE routing scratch: counters, the group table, picks,
     /// gathered token ids and the combine CSR, all produced on-device.
     route_buf: Buffer,
@@ -547,8 +546,8 @@ fn init_device() -> Option<Gpu> {
     let pf_x = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
     let pf_hs = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
     let route_buf = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
-    let pf_attn_sync = device.new_buffer(64, MTLResourceOptions::StorageModeShared);
-    unsafe { std::ptr::write_bytes(pf_attn_sync.contents() as *mut u8, 0, 64) };
+    let pf_attn_sync = device.new_buffer(256, MTLResourceOptions::StorageModeShared);
+    unsafe { std::ptr::write_bytes(pf_attn_sync.contents() as *mut u8, 0, 256) };
     let pf_ev = device.new_shared_event();
 
     Some(Gpu {
@@ -570,7 +569,6 @@ fn init_device() -> Option<Gpu> {
         pf_hs_cap: 1 << 12,
         pf_hs_normed: std::cell::Cell::new(false),
         pf_attn_sync,
-        pf_attn_epoch: std::cell::Cell::new(0),
         route_buf,
         route_cap: 1 << 12,
         dbg_route: std::cell::Cell::new(None),
@@ -8037,10 +8035,22 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             // synced to consumers by a device counter instead of a pipeline
             // barrier. gate_in_q (GLM) keeps the two-dispatch path: its q
             // rows are double-wide, which this kernel does not handle.
+            let tiles = (req.m as u32).div_ceil(8);
             let fused_qk = attend_mm()
                 && crate::runtime::get().pf_fused_qk
-                && !req.gate_in_q;
+                && !req.gate_in_q
+                && tiles <= 64;
             if fused_qk {
+                // The producer/consumer sync counters are per row-block and
+                // must start at zero: consumers wait for this dispatch's
+                // producer count, so stale counts from an earlier chunk or
+                // session would shortcut the wait (or deadlock it).
+                enc.set_compute_pipeline_state(&gpu.pipelines[&("zero_f32", 1, 1)]);
+                enc.set_buffer(0, Some(&gpu.pf_attn_sync), 0);
+                let zw = 64u32;
+                enc.set_bytes(1, 4, &zw as *const u32 as *const _);
+                enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(64, 1, 1));
+                enc.memory_barrier_with_resources(&[&gpu.pf_attn_sync]);
                 enc.set_compute_pipeline_state(&gpu.pipelines[&("attend_mm_fq", 1, 1)]);
                 enc.set_buffer(0, Some(&req.cache.buf), 0);
                 enc.set_buffer(1, Some(&req.cache.buf), 0);
@@ -8070,7 +8080,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                     rot_dim: req.rot_dim as u32,
                     has_bias: req.attn_bias.is_some() as u32,
                     n_kv_heads: req.n_kv_heads as u32,
-                    wait_base: gpu.pf_attn_epoch.get(),
+                    wait_base: 0,
                 };
                 enc.set_bytes(
                     15,
@@ -8100,9 +8110,6 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                     MTLSize::new(req.n_heads as u64, (req.m as u64).div_ceil(8), 1),
                     MTLSize::new(128, 1, 1),
                 );
-                let tiles = (req.m as u32).div_ceil(8);
-                gpu.pf_attn_epoch
-                    .set(gpu.pf_attn_epoch.get() + 2 * req.n_kv_heads as u32 * tiles);
                 cstamp!(gpu, enc, "attend");
                 if !no_barrier() {
                     enc.memory_barrier_with_resources(&[y, &req.cache.buf]);

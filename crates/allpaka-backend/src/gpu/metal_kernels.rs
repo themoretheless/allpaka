@@ -7584,7 +7584,7 @@ kernel void attend_mm_fq(
         threadgroup_barrier(mem_flags::mem_device);
         if (tiitg == 0) {
             DEVICE_FENCE();
-            atomic_fetch_add_explicit(sync, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&sync[tg.y], 1, memory_order_relaxed);
         }
     }
 
@@ -7626,10 +7626,14 @@ kernel void attend_mm_fq(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Wait for this tile's K/V (and every earlier tile's) before the first
-    // cache read.
+    // cache read. Per-rowblock counters: a single global count can be
+    // satisfied by LATER blocks' producers finishing early, letting a
+    // consumer read unwritten K/V (observed: pp480 logit drift).
     if (tiitg == 0) {
-        uint need = pa.wait_base + n_prod * (tg.y + 1);
-        while (atomic_load_explicit(sync, memory_order_relaxed) < need) {
+        uint need = pa.wait_base + n_prod;
+        for (uint gy = 0; gy <= tg.y; gy++) {
+            while (atomic_load_explicit(&sync[gy], memory_order_relaxed) < need) {
+            }
         }
         DEVICE_FENCE();
     }
