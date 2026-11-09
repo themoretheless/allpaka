@@ -37,6 +37,19 @@ struct Task {
     cancel: Mutex<Option<oneshot::Sender<()>>>,
     events: watch::Sender<u64>,
 }
+/// Lifecycle of a background task. The words are the wire and on-disk form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TaskStatus {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+    /// A task that was still running when the server stopped.
+    Interrupted,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Snapshot {
@@ -46,7 +59,7 @@ struct Snapshot {
     finished_ms: Option<u64>,
     duration_ms: Option<u64>,
     id: String,
-    status: String,
+    status: TaskStatus,
     exit_code: Option<i32>,
     #[serde(default)]
     signal: Option<i32>,
@@ -108,8 +121,8 @@ impl Task {
     }
     fn terminal(&self) -> bool {
         let state = self.state.lock().unwrap();
-        state.status != "running"
-            && (state.status == "interrupted"
+        state.status != TaskStatus::Running
+            && (state.status == TaskStatus::Interrupted
                 || self
                     .storage
                     .as_ref()
@@ -171,11 +184,14 @@ impl Manager {
             {
                 bail!("Invalid background receipt identity");
             }
-            if (phase == "start" && state.status != "running")
+            if (phase == "start" && state.status != TaskStatus::Running)
                 || (phase == "done"
                     && !matches!(
-                        state.status.as_str(),
-                        "completed" | "failed" | "cancelled" | "timed_out"
+                        state.status,
+                        TaskStatus::Completed
+                            | TaskStatus::Failed
+                            | TaskStatus::Cancelled
+                            | TaskStatus::TimedOut
                     ))
             {
                 bail!("Invalid background receipt status");
@@ -208,9 +224,9 @@ impl Manager {
             if phase == "done"
                 && (state.finished_ms.is_none()
                     || state.duration_ms.is_none()
-                    || (state.status == "completed"
+                    || (state.status == TaskStatus::Completed
                         && (state.exit_code != Some(0) || state.error.is_some()))
-                    || (state.status == "failed" && state.exit_code == Some(0)))
+                    || (state.status == TaskStatus::Failed && state.exit_code == Some(0)))
             {
                 bail!("Invalid background terminal receipt");
             }
@@ -227,8 +243,8 @@ impl Manager {
             }
         }
         for (_, mut record) in records {
-            if record.snapshot.status == "running" {
-                record.snapshot.status = "interrupted".into();
+            if record.snapshot.status == TaskStatus::Running {
+                record.snapshot.status = TaskStatus::Interrupted;
                 record.snapshot.exit_code = None;
                 record.snapshot.finished_ms = None;
                 record.snapshot.duration_ms = None;
@@ -463,7 +479,7 @@ impl Manager {
                 finished_ms: None,
                 duration_ms: None,
                 id: id.clone(),
-                status: "running".into(),
+                status: TaskStatus::Running,
                 exit_code: None,
                 signal: None,
                 stdout: String::new(),
@@ -487,8 +503,8 @@ impl Manager {
             let err = tokio::spawn(drain(stderr, task.clone(), true));
             let (reason, result) = tokio::select! {
                 result=child.wait()=> (None,result),
-                _=cancel_rx => { terminate(&mut child,pid).await; (Some("cancelled"),child.wait().await) },
-                _=tokio::time::sleep(Duration::from_secs(timeout)) => { terminate(&mut child,pid).await; (Some("timed_out"),child.wait().await) },
+                _=cancel_rx => { terminate(&mut child,pid).await; (Some(TaskStatus::Cancelled),child.wait().await) },
+                _=tokio::time::sleep(Duration::from_secs(timeout)) => { terminate(&mut child,pid).await; (Some(TaskStatus::TimedOut),child.wait().await) },
             };
             // A shell can exit while descendants keep its output pipes open. Reap the group.
             #[cfg(unix)]
@@ -508,13 +524,11 @@ impl Manager {
                 state.finished_ms = Some(timestamp_ms());
                 state.duration_ms =
                     Some(task.started.elapsed().as_millis().min(u64::MAX as u128) as u64);
-                state.status = reason
-                    .unwrap_or(if result.as_ref().is_ok_and(|s| s.success()) {
-                        "completed"
-                    } else {
-                        "failed"
-                    })
-                    .into();
+                state.status = reason.unwrap_or(if result.as_ref().is_ok_and(|s| s.success()) {
+                    TaskStatus::Completed
+                } else {
+                    TaskStatus::Failed
+                });
                 match result {
                     Ok(s) => {
                         state.exit_code = s.code();
@@ -750,7 +764,7 @@ mod tests {
             .unwrap()
             .clone();
         orphan.id = "bg-orphan".into();
-        orphan.status = "running".into();
+        orphan.status = TaskStatus::Running;
         orphan.stdout.clear();
         orphan.finished_ms = None;
         orphan.duration_ms = None;
