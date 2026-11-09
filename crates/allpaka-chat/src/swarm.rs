@@ -137,18 +137,20 @@ pub async fn run(
             for slot in start..end {
                 let (member, provider) = &members[slot];
                 futures.push(run_member(
-                    app,
-                    shared,
-                    project,
-                    &member.label,
-                    provider,
-                    member_settings(settings, member, &config),
-                    member_system(system, member, &config, round),
-                    &read_only,
-                    round,
-                    prompts[slot].clone(),
-                    slot,
-                    index,
+                    MemberRun {
+                        app,
+                        shared,
+                        project,
+                        label: &member.label,
+                        provider,
+                        settings: member_settings(settings, member, &config),
+                        system: member_system(system, member, &config, round),
+                        schemas: &read_only,
+                        round,
+                        prompt: prompts[slot].clone(),
+                        slot,
+                        index,
+                    },
                     trace,
                     parent,
                 ));
@@ -234,18 +236,20 @@ pub async fn retry(
         wave_one_prompt(&target.member, &config, &target.brief)
     };
     let outcome = run_member(
-        app,
-        shared,
-        project,
-        &target.member.label,
-        &provider,
-        member_settings(settings, &target.member, &config),
-        member_system(system, &target.member, &config, target.round),
-        &read_only,
-        target.round,
-        format!("{prompt}{RETRY_NOTE}"),
-        target.slot,
-        target.index,
+        MemberRun {
+            app,
+            shared,
+            project,
+            label: &target.member.label,
+            provider: &provider,
+            settings: member_settings(settings, &target.member, &config),
+            system: member_system(system, &target.member, &config, target.round),
+            schemas: &read_only,
+            round: target.round,
+            prompt: format!("{prompt}{RETRY_NOTE}"),
+            slot: target.slot,
+            index: target.index,
+        },
         trace,
         parent,
     )
@@ -745,45 +749,34 @@ fn prepare(shared: &SharedSession, members: &[(SwarmMember, Provider)]) -> (usiz
     (index, brief)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_member(
-    app: &App,
-    shared: &SharedSession,
-    project: &context::Project,
-    label: &str,
-    provider: &Provider,
-    member_settings: Settings,
+/// One member's run within a wave: who it is, what it is asked, and where
+/// its report lives in the session (`index` is the message, `slot` the report).
+struct MemberRun<'a> {
+    app: &'a App,
+    shared: &'a SharedSession,
+    project: &'a context::Project,
+    label: &'a str,
+    provider: &'a Provider,
+    settings: Settings,
     system: String,
-    schemas: &[Value],
+    schemas: &'a [Value],
     round: u8,
     prompt: String,
     slot: usize,
     index: usize,
+}
+
+async fn run_member(
+    run: MemberRun<'_>,
     trace: &observability::Trace,
     parent: usize,
 ) -> Result<MemberOutcome> {
     let mut span = trace.span(
         "swarm_member",
-        &format!("{label} · wave {round}"),
+        &format!("{} · wave {}", run.label, run.round),
         Some(parent),
     );
-    let result = run_member_inner(
-        app,
-        shared,
-        project,
-        label,
-        provider,
-        member_settings,
-        system,
-        schemas,
-        round,
-        prompt,
-        slot,
-        index,
-        trace,
-        span.id(),
-    )
-    .await;
+    let result = run_member_inner(run, trace, span.id()).await;
     match &result {
         Ok(outcome) => span.finish(
             if outcome.step_limit {
@@ -800,23 +793,25 @@ async fn run_member(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_member_inner(
-    app: &App,
-    shared: &SharedSession,
-    project: &context::Project,
-    label: &str,
-    provider: &Provider,
-    member_settings: Settings,
-    system: String,
-    schemas: &[Value],
-    round: u8,
-    prompt: String,
-    slot: usize,
-    index: usize,
+    run: MemberRun<'_>,
     trace: &observability::Trace,
     parent: usize,
 ) -> Result<MemberOutcome> {
+    let MemberRun {
+        app,
+        shared,
+        project,
+        label,
+        provider,
+        settings: member_settings,
+        system,
+        schemas,
+        round,
+        prompt,
+        slot,
+        index,
+    } = run;
     let guards = member_settings.prepared_guardrails.clone();
     if let Some(prepared) = &guards {
         crate::enforce_guardrail(prepared.input(&prompt)?, trace, parent)?;
