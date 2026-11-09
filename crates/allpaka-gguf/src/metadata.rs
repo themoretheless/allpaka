@@ -140,6 +140,7 @@ pub(crate) struct Header {
     /// BPE merge rules, in rank order.
     pub merges: Option<Vec<String>>,
     fields: Vec<(String, Value)>,
+    field_index: std::collections::HashMap<String, usize>,
 }
 
 impl Header {
@@ -148,9 +149,10 @@ impl Header {
         self.field_u32(&full)
     }
 
-    /// Look up a field by its full key, e.g. `qwen3.rope.freq_base`.
+    /// Look up a field by its full key in O(1), e.g. `qwen3.rope.freq_base`.
+    #[inline]
     pub(crate) fn field(&self, key: &str) -> Option<&Value> {
-        self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.field_index.get(key).map(|&idx| &self.fields[idx].1)
     }
 
     pub(crate) fn field_u32(&self, key: &str) -> Option<u32> {
@@ -205,7 +207,10 @@ pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
 
     let mut arch: Option<String> = None;
     let mut alignment = DEFAULT_ALIGNMENT;
-    let mut fields: Vec<(String, Value)> = Vec::new();
+    let cap = kv_count.min(4096) as usize;
+    let mut fields: Vec<(String, Value)> = Vec::with_capacity(cap);
+    let mut field_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::with_capacity(cap);
     let mut tokens: Option<Vec<String>> = None;
     let mut merges: Option<Vec<String>> = None;
 
@@ -234,6 +239,8 @@ pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
                 }
             }
         }
+        let idx = fields.len();
+        field_index.insert(key.clone(), idx);
         fields.push((key, value));
     }
 
@@ -280,6 +287,7 @@ pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
         tokens,
         merges,
         fields,
+        field_index,
     })
 }
 
@@ -443,7 +451,8 @@ fn read_string(r: &mut impl Read) -> Result<String> {
     }
     let mut buf = vec![0u8; len as usize];
     r.read_exact(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    Ok(String::from_utf8(buf)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
 }
 
 fn read_u32(r: &mut impl Read) -> Result<u32> {

@@ -1,100 +1,12 @@
 //! Access to tensor data: the table, the mmap, and bounds-checked views.
 
 use crate::metadata::{parse, Header};
+pub use allpaka_dtype::GgmlType;
 use anyhow::{bail, Context, Result};
 use memmap2::Mmap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-
-/// A GGML tensor dtype, with the block geometry needed to size its data.
-///
-/// Only the types this project actually plans to serve are decoded; everything
-/// else is carried as `Other` so the table still parses and the error surfaces
-/// at the moment someone asks for the bytes, naming the tensor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GgmlType {
-    F32,
-    F16,
-    /// bfloat16 (ggml id 30): the qwen35moe MTP block's router weights.
-    BF16,
-    Q5_0,
-    Q8_0,
-    Q2K,
-    Q3K,
-    Q4K,
-    Q5K,
-    Q6K,
-    /// MLX affine group quant, 4 bits per element in a 64-element group: eight
-    /// little-endian `u32` nibble words, then one bfloat16 scale and one
-    /// bfloat16 bias, value `q * scale + bias`.
-    ///
-    /// Not a ggml type id - `from_id` never produces these. They exist so the
-    /// weights an MLX checkpoint carries can be repacked into one contiguous
-    /// block and shared with every other quantised matrix in the engine.
-    MlxQ4,
-    /// The same affine group quant at 8 bits: 64 payload bytes, scale, bias.
-    MlxQ8,
-    Other(u32),
-}
-
-impl GgmlType {
-    pub fn from_id(id: u32) -> Self {
-        match id {
-            0 => GgmlType::F32,
-            1 => GgmlType::F16,
-            30 => GgmlType::BF16,
-            6 => GgmlType::Q5_0,
-            8 => GgmlType::Q8_0,
-            10 => GgmlType::Q2K,
-            11 => GgmlType::Q3K,
-            12 => GgmlType::Q4K,
-            13 => GgmlType::Q5K,
-            14 => GgmlType::Q6K,
-            other => GgmlType::Other(other),
-        }
-    }
-
-    /// Elements per quantisation block.
-    pub fn block_elements(self) -> Option<u64> {
-        match self {
-            GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 => Some(1),
-            GgmlType::Q5_0 | GgmlType::Q8_0 => Some(32),
-            GgmlType::Q2K | GgmlType::Q3K | GgmlType::Q4K | GgmlType::Q5K | GgmlType::Q6K => {
-                Some(256)
-            }
-            GgmlType::MlxQ4 | GgmlType::MlxQ8 => Some(64),
-            GgmlType::Other(_) => None,
-        }
-    }
-
-    /// Bytes per quantisation block.
-    pub fn block_bytes(self) -> Option<u64> {
-        match self {
-            GgmlType::F32 => Some(4),
-            GgmlType::F16 | GgmlType::BF16 => Some(2),
-            // f16 scale + 32 int8 values.
-            GgmlType::Q8_0 => Some(34),
-            // f16 scale + 32 high bits + 16 nibble bytes.
-            GgmlType::Q5_0 => Some(22),
-            // 16 scale bytes + 64 quant bytes + d + dmin.
-            GgmlType::Q2K => Some(84),
-            // 32 high-bit mask + 64 quant bytes + 12 packed scales + d.
-            GgmlType::Q3K => Some(110),
-            // d + dmin + 12 packed scales + 128 quant bytes.
-            GgmlType::Q4K => Some(144),
-            // d + dmin + 12 packed scales + 32 high-bit mask + 128 quant bytes.
-            GgmlType::Q5K => Some(176),
-            // 128 low bytes + 64 high bytes + 16 scales + d.
-            GgmlType::Q6K => Some(210),
-            // 8 nibble words (32 bytes) + bfloat16 scale + bfloat16 bias.
-            GgmlType::MlxQ4 => Some(36),
-            // 64 payload bytes + bfloat16 scale + bfloat16 bias.
-            GgmlType::MlxQ8 => Some(68),
-            GgmlType::Other(_) => None,
-        }
-    }
-}
 
 /// One row of the tensor table.
 #[derive(Debug, Clone)]
@@ -359,11 +271,13 @@ pub fn fingerprint(path: &Path) -> Result<String> {
             bail!("GGUF part changed while computing identity");
         }
     }
-    Ok(digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    use std::fmt::Write;
+    let hash = digest.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in hash {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    Ok(out)
 }
 
 /// Expand a possibly-split GGUF path (`name-00001-of-00002.gguf`) into every

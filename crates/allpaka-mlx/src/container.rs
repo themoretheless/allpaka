@@ -18,18 +18,18 @@ pub struct TensorInfo {
 }
 
 /// An MLX safetensors container analogous to `GgufFile`. Holds mmaps of all
-/// shards and a combined tensor table.
+/// shards and a combined tensor table with O(1) name lookup.
 #[derive(Debug)]
 pub struct MlxSafetensors {
     tensors: Vec<TensorInfo>,
+    tensor_shards: Vec<usize>,
+    by_name: HashMap<String, usize>,
     mmaps: Vec<memmap2::Mmap>,
-    #[allow(dead_code)]
-    data_starts: Vec<u64>,
 }
 
-/// Index.json maps each tensor name to the file it lives in and its byte range.
+/// `index.json` maps each tensor name to the shard filename it lives in.
 struct ShardedIndex {
-    map: HashMap<String, (String, u64, u64)>, // name -> (filename, offset, end)
+    files: Vec<String>,
 }
 
 impl ShardedIndex {
@@ -37,18 +37,15 @@ impl ShardedIndex {
         let obj: serde_json::Value = serde_json::from_str(json_str)?;
         let weight_map = obj
             .get("weight_map")
-            .ok_or_else(|| anyhow::anyhow!("no weight_map"))?;
-        let mut map = HashMap::new();
-        if let serde_json::Value::Object(o) = weight_map {
-            for (name, value) in o.iter() {
-                let filename = match value {
-                    serde_json::Value::String(s) => s.clone(),
-                    _ => continue,
-                };
-                map.insert(name.clone(), (filename, 0, 0));
-            }
-        }
-        Ok(Self { map })
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| anyhow::anyhow!("no weight_map object in safetensors index"))?;
+        let mut files: Vec<String> = weight_map
+            .values()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        files.sort_unstable();
+        files.dedup();
+        Ok(Self { files })
     }
 }
 
@@ -57,50 +54,82 @@ where
     P: AsRef<Path>,
 {
     let root = root.as_ref();
-    // Look for index.json first (sharded layout)
     let index_path = root.join("model.safetensors.index.json");
     let shard_files: Vec<String> = if index_path.is_file() {
         let idx_txt = std::fs::read_to_string(&index_path)?;
         let index = ShardedIndex::parse(&idx_txt)?;
-        let mut file_refs: Vec<&str> = index.map.values().map(|(f, _, _)| f.as_str()).collect();
-        file_refs.sort_unstable();
-        file_refs.dedup();
-        let files: Vec<String> = file_refs.into_iter().map(str::to_owned).collect();
-        if files.is_empty() {
+        if index.files.is_empty() {
             let pattern = root
                 .join("model-*.safetensors")
                 .to_string_lossy()
                 .to_string();
             glob_pattern_to_filenames(&pattern)
         } else {
-            files
+            index.files
         }
     } else {
         vec!["model.safetensors".into()]
     };
-    let mut tensors = Vec::new();
-    let mut mmaps = Vec::new();
-    let mut data_starts = Vec::new();
-    for (i, fname) in shard_files.iter().enumerate() {
-        let fpath = root.join(fname);
-        let mm = mmap_shard(&fpath)?;
-        let info = parse_safetensors_header(&mm)?;
+
+    // Map and parse shard headers in parallel when multiple shards exist.
+    let parsed_shards: Vec<(Mmap, FileInfo)> = if shard_files.len() <= 1 {
+        shard_files
+            .iter()
+            .map(|fname| {
+                let mm = mmap_shard(root.join(fname))?;
+                let info = parse_safetensors_header(&mm)?;
+                Ok((mm, info))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+    } else {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = shard_files
+                .iter()
+                .map(|fname| {
+                    s.spawn(move || -> anyhow::Result<(Mmap, FileInfo)> {
+                        let mm = mmap_shard(root.join(fname))?;
+                        let info = parse_safetensors_header(&mm)?;
+                        Ok((mm, info))
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("shard parse thread panicked"))
+                .collect::<anyhow::Result<Vec<_>>>()
+        })?
+    };
+
+    let total_tensors: usize = parsed_shards.iter().map(|(_, info)| info.tensors.len()).sum();
+    let mut tensors = Vec::with_capacity(total_tensors);
+    let mut tensor_shards = Vec::with_capacity(total_tensors);
+    let mut by_name = HashMap::with_capacity(total_tensors * 2);
+    let mut mmaps = Vec::with_capacity(parsed_shards.len());
+
+    for (i, (fname, (mm, info))) in shard_files.iter().zip(parsed_shards).enumerate() {
         let start = info.data_start as u64;
         mmaps.push(mm);
-        data_starts.push(start);
         for mut t in info.tensors {
             t.offset = t
                 .offset
                 .checked_add(start)
                 .ok_or_else(|| anyhow::anyhow!("tensor offset overflow for {}", t.name))?;
-            t.name = format!("{}/{}/{}", i, fname, t.name);
+            let raw_name = t.name;
+            let prefixed_name = format!("{i}/{fname}/{raw_name}");
+            t.name = prefixed_name.clone();
+            let idx = tensors.len();
+            by_name.entry(raw_name).or_insert(idx);
+            by_name.insert(prefixed_name, idx);
             tensors.push(t);
+            tensor_shards.push(i);
         }
     }
+
     Ok(MlxSafetensors {
         tensors,
+        tensor_shards,
+        by_name,
         mmaps,
-        data_starts,
     })
 }
 
@@ -127,7 +156,7 @@ fn parse_safetensors_header(mm: &Mmap) -> anyhow::Result<FileInfo> {
         .get("__metadata__")
         .and_then(|v| v.as_object())
         .unwrap_or(&empty_map);
-    let mut tensors = Vec::new();
+    let mut tensors = Vec::with_capacity(hdr_obj.len());
     for (name, spec) in hdr_obj.iter() {
         if name == "__metadata__" {
             continue;
@@ -160,7 +189,6 @@ fn parse_safetensors_header(mm: &Mmap) -> anyhow::Result<FileInfo> {
             });
         }
     }
-    // Data section starts after header + alignment padding (default 32)
     let mut hdr_sz = usize::try_from(h_end).map_err(|_| anyhow::anyhow!("header too large"))?;
     let align: usize = meta
         .get("alignment")
@@ -204,8 +232,12 @@ pub fn tensor_data<'a>(f: &'a MlxSafetensors, t: &TensorInfo) -> anyhow::Result<
     if f.mmaps.is_empty() {
         return Err(anyhow::anyhow!("no mmaps loaded in container"));
     }
-    let part: usize = t.name.split('/').next().unwrap_or("0").parse().unwrap_or(0);
-    let shard_idx = part.min(f.mmaps.len() - 1);
+    let shard_idx = f
+        .by_name
+        .get(&t.name)
+        .and_then(|&idx| f.tensor_shards.get(idx).copied())
+        .unwrap_or_else(|| t.name.split('/').next().unwrap_or("0").parse().unwrap_or(0))
+        .min(f.mmaps.len() - 1);
     let mm = &f.mmaps[shard_idx];
     let off = usize::try_from(t.offset)
         .map_err(|_| anyhow::anyhow!("tensor {} offset overflow", t.name))?;
@@ -219,29 +251,27 @@ pub fn tensor_data<'a>(f: &'a MlxSafetensors, t: &TensorInfo) -> anyhow::Result<
 }
 
 impl MlxSafetensors {
-    /// Get a tensor by name from the loaded safetensors files.
+    /// Get a tensor by name in O(1) from the loaded safetensors files.
     /// Matches either the full prefixed name (`"{shard}/{file}/{name}"`) or the raw tensor name.
+    #[inline]
     pub fn tensor_by_name(&self, name: &str) -> Option<&TensorInfo> {
-        self.tensors.iter().find(|t| {
-            t.name == name
-                || t.name
-                    .splitn(3, '/')
-                    .nth(2)
-                    .is_some_and(|raw_name| raw_name == name)
-        })
+        self.by_name.get(name).map(|&idx| &self.tensors[idx])
     }
 
     /// Get total number of tensors loaded.
+    #[inline]
     pub fn len(&self) -> usize {
         self.tensors.len()
     }
 
     /// Check if no tensors were loaded.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.tensors.is_empty()
     }
 
     /// Iterate over all loaded tensors.
+    #[inline]
     pub fn tensors(&self) -> &[TensorInfo] {
         &self.tensors
     }

@@ -9,6 +9,12 @@
 //! cannot silently move a shift.
 
 use crate::tensors::GgmlType;
+pub use allpaka_dtype::{
+    bf16_to_f32, dequant_mlx_q4_block_slice, dequant_mlx_q8_block_slice, f16_to_f32, scale_min_k4,
+};
+use allpaka_dtype::{
+    bf16_bytes_to_f32, f16_bytes_to_f32, f32_bytes_to_f32, unpack_q3_k_scales_raw,
+};
 use anyhow::{bail, Result};
 
 /// Dequantise `data` holding `elements` values of type `ty`.
@@ -21,7 +27,7 @@ pub fn dequant(ty: GgmlType, data: &[u8], elements: usize) -> Result<Vec<f32>> {
 /// Dequantise `data` holding `dst.len()` values of type `ty` into an existing slice without heap allocations.
 pub fn dequant_into(ty: GgmlType, data: &[u8], dst: &mut [f32]) -> Result<()> {
     let elements = dst.len();
-    let expected = expected_bytes(ty, elements)?;
+    let expected = ty.expected_bytes(elements)?;
     if data.len() != expected {
         bail!(
             "expected {expected} bytes for {elements} elements of {ty:?}, got {}",
@@ -29,21 +35,9 @@ pub fn dequant_into(ty: GgmlType, data: &[u8], dst: &mut [f32]) -> Result<()> {
         );
     }
     match ty {
-        GgmlType::F32 => {
-            for (c, out) in data.chunks_exact(4).zip(dst.iter_mut()) {
-                *out = f32::from_le_bytes(c.try_into().unwrap());
-            }
-        }
-        GgmlType::F16 => {
-            for (c, out) in data.chunks_exact(2).zip(dst.iter_mut()) {
-                *out = f16_to_f32(u16::from_le_bytes(c.try_into().unwrap()));
-            }
-        }
-        GgmlType::BF16 => {
-            for (c, out) in data.chunks_exact(2).zip(dst.iter_mut()) {
-                *out = f32::from_bits((u16::from_le_bytes(c.try_into().unwrap()) as u32) << 16);
-            }
-        }
+        GgmlType::F32 => f32_bytes_to_f32(data, dst),
+        GgmlType::F16 => f16_bytes_to_f32(data, dst),
+        GgmlType::BF16 => bf16_bytes_to_f32(data, dst),
         GgmlType::Q5_0 => {
             for (block, out) in data.chunks_exact(22).zip(dst.chunks_exact_mut(32)) {
                 dequant_q5_0_block_slice(block, out);
@@ -94,89 +88,30 @@ pub fn dequant_into(ty: GgmlType, data: &[u8], dst: &mut [f32]) -> Result<()> {
     Ok(())
 }
 
-fn expected_bytes(ty: GgmlType, elements: usize) -> Result<usize> {
-    let (be, bb) = match (ty.block_elements(), ty.block_bytes()) {
-        (Some(be), Some(bb)) => (be as usize, bb as usize),
-        _ => bail!("ggml type {ty:?} is not supported"),
-    };
-    if elements % be != 0 {
-        bail!("{elements} elements is not a whole number of {be}-element blocks");
-    }
-    Ok(elements / be * bb)
-}
-
-/// IEEE 754 half to single. Handles subnormals, infinities and NaN; written
-/// out rather than pulled from a crate because this is exactly the kind of
-/// dependency that becomes load-bearing and unauditable.
-pub fn f16_to_f32(h: u16) -> f32 {
-    let sign = ((h >> 15) & 1) as u32;
-    let exp = ((h >> 10) & 0x1f) as u32;
-    let frac = (h & 0x3ff) as u32;
-    let bits = match (exp, frac) {
-        (0, 0) => sign << 31,
-        (0, f) => {
-            // Subnormal half: value is f * 2^-24. Renormalise around the top
-            // set bit (position p in 0..=9), which becomes the implicit one.
-            let p = 31 - f.leading_zeros();
-            let exp = 127 - 24 + p;
-            let frac = (f << (23 - p)) & 0x7f_ffff;
-            (sign << 31) | (exp << 23) | frac
-        }
-        (0x1f, 0) => (sign << 31) | 0x7f80_0000,
-        (0x1f, f) => (sign << 31) | 0x7f80_0000 | (f << 13),
-        (e, f) => (sign << 31) | ((e + 127 - 15) << 23) | (f << 13),
-    };
-    f32::from_bits(bits)
-}
-
-/// bfloat16 to single. Its 8-bit mantissa is a prefix of the single one, so
-/// widening is a shift; no subnormal handling needed because bfloat16 shares
-/// the exponent range of single.
-pub fn bf16_to_f32(h: u16) -> f32 {
-    f32::from_bits((h as u32) << 16)
-}
-
-/// MLX affine 4-bit group quant: eight little-endian nibble words, then a
-/// bfloat16 scale and bias for the group. Element `w * 8 + k` of the group is
-/// the `k`th nibble of word `w`, low nibble first, and `x = q * scale + bias`.
-///
-/// The nibble order and the affine form are not a reading of MLX's source -
-/// they are what `mx.dequantize` produces on a published checkpoint, which is
-/// pinned by `tests/mlx_layout.rs` in allpaka-mlx.
-fn dequant_mlx_q4_block_slice(block: &[u8], out: &mut [f32]) {
-    let scale = bf16_to_f32(u16::from_le_bytes([block[32], block[33]]));
-    let bias = bf16_to_f32(u16::from_le_bytes([block[34], block[35]]));
-    let mut table = [0.0f32; 16];
-    for (q, slot) in table.iter_mut().enumerate() {
-        *slot = (q as f32).mul_add(scale, bias);
-    }
-    for w in 0..8 {
-        let word = u32::from_le_bytes(block[w * 4..w * 4 + 4].try_into().unwrap());
-        let dst = &mut out[w * 8..w * 8 + 8];
-        dst[0] = table[(word & 0xf) as usize];
-        dst[1] = table[((word >> 4) & 0xf) as usize];
-        dst[2] = table[((word >> 8) & 0xf) as usize];
-        dst[3] = table[((word >> 12) & 0xf) as usize];
-        dst[4] = table[((word >> 16) & 0xf) as usize];
-        dst[5] = table[((word >> 20) & 0xf) as usize];
-        dst[6] = table[((word >> 24) & 0xf) as usize];
-        dst[7] = table[((word >> 28) & 0xf) as usize];
-    }
-}
-
-/// MLX affine 8-bit group quant: 64 unsigned payload bytes, then the same
-/// scale/bias pair. `x = q * scale + bias`.
-fn dequant_mlx_q8_block_slice(block: &[u8], out: &mut [f32]) {
-    let scale = bf16_to_f32(u16::from_le_bytes([block[64], block[65]]));
-    let bias = bf16_to_f32(u16::from_le_bytes([block[66], block[67]]));
-    for (&q, slot) in block[..64].iter().zip(out.iter_mut()) {
-        *slot = q as f32 * scale + bias;
-    }
-}
-
 /// Q8_0: an f16 scale followed by 32 signed bytes. `x = d * q`.
 fn dequant_q8_0_block_slice(block: &[u8], out: &mut [f32]) {
     let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let vd = vdupq_n_f32(d);
+        let q_ptr = block.as_ptr().add(2) as *const i8;
+        for g in 0..2 {
+            let q16 = vld1q_s8(q_ptr.add(g * 16));
+            let lo8 = vmovl_s8(vget_low_s8(q16));
+            let hi8 = vmovl_s8(vget_high_s8(q16));
+            let f0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo8)));
+            let f1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo8)));
+            let f2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi8)));
+            let f3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi8)));
+            let dst = out.as_mut_ptr().add(g * 16);
+            vst1q_f32(dst, vmulq_f32(vd, f0));
+            vst1q_f32(dst.add(4), vmulq_f32(vd, f1));
+            vst1q_f32(dst.add(8), vmulq_f32(vd, f2));
+            vst1q_f32(dst.add(12), vmulq_f32(vd, f3));
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     for (&q, slot) in block[2..34].iter().zip(out.iter_mut()) {
         *slot = d * (q as i8) as f32;
     }
@@ -230,46 +165,13 @@ fn dequant_q2_k_block_slice(block: &[u8], out: &mut [f32]) {
     }
 }
 
-/// Unpack the 6-bit (scale, min) pair of sub-block `j` from the 12 packed
-/// bytes shared by Q4_K and Q5_K.
-///
-/// Sub-blocks 0..4 keep their six bits in one byte each (scales in bytes 0..4,
-/// mins in bytes 4..8); sub-blocks 4..8 are split, with the low four bits in
-/// bytes 8..12 and the high two bits in the top bits of the first eight bytes.
-pub fn scale_min_k4(j: usize, packed: &[u8]) -> (f32, f32) {
-    if j < 4 {
-        ((packed[j] & 63) as f32, (packed[j + 4] & 63) as f32)
-    } else {
-        let sc = (packed[j + 4] & 0xf) | ((packed[j - 4] >> 6) << 4);
-        let mn = (packed[j + 4] >> 4) | ((packed[j] >> 6) << 4);
-        (sc as f32, mn as f32)
-    }
-}
-
-/// Q3_K: a 256-element superblock of 2-bit quants plus a separate high-bit
-/// mask, giving 3-bit values, with 16 packed 6-bit signed scales.
-///
-/// Layout: hmask[32], qs[64], scales[12], d (f16). The value is
-/// `d*(scale-32) * (q - (high bit set ? 0 : 4))`: the high bit acts as +4 on
-/// the 2-bit quant, folded in as a subtraction when absent.
 fn dequant_q3_k_block_slice(block: &[u8], out: &mut [f32]) {
     let hmask = &block[0..32];
     let qs = &block[32..96];
     let packed = &block[96..108];
     let d_all = f16_to_f32(u16::from_le_bytes([block[108], block[109]]));
 
-    // Unpack 16 6-bit scales from 12 bytes: low 4 bits of scale i sit in
-    // bytes 0..8, the high 2 bits are packed four-per-byte in bytes 8..12.
-    let mut scales = [0i32; 16];
-    for (i, s) in scales.iter_mut().enumerate() {
-        let lo = if i < 8 {
-            packed[i] & 0xf
-        } else {
-            packed[i - 8] >> 4
-        };
-        let hi = (packed[8 + i % 4] >> (2 * (i / 4))) & 3;
-        *s = ((lo | (hi << 4)) as i32) - 32;
-    }
+    let scales_raw = unpack_q3_k_scales_raw(packed);
 
     let mut is = 0; // sub-block index, 0..16
     let mut m: u8 = 1; // walking high-bit mask
@@ -278,7 +180,7 @@ fn dequant_q3_k_block_slice(block: &[u8], out: &mut [f32]) {
         let q = &qs[half * 32..half * 32 + 32];
         for shift in [0u8, 2, 4, 6] {
             for group in 0..2 {
-                let dl = d_all * scales[is] as f32;
+                let dl = d_all * (scales_raw[is] as i32 - 32) as f32;
                 for l in 0..16 {
                     let idx = group * 16 + l;
                     let quant =
@@ -387,23 +289,7 @@ fn dequant_q6_k_block_slice(block: &[u8], out: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn f32_to_f16(x: f32) -> u16 {
-        // Good enough for tests: round-trip through the exact values used.
-        let bits = x.to_bits();
-        let sign = ((bits >> 31) & 1) as u16;
-        let exp = ((bits >> 23) & 0xff) as i32;
-        let frac = bits & 0x7f_ffff;
-        if exp == 0 && frac == 0 {
-            return sign << 15;
-        }
-        let e = exp - 127 + 15;
-        assert!(
-            (1..31).contains(&e),
-            "test value not representable as normal f16"
-        );
-        (sign << 15) | ((e as u16) << 10) | ((frac >> 13) as u16)
-    }
+    use allpaka_dtype::f32_to_f16;
 
     #[test]
     fn f16_round_trips_the_values_quantisation_uses() {

@@ -6,6 +6,7 @@ rust-version.workspace = true
 description = "GGUF reading for allpaka: metadata, tensor table, mmap'd data, dequantisation"
 
 [dependencies]
+allpaka-dtype.workspace = true
 anyhow.workspace = true
 memmap2.workspace = true
 sha2 = "0.11"

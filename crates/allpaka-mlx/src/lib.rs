@@ -31,9 +31,9 @@ pub use shapes::{flatten_for_matmul, is_3d_expert_shape, json_to_shape, MlxShape
 /// share with every other quantised matrix in the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MlxQuantType {
-    /// eight 8-bit elements in a u32 word, 64 elements per group, bf16 scale/bias.
+    /// Eight 4-bit elements in a u32 word, 64 elements per group, bf16 scale/bias.
     Q4Affine,
-    /// sixty-four 8-bit elements in a u32 word, 64 elements per group, bf16 scale/bias.
+    /// Four 8-bit elements in a u32 word, 64 elements per group, bf16 scale/bias.
     Q8Affine,
 }
 
