@@ -19,19 +19,19 @@
 |---|---|---|---|---|
 | 0.1 | `docs/refactor/*` | S | — | done |
 | 0.2 | Парный бенчмарк `bc82c0a` против `279a667` + `verify --decode` | S | — | отложено: нужна сеть питания и спокойная машина |
-| 0.3 | Проверка `gpu/stub.rs` против API бэкендов | S | низкий | todo |
+| 0.3 | Проверка `gpu/stub.rs` против API бэкендов | S | низкий | done: `scripts/check-backends.sh` |
 | 0.4 | Характеризационные тесты: `route_gated_into_slice` (граница 256), `Config::from_gguf`, `dq_fmt`/`row_bytes`, `valid_id`, `state_file` | M | — | todo |
 
 ## Волна 1. Дефекты и фундамент
 
 | # | Задача | Размер | Риск | Статус |
 |---|---|---|---|---|
-| 1.1 | B1: стаб приведён к API, compile-time проверка сигнатур | S | низкий | todo |
-| 1.2 | B2: >256 экспертов — константа и явный fallback | S | низкий | todo |
-| 1.3 | B3: `total_cmp` вместо `partial_cmp().unwrap()` | S | низкий | todo |
+| 1.1 | B1: стаб приведён к API; проверка — `scripts/check-backends.sh` (stub и CUDA) | S | низкий | done (`4b12e1a`, `523c5e9`) |
+| 1.2 | B2: >256 экспертов | S | низкий | не дефект: буфер по `n_used` (top-k), а не по числу экспертов; `moe.rs` при >256 уходит в кучу. Осталась только именованная константа |
+| 1.3 | B3: `total_cmp` вместо `partial_cmp().unwrap()` | S | низкий | done (`704972c`) |
 | 1.4 | B4: именованные таблицы `dq_fmt` и тест | S | низкий | todo |
-| 1.5 | B5, B6 и все некэшированные чтения env → `RuntimePolicy` / `DebugFlags` | M | низкий | todo |
-| 1.6 | Оставшиеся предупреждения clippy | S | низкий | todo |
+| 1.5 | B5 и все некэшированные чтения env → `RuntimePolicy` / `DebugFlags` | M | низкий | wip: B5 done (`9e538b5`); B6 не дефект (аргумент `_def` дублирует соглашение о флаге, таблица согласована); CUDA и Metal — todo |
+| 1.6 | Оставшиеся предупреждения clippy | S | низкий | done (`9bd193d`): 0 предупреждений |
 | 1.7 | `cargo fmt --all` отдельным коммитом | S | — | todo |
 | 1.8 | `// SAFETY:` для `unsafe impl` и срезов из сырых указателей | M | — | todo |
 
@@ -39,7 +39,7 @@
 
 | # | Задача | Размер | Риск | Статус |
 |---|---|---|---|---|
-| 2.1 | `gpu/metal.rs` → `metal/{device,pipelines,select,telemetry,matvec,attn,ffn,decode,verify,prefill,mega}` | L | низкий–средний | todo |
+| 2.1 | `gpu/metal.rs` → `metal/{device,pipelines,select,telemetry,matvec,attn,ffn,decode,verify,prefill,mega}` | L | низкий–средний | wip: вынесены telemetry, select, decode, verify, prefill, ffn_grouped; в `mod.rs` (2 944 строки) остались device, pipelines, matvec, attn, mega |
 | 2.2 | `gpu/cuda/mod.rs` → `{api,attn,ffn,decode,decode_fused,prefill}` | M | низкий | todo |
 | 2.3 | `gpu/cuda/runtime.rs` → `runtime/{device,telemetry,select,gemm,q8,l2,matvec}` | M | низкий | todo |
 | 2.4 | `gpu/common.rs`: общие `row_bytes`, окна весов, телеметрия, `attn_shape_ok` | M | низкий | todo |

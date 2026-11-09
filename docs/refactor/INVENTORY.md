@@ -7,12 +7,13 @@
 
 | # | Где | Что | Статус |
 |---|---|---|---|
-| B1 | `backend/src/gpu/stub.rs` | API отстал от бэкендов: нет `ffn_batch_grouped`, `attend_project`, region-функций, `stats`, `gpu_time_stats`, `minimum_kv_capacity`; есть неиспользуемые старые имена. Сборка без GPU, вероятно, сломана (не подтверждено компиляцией) | todo |
-| B2 | `model/prefill.rs:312,422` | Стековый буфер на 256 экспертов; при большем числе `k` молча обрезается | todo |
-| B3 | `backend/gpu/metal.rs:1279` | `partial_cmp().unwrap()` паникует на NaN | todo |
+| B1 | `backend/src/gpu/stub.rs` | API отстал от бэкендов: нет `ffn_batch_grouped`, `attend_project`, region-функций, `stats`, `gpu_time_stats`, `minimum_kv_capacity`; есть неиспользуемые старые имена. Подтверждено компиляцией: сборка без GPU не проходила. Регрессия внесена распилом `c983860` | done (`4b12e1a`) |
+| B2 | `model/prefill.rs:312,422` | Стековый буфер на 256 экспертов; при большем числе `k` молча обрезается | не дефект: буфер держит top-k (`n_used`), а не всех экспертов |
+| B3 | `backend/gpu/metal.rs:1279` | `partial_cmp().unwrap()` паникует на NaN | done (`704972c`) |
 | B4 | `metal.rs:4542` и `cuda/runtime.rs:738` | `dq_fmt`: разные коды формата на бэкендах (Metal BF16=6; CUDA Q5_0=6, BF16=9), нет теста соответствия ядрам | todo |
-| B5 | `model/prefill.rs:53` | `ALLPAKA_DUMP_HIDDEN` читается из окружения на каждый `forward_batch` | todo |
-| B6 | `backend/src/runtime.rs:16-29` | Хелперы `on/off/set/present` игнорируют аргумент `_def` | todo |
+| B5 | `model/prefill.rs:53` | `ALLPAKA_DUMP_HIDDEN` читается из окружения на каждый `forward_batch` | done (`9e538b5`) |
+| B6 | `backend/src/runtime.rs:16-29` | Хелперы `on/off/set/present` игнорируют аргумент `_def` | не дефект: умолчание задаёт само соглашение флага, таблица согласована |
+| B10 | `backend/src/gpu/cuda/runtime.rs:680,739` | CUDA-сборка не компилировалась: `match` по `GgmlType` не покрывал `MlxQ4`/`MlxQ8`, добавленные с `allpaka-dtype` | done (`523c5e9`) |
 | B7 | `chat/state_file.rs` | Чтение-изменение-запись целого списка без блокировки: потеря обновлений при одновременных сохранениях | todo |
 | B8 | ~20 модулей chat | Неатомарный `fs::write`: обрезанный файл при падении посреди записи | todo |
 | B9 | chat, 8 копий `valid_id` | Правила расходятся (лимит 80 против 100, hex-only в `lib.rs`) | требует решения |
