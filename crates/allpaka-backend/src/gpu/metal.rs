@@ -214,13 +214,12 @@ pub struct Gpu {
     /// GDN block skips its norm_rows dispatch. Cell because the norm
     /// closures in those blocks hold a shared borrow of `gpu`.
     pf_hs_normed: std::cell::Cell<bool>,
-    /// attend_mm_fq producer/consumer sync: a monotonic device counter the
-    /// K/V producer threadgroups publish to (one increment per producer per
-    /// tile), plus the host-side total of all past increments, passed to the
-    /// next dispatch as its wait base. Never reset; u32 wrap needs ~180k
-    /// prefills.
+    /// attend_mm_fq producer/consumer sync: one per-row-block counter
+    /// (producer threadgroups publish one increment each), zeroed before
+    /// every fused dispatch. Per-block because a single global count can be
+    /// reached by later blocks finishing first, letting consumers read
+    /// unwritten K/V.
     pf_attn_sync: Buffer,
-    pf_attn_epoch: std::cell::Cell<u32>,
     /// GPU-side MoE routing scratch: counters, the group table, picks,
     /// gathered token ids and the combine CSR, all produced on-device.
     route_buf: Buffer,
@@ -497,10 +496,14 @@ fn init_device() -> Option<Gpu> {
         "mmllr64_q4_k",
         "mmllp_q4_k",
         "mmllp_q8_0",
+        "mmllp_q6_k",
         "mmllp_qkv_q4_k",
         "mmllp_qkv_q8_0",
+        "mmllp_qkv_q4k_q6k",
+        "matvec_qkv_q4k_q6k",
         "mmllpg_id_q4_k",
         "mmllps_id_q4_k",
+        "mmllps_id_q6_k",
         "mmllpg_id_q4_k_bn16",
         "mmllps_id_q4_k_bn16",
         "route_pick",
@@ -545,8 +548,8 @@ fn init_device() -> Option<Gpu> {
     let pf_x = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
     let pf_hs = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
     let route_buf = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
-    let pf_attn_sync = device.new_buffer(64, MTLResourceOptions::StorageModeShared);
-    unsafe { std::ptr::write_bytes(pf_attn_sync.contents() as *mut u8, 0, 64) };
+    let pf_attn_sync = device.new_buffer(256, MTLResourceOptions::StorageModeShared);
+    unsafe { std::ptr::write_bytes(pf_attn_sync.contents() as *mut u8, 0, 256) };
     let pf_ev = device.new_shared_event();
 
     Some(Gpu {
@@ -568,7 +571,6 @@ fn init_device() -> Option<Gpu> {
         pf_hs_cap: 1 << 12,
         pf_hs_normed: std::cell::Cell::new(false),
         pf_attn_sync,
-        pf_attn_epoch: std::cell::Cell::new(0),
         route_buf,
         route_cap: 1 << 12,
         dbg_route: std::cell::Cell::new(None),
@@ -1495,7 +1497,19 @@ fn mm_kernel_for(ty: GgmlType, m: usize) -> Option<(&'static str, usize, usize)>
                 }
             }
             (GgmlType::Q5K, false) => "mmll_q5_k",
-            (GgmlType::Q6K, false) => "mmll_q6_k",
+            (GgmlType::Q6K, false) => {
+                // The 8B dense keeps attn_v + ffn_down on Q6_K for half its
+                // layers (and the output head); the pipe halves the barrier
+                // count on its 12288-long K loop. `ALLPAKA_MM_PIPE=0` reverts.
+                if mm_pipe() {
+                    if debug_qkv() {
+                        eprintln!("debug-qkv: mmllp_q6_k selected");
+                    }
+                    "mmllp_q6_k"
+                } else {
+                    "mmll_q6_k"
+                }
+            }
             (GgmlType::Q8_0, true) => "mm64ll_q8_0",
             (GgmlType::Q5_0, true) => "mm64ll_q5_0",
             (GgmlType::Q2K, true) => "mm64ll_q2_k",
@@ -2256,6 +2270,22 @@ struct GpuIdxArgs {
     n_rows: u32,
 }
 
+/// Args of the fused decode QKV matvec (matvec_qkv_q4k_q6k): three weight
+/// bases, three byte outputs, one shared input. Mirrors the Metal struct.
+#[repr(C)]
+struct GpuMvQkvArgs {
+    n_in: u32,
+    n_q: u32,
+    n_k: u32,
+    n_v: u32,
+    wq_off: u64,
+    wk_off: u64,
+    wv_off: u64,
+    q_off: u64,
+    k_off: u64,
+    v_off: u64,
+}
+
 /// A whole decode token - every layer's attention AND FFN, ending with the
 /// output projection - as ONE command buffer with ONE wait.
 ///
@@ -2593,6 +2623,8 @@ fn resolve_decode_layers(
                             | "matvec_q3_k_mv"
                             | "matvec_q4_k_mv"
                             | "matvec_q5_k_mv"
+                            | "matvec_q6_k"
+                            | "matvec_q6_k_mv"
                             | "matvec_q8_0"
                             | "matvec_q8_0_mv"
                     )
@@ -2602,6 +2634,9 @@ fn resolve_decode_layers(
                 for (i, (mat, n_in)) in mats.iter().zip([hidden, hidden, gate.2]).enumerate() {
                     let lpr = lanes_per_row(mat.ty, n_in);
                     let swiglu = i == 2 && sw_fused;
+                    if swiglu && debug_qkv() {
+                        eprintln!("debug-qkv: decode swiglu-fold on {}", mat.kernel);
+                    }
                     states.push(
                         gpu.pipeline_full(mat.kernel, 1, lpr, false, swiglu)?
                             .to_owned(),
@@ -2668,6 +2703,8 @@ fn resolve_decode_layers(
                             | "matvec_q3_k_mv"
                             | "matvec_q4_k_mv"
                             | "matvec_q5_k_mv"
+                            | "matvec_q6_k"
+                            | "matvec_q6_k_mv"
                             | "matvec_q8_0"
                             | "matvec_q8_0_mv"
                     )
@@ -3024,6 +3061,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     let combine_state = gpu.pipelines[&("moe_combine", 1, 1)].to_owned();
     let combine_resnorm_state = gpu.pipelines[&("combine_resnorm", 1, 1)].to_owned();
     let resnorm_router_state = gpu.pipelines[&("resnorm_router", 1, 1)].to_owned();
+    let qkv_mv_state = gpu.pipelines[&("matvec_qkv_q4k_q6k", 1, 1)].to_owned();
     let argmax_state = gpu.pipelines[&("argmax_f32", 1, 1)].to_owned();
     let argmax_final_state = gpu.pipelines[&("argmax_final", 1, 1)].to_owned();
     let embed_state = gpu.pipelines[&("embed_row_f32_dtoken", 1, 1)].to_owned();
@@ -3579,9 +3617,53 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                     .as_ref()
                     .expect("attention layer without mat states");
                 if !probe_skip("qkv") {
-                    matvec(&enc, &astates[0], &amats[0], hidden, l.wq.2, h_at, q_at);
-                    matvec(&enc, &astates[1], &amats[1], hidden, kv, h_at, k_at);
-                    matvec(&enc, &astates[2], &amats[2], hidden, kv, h_at, v_at);
+                    // One dispatch for wq+wk+wv when the layout is the
+                    // Q4_K_M one (q4k/q4k/q6k, even row splits); opt-in -
+                    // see qkv_mv_fuse.
+                    let fused_qkv = qkv_mv_fuse()
+                        && !refs.normflag
+                        && amats[0].kernel == "matvec_q4_k_mv"
+                        && amats[1].kernel == "matvec_q4_k_mv"
+                        && amats[2].kernel == "matvec_q6_k_mv"
+                        && l.wq.2 % 2 == 0
+                        && kv % 2 == 0;
+                    if fused_qkv {
+                        if li == 0 && debug_qkv() {
+                            eprintln!("debug-qkv: decode fused qkv matvec_qkv_q4k_q6k");
+                        }
+                        let args = GpuMvQkvArgs {
+                            n_in: hidden as u32,
+                            n_q: l.wq.2 as u32,
+                            n_k: kv as u32,
+                            n_v: kv as u32,
+                            wq_off: amats[0].w_off,
+                            wk_off: amats[1].w_off,
+                            wv_off: amats[2].w_off,
+                            q_off: e(q_at),
+                            k_off: e(k_at),
+                            v_off: e(v_at),
+                        };
+                        enc.set_compute_pipeline_state(&qkv_mv_state);
+                        enc.set_buffer(0, Some(&gpu.chunks[amats[0].chunk].buf), 0);
+                        enc.set_buffer(1, Some(&gpu.chunks[amats[1].chunk].buf), 0);
+                        enc.set_buffer(2, Some(&gpu.chunks[amats[2].chunk].buf), 0);
+                        enc.set_buffer(3, Some(y), e(h_at));
+                        enc.set_buffer(4, Some(y), 0);
+                        enc.set_bytes(
+                            5,
+                            std::mem::size_of::<GpuMvQkvArgs>() as u64,
+                            &args as *const GpuMvQkvArgs as *const _,
+                        );
+                        let rows = (l.wq.2 + 2 * kv) as u64;
+                        enc.dispatch_thread_groups(
+                            MTLSize::new((rows * 16).div_ceil(mv_tg()), 1, 1),
+                            MTLSize::new(mv_tg(), 1, 1),
+                        );
+                    } else {
+                        matvec(&enc, &astates[0], &amats[0], hidden, l.wq.2, h_at, q_at);
+                        matvec(&enc, &astates[1], &amats[1], hidden, kv, h_at, k_at);
+                        matvec(&enc, &astates[2], &amats[2], hidden, kv, h_at, v_at);
+                    }
                 }
                 bar_c(&enc, b'a');
                 split_here!("qkv");
@@ -7293,13 +7375,24 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 .to_owned(),
         );
     }
-    let qkv_state = if wq_out % 64 == 0
-        && kv % 64 == 0
-        && mats[0].ty == mats[1].ty
-        && mats[1].ty == mats[2].ty
-    {
-        mm_qkv_kernel_for(mats[0].ty)
-            .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned()))
+    let qkv_state = if wq_out % 64 == 0 && kv % 64 == 0 {
+        if mats[0].ty == mats[1].ty && mats[1].ty == mats[2].ty {
+            mm_qkv_kernel_for(mats[0].ty)
+                .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned()))
+        } else if mm_pipe()
+            && mats[0].ty == GgmlType::Q4K
+            && mats[1].ty == GgmlType::Q4K
+            && mats[2].ty == GgmlType::Q6K
+        {
+            // Qwen3-8B's odd layers: v stays Q6_K where q/k are Q4_K.
+            if debug_qkv() {
+                eprintln!("debug-qkv: mixed q4k/q6k fused selected");
+            }
+            gpu.pipeline("mmllp_qkv_q4k_q6k", 1, 1)
+                .map(|p| p.to_owned())
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -7681,10 +7774,22 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             // synced to consumers by a device counter instead of a pipeline
             // barrier. gate_in_q (GLM) keeps the two-dispatch path: its q
             // rows are double-wide, which this kernel does not handle.
+            let tiles = (req.m as u32).div_ceil(8);
             let fused_qk = attend_mm()
                 && crate::runtime::get().pf_fused_qk
-                && !req.gate_in_q;
+                && !req.gate_in_q
+                && tiles <= 64;
             if fused_qk && !pf_skip("attend") {
+                // The producer/consumer sync counters are per row-block and
+                // must start at zero: consumers wait for this dispatch's
+                // producer count, so stale counts from an earlier chunk or
+                // session would shortcut the wait (or deadlock it).
+                enc.set_compute_pipeline_state(&gpu.pipelines[&("zero_f32", 1, 1)]);
+                enc.set_buffer(0, Some(&gpu.pf_attn_sync), 0);
+                let zw = 64u32;
+                enc.set_bytes(1, 4, &zw as *const u32 as *const _);
+                enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(64, 1, 1));
+                enc.memory_barrier_with_resources(&[&gpu.pf_attn_sync]);
                 enc.set_compute_pipeline_state(&gpu.pipelines[&("attend_mm_fq", 1, 1)]);
                 enc.set_buffer(0, Some(&req.cache.buf), 0);
                 enc.set_buffer(1, Some(&req.cache.buf), 0);
@@ -7714,7 +7819,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                     rot_dim: req.rot_dim as u32,
                     has_bias: req.attn_bias.is_some() as u32,
                     n_kv_heads: req.n_kv_heads as u32,
-                    wait_base: gpu.pf_attn_epoch.get(),
+                    wait_base: 0,
                 };
                 enc.set_bytes(
                     15,
@@ -7744,9 +7849,6 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                     MTLSize::new(req.n_heads as u64, (req.m as u64).div_ceil(8), 1),
                     MTLSize::new(128, 1, 1),
                 );
-                let tiles = (req.m as u32).div_ceil(8);
-                gpu.pf_attn_epoch
-                    .set(gpu.pf_attn_epoch.get() + 2 * req.n_kv_heads as u32 * tiles);
                 cstamp!(gpu, enc, "attend");
                 if !no_barrier() {
                     enc.memory_barrier_with_resources(&[y, &req.cache.buf]);
@@ -8834,6 +8936,15 @@ fn gufuse() -> bool {
     crate::runtime::get().gufuse
 }
 
+/// The decode fused QKV matvec (matvec_qkv_q4k_q6k): wq/wk/wv as ONE
+/// dispatch over q+k+v rows. OFF by default pending cool A/B - concurrent
+/// separate dispatches overlap, and gufuse measured that fusion can cost
+/// more than the launches it removes. `ALLPAKA_QKV_MV=1` enables for the
+/// Q4_K/Q4_K/Q6_K layout with even row splits.
+fn qkv_mv_fuse() -> bool {
+    crate::runtime::get().qkv_mv
+}
+
 /// The fused single-threadgroup router_topk in decode. OFF by default: the
 /// fused kernel walks the experts serially inside one threadgroup and is
 /// latency-bound - on qwen3-30b the parallel matvec_f32 + tiny top-k pair
@@ -8886,6 +8997,12 @@ fn mm_k64() -> bool {
 /// to the two-barrier llama-structure loop.
 fn mm_pipe() -> bool {
     crate::runtime::get().mm_pipeline
+}
+
+/// ALLPAKA_DEBUG_QKV=1: log pipelined-Q6_K / mixed-QKV kernel selection.
+fn debug_qkv() -> bool {
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| std::env::var_os("ALLPAKA_DEBUG_QKV").is_some())
 }
 
 /// K-step 64 for the mmid (MoE) kernels only: `ALLPAKA_MMID_K64=1`. The FFN
@@ -8981,6 +9098,17 @@ fn mmid_swiglu_kernel_for(ty: GgmlType, bn16: bool) -> Option<(&'static str, usi
             },
             64,
         )),
+        // The 8B dense's Q6_K down (18/36 layers): pipelined + swiglu fold.
+        (GgmlType::Q6K, false) => {
+            if mm_pipe() {
+                if debug_qkv() {
+                    eprintln!("debug-qkv: mmllps_id_q6_k selected");
+                }
+                Some(("mmllps_id_q6_k", 64))
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }

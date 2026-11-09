@@ -112,12 +112,23 @@ pub fn measure_engine(
     let prefill_rate = (prompt.len() - 32) as f64 / prefill_secs;
     // A kernel reading garbage (nil buffer, bad offset) shows up here first.
     let bad = logits.iter().filter(|v| !v.is_finite()).count();
-    anyhow::ensure!(
-        bad == 0 && !logits.is_empty(),
-        "benchmark invalid: empty or non-finite logits"
-    );
+    if std::env::var_os("ALLPAKA_PF_SKIP").is_some() {
+        eprintln!("  prefill logits: {bad} non-finite (skip-probe run, ignored)");
+    } else {
+        anyhow::ensure!(
+            bad == 0 && !logits.is_empty(),
+            "benchmark invalid: empty or non-finite logits"
+        );
+    }
     let argmax = argmax_token(&logits);
-    eprintln!("  prefill argmax={argmax}");
+    // FNV-1a over the raw bits: a bit-exact regression check across kernel
+    // swaps (ALLPAKA_MM_PIPE=0 must reproduce the same checksum).
+    let mut hash = 0xcbf29ce484222325u64;
+    for v in &logits {
+        let b = v.to_bits();
+        hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
+    }
+    eprintln!("  prefill argmax={argmax} logits-fnv={hash:016x}");
     println!(
         "  prefill  {:>4} tok in {prefill_secs:>6.2} s   {prefill_rate:>7.1} tok/s",
         prompt.len() - 32

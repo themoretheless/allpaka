@@ -394,3 +394,154 @@ our favour; the 8B pp gap (0.946x) remains empirically unexplained by
 source diff. Next instrument: PF_SPLIT per-stage GPU times on a quiet
 machine, stage-by-stage against llama's map (llama pp per-layer
 15.1 ms vs ours 15.9 ms => ~0.8 ms/layer to find).
+## 2026-11-09 — Q6_K pipelining for the 8B dense front (commits 9ef6116, 6e955f9)
+
+GGUF dump of Qwen3-8B-Q4_K_M showed mixed quant types: `attn_v.weight`
+and `ffn_down.weight` are Q6_K on 18/36 layers (Q4_K elsewhere), the
+output head is Q6_K. Three follow-on defects, all fixed:
+
+1. `mm_kernel_for` mapped Q6K to the unpipelined `mmll_q6_k`; the
+   12288-long K loop of ffn_down paid two threadgroup barriers per
+   32 values. New `mmllp_q6_k` (double-buffered, one barrier per block).
+2. The fused-QKV guard demanded equal types, so wq/wk Q4_K + wv Q6_K
+   fell back to three separate mm dispatches per mixed layer. New
+   `mmllp_qkv_q4k_q6k` (q/k staged as Q4_K, v tiles take the Q6_K stage
+   path; the branch is threadgroup-uniform). Proven BIT-EXACT against
+   three separate pipelined dispatches
+   (`fused_qkv_mixed_q4k_q6k_matches_separate`).
+3. Dense FFN rides `ffn_batch_grouped` as one group, so the Q6_K down
+   bypassed `mm_kernel_for` entirely: `mmll_id_q6_k` unpipelined and
+   without the swiglu fold. New `mmllps_id_q6_k` (pipelined + swiglu
+   B-staging), wired into `mmid_swiglu_kernel_for`.
+
+Selection verified end-to-end on the 8B model via `ALLPAKA_DEBUG_QKV=1`
+markers (mixed qkv and both Q6_K kernels fire on the expected layers).
+`ALLPAKA_MM_PIPE=0` reverts all three.
+
+### New measurement hazard: prefill logits are NOT run-to-run bit-stable
+
+An FNV-1a checksum over the raw logit bits (bench prints
+`logits-fnv=...`) differs across IDENTICAL reruns of the same binary —
+on pipe=0 and pipe=1 alike, so the race predates the Q6_K work and lives
+in a pre-existing prefill path (concurrent dispatch overlap or an
+unordered reduction). argmax is stable. Consequence: bitwise e2e A/B on
+logits is impossible on this path; kernel changes are arbitrated by the
+parity/tolerance tests plus bit-exact same-shape kernel comparisons
+(fused vs separate), not by end-to-end hashes. Root cause not chased
+(perf-neutral; quality-neutral at argmax level).
+
+### Open: mmbench q6_k anomaly, needs a quiet machine
+
+One noisy-machine run (searchpartyd/rustc storm) showed llama's
+`kernel_mul_mm_q6_K` ahead of `mmll_q6_k` on 12288->4096 m=480 while
+`mmllp_q6_k` landed behind both, and the q4_k control run inverted the
+llama ordering minutes later — i.e. load-contaminated, not actionable.
+Re-measure at top-process <60%: `MM_FMT=q6_k MM_NIN=12288 MM_NOUT=4096
+MM_M=480 MM_LLAMA=1` with the q4_k same-shape control.
+
+## 2026-11-09 (round 2): decode side of the Q6_K fold + fused decode QKV
+
+Two decode-token gaps found in `decode_token` (m=1):
+
+1. **SWIGLU_X missing on the Q6_K matvecs.** `sw_capable` listed every
+   swiglu-folding matvec except `matvec_q6_k` / `matvec_q6_k_mv`, so the
+   Q4_K_M dense down projection (Q6_K, 12288->4096) paid the standalone
+   swiglu dispatch + one barrier per layer that Q4_K downs avoid. Both
+   Q6_K matvecs now carry SWIGLU_X (buffer 8 = up rows, `sw4` on the
+   activation loads, slot/row strides mirrored from x). Same fold the
+   MoE routed/shared downs already had for other formats. Bit-exact
+   vs standalone swiglu + plain matvec
+   (`matvec_q6k_swiglu_fold_matches_separate`, both kernels).
+   NOTE: the whole decode SWFUSE path stays opt-in
+   (`ALLPAKA_SWFUSE=1`); flipping the default needs a cool-machine A/B.
+2. **Decode QKV was three dispatches.** New `matvec_qkv_q4k_q6k` runs
+   wq(Q4_K)+wk(Q4_K)+wv(Q6_K) as ONE matvec dispatch over n_q+n_k+n_v
+   rows (NR0=2, simdgroup-uniform region branch, bodies verbatim from
+   `matvec_q4_k_mv` / `matvec_q6_k_mv`, so bit-identical —
+   `matvec_qkv_q4k_q6k_matches_separate`). llama.cpp runs three mul_mv
+   here, so this is a candidate win over llama, not parity work.
+   **Opt-in `ALLPAKA_QKV_MV=1`** for now: the gufuse measurement
+   (qwen3-30b dual gate/up 105.0 vs 113.7 tok/s) showed fusion can lose
+   to concurrent separate dispatches; cool A/B decides.
+
+Selection proven end-to-end on Qwen3-8B (`ALLPAKA_DEBUG_QKV=1`:
+`decode swiglu-fold on matvec_q6_k_mv`, `decode fused qkv
+matvec_qkv_q4k_q6k`), declines=0. Telemetry note: the per-layer
+dispatch counter is a static estimate (+8/layer), so fused variants do
+not move the printed dispatch count.
+
+Commit `def20ea`. Pending (quiet machine): the mmbench q6_k re-run
+above; full 3-model matrix to re-baseline after the Q6_K rounds.
+
+### Verdicts from interleaved A/B (contended machine, order-reversed controls)
+
+- **`ALLPAKA_SWFUSE=1` on 8B decode: clear LOSS.** Forward pairs 1/6
+  negative, reversed pairs 0/6 negative, median ≈ −20% tg. Physics:
+  the fold doubles the down matvec's activation stream (gate+up instead
+  of precomputed act) — ≈+400 MB of L2 reads per token on 8B shapes,
+  matching the measured hit. Consistent with the 2026-09-26 default-off
+  flip (235B q3_k −7.7 ms/token). The new Q6_K SWIGLU_X support stays
+  available behind the flag; the default stays OFF. No flip.
+- **`ALLPAKA_QKV_MV=1` on 8B decode: NEUTRAL.** In the quiet window
+  (78-84 tok/s both arms) deltas were −1.3/+2.1/0.0/0.0/−0.1% — the
+  concurrent encoder already overlaps the three dispatches, so fusion
+  only removes launches, not bubbles. Stays opt-in, default OFF.
+
+## 2026-11-09 (round 3): prefill race fixed in attend_mm_fq; A/B verdicts
+
+**Race.** Prefill logits drifted run-to-run at pp480 (argmax stable).
+Flag bisect: `ALLPAKA_ATTN_MM=0` and `ALLPAKA_PF_FQK=0` both stabilize;
+`PF_ONEBUF=0`, `MM_PIPE=0`, `PF_SPLIT=1` do not. Root cause: attend_mm_fq's
+producer/consumer sync was ONE global counter - a consumer's prefix wait
+(`n_prod * (tg.y+1)`) could be satisfied by producers of LATER row blocks
+finishing first, so early tiles read unwritten K/V. Fix (`819ac5a`):
+per-rowblock counters, prefix wait per block, 256 B buffer, counters
+zeroed by a tiny dispatch before every fused attention launch (the old
+monotonic epoch could deadlock across chunks/sessions with differing
+tile counts). Verified: pp480 fnv stable 5/5 and BIT-IDENTICAL to the
+unfused `PF_FQK=0` reference; stable on 30B-A3B, 0.6B, two-chunk pp1200.
+
+**A/B (interleaved pairs, contended machine, pp=128, Qwen3-8B):**
+- `MM_PIPE` (the whole Q6_K pipelined round): mean +3.4%, 6/8 positive
+  pairs. The 9ef6116/6e955f9 work is a real pp win.
+- `PF_FQK` post-fix vs unfused: ~0% in stable windows - the correctness
+  fix costs nothing measurable; the fusion keeps its original +0.4%.
+
+E2e bitwise A/B of prefill changes is possible again (deterministic
+logits), which hardens all future pp comparisons.
+
+## 2026-11-09 (round 4): 30B pp diagnostics + FA inner-loop experiment (branch perf-fa-db)
+
+**Where 30B pp time goes** (PF_SPLIT/FFN_SPLIT per-stage GPU ms shares,
+pp480, shares only - split serialisation inflates absolutes ~2.7x):
+attend 38%, expert gate+up 27%, expert down 16%, qkv 8%, wo 6%, the
+rest (norms/router/swiglu/shared) ~5%. The per-row "ROWS matvec" MoE
+path in metal.rs turned out to be the MTP verify path; real prefill MoE
+runs `ffn_batch_grouped` with the tiled grouped-mm kernels
+(mmll_id/mmllpg/mmllps). `MM_PIPE` (pipelined Q4_K gather + Q6_K
+swiglu-fold down) measures +13-21% on 30B pp480 interleaved A/B - the
+Q6_K round pays off on MoE too, not only on 8B dense.
+
+**llama flash-attn reference** (ggml 0.29 homebrew, tensor API disabled
+on M4 Max -> fa_f16 path): for dk128/f16 llama runs Q=8 query rows per
+threadgroup, C=64 positions per tile, NSG=4 - the SAME macro-structure
+as our attend_mm/attend_mm_fq. The remaining structural delta is
+inner-loop pipelining: llama keeps two 8-dim blocks in flight in QK
+(mq[2]/mk[2], 8 iterations of 2 MMAs) and two 8-position strips in
+flight in PV (4 iterations of 2x4 MMAs); we ran single chains
+(16x1 and 8x4).
+
+**Experiment**: attend_mm + attend_mm_fq QK/PV loops restructured to
+llama-style double-buffering. Accumulate order per accumulator
+unchanged, so bit-identical - verified: 30B pp480 logits-fnv
+`18259760d250fc77` before and after.
+
+**A/B (interleaved pairs, heavily contended machine, top-CPU 150-250%)**:
+- 30B pp480 window A: +6.8/+3.0/-3.5 (2/3 positive)
+- 30B pp480 window B: -17.5/+2.8/-15.6/+39.9 (swings exceed the signal)
+- 8B pp128: -12.8/+1.6/-3.0/-3.2/-11.1 (median ~ -2.5%)
+
+Verdict: INCONCLUSIVE - plausible small win on 30B, plausible small loss
+on 8B, noise swamps both. The change is pushed on branch `perf-fa-db`;
+main keeps the single-chain loops until a quiet-machine (top-CPU < 60)
+interleaved A/B via `scripts/quiet-round.sh` gives a real verdict.

@@ -104,6 +104,7 @@ fn main() {
     let row_bytes = match fmt.as_str() {
         "q8_0" => n_in / 32 * 34,
         "q5_k" => n_in / 256 * 176,
+        "q6_k" => n_in / 256 * 210,
         _ => n_in / 256 * 144,
     };
     let w_len = n_out
@@ -219,6 +220,7 @@ fn main() {
     let kernel_list: Vec<(&str, u64)> = match fmt.as_str() {
         "q8_0" => vec![("mmll_q8_0", 32), ("mmllp_q8_0", 32), ("mm64ll_q8_0", 32)],
         "q5_k" => vec![("mmll_q5_k", 32), ("mm64ll_q5_k", 32), ("mmllp_q5_k", 32)],
+        "q6_k" => vec![("mmll_q6_k", 32), ("mm64ll_q6_k", 32), ("mmllp_q6_k", 32)],
         _ => vec![
             ("mmll_q4_k", 32u64),
             ("mm64ll_q4_k", 32),
@@ -274,7 +276,11 @@ fn main() {
         let llib = device
             .new_library_with_source(&lsrc, &CompileOptions::new())
             .unwrap_or_else(|e| panic!("llama mm compile: {e}"));
-        let fun = llib.get_function("llama_mm_q4_K", None).unwrap();
+        let lfun = match fmt.as_str() {
+            "q6_k" => "llama_mm_q6_K",
+            _ => "llama_mm_q4_K",
+        };
+        let fun = llib.get_function(lfun, None).unwrap();
         let pipe = device
             .new_compute_pipeline_state_with_function(&fun)
             .unwrap();
@@ -332,7 +338,7 @@ fn main() {
             10,
         );
         let fl = 2.0 * (m * n_in * n_out) as f64;
-        println!("llama kernel_mul_mm_q4_K_f32: {:.3} ms, {:.2} TFLOPS", t * 1e3, fl / t / 1e12);
+        println!("llama {lfun}: {:.3} ms, {:.2} TFLOPS", t * 1e3, fl / t / 1e12);
     }
 
     // --- mmid (grouped) mode ---
@@ -822,7 +828,11 @@ fn main() {
     }
 
     // --- llama ---
-    let src = std::fs::read_to_string("/tmp/mm_full.metal").unwrap();
+    // Legacy full-file extract; gone from /tmp on a cleaned machine — skip.
+    let Ok(src) = std::fs::read_to_string("/tmp/mm_full.metal") else {
+        println!("skip llama_mul_mm_q4_K: /tmp/mm_full.metal missing");
+        return;
+    };
     let llib = device
         .new_library_with_source(&src, &CompileOptions::new())
         .unwrap();
