@@ -349,21 +349,34 @@ allpaka fleet --model models/reasoner.gguf --model models/tools.gguf --model mod
   - `credentials.rs` - ключи провайдеров: `Store` поверх трейта `Vault`,
     `SystemVault` есть только на macOS и Windows; скоуп - директория истории,
     сами секреты хранятся вне неё.
-  - `lib.rs` - корень сборки: запуск сервера, таблица маршрутов, гвард
-    источников, реестр сессий и `ActionKind` - тип действия, которым ход управляет.
+  - `lib.rs` - корень сборки: общие типы, `App`, запуск сервера (`run`), реестр
+    сессий и `ActionKind` - тип действия, которым ход управляет.
+  - `api/` - таблица маршрутов и гвард источников (`router.rs`), обработчики
+    сессий, плана, фоновых задач и проектов (`handlers.rs`).
+  - `runtime/` - актор сессии (`actor.rs`), ход модели (`turn.rs`), вложенные
+    ходы субагентов (`subagent.rs`) и запуск команд (`exec.rs`).
+  - `observability/` - хранилище трасс: запись и спаны (`model.rs`), живые
+    трассы (`trace.rs`), приём внешних (`ingest.rs`), чтение и сводки
+    (`store.rs`), вайтлист метаданных (`receipts.rs`), агрегаты guardrail
+    (`guardrails.rs`) и HTTP-обработчики (`api.rs`).
 - `crates/allpaka-gguf` - чтение GGUF: `metadata.rs`, `tensors.rs`,
   `dequant.rs` (кванты) и `vision.rs`.
 - `crates/allpaka-backend` - слой исполнения: какой бэкенд считает данный тензор.
-  - `gpu/metal.rs`, `gpu/cuda/`, `gpu/stub.rs` - ядра под Apple Silicon, под
-    NVIDIA через `ggml` и заглушка для машины без GPU.
+  - `gpu/metal/`, `gpu/cuda/`, `gpu/stub.rs` - ядра под Apple Silicon, под
+    NVIDIA через `ggml` и заглушка для машины без GPU. Оба бэкенда разложены
+    одинаково: устройство (`device.rs`), область KV (`region.rs`), matvec,
+    внимание (`attn.rs`), декод (`decode.rs`), prefill (`prefill.rs`) и
+    групповой FFN (`ffn_grouped.rs`). На macOS компилируется только Metal;
+    остальные две ветки проверяет `scripts/check-backends.sh`.
   - `accel.rs`, `capability.rs`, `memory.rs` - выбор ускорителя, его возможности
     и бюджет памяти.
-  - `ops.rs`, `quantmat.rs`, `execution.rs`, `command.rs` - операции, квантованные
+  - `ops/`, `quantmat/`, `execution.rs`, `command.rs` - операции, квантованные
     матрицы и постановка работы на очередь.
   - `runtime.rs`, `profile.rs` - политики запуска (`ALLPAKA_*`) и именованные
     профили.
   - `telemetry.rs` - пофазный учёт времени (Embed/Norm/QKV/Attention/...).
-- `crates/allpaka-model` - модель целиком: `model.rs` (слои), `kv.rs` (KV-кэш),
+- `crates/allpaka-model` - модель целиком: `model/` (загрузка, внимание, MoE,
+  prefill, декод, MTP, GDN, сессия), `kv.rs` (KV-кэш),
   `prefix_cache.rs`, `speculate.rs`, `tokenizer.rs`, `requirements.rs`,
   `config.rs` и `profile.rs` - куда уходит время CPU на один токен декода.
   Одно имя с `backend/src/profile.rs`, смысл разный: там именованные политики
@@ -372,7 +385,8 @@ allpaka fleet --model models/reasoner.gguf --model models/tools.gguf --model mod
   - `config.rs` - чтение `allpaka.toml` (`init` пишет его же).
   - `scheduler.rs`, `serving_runtime.rs`, `model_registry.rs` - очередь запросов,
     непрерывный батчинг и реестр загруженных моделей.
-  - `serve/` - части сервера: вход (`ingress.rs`), запуск моделей (`launch.rs`),
+  - `serve/` - части сервера: вход (`ingress.rs`), маршрутизация соединений
+    (`router.rs`), генерация (`inference.rs`), запуск моделей (`launch.rs`),
     бюджет памяти (`memory.rs`), RAG-инструменты (`rag_tools.rs`), отмена запросов
     (`request_control.rs`) и снимок ресурсов (`resources.rs`).
   - `autotune.rs`, `benchmark_report.rs`, `airbug.rs`, `airbug_llama.rs` -
