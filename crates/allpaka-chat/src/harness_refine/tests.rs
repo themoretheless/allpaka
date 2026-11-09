@@ -43,9 +43,7 @@ impl Engine for Scripted {
                 let prefix = "pool/inv1/harness/";
                 tree = files
                     .iter()
-                    .filter_map(|(p, t)| {
-                        p.strip_prefix(prefix).map(|p| (p.to_string(), t.clone()))
-                    })
+                    .filter_map(|(p, t)| p.strip_prefix(prefix).map(|p| (p.to_string(), t.clone())))
                     .collect();
                 return Ok((tree, "adopted inv1".into()));
             }
@@ -132,8 +130,7 @@ fn plan<'a>(
     }
 }
 fn temp() -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("allpaka-refine-{}", crate::evaluation::new_id()));
+    let dir = std::env::temp_dir().join(format!("allpaka-refine-{}", crate::evaluation::new_id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -161,11 +158,7 @@ fn validator(verdicts: &[PairVerdict]) -> ValidationEngine {
 }
 
 impl Engine for ValidationEngine {
-    fn rollout<'a>(
-        &'a self,
-        label: &'a str,
-        _tree: &'a Tree,
-    ) -> BoxFuture<'a, Result<RunView>> {
+    fn rollout<'a>(&'a self, label: &'a str, _tree: &'a Tree) -> BoxFuture<'a, Result<RunView>> {
         Box::pin(async move {
             self.rollouts.lock().unwrap().push(label.to_string());
             let base = label.starts_with("validation-base-");
@@ -1113,8 +1106,7 @@ fn hook_model(request: &Value) -> Value {
         }
         _ => {
             assert!(
-                results[1].contains("[harness hook trimmed")
-                    && results[1].chars().count() < 600,
+                results[1].contains("[harness hook trimmed") && results[1].chars().count() < 600,
                 "{}",
                 results[1].len()
             );
@@ -1313,9 +1305,7 @@ fn probe_model(request: &Value) -> Value {
             say(&json!({"files":{},"notes":"KEEP_BASE: runs agree"}).to_string())
         }
     } else if results.is_empty() {
-        assert!(
-            system.contains("# Available skills") && tools.contains(&"load_skill".to_string())
-        );
+        assert!(system.contains("# Available skills") && tools.contains(&"load_skill".to_string()));
         call("load_skill", json!({"name":"note"}))
     } else if results.len() == 1 {
         assert!(results[0].contains("Write out.txt"));
@@ -1528,9 +1518,10 @@ fn proposer_model(request: &Value) -> Value {
     assert!(system.contains("YOUR DIMENSION: INV") && system.contains("YOURS TO EDIT"));
     assert!(!tools
         .iter()
-        .any(|t| ["run_command", "background", "delegate", "load_skill"]
-            .contains(&t.as_str())
-            || t.starts_with("mcp_")));
+        .any(
+            |t| ["run_command", "background", "delegate", "load_skill"].contains(&t.as_str())
+                || t.starts_with("mcp_")
+        ));
     match results.len() {
         0 => call("read_file", json!({"path":"context/rollouts/base1.md"})),
         1 => {
@@ -1618,10 +1609,7 @@ fn selector_model(request: &Value) -> Value {
         }
         _ => {
             assert!(results[1].contains("hello"));
-            say(
-                &json!({"why":"A contradicts readme.txt; B matches it","choice":"B"})
-                    .to_string(),
-            )
+            say(&json!({"why":"A contradicts readme.txt; B matches it","choice":"B"}).to_string())
         }
     }
 }
@@ -1740,14 +1728,11 @@ fn harness_materializes_for_codex_and_opencode() {
     assert!(codex["AGENTS.md"].starts_with("# Repo rules\nUse cargo.\n\nBe exact."));
     assert!(codex["AGENTS.md"]
         .contains("- note: the task asks for a note (.agents/skills/note/SKILL.md)"));
-    assert!(codex["AGENTS.md"]
-        .contains("# Delegation playbooks\n## reader — reads one file\nRead it."));
     assert!(
-        codex["AGENTS.md"].contains("- .agents/skills/note/scripts/check.sh: Check the note")
+        codex["AGENTS.md"].contains("# Delegation playbooks\n## reader — reads one file\nRead it.")
     );
-    assert!(
-        !codex["AGENTS.md"].contains("load_skill") && !codex["AGENTS.md"].contains("delegate")
-    );
+    assert!(codex["AGENTS.md"].contains("- .agents/skills/note/scripts/check.sh: Check the note"));
+    assert!(!codex["AGENTS.md"].contains("load_skill") && !codex["AGENTS.md"].contains("delegate"));
     assert!(
         codex.contains_key(".agents/skills/note/SKILL.md")
             && codex.contains_key("scripts/count.py")
@@ -1840,8 +1825,7 @@ fn delegate_model(request: &Value) -> Value {
         };
     }
     assert!(
-        system.contains("# Available subagents\n")
-            || system.contains("# Available subagents (")
+        system.contains("# Available subagents\n") || system.contains("# Available subagents (")
     );
     if results.is_empty() {
         call(
@@ -1901,13 +1885,10 @@ fn files_only_model(request: &Value) -> Value {
     let (system, tools, results) = (system_of(request), tools_of(request), results_of(request));
     let command = json!({"command":"printf pwned > policy-marker.txt"});
     if system.contains("You are the `reader` subagent") {
-        assert!(tools.iter().all(|name| ![
-            "run_command",
-            "run_script",
-            "background",
-            "delegate"
-        ]
-        .contains(&name.as_str())));
+        assert!(tools.iter().all(
+            |name| !["run_command", "run_script", "background", "delegate"]
+                .contains(&name.as_str())
+        ));
         return if results.is_empty() {
             call("run_command", command)
         } else {

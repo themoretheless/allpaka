@@ -9,11 +9,11 @@
 //! cannot silently move a shift.
 
 use crate::tensors::GgmlType;
-pub use allpaka_dtype::{
-    bf16_to_f32, dequant_mlx_q4_block_slice, dequant_mlx_q8_block_slice, f16_to_f32, scale_min_k4,
-};
 use allpaka_dtype::{
     bf16_bytes_to_f32, f16_bytes_to_f32, f32_bytes_to_f32, unpack_q3_k_scales_raw,
+};
+pub use allpaka_dtype::{
+    bf16_to_f32, dequant_mlx_q4_block_slice, dequant_mlx_q8_block_slice, f16_to_f32, scale_min_k4,
 };
 use anyhow::{bail, Result};
 

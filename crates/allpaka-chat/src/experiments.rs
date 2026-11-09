@@ -159,9 +159,7 @@ pub(crate) async fn offline_score(
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 pub(crate) fn read_offline_score_inner(app: &crate::App, id: &str) -> Result<Value> {
-    if id.is_empty()
-        || id.len() > 80
-        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    if id.is_empty() || id.len() > 80 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
         bail!("Invalid score ID");
     }
@@ -186,10 +184,7 @@ pub(crate) fn read_offline_score_inner(app: &crate::App, id: &str) -> Result<Val
         bail!("Offline receipt too large");
     }
     let receipt: Value = crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
-    if receipt["id"] != id
-        || receipt["kind"] != "offline_score"
-        || receipt["provider_calls"] != 0
-    {
+    if receipt["id"] != id || receipt["kind"] != "offline_score" || receipt["provider_calls"] != 0 {
         bail!("Offline identity mismatch");
     }
     let version = receipt["dataset_version"]
@@ -200,8 +195,7 @@ pub(crate) fn read_offline_score_inner(app: &crate::App, id: &str) -> Result<Val
         receipt["dataset_id"].as_str().context("Missing dataset")?,
         Some(version),
     )?;
-    if receipt["dataset_sha256"] != snapshot.sha256
-        || receipt["project_id"] != snapshot.project_id
+    if receipt["dataset_sha256"] != snapshot.sha256 || receipt["project_id"] != snapshot.project_id
     {
         bail!("Offline dataset mismatch");
     }
@@ -1887,9 +1881,7 @@ pub(crate) async fn save_matrix(
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 pub(crate) fn read_matrix_inner(app: &crate::App, id: &str) -> Result<Value> {
-    if id.is_empty()
-        || id.len() > 80
-        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    if id.is_empty() || id.len() > 80 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
         bail!("Invalid matrix ID");
     }

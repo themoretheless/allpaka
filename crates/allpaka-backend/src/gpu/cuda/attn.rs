@@ -20,7 +20,12 @@ pub(super) fn attend_gqa_launch_cfg(n_q_or_kv: u32, m: u32) -> LaunchConfig {
     }
 }
 
-pub(super) fn attend_gqa_kv_launch_cfg(n_kv: u32, m: u32, group: u32, head_dim: u32) -> LaunchConfig {
+pub(super) fn attend_gqa_kv_launch_cfg(
+    n_kv: u32,
+    m: u32,
+    group: u32,
+    head_dim: u32,
+) -> LaunchConfig {
     // TILE=64 × head_dim × 2 (K+V) × sizeof(uint16)
     let smem = 64u32 * head_dim * 2 * 2;
     LaunchConfig {

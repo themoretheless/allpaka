@@ -21,7 +21,12 @@ pub(super) fn best_single_node(
 /// and only depends on `(node_index, layer_count)`. We push DP row computation
 /// into the permutation recursion tree so each prefix `order[0..=s]` computes
 /// row `s` once for all extensions, pruning missing-link subtrees immediately.
-pub(super) fn best_split(nodes: &[Node], model: &Model, fabric: &Fabric, req: &PlanRequest) -> Option<Plan> {
+pub(super) fn best_split(
+    nodes: &[Node],
+    model: &Model,
+    fabric: &Fabric,
+    req: &PlanRequest,
+) -> Option<Plan> {
     let total_layers = model.n_layers as usize;
     if nodes.len() < 2 || total_layers < 2 {
         return None;
@@ -182,7 +187,9 @@ pub(super) fn best_split(nodes: &[Node], model: &Model, fabric: &Fabric, req: &P
                         if let Some(ret_link) = fabric.between(ni, order[0]) {
                             let cand_secs = match spec_params {
                                 None => {
-                                    compute + next_fwd_1 + ret_link.one_way_p99(RETURN_PAYLOAD_BYTES)
+                                    compute
+                                        + next_fwd_1
+                                        + ret_link.one_way_p99(RETURN_PAYLOAD_BYTES)
                                 }
                                 Some((_, ret_spec, expected_accepted, draft_bytes, draft_toks)) => {
                                     if expected_accepted > 0.0 {

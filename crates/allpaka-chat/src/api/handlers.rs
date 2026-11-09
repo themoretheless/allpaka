@@ -313,7 +313,10 @@ pub(crate) async fn execute_background(
     Ok(result)
 }
 
-pub(crate) async fn delete_session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
+pub(crate) async fn delete_session(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> ApiResult<Value> {
     let folder = {
         let sessions = app.sessions.lock().unwrap();
         let Some((shared, _)) = sessions.get(&id) else {

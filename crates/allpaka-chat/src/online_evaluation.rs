@@ -708,9 +708,7 @@ impl Store {
         trace_hash: &str,
     ) -> Result<serde_json::Value> {
         use std::io::Read;
-        if !technical(project)
-            || !technical(trace)
-            || !crate::storage::valid_sha256_hex(trace_hash)
+        if !technical(project) || !technical(trace) || !crate::storage::valid_sha256_hex(trace_hash)
         {
             bail!("Invalid selection identity or trace hash");
         }

@@ -1,7 +1,8 @@
 //! Batched prompt prefill and speculative verification passes.
 
 use super::{
-    attn_zero_enabled, cpu_attn_enabled, moe::{route_gated_into_slice, Ffn},
+    attn_zero_enabled, cpu_attn_enabled,
+    moe::{route_gated_into_slice, Ffn},
     moe_zero_enabled, no_tokenbuf_enabled, prefuse_enabled, trace, Model, Session,
 };
 use crate::config::{Gating, RopeStyle};
@@ -308,8 +309,7 @@ impl<'a> Model<'a> {
         let hidden = c.hidden as usize;
         let head_dim = c.head_dim as usize;
         let scale = 1.0 / (head_dim as f32).sqrt();
-        let rope_flat =
-            &s.rope_cache[base * s.rope_cache_pairs..(base + m) * s.rope_cache_pairs];
+        let rope_flat = &s.rope_cache[base * s.rope_cache_pairs..(base + m) * s.rope_cache_pairs];
         let mut picked_buf = [(0usize, 0.0f32); 256];
         for (li, layer) in self.layers.iter().enumerate() {
             if layer.attn_norm_raw.is_empty() || layer.ffn_norm_raw.is_empty() {

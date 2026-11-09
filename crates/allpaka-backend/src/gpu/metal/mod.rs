@@ -43,8 +43,8 @@ macro_rules! cstamp {
 
 mod telemetry;
 
-pub use telemetry::{gpu_time_stats, stats};
 use telemetry::*;
+pub use telemetry::{gpu_time_stats, stats};
 
 mod select;
 use select::*;

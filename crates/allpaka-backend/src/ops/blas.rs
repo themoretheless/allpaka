@@ -185,8 +185,11 @@ pub fn add_assign_par(a: &mut [f32], b: &[f32]) {
         let elem_end = (c_end * per).min(total);
         if elem_start < elem_end {
             let len = elem_end - elem_start;
-            let ac = unsafe { std::slice::from_raw_parts_mut((a_addr as *mut f32).add(elem_start), len) };
-            let bc = unsafe { std::slice::from_raw_parts((b_addr as *const f32).add(elem_start), len) };
+            let ac = unsafe {
+                std::slice::from_raw_parts_mut((a_addr as *mut f32).add(elem_start), len)
+            };
+            let bc =
+                unsafe { std::slice::from_raw_parts((b_addr as *const f32).add(elem_start), len) };
             add_assign_slice(ac, bc);
         }
     });
@@ -243,14 +246,34 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
                 let ap = a.as_ptr();
                 let bp = b.as_ptr();
                 while i + 32 <= n {
-                    acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(ap.add(i)), _mm256_loadu_ps(bp.add(i)), acc0);
-                    acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(ap.add(i + 8)), _mm256_loadu_ps(bp.add(i + 8)), acc1);
-                    acc2 = _mm256_fmadd_ps(_mm256_loadu_ps(ap.add(i + 16)), _mm256_loadu_ps(bp.add(i + 16)), acc2);
-                    acc3 = _mm256_fmadd_ps(_mm256_loadu_ps(ap.add(i + 24)), _mm256_loadu_ps(bp.add(i + 24)), acc3);
+                    acc0 = _mm256_fmadd_ps(
+                        _mm256_loadu_ps(ap.add(i)),
+                        _mm256_loadu_ps(bp.add(i)),
+                        acc0,
+                    );
+                    acc1 = _mm256_fmadd_ps(
+                        _mm256_loadu_ps(ap.add(i + 8)),
+                        _mm256_loadu_ps(bp.add(i + 8)),
+                        acc1,
+                    );
+                    acc2 = _mm256_fmadd_ps(
+                        _mm256_loadu_ps(ap.add(i + 16)),
+                        _mm256_loadu_ps(bp.add(i + 16)),
+                        acc2,
+                    );
+                    acc3 = _mm256_fmadd_ps(
+                        _mm256_loadu_ps(ap.add(i + 24)),
+                        _mm256_loadu_ps(bp.add(i + 24)),
+                        acc3,
+                    );
                     i += 32;
                 }
                 while i + 8 <= n {
-                    acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(ap.add(i)), _mm256_loadu_ps(bp.add(i)), acc0);
+                    acc0 = _mm256_fmadd_ps(
+                        _mm256_loadu_ps(ap.add(i)),
+                        _mm256_loadu_ps(bp.add(i)),
+                        acc0,
+                    );
                     i += 8;
                 }
                 let sum01 = _mm256_add_ps(acc0, acc1);

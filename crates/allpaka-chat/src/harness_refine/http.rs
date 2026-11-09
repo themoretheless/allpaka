@@ -250,4 +250,3 @@ pub(crate) async fn adopt_api(
     harness::activate(&app.data, &job.project_id, Some(&revision)).map_err(bad)?;
     Ok(Json(json!({"active": revision})))
 }
-

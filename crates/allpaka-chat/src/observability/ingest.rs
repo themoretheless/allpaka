@@ -251,7 +251,10 @@ impl Store {
             // Scope keys to the project; no raw key is retained in metadata.
             format!(
                 "trace-external-{}",
-                crate::storage::hex_sha256(&serde_json::to_vec(&(request.project_id.as_str(), key))?)
+                crate::storage::hex_sha256(&serde_json::to_vec(&(
+                    request.project_id.as_str(),
+                    key
+                ))?)
             )
         } else {
             format!("trace-external-{}", crate::evaluation::new_id())

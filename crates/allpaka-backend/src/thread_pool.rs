@@ -143,19 +143,12 @@ where
     }
 
     let pool = global_pool();
-    let mut spawned = pool
-        .dispatch_lock
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut spawned = pool.dispatch_lock.lock().unwrap_or_else(|e| e.into_inner());
     let needed_extra = n_workers - 1;
 
     let task = TaskFn::from_ref(&f);
     {
-        let mut st = pool
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut st = pool.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         while *spawned < needed_extra {
             *spawned += 1;
             spawn_worker(pool.shared, *spawned, st.generation);
@@ -181,11 +174,7 @@ where
     }));
 
     let panic_payload = {
-        let mut st = pool
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut st = pool.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         while st.remaining > 0 {
             st = pool
                 .shared
@@ -287,8 +276,9 @@ mod tests {
         let mut out = vec![0usize; n];
         let base = out.as_mut_ptr() as usize;
         par_for_chunks(n, 8, |_tid, start, end| {
-            let sub =
-                unsafe { std::slice::from_raw_parts_mut((base as *mut usize).add(start), end - start) };
+            let sub = unsafe {
+                std::slice::from_raw_parts_mut((base as *mut usize).add(start), end - start)
+            };
             for (i, slot) in sub.iter_mut().enumerate() {
                 *slot = start + i + 1;
             }

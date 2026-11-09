@@ -6,7 +6,11 @@ use crate::*;
 /// Run one turn. `retry_member` names a swarm member to re-run instead of a full
 /// wave; only the Swarm executor understands it, and the actor refuses it for
 /// every other mode.
-pub(crate) async fn turn(app: App, s: SharedSession, retry_member: Option<String>) -> Result<TurnOutcome> {
+pub(crate) async fn turn(
+    app: App,
+    s: SharedSession,
+    retry_member: Option<String>,
+) -> Result<TurnOutcome> {
     let (id, project) = {
         let state = s.lock().unwrap();
         (state.id.clone(), state.settings.project_id.clone())
@@ -26,7 +30,11 @@ pub(crate) async fn turn(app: App, s: SharedSession, retry_member: Option<String
     result
 }
 
-pub(crate) fn enforce_guardrail(receipt: Value, trace: &observability::Trace, parent: usize) -> Result<()> {
+pub(crate) fn enforce_guardrail(
+    receipt: Value,
+    trace: &observability::Trace,
+    parent: usize,
+) -> Result<()> {
     let passed = receipt["passed"]
         .as_bool()
         .context("Invalid guardrail outcome")?;
@@ -109,10 +117,9 @@ pub(crate) async fn turn_traced(
     };
     let harness_hooks = harness::hooks(&harness_tree)?;
     let nested = ephemeral.as_ref().is_some_and(|e| e.nested);
-    let policy = ephemeral.as_ref().map_or_else(
-        ExecutionPolicy::trusted_unsandboxed,
-        |e| e.policy,
-    );
+    let policy = ephemeral
+        .as_ref()
+        .map_or_else(ExecutionPolicy::trusted_unsandboxed, |e| e.policy);
     let restricted = !policy.external_tools;
     let mut tool_settings = settings.clone();
     tool_settings.allow_writes &= project.roots.iter().any(|r| r.writable);

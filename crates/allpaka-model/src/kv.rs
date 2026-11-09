@@ -258,7 +258,8 @@ impl SsmCache {
         let n = self.total_elems();
         let byte_len = n * 4;
         let slot_byte_off = i * byte_len;
-        if let (Some(slot_sh), Some(slot_st)) = (self.slot_shared.as_ref(), self.slot_store.as_mut())
+        if let (Some(slot_sh), Some(slot_st)) =
+            (self.slot_shared.as_ref(), self.slot_store.as_mut())
         {
             if slot_sh.is_discrete() {
                 let dst = &mut slot_st.as_bytes_mut()[slot_byte_off..slot_byte_off + byte_len];

@@ -130,7 +130,12 @@ impl ModelTotals {
         }
         Ok(())
     }
-    pub(super) fn receipt(mut self, source: String, provider_id: Option<String>, model: String) -> Value {
+    pub(super) fn receipt(
+        mut self,
+        source: String,
+        provider_id: Option<String>,
+        model: String,
+    ) -> Value {
         self.durations.sort_unstable();
         let percentile = |percent: usize| {
             if self.durations.is_empty() {

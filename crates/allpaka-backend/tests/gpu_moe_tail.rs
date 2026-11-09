@@ -148,7 +148,10 @@ fn grouped_tail_stores_match_conservative_barriers() {
         // Verify BN=16 kernels match BN=32 kernels bit-for-bit across all
         // full-tile (m=16, m=32) and tail-tile (m=1, m=31, m=33, m=65) groups.
         let mut bn16_pairs = vec![
-            (format!("mmll_id_{suffix}"), format!("mmll_id_{suffix}_bn16")),
+            (
+                format!("mmll_id_{suffix}"),
+                format!("mmll_id_{suffix}_bn16"),
+            ),
             (
                 format!("mmllg_id_{suffix}"),
                 format!("mmllg_id_{suffix}_bn16"),
@@ -374,7 +377,11 @@ fn fused_qkv_kernels_match_separate_dispatches() {
         enc.end_encoding();
         cmd.commit();
         cmd.wait_until_completed();
-        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{qkv_name}");
+        assert_eq!(
+            cmd.status(),
+            MTLCommandBufferStatus::Completed,
+            "{qkv_name}"
+        );
 
         let s_ref =
             unsafe { std::slice::from_raw_parts(ref_out.contents().cast::<f32>(), total_out) };
@@ -542,12 +549,18 @@ fn route_fused_matches_three_stage_router() {
     cmd.wait_until_completed();
     assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
 
-    let tab_a = unsafe { std::slice::from_raw_parts(table_a.contents().cast::<[u32; 3]>(), n_expert as usize) };
-    let tab_b = unsafe { std::slice::from_raw_parts(table_b.contents().cast::<[u32; 3]>(), n_expert as usize) };
+    let tab_a = unsafe {
+        std::slice::from_raw_parts(table_a.contents().cast::<[u32; 3]>(), n_expert as usize)
+    };
+    let tab_b = unsafe {
+        std::slice::from_raw_parts(table_b.contents().cast::<[u32; 3]>(), n_expert as usize)
+    };
     assert_eq!(tab_a, tab_b, "group tables differ");
 
-    let off_a = unsafe { std::slice::from_raw_parts(tok_off_a.contents().cast::<u32>(), (m + 1) as usize) };
-    let off_b = unsafe { std::slice::from_raw_parts(tok_off_b.contents().cast::<u32>(), (m + 1) as usize) };
+    let off_a =
+        unsafe { std::slice::from_raw_parts(tok_off_a.contents().cast::<u32>(), (m + 1) as usize) };
+    let off_b =
+        unsafe { std::slice::from_raw_parts(tok_off_b.contents().cast::<u32>(), (m + 1) as usize) };
     assert_eq!(off_a, off_b, "tok_off differs");
 
     let hw_a = unsafe { std::slice::from_raw_parts(hit_w_a.contents().cast::<f32>(), hit_len) };
@@ -556,8 +569,10 @@ fn route_fused_matches_three_stage_router() {
         assert_eq!(a.to_bits(), b.to_bits(), "hit_w[{i}] differs");
     }
 
-    let tk_a = unsafe { std::slice::from_raw_parts(tok_a.contents().cast::<u32>(), total_rows as usize) };
-    let tk_b = unsafe { std::slice::from_raw_parts(tok_b.contents().cast::<u32>(), total_rows as usize) };
+    let tk_a =
+        unsafe { std::slice::from_raw_parts(tok_a.contents().cast::<u32>(), total_rows as usize) };
+    let tk_b =
+        unsafe { std::slice::from_raw_parts(tok_b.contents().cast::<u32>(), total_rows as usize) };
     let hr_a = unsafe { std::slice::from_raw_parts(hit_row_a.contents().cast::<u32>(), hit_len) };
     let hr_b = unsafe { std::slice::from_raw_parts(hit_row_b.contents().cast::<u32>(), hit_len) };
 
@@ -585,9 +600,8 @@ fn route_fused_matches_three_stage_router() {
     // Tile descriptors: exact cover of each expert's rows in 32-row chunks,
     // experts in order, then a rows=0 tail up to tile_bound.
     let tile_bound = (n_expert + total_rows / 32) as usize;
-    let tiles = unsafe {
-        std::slice::from_raw_parts(tiles_b.contents().cast::<[u32; 3]>(), tile_bound)
-    };
+    let tiles =
+        unsafe { std::slice::from_raw_parts(tiles_b.contents().cast::<[u32; 3]>(), tile_bound) };
     let mut t = 0usize;
     for (e, entry) in tab_b.iter().enumerate().take(n_expert as usize) {
         let row0 = entry[1];

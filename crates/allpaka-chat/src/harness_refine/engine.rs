@@ -48,7 +48,12 @@ pub struct Evidence {
     pub(super) text: String,
     pub(super) files: BTreeMap<String, String>,
 }
-pub(super) fn evidence(plan: &Plan, current: &Tree, bases: &[RunView], pool: &[Candidate]) -> Evidence {
+pub(super) fn evidence(
+    plan: &Plan,
+    current: &Tree,
+    bases: &[RunView],
+    pool: &[Candidate],
+) -> Evidence {
     let mut files = BTreeMap::new();
     files.insert("task.md".to_string(), plan.task.clone());
     for (path, text) in &plan.base {
@@ -95,7 +100,12 @@ pub(super) fn evidence(plan: &Plan, current: &Tree, bases: &[RunView], pool: &[C
         files,
     }
 }
-pub(super) fn evidence_text(plan: &Plan, current: &Tree, bases: &[RunView], pool: &[Candidate]) -> String {
+pub(super) fn evidence_text(
+    plan: &Plan,
+    current: &Tree,
+    bases: &[RunView],
+    pool: &[Candidate],
+) -> String {
     let runs = bases.len() + pool.len();
     let budget = (120_000 / runs.max(1)).clamp(3_000, 24_000);
     let mut out = format!(
@@ -689,7 +699,11 @@ pub async fn run(plan: Plan<'_>) -> Result<Outcome> {
 /// Rubric scores for the base rollouts and the chosen final, with Studio's
 /// judge instructions. Reporting only: selection and composition never see
 /// them. A failed judgement is None, never zero.
-pub(super) async fn score(plan: &Plan<'_>, rubric: &str, runs: &[&RunView]) -> BTreeMap<String, Option<f64>> {
+pub(super) async fn score(
+    plan: &Plan<'_>,
+    rubric: &str,
+    runs: &[&RunView],
+) -> BTreeMap<String, Option<f64>> {
     let path = plan.dir.join("scores.json");
     let cache_key = downstream_cache_key(
         plan,
@@ -800,7 +814,10 @@ pub(super) fn warnings(
 
 /// Blind selection among delivering finals. Falls back to the first
 /// delivering final, and to the base harness when no final delivered.
-pub(super) async fn select(plan: &Plan<'_>, finals: &[(Stage, RunView)]) -> (String, String, String) {
+pub(super) async fn select(
+    plan: &Plan<'_>,
+    finals: &[(Stage, RunView)],
+) -> (String, String, String) {
     let delivered: Vec<&(Stage, RunView)> = finals.iter().filter(|(_, r)| r.delivered).collect();
     match delivered.len() {
         0 => {
@@ -925,4 +942,3 @@ pub(super) async fn select(plan: &Plan<'_>, finals: &[(Stage, RunView)]) -> (Str
         ),
     }
 }
-

@@ -868,4 +868,3 @@ pub(super) fn read_files(root: &std::path::Path) -> Result<Tree> {
     }
     Ok(tree)
 }
-

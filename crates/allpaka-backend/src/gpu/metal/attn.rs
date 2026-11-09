@@ -98,7 +98,12 @@ pub(super) fn attn_shape_ok(req: &AttnReq) -> bool {
 
 /// Encode attention into an open encoder, q already staged in the x arena and
 /// the result landing at `y_off` in the y arena.
-pub(super) fn encode_attend(enc: &metal::ComputeCommandEncoderRef, gpu: &Gpu, req: &AttnReq, y_off: usize) {
+pub(super) fn encode_attend(
+    enc: &metal::ComputeCommandEncoderRef,
+    gpu: &Gpu,
+    req: &AttnReq,
+    y_off: usize,
+) {
     encode_attend_at(enc, gpu, req, 0, y_off)
 }
 

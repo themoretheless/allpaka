@@ -119,9 +119,8 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     };
     let dual = dual_state.is_some();
 
-    let use_route_fused = route_mode
-        && req.n_expert <= 256
-        && std::env::var_os("ALLPAKA_NO_ROUTE_FUSED").is_none();
+    let use_route_fused =
+        route_mode && req.n_expert <= 256 && std::env::var_os("ALLPAKA_NO_ROUTE_FUSED").is_none();
     // Tile-descriptor grid (llama-style): route_fused emits one MmGroup per
     // non-empty tile_w-row chunk (32, or 16 for bn16), so the grid covers
     // real work exactly - at pp480/128exp this is ~250 z-slices instead of
@@ -187,18 +186,15 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     // GPU routing: size route_buf, then rescue the logits out of y_arena
     // BEFORE ensure_arenas can reallocate it (steady state binds y_arena
     // directly - zero copies). Counts/counters must start at zero.
-    let rl = req
-        .route
-        .as_ref()
-        .map(|r| {
-            route_layout(
-                m_fused,
-                req.n_expert,
-                r.n_used,
-                req.shared.is_some(),
-                if bn16 { 16 } else { 32 },
-            )
-        });
+    let rl = req.route.as_ref().map(|r| {
+        route_layout(
+            m_fused,
+            req.n_expert,
+            r.n_used,
+            req.shared.is_some(),
+            if bn16 { 16 } else { 32 },
+        )
+    });
     let mut logits_at: Option<(&'static str, usize)> = None;
     // One-buffer rescue: (old y_arena, logits offset, logits target, count).
     let mut obuf_rescue: Option<(Buffer, usize, usize, usize)> = None;

@@ -371,18 +371,14 @@ fn macos_memory_mib() -> (u64, u64, u64) {
 
     unsafe {
         let mut info = std::mem::zeroed::<MachTaskBasicInfo>();
-        let mut count = (std::mem::size_of::<MachTaskBasicInfo>() / std::mem::size_of::<u32>()) as u32;
-        let rss_bytes = if task_info(
-            mach_task_self_,
-            MACH_TASK_BASIC_INFO,
-            &mut info,
-            &mut count,
-        ) == 0
-        {
-            info.resident_size
-        } else {
-            0
-        };
+        let mut count =
+            (std::mem::size_of::<MachTaskBasicInfo>() / std::mem::size_of::<u32>()) as u32;
+        let rss_bytes =
+            if task_info(mach_task_self_, MACH_TASK_BASIC_INFO, &mut info, &mut count) == 0 {
+                info.resident_size
+            } else {
+                0
+            };
 
         let host = mach_host_self();
         let mut page_size: usize = 16384;
@@ -390,21 +386,17 @@ fn macos_memory_mib() -> (u64, u64, u64) {
         let mut vm_stat = std::mem::zeroed::<VmStatistics64>();
         let mut vm_count =
             (std::mem::size_of::<VmStatistics64>() / std::mem::size_of::<u32>()) as u32;
-        let used_bytes = if host_statistics64(host, HOST_VM_INFO64, &mut vm_stat, &mut vm_count) == 0
-        {
-            let used_pages = u64::from(vm_stat.active_count)
-                + u64::from(vm_stat.wire_count)
-                + u64::from(vm_stat.compressor_page_count);
-            used_pages.saturating_mul(page_size as u64)
-        } else {
-            0
-        };
+        let used_bytes =
+            if host_statistics64(host, HOST_VM_INFO64, &mut vm_stat, &mut vm_count) == 0 {
+                let used_pages = u64::from(vm_stat.active_count)
+                    + u64::from(vm_stat.wire_count)
+                    + u64::from(vm_stat.compressor_page_count);
+                used_pages.saturating_mul(page_size as u64)
+            } else {
+                0
+            };
 
-        (
-            rss_bytes >> 20,
-            used_bytes >> 20,
-            total_bytes >> 20,
-        )
+        (rss_bytes >> 20, used_bytes >> 20, total_bytes >> 20)
     }
 }
 

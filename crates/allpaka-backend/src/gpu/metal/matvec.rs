@@ -100,7 +100,12 @@ pub(super) fn mv_id_grid() -> bool {
 }
 
 /// Dispatch geometry for a matvec pipeline (LPR × rows, TG via `mv_tg`).
-pub(super) fn dispatch_mv(enc: &metal::ComputeCommandEncoderRef, ty: GgmlType, n_in: usize, n_rows: usize) {
+pub(super) fn dispatch_mv(
+    enc: &metal::ComputeCommandEncoderRef,
+    ty: GgmlType,
+    n_in: usize,
+    n_rows: usize,
+) {
     let lpr = lanes_per_row(ty, n_in) as u64;
     let tg = mv_tg();
     enc.dispatch_thread_groups(

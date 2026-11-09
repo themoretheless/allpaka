@@ -18,7 +18,15 @@ pub(crate) fn routes(app: App) -> Router {
                 )
             }),
         )
-        .route("/files.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], include_str!("../../web/files.js")) }))
+        .route(
+            "/files.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../web/files.js"),
+                )
+            }),
+        )
         .route(
             "/style.css",
             get(|| async {
@@ -375,7 +383,11 @@ pub(crate) fn routes(app: App) -> Router {
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)
 }
-pub(crate) async fn guard(State(app): State<App>, req: axum::extract::Request, next: Next) -> Response {
+pub(crate) async fn guard(
+    State(app): State<App>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
     if req.uri().path() == "/api/worker/run" {
         if !remote_worker::authorized(req.headers()) {
             return error(StatusCode::UNAUTHORIZED, "Worker authentication required")

@@ -1,8 +1,7 @@
 use super::*;
 #[test]
 fn completed_trace_health_counts_failed_spans_and_rejects_running_or_removed() {
-    let data =
-        std::env::temp_dir().join(format!("allpaka-health-{}", crate::evaluation::new_id()));
+    let data = std::env::temp_dir().join(format!("allpaka-health-{}", crate::evaluation::new_id()));
     std::fs::create_dir_all(&data).unwrap();
     let data = data.canonicalize().unwrap();
     let store = Store::new(&data).unwrap();
@@ -196,8 +195,7 @@ fn evaluation_scores_are_bounded_numeric_metadata() {
         assert!(valid_evaluator_ref(&invalid).is_none());
     }
     assert_eq!(
-        public_usage(&json!({"evaluation_scores":{"quality":0.5}}))["evaluation_scores"]
-            ["quality"],
+        public_usage(&json!({"evaluation_scores":{"quality":0.5}}))["evaluation_scores"]["quality"],
         0.5
     );
     for invalid in [
@@ -208,9 +206,7 @@ fn evaluation_scores_are_bounded_numeric_metadata() {
         json!({"metric":"PRIVATE"}),
     ] {
         assert!(valid_evaluation_scores(&invalid).is_none());
-        assert!(
-            public_usage(&json!({"evaluation_scores":invalid}))["evaluation_scores"].is_null()
-        );
+        assert!(public_usage(&json!({"evaluation_scores":invalid}))["evaluation_scores"].is_null());
     }
 }
 #[test]
@@ -474,9 +470,7 @@ fn first_text_metadata_is_integer_bounded_and_optional() {
     );
     for value in [json!(-1), json!(true), json!(1.5), json!("private")] {
         assert!(public_usage(&json!({"first_text_ms":value}))["first_text_ms"].is_null());
-        assert!(
-            serde_json::from_value::<ExternalUsage>(json!({"first_text_ms":value})).is_err()
-        );
+        assert!(serde_json::from_value::<ExternalUsage>(json!({"first_text_ms":value})).is_err());
     }
     assert!(public_usage(&json!({}))["first_text_ms"].is_null());
 }
@@ -1008,8 +1002,7 @@ fn restart_recovery_keeps_completed_leaves_and_unknown_durations() {
 }
 #[test]
 fn trace_tree_persists_status_and_whitelisted_usage_and_drop_interrupts() {
-    let data =
-        std::env::temp_dir().join(format!("allpaka-trace-{}-{}", std::process::id(), now()));
+    let data = std::env::temp_dir().join(format!("allpaka-trace-{}-{}", std::process::id(), now()));
     std::fs::create_dir(&data).unwrap();
     let data = data.canonicalize().unwrap();
     let store = Store::new(&data).unwrap();

@@ -69,10 +69,10 @@ fn atomic_write(path: &std::path::Path, record: &Record) -> Result<()> {
 }
 fn update_cache(cache: &TraceCache, path: &std::path::Path, record: &Record) {
     if let Ok(meta) = std::fs::symlink_metadata(path) {
-        cache
-            .lock()
-            .unwrap()
-            .insert(record.id.clone(), (meta.len(), meta.modified().ok(), record.clone()));
+        cache.lock().unwrap().insert(
+            record.id.clone(),
+            (meta.len(), meta.modified().ok(), record.clone()),
+        );
     }
 }
 #[cfg(test)]

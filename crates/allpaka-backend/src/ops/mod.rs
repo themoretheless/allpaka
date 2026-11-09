@@ -176,7 +176,11 @@ mod tests {
         let orig_gate = gate.clone();
         swiglu(&mut gate, &up);
         for ((&got, &g), &u) in gate.iter().zip(&orig_gate).zip(&up) {
-            assert!(close(got, silu(g) * u), "g={g} u={u}: got={got} vs {}", silu(g) * u);
+            assert!(
+                close(got, silu(g) * u),
+                "g={g} u={u}: got={got} vs {}",
+                silu(g) * u
+            );
         }
     }
 

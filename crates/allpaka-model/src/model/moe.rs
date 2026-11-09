@@ -195,15 +195,7 @@ impl Ffn<'_> {
                 };
                 let src = &probs_all[start_t * n_expert..end_t * n_expert];
                 for (dst_row, row) in dst.chunks_mut(k).zip(src.chunks(n_expert)) {
-                    route_gated_into_slice(
-                        row,
-                        k,
-                        gating_val,
-                        norm_val,
-                        scale_val,
-                        rbias,
-                        dst_row,
-                    );
+                    route_gated_into_slice(row, k, gating_val, norm_val, scale_val, rbias, dst_row);
                 }
             });
         }
