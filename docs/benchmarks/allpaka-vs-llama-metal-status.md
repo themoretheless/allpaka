@@ -343,3 +343,26 @@ above; full 3-model matrix to re-baseline after the Q6_K rounds.
   (78-84 tok/s both arms) deltas were −1.3/+2.1/0.0/0.0/−0.1% — the
   concurrent encoder already overlaps the three dispatches, so fusion
   only removes launches, not bubbles. Stays opt-in, default OFF.
+
+## 2026-11-09 (round 3): prefill race fixed in attend_mm_fq; A/B verdicts
+
+**Race.** Prefill logits drifted run-to-run at pp480 (argmax stable).
+Flag bisect: `ALLPAKA_ATTN_MM=0` and `ALLPAKA_PF_FQK=0` both stabilize;
+`PF_ONEBUF=0`, `MM_PIPE=0`, `PF_SPLIT=1` do not. Root cause: attend_mm_fq's
+producer/consumer sync was ONE global counter - a consumer's prefix wait
+(`n_prod * (tg.y+1)`) could be satisfied by producers of LATER row blocks
+finishing first, so early tiles read unwritten K/V. Fix (`819ac5a`):
+per-rowblock counters, prefix wait per block, 256 B buffer, counters
+zeroed by a tiny dispatch before every fused attention launch (the old
+monotonic epoch could deadlock across chunks/sessions with differing
+tile counts). Verified: pp480 fnv stable 5/5 and BIT-IDENTICAL to the
+unfused `PF_FQK=0` reference; stable on 30B-A3B, 0.6B, two-chunk pp1200.
+
+**A/B (interleaved pairs, contended machine, pp=128, Qwen3-8B):**
+- `MM_PIPE` (the whole Q6_K pipelined round): mean +3.4%, 6/8 positive
+  pairs. The 9ef6116/6e955f9 work is a real pp win.
+- `PF_FQK` post-fix vs unfused: ~0% in stable windows - the correctness
+  fix costs nothing measurable; the fusion keeps its original +0.4%.
+
+E2e bitwise A/B of prefill changes is possible again (deterministic
+logits), which hardens all future pp comparisons.
