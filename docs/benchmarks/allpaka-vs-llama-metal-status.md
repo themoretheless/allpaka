@@ -366,3 +366,39 @@ unfused `PF_FQK=0` reference; stable on 30B-A3B, 0.6B, two-chunk pp1200.
 
 E2e bitwise A/B of prefill changes is possible again (deterministic
 logits), which hardens all future pp comparisons.
+
+## 2026-11-09 (round 4): 30B pp diagnostics + FA inner-loop experiment (branch perf-fa-db)
+
+**Where 30B pp time goes** (PF_SPLIT/FFN_SPLIT per-stage GPU ms shares,
+pp480, shares only - split serialisation inflates absolutes ~2.7x):
+attend 38%, expert gate+up 27%, expert down 16%, qkv 8%, wo 6%, the
+rest (norms/router/swiglu/shared) ~5%. The per-row "ROWS matvec" MoE
+path in metal.rs turned out to be the MTP verify path; real prefill MoE
+runs `ffn_batch_grouped` with the tiled grouped-mm kernels
+(mmll_id/mmllpg/mmllps). `MM_PIPE` (pipelined Q4_K gather + Q6_K
+swiglu-fold down) measures +13-21% on 30B pp480 interleaved A/B - the
+Q6_K round pays off on MoE too, not only on 8B dense.
+
+**llama flash-attn reference** (ggml 0.29 homebrew, tensor API disabled
+on M4 Max -> fa_f16 path): for dk128/f16 llama runs Q=8 query rows per
+threadgroup, C=64 positions per tile, NSG=4 - the SAME macro-structure
+as our attend_mm/attend_mm_fq. The remaining structural delta is
+inner-loop pipelining: llama keeps two 8-dim blocks in flight in QK
+(mq[2]/mk[2], 8 iterations of 2 MMAs) and two 8-position strips in
+flight in PV (4 iterations of 2x4 MMAs); we ran single chains
+(16x1 and 8x4).
+
+**Experiment**: attend_mm + attend_mm_fq QK/PV loops restructured to
+llama-style double-buffering. Accumulate order per accumulator
+unchanged, so bit-identical - verified: 30B pp480 logits-fnv
+`18259760d250fc77` before and after.
+
+**A/B (interleaved pairs, heavily contended machine, top-CPU 150-250%)**:
+- 30B pp480 window A: +6.8/+3.0/-3.5 (2/3 positive)
+- 30B pp480 window B: -17.5/+2.8/-15.6/+39.9 (swings exceed the signal)
+- 8B pp128: -12.8/+1.6/-3.0/-3.2/-11.1 (median ~ -2.5%)
+
+Verdict: INCONCLUSIVE - plausible small win on 30B, plausible small loss
+on 8B, noise swamps both. The change is pushed on branch `perf-fa-db`;
+main keeps the single-chain loops until a quiet-machine (top-CPU < 60)
+interleaved A/B via `scripts/quiet-round.sh` gives a real verdict.
