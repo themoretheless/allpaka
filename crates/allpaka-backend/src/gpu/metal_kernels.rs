@@ -7377,12 +7377,17 @@ kernel void attend_mm(
             device const half* pk =
                 k + k_base + p0 * kv_dim + (ulong)kv_head * head_dim;
             simdgroup_float8x8 mqk = make_filled_simdgroup_matrix<float, 8>(0.0f);
-            for (ushort i = 0; i < 16; i++) {
-                simdgroup_half8x8 mq;
-                simdgroup_half8x8 mk;
-                simdgroup_load(mq, sq + 8 * i, 128, 0, false);
-                simdgroup_load(mk, pk + 8 * i, kv_dim, 0, true); // dims x pos
-                simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
+            // Two dim-blocks in flight: the device K load latency hides
+            // behind the first MMA. Same accumulate order as the plain loop.
+            #pragma unroll
+            for (ushort i = 0; i < 8; i++) {
+                simdgroup_half8x8 mq0, mq1, mk0, mk1;
+                simdgroup_load(mq0, sq + 16 * i, 128, 0, false);
+                simdgroup_load(mq1, sq + 16 * i + 8, 128, 0, false);
+                simdgroup_load(mk0, pk + 16 * i, kv_dim, 0, true); // dims x pos
+                simdgroup_load(mk1, pk + 16 * i + 8, kv_dim, 0, true);
+                simdgroup_multiply_accumulate(mqk, mq0, mk0, mqk);
+                simdgroup_multiply_accumulate(mqk, mq1, mk1, mqk);
             }
             simdgroup_store(mqk, ss + pb * 8, 64, 0, false);
         }
@@ -7418,17 +7423,28 @@ kernel void attend_mm(
         for (ushort ii = 0; ii < 4; ii++) {
             simdgroup_load(lo[ii], so + sgitg * 32 + ii * 8, 128, 0, false);
         }
-        for (ushort cc = 0; cc < 8; cc++) {
-            uint pstart = ic + cc * 8;
-            ulong p0 = pstart < max_pos ? pstart : min(pstart, span8);
-            device const half* pv = v + v_base + p0 * kv_dim
+        // Two position-strips in flight per step; per-accumulator order is
+        // unchanged (cc ascending), so the result is bit-identical.
+        #pragma unroll
+        for (ushort cc2 = 0; cc2 < 4; cc2++) {
+            uint pa0 = ic + cc2 * 16;
+            uint pb0 = pa0 + 8;
+            ulong q0 = pa0 < max_pos ? pa0 : min(pa0, span8);
+            ulong q1 = pb0 < max_pos ? pb0 : min(pb0, span8);
+            device const half* pv0 = v + v_base + q0 * kv_dim
                 + (ulong)kv_head * head_dim + sgitg * 32;
-            simdgroup_float8x8 pa;
-            simdgroup_load(pa, ss + cc * 8, 64, 0, false);
+            device const half* pv1 = v + v_base + q1 * kv_dim
+                + (ulong)kv_head * head_dim + sgitg * 32;
+            simdgroup_float8x8 pa_0, pa_1;
+            simdgroup_load(pa_0, ss + cc2 * 16, 64, 0, false);
+            simdgroup_load(pa_1, ss + cc2 * 16 + 8, 64, 0, false);
+            #pragma unroll
             for (ushort ii = 0; ii < 4; ii++) {
-                simdgroup_half8x8 mv;
-                simdgroup_load(mv, pv + ii * 8, kv_dim, 0, false);
-                simdgroup_multiply_accumulate(lo[ii], pa, mv, lo[ii]);
+                simdgroup_half8x8 mv0, mv1;
+                simdgroup_load(mv0, pv0 + ii * 8, kv_dim, 0, false);
+                simdgroup_load(mv1, pv1 + ii * 8, kv_dim, 0, false);
+                simdgroup_multiply_accumulate(lo[ii], pa_0, mv0, lo[ii]);
+                simdgroup_multiply_accumulate(lo[ii], pa_1, mv1, lo[ii]);
             }
         }
         for (ushort ii = 0; ii < 4; ii++) {
@@ -7653,12 +7669,17 @@ kernel void attend_mm_fq(
             device const half* pk =
                 kc + k_base + p0 * kv_dim + (ulong)kv_head * head_dim;
             simdgroup_float8x8 mqk = make_filled_simdgroup_matrix<float, 8>(0.0f);
-            for (ushort i = 0; i < 16; i++) {
-                simdgroup_half8x8 mq;
-                simdgroup_half8x8 mk;
-                simdgroup_load(mq, sq + 8 * i, 128, 0, false);
-                simdgroup_load(mk, pk + 8 * i, kv_dim, 0, true); // dims x pos
-                simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
+            // Two dim-blocks in flight: the device K load latency hides
+            // behind the first MMA. Same accumulate order as the plain loop.
+            #pragma unroll
+            for (ushort i = 0; i < 8; i++) {
+                simdgroup_half8x8 mq0, mq1, mk0, mk1;
+                simdgroup_load(mq0, sq + 16 * i, 128, 0, false);
+                simdgroup_load(mq1, sq + 16 * i + 8, 128, 0, false);
+                simdgroup_load(mk0, pk + 16 * i, kv_dim, 0, true); // dims x pos
+                simdgroup_load(mk1, pk + 16 * i + 8, kv_dim, 0, true);
+                simdgroup_multiply_accumulate(mqk, mq0, mk0, mqk);
+                simdgroup_multiply_accumulate(mqk, mq1, mk1, mqk);
             }
             simdgroup_store(mqk, ss + pb * 8, 64, 0, false);
         }
@@ -7694,17 +7715,28 @@ kernel void attend_mm_fq(
         for (ushort ii = 0; ii < 4; ii++) {
             simdgroup_load(lo[ii], so + sgitg * 32 + ii * 8, 128, 0, false);
         }
-        for (ushort cc = 0; cc < 8; cc++) {
-            uint pstart = ic + cc * 8;
-            ulong p0 = pstart < max_pos ? pstart : min(pstart, span8);
-            device const half* pv = vc + v_base + p0 * kv_dim
+        // Two position-strips in flight per step; per-accumulator order is
+        // unchanged (cc ascending), so the result is bit-identical.
+        #pragma unroll
+        for (ushort cc2 = 0; cc2 < 4; cc2++) {
+            uint pa0 = ic + cc2 * 16;
+            uint pb0 = pa0 + 8;
+            ulong q0 = pa0 < max_pos ? pa0 : min(pa0, span8);
+            ulong q1 = pb0 < max_pos ? pb0 : min(pb0, span8);
+            device const half* pv0 = vc + v_base + q0 * kv_dim
                 + (ulong)kv_head * head_dim + sgitg * 32;
-            simdgroup_float8x8 pa2;
-            simdgroup_load(pa2, ss + cc * 8, 64, 0, false);
+            device const half* pv1 = vc + v_base + q1 * kv_dim
+                + (ulong)kv_head * head_dim + sgitg * 32;
+            simdgroup_float8x8 pa_0, pa_1;
+            simdgroup_load(pa_0, ss + cc2 * 16, 64, 0, false);
+            simdgroup_load(pa_1, ss + cc2 * 16 + 8, 64, 0, false);
+            #pragma unroll
             for (ushort ii = 0; ii < 4; ii++) {
-                simdgroup_half8x8 mv;
-                simdgroup_load(mv, pv + ii * 8, kv_dim, 0, false);
-                simdgroup_multiply_accumulate(lo[ii], pa2, mv, lo[ii]);
+                simdgroup_half8x8 mv0, mv1;
+                simdgroup_load(mv0, pv0 + ii * 8, kv_dim, 0, false);
+                simdgroup_load(mv1, pv1 + ii * 8, kv_dim, 0, false);
+                simdgroup_multiply_accumulate(lo[ii], pa_0, mv0, lo[ii]);
+                simdgroup_multiply_accumulate(lo[ii], pa_1, mv1, lo[ii]);
             }
         }
         for (ushort ii = 0; ii < 4; ii++) {
