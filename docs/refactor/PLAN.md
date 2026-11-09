@@ -39,7 +39,7 @@
 
 | # | Задача | Размер | Риск | Статус |
 |---|---|---|---|---|
-| 2.1 | `gpu/metal.rs` → `metal/{device,pipelines,select,telemetry,matvec,attn,ffn,decode,verify,prefill,mega}` | L | низкий–средний | wip: вынесены telemetry, select, decode, verify, prefill, ffn_grouped; в `mod.rs` (2 944 строки) остались device, pipelines, matvec, attn, mega |
+| 2.1 | `gpu/metal.rs` → `metal/{device,region,pipelines,select,telemetry,matvec,attn,args,ffn_grouped,decode,verify,prefill,mega}` | L | низкий–средний | done (`4b8ccc9` и следующий): чистый перенос, проверен сравнением строк; `mod.rs` 527 строк. Pipelines остались внутри `impl Gpu` в `device.rs` |
 | 2.2 | `gpu/cuda/mod.rs` → `{api,attn,ffn,decode,decode_fused,prefill}` | M | низкий | todo |
 | 2.3 | `gpu/cuda/runtime.rs` → `runtime/{device,telemetry,select,gemm,q8,l2,matvec}` | M | низкий | todo |
 | 2.4 | `gpu/common.rs`: общие `row_bytes`, окна весов, телеметрия, `attn_shape_ok` | M | низкий | todo |
