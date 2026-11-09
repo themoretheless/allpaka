@@ -1,4 +1,4 @@
-﻿//! CUDA device runtime: context, streams, weight residency, scratch arenas.
+//! CUDA device runtime: context, streams, weight residency, scratch arenas.
 
 use crate::gpu::cuda::kernels::{EMBED_KERNELS, KERNELS};
 use crate::gpu::cuda::pdl::{LaunchArgsPdl, StreamPdlExt};
@@ -21,10 +21,6 @@ pub static ENCODE_NS: AtomicU64 = AtomicU64::new(0);
 pub static WAIT_NS: AtomicU64 = AtomicU64::new(0);
 pub static GPU_BUSY_NS: AtomicU64 = AtomicU64::new(0);
 pub static SCHED_NS: AtomicU64 = AtomicU64::new(0);
-
-pub static DECODE_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
-pub static DECODE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-pub static DECODE_DECLINES: AtomicU64 = AtomicU64::new(0);
 
 /// Batch size from which dequant + GEMM beats a loop of matvecs.
 pub const MM_MIN_M: usize = 32;
@@ -220,7 +216,7 @@ fn init_device() -> Option<CudaGpu> {
     // (null cannot be installed into ggml). Prefer that whenever graphs, ggml
     // FA/MMQ, or ggml decode may share the queue. DEFAULT_STREAM=1 keeps the
     // legacy default-stream path (pp-oriented; peer share is skipped).
-    let want_graph = std::env::var("ALLPAKA_CUDA_GRAPH").map_or(false, |v| v == "1");
+    let want_graph = crate::runtime::get().cuda_graph;
     let want_ggml = crate::gpu::cuda::ggml::enabled();
     let want_ggml_decode = std::env::var("ALLPAKA_GGML_DECODE")
         .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"));

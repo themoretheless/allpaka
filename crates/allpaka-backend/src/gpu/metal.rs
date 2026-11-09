@@ -25,6 +25,8 @@ use std::sync::{Mutex, OnceLock};
 
 use allpaka_gguf::GgmlType;
 
+pub use super::types::*;
+
 /// Where GPU wall time goes, accumulated across every call. The split that
 /// matters: `wait_ns` is dead time the CPU spends blocked on the GPU, and its
 /// ratio to `calls` is the per-round-trip cost every extra command buffer pays.
@@ -601,8 +603,29 @@ impl Gpu {
     /// therefore get several overlapping chunk windows, and every dispatch
     /// picks the window that wholly contains its tensor.
     fn add_mapping(&mut self, mapping: &[u8]) -> bool {
+        if mapping.is_empty() {
+            return true;
+        }
         let page = 16384usize;
         let base = mapping.as_ptr() as usize;
+        if base % page != 0 {
+            let buf = self.device.new_buffer_with_data(
+                mapping.as_ptr() as *const _,
+                mapping.len() as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            if buf.as_ptr().is_null() {
+                return false;
+            }
+            let added = vec![WeightChunk {
+                buf,
+                start: base,
+                len: mapping.len(),
+            }];
+            self.ensure_residency(&added);
+            self.chunks.extend(added);
+            return true;
+        }
         let aligned_len = mapping.len().div_ceil(page) * page;
         // Stay well under the device's maxBufferLength: a buffer AT the
         // limit (80.6 GiB here) comes back non-nil yet reads wrong - the
@@ -1263,16 +1286,6 @@ impl Gpu {
             );
         }
     }
-}
-
-/// One matmul request inside a batch: `x` holds `m` activation rows.
-pub struct MatvecReq<'a> {
-    pub ty: GgmlType,
-    pub w: &'a [u8],
-    pub n_in: usize,
-    pub n_out: usize,
-    pub x: &'a [f32],
-    pub m: usize,
 }
 
 /// How many lanes cooperate on one output row, given how many quant blocks
@@ -1976,23 +1989,6 @@ pub fn minimum_kv_capacity() -> usize {
     1
 }
 
-/// One decode step's attention over the cache, for every query head.
-///
-/// `k_off` and `v_off` are *element* offsets of this layer's K and V inside
-/// the wrapped region of halves; from there the cache is `[pos][kv_dim]`.
-pub struct AttnReq<'a> {
-    pub cache: &'a SharedRegion,
-    pub k_off: usize,
-    pub v_off: usize,
-    pub q: &'a [f32],
-    pub kv_dim: usize,
-    pub head_dim: usize,
-    pub n_q_heads: usize,
-    pub group: usize,
-    pub n_pos: usize,
-    pub scale: f32,
-}
-
 /// The kernel assumes a lane owns four dimensions of a 128-wide head.
 const ATTN_HEAD_DIM: usize = 128;
 
@@ -2133,142 +2129,6 @@ fn encode_attend_from(
         MTLSize::new(req.n_q_heads as u64, 1, 1),
         MTLSize::new(attend_tg(), 1, 1),
     );
-}
-
-/// The gated-delta-net branch of a qwen35moe layer (linear attention):
-/// replaces the whole attention half of the token (no KV cache, the
-/// recurrence state lives in the shared SSM region instead).
-pub struct TokenGdn<'a> {
-    /// hidden -> conv channels (key_dim*2 + value_dim), Q8_0.
-    pub wqkv: (GgmlType, &'a [u8], usize),
-    /// hidden -> value_dim (the z gate), Q8_0.
-    pub zgate: (GgmlType, &'a [u8], usize),
-    /// F32 [hidden -> heads_v] projections, raw bytes in the mmap.
-    pub alpha: &'a [u8],
-    pub beta: &'a [u8],
-    /// F32 conv weights [channels * d_conv], raw bytes in the mmap.
-    pub conv1d: &'a [u8],
-    /// Small F32 vectors handed to the kernel by value.
-    pub a: &'a [f32],
-    pub dt: &'a [f32],
-    pub ssm_norm: &'a [f32],
-    /// value_dim -> hidden, Q8_0.
-    pub ssm_out: (GgmlType, &'a [u8], usize),
-    pub heads_k: usize,
-    pub heads_v: usize,
-    pub d: usize,
-    pub d_conv: usize,
-    /// Element offsets of this layer's conv window and deltanet state
-    /// inside the SSM region.
-    pub conv_off: usize,
-    pub state_off: usize,
-}
-
-/// One decode layer's description for the whole-token encoder.
-pub struct TokenLayer<'a> {
-    /// Raw F32 norm weights, borrowed from the mmap (16 KB exceeds setBytes).
-    pub attn_norm: &'a [u8],
-    pub ffn_norm: &'a [u8],
-    pub wq: (GgmlType, &'a [u8], usize),
-    pub wk: (GgmlType, &'a [u8], usize),
-    pub wv: (GgmlType, &'a [u8], usize),
-    pub wo: (GgmlType, &'a [u8], usize),
-    pub q_norm: Option<&'a [f32]>,
-    pub k_norm: Option<&'a [f32]>,
-    /// qwen35moe: the sigmoid output gate is fused into the q projection
-    /// ([q | gate] per head); split and applied post-attention on the GPU.
-    pub gate_in_q: bool,
-    /// Raw F32 Q/K/V biases in the mmap (GLM-4); None for bias-free models.
-    pub q_bias: Option<&'a [u8]>,
-    pub k_bias: Option<&'a [u8]>,
-    pub v_bias: Option<&'a [u8]>,
-    /// Element offsets of this layer's K and V in the cache region.
-    pub k_off: usize,
-    pub v_off: usize,
-    /// Present on linear-attention layers: the whole attention half is the
-    /// gated-delta-net branch, and the attention fields above go unused.
-    pub gdn: Option<TokenGdn<'a>>,
-    pub ffn: TokenFfn<'a>,
-}
-
-pub enum TokenFfn<'a> {
-    Dense {
-        gate: (GgmlType, &'a [u8], usize),
-        up: (GgmlType, &'a [u8], usize),
-        down: (GgmlType, &'a [u8], usize),
-    },
-    Moe {
-        /// F32 router `[n_expert, hidden]`.
-        router: (GgmlType, &'a [u8], usize),
-        /// Raw F32 router bias (GLM `exp_probs_b`); sigmoid gating only.
-        router_bias: Option<&'a [u8]>,
-        /// Stacked expert tensors; per-expert geometry alongside.
-        gate: (GgmlType, &'a [u8]),
-        up: (GgmlType, &'a [u8]),
-        down: (GgmlType, &'a [u8]),
-        expert_ffn: usize,
-        n_used: usize,
-        /// Sigmoid gating (GLM-4) instead of softmax; weights already
-        /// renormalized over the top-k by the caller's contract.
-        sigmoid: bool,
-        /// Optional shared expert, same ffn width as a routed expert; runs
-        /// as an extra combine slot with weight 1.
-        shared: Option<[(GgmlType, &'a [u8], usize); 3]>,
-        /// qwen35moe: the shared expert's combine weight is not a constant
-        /// 1 but sigmoid(gate . h), an F32 [hidden] vector in the mmap. The
-        /// raw logit lands in the slot's weight and the combine kernel
-        /// applies the sigmoid.
-        shared_gate: Option<&'a [u8]>,
-    },
-}
-
-pub struct TokenReq<'a> {
-    /// The embedded input rows, `m * hidden` floats (`m` = 1 for decode).
-    pub x: &'a [f32],
-    /// Tokens to run through the layers in one buffer. m > 1 is the
-    /// speculative-verify path: batched projections (TILE = m), per-token
-    /// attention and MoE, the GDN batch kernels.
-    pub m: usize,
-    pub layers: &'a [TokenLayer<'a>],
-    pub cache: &'a SharedRegion,
-    pub cache_capacity: usize,
-    /// qwen35moe: the SSM region holding every GDN layer's conv window and
-    /// deltanet state (f32 elements), wrapped like the KV cache.
-    pub ssm: Option<&'a SharedRegion>,
-    /// MTP verification: per-row rollback slots written by the GDN batch
-    /// kernels (region, slot stride in elements); None for plain decode.
-    pub ssm_slots: Option<(&'a SharedRegion, usize)>,
-    pub kv_dim: usize,
-    pub head_dim: usize,
-    pub n_heads: usize,
-    pub n_kv_heads: usize,
-    /// First token's position; token i lands at pos + i.
-    pub pos: usize,
-    pub scale: f32,
-    /// `(sin, cos)` pairs per rotary pair per token: `m * rot_dim / 2`.
-    pub rope: &'a [[f32; 2]],
-    /// Rotary width; equals head_dim for full rope, head_dim/2 for GLM-4,
-    /// head_dim/4 for qwen35moe's 64-of-256 partial rope.
-    pub rot_dim: usize,
-    pub eps: f32,
-    pub output_norm: &'a [u8],
-    pub output: (GgmlType, &'a [u8], usize),
-    /// Greedy caller: run the argmax on the GPU after the output projection
-    /// and read back 4 bytes instead of the whole vocabulary.
-    pub argmax: bool,
-    pub embd: Option<(GgmlType, &'a [u8], usize)>,
-    pub token_id: Option<u32>,
-}
-
-/// What decode_token produced: the full vocabulary logits, or just the
-/// greedy winner when the request asked for the on-GPU argmax. For a
-/// multi-token request: the per-row argmax and the output-normed hidden
-/// rows (the speculative verifier's arbitration inputs and the next
-/// round's draft seed).
-pub enum TokenOut {
-    Logits(Vec<f32>),
-    Argmax(u32),
-    Rows { argmax: Vec<u32>, hidden: Vec<f32> },
 }
 
 /// A resolved norm bind: which chunk window holds the F32 weights.
@@ -3046,43 +2906,6 @@ enum FfnRefs {
     },
 }
 
-/// A whole-token GPU request was rejected before submission. The checked API
-/// keeps this distinct from a successful GPU result so callers cannot silently
-/// mistake a CPU fallback for GPU execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DecodeDecline {
-    pub stage: &'static str,
-    pub reason: &'static str,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DecodePathStats {
-    pub attempts: u64,
-    pub successes: u64,
-    pub declines: u64,
-}
-
-static DECODE_ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static DECODE_SUCCESSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static DECODE_DECLINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-pub fn decode_path_stats() -> DecodePathStats {
-    use std::sync::atomic::Ordering::Relaxed;
-    DecodePathStats {
-        attempts: DECODE_ATTEMPTS.load(Relaxed),
-        successes: DECODE_SUCCESSES.load(Relaxed),
-        declines: DECODE_DECLINES.load(Relaxed),
-    }
-}
-
-impl std::fmt::Display for DecodeDecline {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "stage={} reason={}", self.stage, self.reason)
-    }
-}
-
-impl std::error::Error for DecodeDecline {}
-
 /// Diagnostic-preserving entry point for production fast paths.
 pub fn decode_token_checked(req: &TokenReq) -> Result<TokenOut, DecodeDecline> {
     use std::sync::atomic::Ordering::Relaxed;
@@ -3102,20 +2925,8 @@ pub fn decode_token_checked(req: &TokenReq) -> Result<TokenOut, DecodeDecline> {
     }
 }
 
-/// Backend-neutral checked decode contract. New callers should use this
-/// rather than interpreting `None` from the compatibility API below.
-pub fn decode_token_outcome(req: &TokenReq) -> crate::accel::AccelOutcome<TokenOut> {
-    match decode_token_checked(req) {
-        Ok(out) => crate::accel::AccelOutcome::Executed(out),
-        Err(reason) => crate::accel::AccelOutcome::Declined(crate::accel::DeclineReason::Backend {
-            operation: "decode-token",
-            detail: reason.to_string(),
-        }),
-    }
-}
-
 pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
-    let dbg = std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some();
+    let dbg = crate::runtime::get().tokenbuf_debug;
     macro_rules! why {
         ($cond:expr, $msg:expr) => {
             if $cond {
@@ -3364,7 +3175,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         // stage boundaries. Profile mode uses multiple compute encoders inside
         // the same command buffer; production mode remains one concurrent
         // encoder. Both modes keep one submit and one wait per token.
-        let split = std::env::var_os("ALLPAKA_DECODE_SPLIT").is_some();
+        let split = crate::runtime::get().decode_split;
         const MAX_SPLIT_SAMPLES: u64 = 2048;
         let split_counter = if split
             && gpu
@@ -6979,37 +6790,6 @@ fn encode_verify_tokens(
     Some(out)
 }
 
-/// One decode layer's whole attention half as ONE command buffer: the three
-/// qkv projections, per-head norm + RoPE, the f16 store of k/v into the
-/// cache, attention over it, and the output projection. Five waits become
-/// one, and by the GPU's own clock the driver's per-buffer scheduling was as
-/// expensive as the round trips themselves.
-///
-/// NEOX rope only (what every current target model uses); anything else
-/// declines to the CPU path.
-pub struct AttnBlockReq<'a> {
-    pub wq: (GgmlType, &'a [u8], usize),
-    pub wk: (GgmlType, &'a [u8], usize),
-    pub wv: (GgmlType, &'a [u8], usize),
-    pub wo: (GgmlType, &'a [u8], usize),
-    /// The normed layer input, `hidden` floats.
-    pub x: &'a [f32],
-    pub q_norm: Option<&'a [f32]>,
-    pub k_norm: Option<&'a [f32]>,
-    /// `(sin, cos)` per NEOX pair, `head_dim / 2` entries.
-    pub rope: &'a [[f32; 2]],
-    pub eps: f32,
-    pub cache: &'a SharedRegion,
-    pub k_off: usize,
-    pub v_off: usize,
-    pub kv_dim: usize,
-    pub head_dim: usize,
-    pub n_heads: usize,
-    pub n_kv_heads: usize,
-    pub pos: usize,
-    pub scale: f32,
-}
-
 #[repr(C)]
 struct QkPrepArgs {
     n_heads: u32,
@@ -7279,25 +7059,6 @@ pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
     }))
 }
 
-/// A prefill chunk's whole attention half as ONE command buffer: the three
-/// qkv projections over all `m` rows (tile-matmul kernels), per-row norm +
-/// rope + f16 cache store (qk_prep_batch), causal attention per row, and
-/// the output projection. Mirrors the decode token buffer; the FFN half
-/// stays separate because routing groups tokens on the CPU.
-/// Extra weights for the fused prefill: with this present (and
-/// `prefill_begin` called for the chunk), the block reads the residual
-/// stream from GPU memory, norms on the GPU, folds the attention output
-/// back in, re-norms for the FFN and finishes with the router matmul -
-/// returning router logits instead of the projected rows.
-pub struct PrefillFusion<'a> {
-    /// F32 raw norm weights, `hidden` floats each.
-    pub attn_norm: &'a [u8],
-    pub ffn_norm: &'a [u8],
-    /// F32 raw router weights, `n_expert * hidden` floats.
-    pub router: &'a [u8],
-    pub n_expert: usize,
-}
-
 /// Upload the chunk's residual stream for the fused prefill path.
 /// Stamp a GPUTimestamp after a dispatch. No-op unless ALLPAKA_GPU_COUNTERS.
 macro_rules! cstamp {
@@ -7435,7 +7196,7 @@ impl Drop for SharedVector {
 /// Hand the completed residual allocation to its next consumer without memcpy.
 /// The old copying path remains available for controlled A/B measurements.
 pub fn prefill_end_output(len: usize) -> Option<crate::activation::Activation> {
-    if std::env::var("ALLPAKA_PREFILL_ZERO_COPY").is_ok_and(|v| v == "0") {
+    if !crate::runtime::get().prefill_zero_copy {
         let mut out = vec![0.0; len];
         prefill_end(&mut out)?;
         return Some(out.into());
@@ -7486,41 +7247,6 @@ pub fn prefill_abort() {
             gpu.pf_active_len = None;
         }
     }
-}
-
-pub struct PrefillAttnReq<'a> {
-    pub wq: (GgmlType, &'a [u8], usize),
-    pub wk: (GgmlType, &'a [u8], usize),
-    pub wv: (GgmlType, &'a [u8], usize),
-    pub wo: (GgmlType, &'a [u8], usize),
-    /// Normed layer input, `m * hidden` floats.
-    pub hs: &'a [f32],
-    pub m: usize,
-    pub q_norm: Option<&'a [f32]>,
-    pub k_norm: Option<&'a [f32]>,
-    /// `(sin, cos)` pairs for every row: `m * rot_dim / 2` entries.
-    pub ropes: &'a [[f32; 2]],
-    /// Rotary width; == head_dim for full rope, smaller for GLM's partial,
-    /// 64 for qwen35moe's 256-wide heads.
-    pub rot_dim: usize,
-    /// qwen35moe: the sigmoid output gate rides inside the q projection
-    /// ([q | gate] per head, wq.n_out == 2 * q_dim); split and applied
-    /// post-attention.
-    pub gate_in_q: bool,
-    /// GLM's per-head q/k/v additive biases as raw F32 GGUF bytes.
-    pub attn_bias: Option<(&'a [u8], &'a [u8], &'a [u8])>,
-    pub eps: f32,
-    pub cache: &'a SharedRegion,
-    pub k_off: usize,
-    pub v_off: usize,
-    pub kv_dim: usize,
-    pub head_dim: usize,
-    pub n_heads: usize,
-    pub n_kv_heads: usize,
-    /// First row's position; row i attends over base + i + 1 positions.
-    pub base: usize,
-    pub scale: f32,
-    pub fusion: Option<PrefillFusion<'a>>,
 }
 
 pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
@@ -8251,45 +7977,6 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
     Some(out)
 }
 
-/// A prefill chunk of one gated-delta-net layer (qwen35moe linear
-/// attention), mirroring [`prefill_attn_block`]'s fusion contract: reads the
-/// residual stream from pf_x, leaves it updated there (branch output folded
-/// into the FFN norm), the router logits in y_arena for GPU routing.
-pub struct PrefillGdnReq<'a> {
-    /// hidden -> conv channels (key_dim*2 + value_dim), Q8_0.
-    pub wqkv: (GgmlType, &'a [u8], usize),
-    /// hidden -> value_dim (the z gate), Q8_0.
-    pub zgate: (GgmlType, &'a [u8], usize),
-    /// F32 [hidden -> heads_v] projections, raw bytes in the mmap.
-    pub alpha: &'a [u8],
-    pub beta: &'a [u8],
-    /// F32 conv weights [channels * d_conv], raw bytes.
-    pub conv1d: &'a [u8],
-    /// Small F32 vectors handed to the kernel by value.
-    pub a: &'a [f32],
-    pub dt: &'a [f32],
-    pub ssm_norm: &'a [f32],
-    /// value_dim -> hidden, Q8_0.
-    pub ssm_out: (GgmlType, &'a [u8], usize),
-    pub heads_k: usize,
-    pub heads_v: usize,
-    pub d: usize,
-    pub d_conv: usize,
-    pub hidden: usize,
-    pub m: usize,
-    pub eps: f32,
-    /// The shared SSM region: conv window and deltanet state, updated in
-    /// place (element offsets per layer).
-    pub ssm: &'a SharedRegion,
-    /// MTP verification: per-row rollback slots (`SsmCache::arm_slots`),
-    /// (region, slot stride in elements). The batch kernels then also write
-    /// every row's state/window into the slots.
-    pub ssm_slots: Option<(&'a SharedRegion, usize)>,
-    pub conv_off: usize,
-    pub state_off: usize,
-    pub fusion: Option<PrefillFusion<'a>>,
-}
-
 pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
     let hidden = req.hidden;
     let key_dim = req.heads_k * req.d;
@@ -8904,84 +8591,6 @@ pub fn attend(req: &AttnReq) -> Option<Vec<f32>> {
         }
         out
     }))
-}
-
-/// A prefill chunk's whole routed FFN - every expert group's gate, up,
-/// swiglu and down - as ONE command buffer with SIX dispatches, however many
-/// experts were hit. `x` holds the gathered rows (each group's tokens
-/// contiguous), `groups` maps each to its expert and row range. Returns the
-/// down outputs in the same row layout.
-pub struct GroupedFfnReq<'a> {
-    pub gate: (GgmlType, &'a [u8]),
-    pub up: (GgmlType, &'a [u8]),
-    pub down: (GgmlType, &'a [u8]),
-    pub n_expert: usize,
-    pub hidden: usize,
-    pub ffn: usize,
-    /// `[expert, row0, rows]` per hit group; row0 indexes into the flat row
-    /// space. An array, not a tuple: this is copied verbatim into GPU memory
-    /// and a tuple's layout is not guaranteed.
-    pub groups: &'a [[u32; 3]],
-    /// The UNGATHERED activations (`m` rows); `tok[row]` names each flat
-    /// row's source token. The gather happens inside the gate/up kernels.
-    pub x: &'a [f32],
-    pub tok: &'a [u32],
-    pub total_rows: usize,
-    /// Fused prefill: read activations from the pf_hs buffer written by the
-    /// preceding fused attention block, and scatter the weighted expert
-    /// outputs into pf_x on the GPU (CSR hits per token) instead of
-    /// returning them.
-    pub fused: Option<GroupedCombine<'a>>,
-    /// GLM's shared expert (fused path only): dense gate/up/down applied to
-    /// every token. Its down rows land in the down region right after the
-    /// `total_rows` expert rows, so the caller can reference them in the CSR
-    /// hits with weight 1.0.
-    pub shared: Option<GroupedShared<'a>>,
-    /// GPU-side routing (fused path only): route_pick/scan/scatter build the
-    /// group table, token gather and CSR hits on-device at the head of the
-    /// FFN command buffer, from the router logits the attention block left
-    /// in y_arena. `groups`/`tok`/CSR slices are ignored in this mode.
-    pub route: Option<GroupedRoute<'a>>,
-}
-
-pub struct GroupedRoute<'a> {
-    pub n_used: usize,
-    /// Renormalise the winners to sum to 1 (`norm_topk_prob`).
-    pub norm: bool,
-    pub scale: f32,
-    /// Selection bias (`+bias` shifts only the top-k choice).
-    pub bias: Option<&'a [f32]>,
-    /// Sigmoid gating (GLM) when true, softmax over all experts (Qwen3)
-    /// when false. The softmax case is only exact without a selection bias
-    /// and with `norm` set; the caller falls back to the CPU router
-    /// otherwise.
-    pub sigmoid: bool,
-}
-
-pub struct GroupedShared<'a> {
-    pub gate: (GgmlType, &'a [u8]),
-    pub up: (GgmlType, &'a [u8]),
-    pub down: (GgmlType, &'a [u8]),
-    /// Shared-expert FFN width (n_ff_exp * n_expert_shared).
-    pub ffn: usize,
-    /// qwen35moe: the shared expert's combine weight is sigmoid(gate . h)
-    /// per token, an F32 [hidden] projection in the mmap. Its raw logits
-    /// land in y; route_patch_shared_w folds them into the CSR weights.
-    pub gate_out: Option<(GgmlType, &'a [u8])>,
-}
-
-pub struct GroupedCombine<'a> {
-    /// CSR offsets, `m + 1` entries.
-    pub tok_off: &'a [u32],
-    /// Flat-row index and routing weight per hit.
-    pub hit_row: &'a [u32],
-    pub hit_w: &'a [f32],
-    pub m: usize,
-    /// The NEXT layer's attention-norm weight (raw F32) plus rms eps: the
-    /// combine dispatch then also writes the normed rows to pf_hs
-    /// (combine_rows_resnorm), and the next attention block skips its own
-    /// norm. None for the last layer (the output norm stays on the CPU).
-    pub next_norm: Option<(&'a [u8], f32)>,
 }
 
 /// Deferred fused-prefill commits: layer buffers chain through an
@@ -10312,21 +9921,6 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         out
     });
     Some(out)
-}
-
-/// One FFN inside a fused batch: `y = swiglu(x·Gᵀ, x·Uᵀ) · Dᵀ` for `m`
-/// activation rows, without the CPU touching the intermediates.
-pub struct FfnReq<'a> {
-    pub gate_ty: GgmlType,
-    pub gate_w: &'a [u8],
-    pub up_ty: GgmlType,
-    pub up_w: &'a [u8],
-    pub down_ty: GgmlType,
-    pub down_w: &'a [u8],
-    pub hidden: usize,
-    pub ffn: usize,
-    pub x: &'a [f32],
-    pub m: usize,
 }
 
 /// A validated weight reference: kernel name plus window-relative offset.

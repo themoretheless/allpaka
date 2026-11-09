@@ -16,12 +16,13 @@ use runtime::{
     dq_fmt, launch_embed_row, launch_embed_row_dtoken_ptr, launch_gemm_dequant, launch_inc_u32_ptr,
     launch_matvec_q4k_2, launch_matvec_q4k_qkv, launch_matvec_y_ptr, launch_store_u32_at_ptr,
     note_call, q8_decode_enabled, resolve_w, row_bytes, run_matvec, try_init, with_gpu, CudaGpu,
-    CALLS, DECODE_ATTEMPTS, DECODE_DECLINES, DECODE_SUCCESSES, DISPATCHES, ENCODE_NS, GPU,
-    GPU_BUSY_NS, MM_MIN_M, SCHED_NS, WAIT_NS,
+    CALLS, DISPATCHES, ENCODE_NS, GPU, GPU_BUSY_NS, MM_MIN_M, SCHED_NS, WAIT_NS,
 };
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
+
+pub use super::types::*;
 
 pub fn attach(mapping: &[u8]) -> bool {
     if std::env::var_os("ALLPAKA_NO_GPU").is_some() {
@@ -136,15 +137,6 @@ pub fn gpu_time_stats() -> (u64, u64) {
     )
 }
 
-pub struct MatvecReq<'a> {
-    pub ty: GgmlType,
-    pub w: &'a [u8],
-    pub n_in: usize,
-    pub n_out: usize,
-    pub x: &'a [f32],
-    pub m: usize,
-}
-
 pub fn matvec(ty: GgmlType, w: &[u8], n_in: usize, n_out: usize, x: &[f32]) -> Option<Vec<f32>> {
     matvec_batch(&[MatvecReq {
         ty,
@@ -219,19 +211,6 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
         }
         Some(out)
     })
-}
-
-pub struct FfnReq<'a> {
-    pub gate_ty: GgmlType,
-    pub gate_w: &'a [u8],
-    pub up_ty: GgmlType,
-    pub up_w: &'a [u8],
-    pub down_ty: GgmlType,
-    pub down_w: &'a [u8],
-    pub hidden: usize,
-    pub ffn: usize,
-    pub x: &'a [f32],
-    pub m: usize,
 }
 
 pub fn ffn_batch(reqs: &[FfnReq]) -> Option<Vec<Vec<f32>>> {
@@ -360,19 +339,6 @@ pub fn minimum_kv_capacity() -> usize {
     }
 }
 
-pub struct AttnReq<'a> {
-    pub cache: &'a SharedRegion,
-    pub k_off: usize,
-    pub v_off: usize,
-    pub q: &'a [f32],
-    pub kv_dim: usize,
-    pub head_dim: usize,
-    pub n_q_heads: usize,
-    pub group: usize,
-    pub n_pos: usize,
-    pub scale: f32,
-}
-
 fn attn_shape_ok(req: &AttnReq) -> bool {
     matches!(req.head_dim, 64 | 128 | 256)
         && req.group > 0
@@ -482,27 +448,6 @@ pub fn attend_batch(reqs: &[AttnReq]) -> Option<Vec<Vec<f32>>> {
 pub fn attend_project(req: &AttnReq, wo_ty: GgmlType, wo: &[u8], n_out: usize) -> Option<Vec<f32>> {
     let attn = attend(req)?;
     matvec(wo_ty, wo, attn.len(), n_out, &attn)
-}
-
-pub struct AttnBlockReq<'a> {
-    pub wq: (GgmlType, &'a [u8], usize),
-    pub wk: (GgmlType, &'a [u8], usize),
-    pub wv: (GgmlType, &'a [u8], usize),
-    pub wo: (GgmlType, &'a [u8], usize),
-    pub x: &'a [f32],
-    pub q_norm: Option<&'a [f32]>,
-    pub k_norm: Option<&'a [f32]>,
-    pub rope: &'a [[f32; 2]],
-    pub eps: f32,
-    pub cache: &'a SharedRegion,
-    pub k_off: usize,
-    pub v_off: usize,
-    pub kv_dim: usize,
-    pub head_dim: usize,
-    pub n_heads: usize,
-    pub n_kv_heads: usize,
-    pub pos: usize,
-    pub scale: f32,
 }
 
 pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
@@ -688,123 +633,6 @@ fn rmsnorm_pf_x_into_hs(
     Some(())
 }
 
-pub struct TokenGdn<'a> {
-    pub wqkv: (GgmlType, &'a [u8], usize),
-    pub zgate: (GgmlType, &'a [u8], usize),
-    pub alpha: &'a [u8],
-    pub beta: &'a [u8],
-    pub conv1d: &'a [u8],
-    pub a: &'a [f32],
-    pub dt: &'a [f32],
-    pub ssm_norm: &'a [f32],
-    pub ssm_out: (GgmlType, &'a [u8], usize),
-    pub heads_k: usize,
-    pub heads_v: usize,
-    pub d: usize,
-    pub d_conv: usize,
-    pub conv_off: usize,
-    pub state_off: usize,
-}
-
-pub struct TokenLayer<'a> {
-    pub attn_norm: &'a [u8],
-    pub ffn_norm: &'a [u8],
-    pub wq: (GgmlType, &'a [u8], usize),
-    pub wk: (GgmlType, &'a [u8], usize),
-    pub wv: (GgmlType, &'a [u8], usize),
-    pub wo: (GgmlType, &'a [u8], usize),
-    pub q_norm: Option<&'a [f32]>,
-    pub k_norm: Option<&'a [f32]>,
-    pub gate_in_q: bool,
-    pub q_bias: Option<&'a [u8]>,
-    pub k_bias: Option<&'a [u8]>,
-    pub v_bias: Option<&'a [u8]>,
-    pub k_off: usize,
-    pub v_off: usize,
-    pub gdn: Option<TokenGdn<'a>>,
-    pub ffn: TokenFfn<'a>,
-}
-
-pub enum TokenFfn<'a> {
-    Dense {
-        gate: (GgmlType, &'a [u8], usize),
-        up: (GgmlType, &'a [u8], usize),
-        down: (GgmlType, &'a [u8], usize),
-    },
-    Moe {
-        router: (GgmlType, &'a [u8], usize),
-        router_bias: Option<&'a [u8]>,
-        gate: (GgmlType, &'a [u8]),
-        up: (GgmlType, &'a [u8]),
-        down: (GgmlType, &'a [u8]),
-        expert_ffn: usize,
-        n_used: usize,
-        sigmoid: bool,
-        shared: Option<[(GgmlType, &'a [u8], usize); 3]>,
-        shared_gate: Option<&'a [u8]>,
-    },
-}
-
-pub struct TokenReq<'a> {
-    pub x: &'a [f32],
-    pub m: usize,
-    pub layers: &'a [TokenLayer<'a>],
-    pub cache: &'a SharedRegion,
-    pub cache_capacity: usize,
-    pub ssm: Option<&'a SharedRegion>,
-    pub ssm_slots: Option<(&'a SharedRegion, usize)>,
-    pub kv_dim: usize,
-    pub head_dim: usize,
-    pub n_heads: usize,
-    pub n_kv_heads: usize,
-    pub pos: usize,
-    pub scale: f32,
-    pub rope: &'a [[f32; 2]],
-    pub rot_dim: usize,
-    pub eps: f32,
-    pub output_norm: &'a [u8],
-    pub output: (GgmlType, &'a [u8], usize),
-    pub argmax: bool,
-    /// When set with `token_id` and `x` empty, CUDA dequants embd on GPU.
-    pub embd: Option<(GgmlType, &'a [u8], usize)>,
-    pub token_id: Option<u32>,
-}
-
-pub enum TokenOut {
-    Logits(Vec<f32>),
-    Argmax(u32),
-    Rows { argmax: Vec<u32>, hidden: Vec<f32> },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DecodeDecline {
-    pub stage: &'static str,
-    pub reason: &'static str,
-}
-
-impl std::fmt::Display for DecodeDecline {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "stage={} reason={}", self.stage, self.reason)
-    }
-}
-
-impl std::error::Error for DecodeDecline {}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DecodePathStats {
-    pub attempts: u64,
-    pub successes: u64,
-    pub declines: u64,
-}
-
-pub fn decode_path_stats() -> DecodePathStats {
-    DecodePathStats {
-        attempts: DECODE_ATTEMPTS.load(Ordering::Relaxed),
-        successes: DECODE_SUCCESSES.load(Ordering::Relaxed),
-        declines: DECODE_DECLINES.load(Ordering::Relaxed),
-    }
-}
-
 pub fn decode_token_checked(req: &TokenReq) -> Result<TokenOut, DecodeDecline> {
     DECODE_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
     match decode_token(req) {
@@ -819,16 +647,6 @@ pub fn decode_token_checked(req: &TokenReq) -> Result<TokenOut, DecodeDecline> {
                 reason: "request shape, tensor format, or CUDA path unsupported",
             })
         }
-    }
-}
-
-pub fn decode_token_outcome(req: &TokenReq) -> crate::accel::AccelOutcome<TokenOut> {
-    match decode_token_checked(req) {
-        Ok(out) => crate::accel::AccelOutcome::Executed(out),
-        Err(reason) => crate::accel::AccelOutcome::Declined(crate::accel::DeclineReason::Backend {
-            operation: "decode-token",
-            detail: reason.to_string(),
-        }),
     }
 }
 
@@ -883,32 +701,15 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         for row in 0..m {
             let xrow = &req.x[row * hidden..(row + 1) * hidden];
             let rope = &req.rope[row * req.rot_dim / 2..(row + 1) * req.rot_dim / 2];
-            let out = decode_token_one(req, xrow, rope, req.pos + row)?;
-            match out {
-                TokenOut::Argmax(a) => {
-                    argmax.push(a);
-                    // Recompute final hidden by running without argmax is expensive;
-                    // store the residual estimate from a dedicated path.
-                    hidden_out.extend_from_slice(xrow);
-                }
-                TokenOut::Logits(l) => {
-                    let a = l
-                        .iter()
-                        .enumerate()
-                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                        .map(|(i, _)| i as u32)
-                        .unwrap_or(0);
-                    argmax.push(a);
-                    hidden_out.extend_from_slice(xrow);
-                }
-                TokenOut::Rows {
-                    argmax: a,
-                    hidden: h,
-                } => {
-                    argmax.push(a[0]);
-                    hidden_out.extend_from_slice(&h);
-                }
-            }
+            let TokenOut::Rows {
+                argmax: a,
+                hidden: h,
+            } = decode_token_one(req, xrow, rope, req.pos + row)?
+            else {
+                return None;
+            };
+            argmax.push(a[0]);
+            hidden_out.extend_from_slice(&h);
         }
         return Some(TokenOut::Rows {
             argmax,
@@ -935,7 +736,7 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
     if !gpu_has_chain_kernels() {
         return None;
     }
-    let use_graph = std::env::var("ALLPAKA_CUDA_GRAPH").map_or(false, |v| v == "1");
+    let use_graph = crate::runtime::get().cuda_graph;
     if !use_graph {
         return None;
     }
@@ -1231,7 +1032,7 @@ fn gdn_decode_layer(
 }
 
 fn fuse_decode_eligible(req: &TokenReq) -> bool {
-    if std::env::var_os("ALLPAKA_CUDA_NO_FUSE").is_some() {
+    if crate::runtime::get().cuda_no_fuse {
         return false;
     }
     for layer in req.layers {
@@ -1378,7 +1179,7 @@ fn decode_token_one_fused(
     // around attend. ALLPAKA_FA_INLINE=1 captures FA into one whole-token graph
     // (direct fattn is stream-capturable). Without FA, one whole-token graph.
     // Drain ggml *before* capture — sync during capture corrupts the graph.
-    let use_graph = std::env::var("ALLPAKA_CUDA_GRAPH").map_or(false, |v| v == "1");
+    let use_graph = crate::runtime::get().cuda_graph;
     let use_fa = crate::gpu::cuda::ggml::enabled()
         && std::env::var("ALLPAKA_NO_FA")
             .map(|v| !(v == "1" || v.eq_ignore_ascii_case("true")))
@@ -1603,7 +1404,16 @@ fn decode_token_one_fused(
                     gpu.sync()?;
                     note_call(launches, enc, t1.elapsed().as_nanos() as u64);
                     crate::gpu::cuda::ggml::mark_cudarc_dirty();
-                    let out = if req.argmax {
+                    let out = if req.m > 1 {
+                        let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
+                        let h = stream
+                            .clone_dtoh(&gpu.y_arena.slice(h_at..h_at + hidden))
+                            .ok()?;
+                        TokenOut::Rows {
+                            argmax: vec![idx[0]],
+                            hidden: h,
+                        }
+                    } else if req.argmax {
                         let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
                         TokenOut::Argmax(idx[0])
                     } else {
@@ -1631,7 +1441,16 @@ fn decode_token_one_fused(
                         gpu.sync()?;
                         note_call(launches, enc, t1.elapsed().as_nanos() as u64);
                         crate::gpu::cuda::ggml::mark_cudarc_dirty();
-                        let out = if req.argmax {
+                        let out = if req.m > 1 {
+                            let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
+                            let h = stream
+                                .clone_dtoh(&gpu.y_arena.slice(h_at..h_at + hidden))
+                                .ok()?;
+                            TokenOut::Rows {
+                                argmax: vec![idx[0]],
+                                hidden: h,
+                            }
+                        } else if req.argmax {
                             let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
                             TokenOut::Argmax(idx[0])
                         } else {
@@ -1789,7 +1608,16 @@ fn decode_token_one_fused(
                 gpu.sync()?;
                 note_call(launches, enc, t1.elapsed().as_nanos() as u64);
                 crate::gpu::cuda::ggml::mark_cudarc_dirty();
-                let out = if req.argmax {
+                let out = if req.m > 1 {
+                    let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
+                    let h = stream
+                        .clone_dtoh(&gpu.y_arena.slice(h_at..h_at + hidden))
+                        .ok()?;
+                    TokenOut::Rows {
+                        argmax: vec![idx[0]],
+                        hidden: h,
+                    }
+                } else if req.argmax {
                     let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
                     TokenOut::Argmax(idx[0])
                 } else {
@@ -2846,7 +2674,7 @@ fn decode_token_one_fused(
             crate::gpu::cuda::ggml::prepare_for_cudarc();
         }
 
-        let out = if req.argmax {
+        let out = if req.argmax || req.m > 1 {
             let f = gpu.func_owned("argmax_f32")?;
             let n_u = vocab as u32;
             let cfg = LaunchConfig {
@@ -2996,7 +2824,17 @@ fn decode_token_one_fused(
             note_call(launches, enc, t1.elapsed().as_nanos() as u64);
             crate::gpu::cuda::ggml::mark_cudarc_dirty();
             let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
-            TokenOut::Argmax(idx[0])
+            if req.m > 1 {
+                let h = stream
+                    .clone_dtoh(&gpu.y_arena.slice(h_at..h_at + hidden))
+                    .ok()?;
+                TokenOut::Rows {
+                    argmax: vec![idx[0]],
+                    hidden: h,
+                }
+            } else {
+                TokenOut::Argmax(idx[0])
+            }
         } else {
             if capturing_hybrid {
                 capture_guard.active = false;
@@ -3148,7 +2986,7 @@ fn decode_token_one(
             None => {
                 eprintln!(
                     "cuda: fused decode returned None (graph={})",
-                    std::env::var("ALLPAKA_CUDA_GRAPH").unwrap_or_default()
+                    crate::runtime::get().cuda_graph
                 );
             }
         }
@@ -3412,13 +3250,6 @@ fn decode_token_one(
         Some(TokenOut::Logits(logits))
     }
 }
-pub struct PrefillFusion<'a> {
-    pub attn_norm: &'a [u8],
-    pub ffn_norm: &'a [u8],
-    pub router: &'a [u8],
-    pub n_expert: usize,
-}
-
 pub fn prefill_begin(xs: &[f32]) -> Option<()> {
     with_gpu(|gpu| {
         gpu.ensure_prefill(xs.len())?;
@@ -4116,32 +3947,6 @@ fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     })
 }
 
-pub struct PrefillAttnReq<'a> {
-    pub wq: (GgmlType, &'a [u8], usize),
-    pub wk: (GgmlType, &'a [u8], usize),
-    pub wv: (GgmlType, &'a [u8], usize),
-    pub wo: (GgmlType, &'a [u8], usize),
-    pub hs: &'a [f32],
-    pub m: usize,
-    pub q_norm: Option<&'a [f32]>,
-    pub k_norm: Option<&'a [f32]>,
-    pub ropes: &'a [[f32; 2]],
-    pub rot_dim: usize,
-    pub gate_in_q: bool,
-    pub attn_bias: Option<(&'a [u8], &'a [u8], &'a [u8])>,
-    pub eps: f32,
-    pub cache: &'a SharedRegion,
-    pub k_off: usize,
-    pub v_off: usize,
-    pub kv_dim: usize,
-    pub head_dim: usize,
-    pub n_heads: usize,
-    pub n_kv_heads: usize,
-    pub base: usize,
-    pub scale: f32,
-    pub fusion: Option<PrefillFusion<'a>>,
-}
-
 pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
     let hidden = req.hs.len() / req.m.max(1);
     let hd = req.head_dim;
@@ -4366,30 +4171,6 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
         });
     }
     Some(proj)
-}
-
-pub struct PrefillGdnReq<'a> {
-    pub wqkv: (GgmlType, &'a [u8], usize),
-    pub zgate: (GgmlType, &'a [u8], usize),
-    pub alpha: &'a [u8],
-    pub beta: &'a [u8],
-    pub conv1d: &'a [u8],
-    pub a: &'a [f32],
-    pub dt: &'a [f32],
-    pub ssm_norm: &'a [f32],
-    pub ssm_out: (GgmlType, &'a [u8], usize),
-    pub heads_k: usize,
-    pub heads_v: usize,
-    pub d: usize,
-    pub d_conv: usize,
-    pub hidden: usize,
-    pub m: usize,
-    pub eps: f32,
-    pub ssm: &'a SharedRegion,
-    pub ssm_slots: Option<(&'a SharedRegion, usize)>,
-    pub conv_off: usize,
-    pub state_off: usize,
-    pub fusion: Option<PrefillFusion<'a>>,
 }
 
 pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
@@ -4808,47 +4589,6 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
     }
     Some(proj)
 }
-pub struct GroupedRoute<'a> {
-    pub n_used: usize,
-    pub norm: bool,
-    pub scale: f32,
-    pub bias: Option<&'a [f32]>,
-    pub sigmoid: bool,
-}
-
-pub struct GroupedShared<'a> {
-    pub gate: (GgmlType, &'a [u8]),
-    pub up: (GgmlType, &'a [u8]),
-    pub down: (GgmlType, &'a [u8]),
-    pub ffn: usize,
-    pub gate_out: Option<(GgmlType, &'a [u8])>,
-}
-
-pub struct GroupedCombine<'a> {
-    pub tok_off: &'a [u32],
-    pub hit_row: &'a [u32],
-    pub hit_w: &'a [f32],
-    pub m: usize,
-    /// Metal-only fusion (combine + next attention norm); ignored here.
-    pub next_norm: Option<(&'a [u8], f32)>,
-}
-
-pub struct GroupedFfnReq<'a> {
-    pub gate: (GgmlType, &'a [u8]),
-    pub up: (GgmlType, &'a [u8]),
-    pub down: (GgmlType, &'a [u8]),
-    pub n_expert: usize,
-    pub hidden: usize,
-    pub ffn: usize,
-    pub groups: &'a [[u32; 3]],
-    pub x: &'a [f32],
-    pub tok: &'a [u32],
-    pub total_rows: usize,
-    pub fused: Option<GroupedCombine<'a>>,
-    pub shared: Option<GroupedShared<'a>>,
-    pub route: Option<GroupedRoute<'a>>,
-}
-
 pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     // Dense fused prefill: FFN stays on-device from pf_hs.
     if req.fused.is_some() && req.route.is_none() && req.shared.is_none() && req.n_expert <= 1 {

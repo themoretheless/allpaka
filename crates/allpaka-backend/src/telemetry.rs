@@ -162,6 +162,56 @@ pub fn take_global() -> PhaseTrace {
     trace
 }
 
+/// Maximum number of model-level profile slots supported by the shared atomic profiler.
+pub const MAX_PROFILE_SLOTS: usize = 16;
+
+static MODEL_SLOTS: [AlignedPhaseSlot; MAX_PROFILE_SLOTS] = [const {
+    AlignedPhaseSlot {
+        duration_ns: AtomicU64::new(0),
+        calls: AtomicU64::new(0),
+    }
+}; MAX_PROFILE_SLOTS];
+
+/// A running model-level phase span; adds its elapsed time when dropped.
+pub struct ProfileSpan(usize, Instant);
+
+impl Drop for ProfileSpan {
+    #[inline]
+    fn drop(&mut self) {
+        let slot = &MODEL_SLOTS[self.0];
+        slot.duration_ns
+            .fetch_add(self.1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        slot.calls.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Start timing model profile slot `index` until the returned guard is dropped.
+#[inline]
+pub fn span_slot(index: usize) -> ProfileSpan {
+    debug_assert!(index < MAX_PROFILE_SLOTS);
+    ProfileSpan(index, Instant::now())
+}
+
+/// Read accumulated nanoseconds and call counts for the first `N` model profile slots.
+pub fn take_slots_with_counts<const N: usize>() -> ([u64; N], [u64; N]) {
+    assert!(N <= MAX_PROFILE_SLOTS);
+    let mut ns = [0u64; N];
+    let mut calls = [0u64; N];
+    for i in 0..N {
+        ns[i] = MODEL_SLOTS[i].duration_ns.load(Ordering::Relaxed);
+        calls[i] = MODEL_SLOTS[i].calls.load(Ordering::Relaxed);
+    }
+    (ns, calls)
+}
+
+/// Reset all model profile slots.
+pub fn reset_slots() {
+    for slot in &MODEL_SLOTS {
+        slot.duration_ns.store(0, Ordering::Relaxed);
+        slot.calls.store(0, Ordering::Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{record_global, reset_global, take_global, Phase, PhaseTrace};

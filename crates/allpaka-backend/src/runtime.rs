@@ -110,9 +110,20 @@ flags! {
     no_stage_barrier: bool = false, env "ALLPAKA_NO_STAGE_BARRIER", present;
     no_barrier_probe: bool = false, env "ALLPAKA_NO_BARRIER", present;
     serial: bool = false, env "ALLPAKA_SERIAL", present;
+    prefill_zero_copy: bool = true, env "ALLPAKA_PREFILL_ZERO_COPY", on;
+    tokenbuf_debug: bool = false, env "ALLPAKA_TOKENBUF_DEBUG", present;
+    decode_split: bool = false, env "ALLPAKA_DECODE_SPLIT", present;
+    cuda_graph: bool = false, env "ALLPAKA_CUDA_GRAPH", off;
+    cuda_no_fuse: bool = false, env "ALLPAKA_CUDA_NO_FUSE", present;
 }
 
 static POLICY: OnceLock<RuntimePolicy> = OnceLock::new();
+
+#[inline]
+pub fn cpu_threads() -> usize {
+    static THREADS: OnceLock<usize> = OnceLock::new();
+    *THREADS.get_or_init(|| std::thread::available_parallelism().map_or(1, |t| t.get()))
+}
 
 #[inline]
 pub fn get() -> &'static RuntimePolicy {

@@ -26,6 +26,7 @@ pub mod profile;
 pub mod quantmat;
 pub mod runtime;
 pub mod telemetry;
+pub mod thread_pool;
 
 pub use ops::{matmul_f32, rmsnorm, rope_neox, rope_norm, silu, softmax, swiglu};
 pub use quantmat::QuantMat;
