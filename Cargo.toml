@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/allpaka-dtype",
     "crates/allpaka-core",
     "crates/allpaka-chat",
     "crates/allpaka-cli",
@@ -24,6 +25,7 @@ lto = "fat"
 codegen-units = 1
 
 [workspace.dependencies]
+allpaka-dtype = { path = "crates/allpaka-dtype" }
 allpaka-core = { path = "crates/allpaka-core" }
 allpaka-chat = { path = "crates/allpaka-chat" }
 allpaka-backend = { path = "crates/allpaka-backend" }

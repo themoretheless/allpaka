@@ -49,6 +49,7 @@ dependencies = [
 name = "allpaka-backend"
 version = "0.1.0"
 dependencies = [
+ "allpaka-dtype",
  "allpaka-gguf",
  "anyhow",
  "block",
@@ -104,9 +105,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "allpaka-dtype"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "allpaka-gguf"
 version = "0.1.0"
 dependencies = [
+ "allpaka-dtype",
  "anyhow",
  "memmap2",
  "sha2",
@@ -116,6 +125,7 @@ dependencies = [
 name = "allpaka-mlx"
 version = "0.1.0"
 dependencies = [
+ "allpaka-dtype",
  "anyhow",
  "glob",
  "memmap2",
