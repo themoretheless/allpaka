@@ -129,6 +129,10 @@ class Mock(BaseHTTPRequestHandler):
                 for _ in range(20):time.sleep(.1);event({'choices':[{'delta':{'content':'.'}}]})
             elif 'Ты — участник swarm' in content and 'SWARM-FAIL' in content and '«risks»' in content and 'Это повтор' not in content:
                 event({'error':{'message':'simulated rate limit'}})
+            elif content.startswith('Лимит исследования исчерпан') and any('SWARM-STEP limited' in str(m.get('content','')) and '«scout»' in str(m.get('content','')) for m in messages):
+                # The member spent its research budget and is asked for the report
+                # without tools; asking for another tool here is the step-limit case.
+                event({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'swover','type':'function','function':{'name':'read_file','arguments':json.dumps({'path':'reference/context.txt'})}}]},'finish_reason':'tool_calls'}]})
             elif 'Ты — участник swarm' in content and 'SWARM-STEP' in content and '«scout»' in content and not any(m.get('role')=='tool' for m in messages):
                 # First pass of a two-step member: one read-only tool call, so the
                 # run reaches step 2 and the step has somewhere to live.
@@ -2573,7 +2577,8 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         limited_state=wait(limited,lambda state:state['status']=='idle' and state['messages'][-1].get('swarm'))
         limited_trace=trace_rows(limited)[0];assert_trace_tree(limited_trace)
         assert next(span for span in limited_trace['spans'] if span['kind']=='swarm_member' and span['name'].startswith('scout'))['status']=='step_limit'
-        assert not any(span['kind']=='tool' for span in limited_trace['spans'])
+        # The one budgeted step ran its tool; the call requested after the limit did not.
+        assert [span['name'] for span in limited_trace['spans'] if span['kind']=='tool']==['read_file']
         assert next(report for report in limited_state['messages'][-1]['swarm'] if report['label']=='scout')['status']=='error'
 
         for broken in [dict(members=[dict(label='solo',role='',provider='local',model='mock')]),
