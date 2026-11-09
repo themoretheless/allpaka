@@ -118,7 +118,7 @@ crash recovery and persisted output. No automatic continuation is claimed.
 Studio background handler qualification now verifies terminal duration display,
 restart interruption with unknown duration, no cancellation button on recovered
 terminal tasks, literal stdout rendering, explicit cancel/cleanup routing and
-hidden empty catalog. `node scripts/test-studio-background-ui.js` passes. This
+hidden empty catalog. `node scripts/studio-ui-tests/test-studio-background-ui.js` passes. This
 is handler-level evidence; real-browser recovery qualification remains open.
 
 Explicit background continuation is now implemented with optional `follow_up`
@@ -152,8 +152,8 @@ command, bounded seconds timeout and optional follow-up. It appears for active
 Auto/Goal conversations, clears drafts when switching chats, validates UTF-8
 limits, prevents duplicate submits and discards stale replies. No command starts
 without the user's launch button. Panel handler and launch-handler tests pass
-(`node scripts/test-studio-background-ui.js`,
-`node scripts/test-studio-background-launch-ui.js`); full browser qualification
+(`node scripts/studio-ui-tests/test-studio-background-ui.js`,
+`node scripts/studio-ui-tests/test-studio-background-launch-ui.js`); full browser qualification
 of command launch/recovery remains open.
 
 Real-browser launch qualification passed using native accessibility controls:
@@ -164,9 +164,9 @@ opened the exact stdout. Screenshot:
 remains unqualified: after reload the automation click helper could not resolve
 its target; this is not evidence of an application recovery failure.
 
-History refresh qualification (2026-10-07): unchanged automatic session-list responses retain existing DOM elements, preserving focus and selection. The cache includes filters, pagination request, selected session and complete returned rows; append and failed requests invalidate it. `scripts/test-studio-history-refresh-ui.js` verifies element identity, changed status/selection/filter updates, pagination, empty results and error recovery. Browser reload recovery remains unqualified.
+History refresh qualification (2026-10-07): unchanged automatic session-list responses retain existing DOM elements, preserving focus and selection. The cache includes filters, pagination request, selected session and complete returned rows; append and failed requests invalidate it. `scripts/studio-ui-tests/test-studio-history-refresh-ui.js` verifies element identity, changed status/selection/filter updates, pagination, empty results and error recovery. Browser reload recovery remains unqualified.
 
-Background output continuity (2026-10-07): explicitly opened captured output survives task-catalog updates, including another command finishing. The UI keeps output only for currently listed task IDs in the same conversation, clears it on conversation changes/removal, and discards late responses for removed tasks. It remains an explicit snapshot rather than automatic live output polling. `scripts/test-studio-background-ui.js` verifies persistence, conversation isolation and late-response rejection in addition to existing lifecycle controls.
+Background output continuity (2026-10-07): explicitly opened captured output survives task-catalog updates, including another command finishing. The UI keeps output only for currently listed task IDs in the same conversation, clears it on conversation changes/removal, and discards late responses for removed tasks. It remains an explicit snapshot rather than automatic live output polling. `scripts/studio-ui-tests/test-studio-background-ui.js` verifies persistence, conversation isolation and late-response rejection in addition to existing lifecycle controls.
 
 Named background tasks (2026-10-07): native background start accepts an optional human-readable `name` (nonblank, at most 200 UTF-8 bytes), persisted in both start/completion receipts and exposed in catalog/status/output. Receipt pair names must agree; old receipts lacking the field load as unnamed. Python start and Studio launch form expose the label; UI displays it as literal text beside the technical ID and preserves name draft changes during pending launches. Rust qualification covers durable Unicode labels, oversized receipt rejection and legacy receipt loading; SDK/UI tests cover bounds, launch transport and literal labels. Native HTTP fixtures verify tool-start label persistence through SIGKILL recovery.
 
