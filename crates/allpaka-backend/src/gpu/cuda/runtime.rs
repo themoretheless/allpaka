@@ -688,7 +688,7 @@ pub fn matvec_kernel(ty: GgmlType) -> Option<&'static str> {
         GgmlType::Q4K => "matvec_q4_k",
         GgmlType::Q5K => "matvec_q5_k",
         GgmlType::Q6K => "matvec_q6_k",
-        GgmlType::Other(_) => return None,
+        GgmlType::MlxQ4 | GgmlType::MlxQ8 | GgmlType::Other(_) => return None,
     })
 }
 
@@ -747,7 +747,7 @@ pub fn dq_fmt(ty: GgmlType) -> Option<u32> {
         GgmlType::F16 => 7,
         GgmlType::F32 => 8,
         GgmlType::BF16 => 9,
-        GgmlType::Other(_) => return None,
+        GgmlType::MlxQ4 | GgmlType::MlxQ8 | GgmlType::Other(_) => return None,
     })
 }
 

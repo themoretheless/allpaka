@@ -50,10 +50,11 @@ impl<'a> Model<'a> {
         ops::rmsnorm(last, &self.output_norm, self.config.rms_eps);
         // Debug hook: dump the post-norm hidden state (the head's input) to
         // compare against llama.cpp's /embedding for the same context.
-        if let Ok(path) = std::env::var("ALLPAKA_DUMP_HIDDEN") {
+        static DUMP_HIDDEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        if let Some(path) = DUMP_HIDDEN.get_or_init(|| std::env::var("ALLPAKA_DUMP_HIDDEN").ok()) {
             use std::io::Write as _;
             let body: Vec<String> = last.iter().map(|v| format!("{v:.8e}")).collect();
-            std::fs::File::create(&path)
+            std::fs::File::create(path)
                 .and_then(|mut f| f.write_all(body.join(" ").as_bytes()))
                 .unwrap_or_else(|e| eprintln!("ALLPAKA_DUMP_HIDDEN write failed: {e}"));
         }
