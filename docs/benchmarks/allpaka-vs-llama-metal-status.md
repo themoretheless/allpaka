@@ -295,3 +295,38 @@ One noisy-machine run (searchpartyd/rustc storm) showed llama's
 llama ordering minutes later — i.e. load-contaminated, not actionable.
 Re-measure at top-process <60%: `MM_FMT=q6_k MM_NIN=12288 MM_NOUT=4096
 MM_M=480 MM_LLAMA=1` with the q4_k same-shape control.
+
+## 2026-11-09 (round 2): decode side of the Q6_K fold + fused decode QKV
+
+Two decode-token gaps found in `decode_token` (m=1):
+
+1. **SWIGLU_X missing on the Q6_K matvecs.** `sw_capable` listed every
+   swiglu-folding matvec except `matvec_q6_k` / `matvec_q6_k_mv`, so the
+   Q4_K_M dense down projection (Q6_K, 12288->4096) paid the standalone
+   swiglu dispatch + one barrier per layer that Q4_K downs avoid. Both
+   Q6_K matvecs now carry SWIGLU_X (buffer 8 = up rows, `sw4` on the
+   activation loads, slot/row strides mirrored from x). Same fold the
+   MoE routed/shared downs already had for other formats. Bit-exact
+   vs standalone swiglu + plain matvec
+   (`matvec_q6k_swiglu_fold_matches_separate`, both kernels).
+   NOTE: the whole decode SWFUSE path stays opt-in
+   (`ALLPAKA_SWFUSE=1`); flipping the default needs a cool-machine A/B.
+2. **Decode QKV was three dispatches.** New `matvec_qkv_q4k_q6k` runs
+   wq(Q4_K)+wk(Q4_K)+wv(Q6_K) as ONE matvec dispatch over n_q+n_k+n_v
+   rows (NR0=2, simdgroup-uniform region branch, bodies verbatim from
+   `matvec_q4_k_mv` / `matvec_q6_k_mv`, so bit-identical —
+   `matvec_qkv_q4k_q6k_matches_separate`). llama.cpp runs three mul_mv
+   here, so this is a candidate win over llama, not parity work.
+   **Opt-in `ALLPAKA_QKV_MV=1`** for now: the gufuse measurement
+   (qwen3-30b dual gate/up 105.0 vs 113.7 tok/s) showed fusion can lose
+   to concurrent separate dispatches; cool A/B decides.
+
+Selection proven end-to-end on Qwen3-8B (`ALLPAKA_DEBUG_QKV=1`:
+`decode swiglu-fold on matvec_q6_k_mv`, `decode fused qkv
+matvec_qkv_q4k_q6k`), declines=0. Telemetry note: the per-layer
+dispatch counter is a static estimate (+8/layer), so fused variants do
+not move the printed dispatch count.
+
+Commit `def20ea`. Pending (quiet machine): SWFUSE=1 and QKV_MV=1 A/B on
+8B tg, then default flips for whichever wins; the mmbench q6_k re-run
+above; full 3-model matrix to re-baseline after the Q6_K rounds.
