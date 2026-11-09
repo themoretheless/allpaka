@@ -67,10 +67,8 @@ pub(crate) struct SaveMemory {
     #[serde(default)]
     consolidation_sources: Option<Vec<ConsolidationSource>>,
 }
-fn valid_id(id: &str) -> bool {
-    crate::storage::valid_id(id)
-}
 use crate::evaluation::{commit_new, new_id};
+use crate::storage::valid_id;
 fn digest(snapshot: &Snapshot) -> Result<String> {
     let mut bytes = serde_json::to_vec(&(
         &snapshot.id,

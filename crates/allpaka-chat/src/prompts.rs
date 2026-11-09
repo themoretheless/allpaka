@@ -67,14 +67,8 @@ pub(crate) struct SavePrompt {
 pub(crate) fn default_system() -> String {
     "Answer the supplied evaluation sample.".into()
 }
-fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 80
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
 use crate::evaluation::{commit_new, hex_sha256, new_id, project_exists, DigestWriter};
+use crate::storage::valid_id;
 fn digest(snapshot: &Snapshot) -> Result<String> {
     let fields = (
         &snapshot.id,

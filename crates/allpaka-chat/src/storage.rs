@@ -29,6 +29,15 @@ pub fn hex_sha256_hasher(hasher: Sha256) -> String {
     format_hex(&digest)
 }
 
+/// Milliseconds since the Unix epoch, saturating; zero if the clock is before it.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
 #[inline]
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()

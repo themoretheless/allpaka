@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -17,13 +17,7 @@ use tokio::{
 };
 
 const OUTPUT_LIMIT: usize = 128 * 1024;
-fn timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u64::MAX as u128) as u64
-}
+use crate::storage::now_ms as timestamp_ms;
 struct ProcessGroup(u32);
 impl Drop for ProcessGroup {
     fn drop(&mut self) {

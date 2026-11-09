@@ -764,12 +764,7 @@ fn valid_hash(id: &str) -> bool {
 fn revisions_dir(data: &std::path::Path) -> std::path::PathBuf {
     data.join("harness/revisions")
 }
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+pub use crate::storage::now_ms;
 
 /// Store a tree as a revision. The ID covers the project and the tree, so
 /// saving the same tree twice returns the existing revision.

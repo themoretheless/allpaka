@@ -3,13 +3,7 @@ use crate::types::{Mode, PlanCheckpoint, PlanItem, PlanStatus, Session};
 use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet};
 const MAX_HISTORY_BYTES: usize = 1024 * 1024;
-fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 80
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
+use crate::storage::valid_id;
 pub(crate) fn validate_steps(steps: &[PlanItem]) -> Result<()> {
     if steps.len() > 30 {
         bail!("Select at most 30 plan steps");

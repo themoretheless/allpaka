@@ -64,13 +64,7 @@ pub(crate) struct SaveDataset {
     #[serde(default)]
     origin: Option<Origin>,
 }
-fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 80
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
+use crate::storage::valid_id;
 pub(crate) fn new_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);

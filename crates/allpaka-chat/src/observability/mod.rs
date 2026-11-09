@@ -15,7 +15,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime},
 };
 
 mod api;
@@ -41,13 +41,7 @@ pub(crate) struct Store {
     lifecycle: Arc<Mutex<()>>,
     cache: TraceCache,
 }
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u64::MAX as u128) as u64
-}
+use crate::storage::now_ms as now;
 fn atomic_write(path: &std::path::Path, record: &Record) -> Result<()> {
     use std::io::Write;
     let bytes = serde_json::to_vec(record)?;
