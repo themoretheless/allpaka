@@ -32,7 +32,7 @@
 | 1.4 | B4: именованные таблицы `dq_fmt` и тест | S | низкий | todo |
 | 1.5 | B5 и все некэшированные чтения env → `RuntimePolicy` / `DebugFlags` | M | низкий | wip: B5 done (`9e538b5`); B6 не дефект (аргумент `_def` дублирует соглашение о флаге, таблица согласована); CUDA и Metal — todo |
 | 1.6 | Оставшиеся предупреждения clippy | S | низкий | done (`9bd193d`): 0 предупреждений |
-| 1.7 | `cargo fmt --all` отдельным коммитом | S | — | todo |
+| 1.7 | `cargo fmt --all` отдельным коммитом | S | — | done: `fmt --check` проходит |
 | 1.8 | `// SAFETY:` для `unsafe impl` и срезов из сырых указателей | M | — | todo |
 
 ## Волна 2. Структурные перемещения (без изменения логики)
@@ -40,15 +40,15 @@
 | # | Задача | Размер | Риск | Статус |
 |---|---|---|---|---|
 | 2.1 | `gpu/metal.rs` → `metal/{device,region,pipelines,select,telemetry,matvec,attn,args,ffn_grouped,decode,verify,prefill,mega}` | L | низкий–средний | done (`4b8ccc9` и следующий): чистый перенос, проверен сравнением строк; `mod.rs` 527 строк. Pipelines остались внутри `impl Gpu` в `device.rs` |
-| 2.2 | `gpu/cuda/mod.rs` → `{api,attn,ffn,decode,decode_fused,prefill}` | M | низкий | todo |
-| 2.3 | `gpu/cuda/runtime.rs` → `runtime/{device,telemetry,select,gemm,q8,l2,matvec}` | M | низкий | todo |
+| 2.2 | `gpu/cuda/mod.rs` → `{region,attn,decode,decode_fused,prefill,ffn_grouped}` | M | низкий | done (`bd55b83`): 4 914 → 254 строки в `mod.rs`; проверено только type-check'ом |
+| 2.3 | `gpu/cuda/runtime.rs` → `runtime/{device,select,embed,gemm,q8,l2,matvec}` | M | низкий | done (`bd55b83`) |
 | 2.4 | `gpu/common.rs`: общие `row_bytes`, окна весов, телеметрия, `attn_shape_ok` | M | низкий | todo |
-| 2.5 | backend импортирует `GgmlType` из dtype; MLX-деквант → mlx; `anyhow` из dtype | S | низкий | todo |
-| 2.6 | `core`: распил `plan.rs` и `fleet.rs` | M | низкий | todo |
-| 2.7 | `cli`: `serve.rs` → `serve/{inference,router}`; диспетчер из `main.rs` | S | низкий | wip: inference и router вынесены (`576cd8b`), `serve.rs` 1 402 → 589; `handle` (300 строк) и `main.rs` — todo |
-| 2.8 | `chat`: `lib.rs` → `bootstrap`, `api/*`, `runtime/*` | M | низкий | todo |
-| 2.9 | `chat`: `observability.rs` → `observability/*` | M | средний | todo. Внимание: элементы с `pub(super)` при переносе на уровень глубже должны стать `pub(in crate)`/`pub(crate)`, иначе сузится видимость; тесты (1 000+ строк) опираются на `super::*` |
-| 2.10 | `scripts/`: подкаталоги, общий harness, `node --test` | S | низкий | todo |
+| 2.5 | backend импортирует `GgmlType` из dtype; MLX-деквант → mlx; `anyhow` из dtype | S | низкий | wip: импорт done; перенос MLX-декванта и `anyhow` — todo |
+| 2.6 | `core`: поиск из `plan.rs` и `fleet.rs` → `plan/search.rs`, `fleet/search.rs` | M | низкий | done (`ce57524`). Длина `search_tree` (190 строк) — задача 3.11 |
+| 2.7 | `cli`: `serve.rs` → `serve/{inference,router}`; диспетчер из `main.rs` | S | низкий | wip: inference и router вынесены (`576cd8b`), `serve.rs` 1 402 → 589; `handle` (300 строк) и `main.rs` требуют правки логики → волна 3 |
+| 2.8 | `chat`: `lib.rs` → `api/{router,handlers}`, `runtime/{actor,turn,subagent,exec}` | M | низкий | done (`8c5bb55`): `lib.rs` 2 350 → 348 |
+| 2.9 | `chat`: `observability.rs` → `observability/{model,trace,ingest,store,receipts,guardrails,api,tests}` | M | средний | done (`cb9a9ec`): `mod.rs` 63 строки кода |
+| 2.10 | `scripts/`: UI-тесты Studio в `studio-ui-tests/` с раннером | S | низкий | done (`d6fe2db`): 58 тестов, `run.sh`. Остальные скрипты оставлены на месте: на них ~130 ссылок в документах и внешней автоматизации, перенос не окупается. Общий harness для 58 тестов — todo |
 | 2.11 | `model/lib.rs`: сквозные тесты → `tests/` | S | — | todo |
 
 ## Волна 3. Логические рефакторинги
