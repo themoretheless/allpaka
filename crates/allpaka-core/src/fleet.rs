@@ -142,22 +142,22 @@ impl FleetPlan {
     pub fn co_resident(&self) -> impl Iterator<Item = &Placement> {
         self.placements.iter().filter(|p| p.co_resident)
     }
-
-    fn better_than(&self, other: &FleetPlan) -> bool {
-        match self.placements.len().cmp(&other.placements.len()) {
-            std::cmp::Ordering::Greater => true,
-            std::cmp::Ordering::Less => false,
-            std::cmp::Ordering::Equal => {
-                self.aggregate_tokens_per_sec() > other.aggregate_tokens_per_sec()
-            }
-        }
-    }
 }
 
 /// Beyond this the exhaustive search stops being instant. Real fleets are far
 /// smaller; the cap turns a pathological config into an error rather than a
 /// hang.
 const MAX_SEARCH: usize = 8;
+
+/// Lightweight stack representation of a candidate `(model_index, node_index)`
+/// pair during DFS search, avoiding heap allocations and `String` clones.
+#[derive(Clone, Copy, Default)]
+struct Cand {
+    model_index: u8,
+    node_index: u8,
+    host_id: u8,
+    secs_per_token: f64,
+}
 
 /// Assign each agent to at most one pool, maximising coverage then throughput.
 pub fn fleet(members: &[FleetMember], nodes: &[Node]) -> Result<FleetPlan, String> {
@@ -194,25 +194,68 @@ pub fn fleet(members: &[FleetMember], nodes: &[Node]) -> Result<FleetPlan, Strin
         }
     }
 
+    // Intern node host names into small `0..MAX_SEARCH` integer IDs so co-residency
+    // checks inside the DFS leaf loop are a single byte array lookup.
+    let mut host_names: Vec<&str> = Vec::with_capacity(nodes.len());
+    let mut node_host_ids = [0u8; MAX_SEARCH];
+    let mut node_contention = [1.0f64; MAX_SEARCH];
+    for (ni, node) in nodes.iter().enumerate() {
+        let h = node.host();
+        let hid = match host_names.iter().position(|&existing| existing == h) {
+            Some(pos) => pos as u8,
+            None => {
+                let pos = host_names.len() as u8;
+                host_names.push(h);
+                pos
+            }
+        };
+        node_host_ids[ni] = hid;
+        node_contention[ni] = node.contention.clamp(0.0, 1.0);
+    }
+
     // Precompute which (agent, pool) pairs are even possible. A pinned agent
     // has exactly one candidate.
     let mut options: Vec<Vec<Option<Placement>>> = Vec::with_capacity(members.len());
+    let mut cands = [[None::<Cand>; MAX_SEARCH]; MAX_SEARCH];
     for (mi, member) in members.iter().enumerate() {
         let mut row = Vec::with_capacity(nodes.len());
         for (ni, node) in nodes.iter().enumerate() {
             let allowed = member.pin.is_none_or(|p| p == ni);
-            row.push(if allowed {
+            let p = if allowed {
                 place(mi, member, ni, node)
             } else {
                 None
-            });
+            };
+            if let Some(ref placement) = p {
+                cands[mi][ni] = Some(Cand {
+                    model_index: mi as u8,
+                    node_index: ni as u8,
+                    host_id: node_host_ids[ni],
+                    secs_per_token: placement.secs_per_token,
+                });
+            }
+            row.push(p);
         }
         options.push(row);
     }
 
     let mut best = FleetPlan::default();
-    let mut current = Vec::new();
-    search(&options, nodes, 0, &mut 0u32, &mut current, &mut best);
+    let mut best_count = 0usize;
+    let mut best_tps = 0.0f64;
+    let mut current = [Cand::default(); MAX_SEARCH];
+    search(
+        &options,
+        &cands,
+        nodes,
+        &node_contention,
+        0,
+        0u32,
+        &mut current,
+        0,
+        &mut best,
+        &mut best_count,
+        &mut best_tps,
+    );
 
     let placed: Vec<usize> = best.placements.iter().map(|p| p.model_index).collect();
     best.unplaced = (0..members.len()).filter(|i| !placed.contains(i)).collect();
@@ -230,55 +273,110 @@ pub fn required_bytes(m: &FleetMember) -> u64 {
 }
 
 /// Depth-first over models, tracking which pools are taken in a bitmask.
+#[allow(clippy::too_many_arguments)]
 fn search(
     options: &[Vec<Option<Placement>>],
+    cands: &[[Option<Cand>; MAX_SEARCH]; MAX_SEARCH],
     nodes: &[Node],
+    node_contention: &[f64; MAX_SEARCH],
     model_index: usize,
-    used_nodes: &mut u32,
-    current: &mut Vec<Placement>,
+    used_nodes: u32,
+    current: &mut [Cand; MAX_SEARCH],
+    current_len: usize,
     best: &mut FleetPlan,
+    best_count: &mut usize,
+    best_tps: &mut f64,
 ) {
     if model_index == options.len() {
-        if current.len() < best.placements.len() {
+        if current_len < *best_count {
             return;
         }
-        let mut placements = current.clone();
         // Co-residency is a property of the whole assignment, not of one pair,
         // so it can only be charged once the candidate is complete.
-        charge_co_residency(&mut placements, nodes);
-        let candidate = FleetPlan {
-            placements,
-            unplaced: Vec::new(),
-        };
-        if candidate.better_than(best) {
-            *best = candidate;
+        let mut host_counts = [0u8; MAX_SEARCH];
+        for c in &current[..current_len] {
+            host_counts[c.host_id as usize] += 1;
+        }
+        let mut agg_tps = 0.0f64;
+        for c in &current[..current_len] {
+            let secs = if host_counts[c.host_id as usize] > 1 {
+                crate::cost::contended(c.secs_per_token, node_contention[c.node_index as usize])
+            } else {
+                c.secs_per_token
+            };
+            agg_tps += if secs <= 0.0 {
+                f64::INFINITY
+            } else {
+                1.0 / secs
+            };
+        }
+        let is_better =
+            current_len > *best_count || (current_len == *best_count && agg_tps > *best_tps);
+        if is_better {
+            let mut placements: Vec<Placement> = current[..current_len]
+                .iter()
+                .map(|c| {
+                    options[c.model_index as usize][c.node_index as usize]
+                        .as_ref()
+                        .expect("valid placement option")
+                        .clone()
+                })
+                .collect();
+            charge_co_residency(&mut placements, nodes);
+            *best_count = current_len;
+            *best_tps = placements.iter().map(Placement::tokens_per_sec).sum();
+            *best = FleetPlan {
+                placements,
+                unplaced: Vec::new(),
+            };
         }
         return;
     }
 
-    // Prune branch if even placing all remaining models cannot beat best.placements.len()
+    // Prune branch if even placing all remaining models cannot beat best_count.
     let remaining = options.len() - model_index;
-    if current.len() + remaining < best.placements.len() {
+    if current_len + remaining < *best_count {
         return;
     }
 
-    for (node_index, option) in options[model_index].iter().enumerate() {
-        let Some(placement) = option else { continue };
+    for (node_index, cand_opt) in cands[model_index][..nodes.len()].iter().enumerate() {
+        let Some(cand) = *cand_opt else { continue };
         let bit = 1u32 << node_index;
-        if *used_nodes & bit != 0 {
+        if used_nodes & bit != 0 {
             continue;
         }
-        *used_nodes |= bit;
-        current.push(placement.clone());
-        search(options, nodes, model_index + 1, used_nodes, current, best);
-        current.pop();
-        *used_nodes &= !bit;
+        current[current_len] = cand;
+        search(
+            options,
+            cands,
+            nodes,
+            node_contention,
+            model_index + 1,
+            used_nodes | bit,
+            current,
+            current_len + 1,
+            best,
+            best_count,
+            best_tps,
+        );
     }
 
     // Leaving a model unplaced is a legal branch: sometimes there is simply no
-    // pool left that holds it. Explored after placement branches so `best.placements.len()`
+    // pool left that holds it. Explored after placement branches so `best_count`
     // reaches high coverage early and prunes inferior unplaced subtrees.
-    search(options, nodes, model_index + 1, used_nodes, current, best);
+    search(
+        options,
+        cands,
+        nodes,
+        node_contention,
+        model_index + 1,
+        used_nodes,
+        current,
+        current_len,
+        best,
+        best_count,
+        best_tps,
+    );
 }
 
 /// Mark agents that share a machine and slow them by that pool's measured
@@ -290,14 +388,13 @@ fn search(
 /// fast it ran. So one division reproduces what recomputing from
 /// [`Node::contended_stream_time`] would give.
 fn charge_co_residency(placements: &mut [Placement], nodes: &[Node]) {
-    for i in 0..placements.len() {
-        let shared =
-            (0..placements.len()).any(|j| j != i && placements[j].host == placements[i].host);
-        if shared {
-            let scale = nodes[placements[i].node_index].contention.clamp(0.0, 1.0);
-            placements[i].co_resident = true;
-            placements[i].secs_per_token =
-                crate::cost::contended(placements[i].secs_per_token, scale);
+    let hosts: Vec<&str> = placements.iter().map(|p| p.host.as_str()).collect();
+    let node_indices: Vec<usize> = placements.iter().map(|p| p.node_index).collect();
+    let scales = crate::cost::co_residency_scale(&hosts, &node_indices, nodes);
+    for (p, scale) in placements.iter_mut().zip(scales) {
+        if let Some(s) = scale {
+            p.co_resident = true;
+            p.secs_per_token = crate::cost::contended(p.secs_per_token, s);
         }
     }
 }
@@ -340,354 +437,4 @@ fn place(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Backend;
-
-    fn mac() -> Node {
-        Node {
-            name: "mac".into(),
-            backend: Backend::Metal,
-            usable_bytes: 96 << 30,
-            mem_bandwidth_bytes_per_sec: 546e9,
-            bandwidth_efficiency: 0.7,
-            ..Node::default()
-        }
-    }
-
-    // The GPU and system RAM below are two pools of one desktop, which is why
-    // they name the same host.
-    fn gpu() -> Node {
-        Node {
-            name: "pc-gpu".into(),
-            backend: Backend::Cuda,
-            usable_bytes: 30 << 30,
-            mem_bandwidth_bytes_per_sec: 1792e9,
-            bandwidth_efficiency: 0.7,
-            host: Some("pc".into()),
-            ..Node::default()
-        }
-    }
-
-    fn ram() -> Node {
-        Node {
-            name: "pc-ram".into(),
-            backend: Backend::Cpu,
-            usable_bytes: 56 << 30,
-            mem_bandwidth_bytes_per_sec: 51.2e9,
-            bandwidth_efficiency: 0.6,
-            host: Some("pc".into()),
-            ..Node::default()
-        }
-    }
-
-    fn model(name: &str, gib: u64) -> Model {
-        Model {
-            name: name.into(),
-            n_layers: 64,
-            hidden_size: 5120,
-            total_weight_bytes: gib << 30,
-            kv_bytes_per_token_per_layer: 1024,
-            activation_bytes: 2,
-            active_weight_fraction: 1.0,
-            param_count: 0,
-        }
-    }
-
-    fn member(name: &str, gib: u64) -> FleetMember {
-        FleetMember {
-            model: model(name, gib),
-            context_tokens: 8192,
-            prompt_tokens: 2048,
-            pin: None,
-            speculation: None,
-        }
-    }
-
-    /// The headline behaviour: a model that fits only one pool goes there, and
-    /// the rest arrange themselves around it.
-    #[test]
-    fn a_constrained_model_takes_the_only_pool_that_holds_it() {
-        let plan = fleet(
-            &[member("big", 80), member("small", 10)],
-            &[mac(), gpu(), ram()],
-        )
-        .unwrap();
-        assert_eq!(plan.endpoints(), 2);
-        let big = plan
-            .placements
-            .iter()
-            .find(|p| p.model_name == "big")
-            .unwrap();
-        assert_eq!(big.node_name, "mac");
-    }
-
-    /// With the big model on the Mac, the small one should land on the GPU
-    /// rather than on system RAM, because that is where it is fastest.
-    #[test]
-    fn a_small_model_is_given_the_fastest_free_pool() {
-        let plan = fleet(
-            &[member("big", 80), member("small", 10)],
-            &[mac(), gpu(), ram()],
-        )
-        .unwrap();
-        let small = plan
-            .placements
-            .iter()
-            .find(|p| p.model_name == "small")
-            .unwrap();
-        assert_eq!(small.node_name, "pc-gpu");
-    }
-
-    /// Coverage beats speed: three agents on three pools is better than two
-    /// agents placed slightly faster.
-    #[test]
-    fn placing_every_model_wins_over_placing_fewer_of_them_faster() {
-        let plan = fleet(
-            &[member("a", 10), member("b", 10), member("c", 10)],
-            &[mac(), gpu(), ram()],
-        )
-        .unwrap();
-        assert_eq!(plan.endpoints(), 3, "all three should be placed");
-        assert!(plan.unplaced.is_empty());
-    }
-
-    #[test]
-    fn one_pool_holds_at_most_one_model() {
-        let members = [
-            member("a", 10),
-            member("b", 10),
-            member("c", 10),
-            member("d", 10),
-        ];
-        let plan = fleet(&members, &[mac(), gpu()]).unwrap();
-        assert_eq!(plan.endpoints(), 2);
-        assert_eq!(plan.unplaced.len(), 2);
-        let mut nodes: Vec<usize> = plan.placements.iter().map(|p| p.node_index).collect();
-        nodes.sort_unstable();
-        nodes.dedup();
-        assert_eq!(nodes.len(), 2, "a pool must not host two models");
-    }
-
-    /// An unplaceable model is named, not silently dropped.
-    #[test]
-    fn a_model_too_large_for_every_pool_is_reported_as_unplaced() {
-        let plan = fleet(&[member("huge", 200), member("small", 10)], &[mac(), gpu()]).unwrap();
-        assert_eq!(plan.unplaced, vec![0]);
-        assert_eq!(plan.endpoints(), 1);
-    }
-
-    /// A fleet member never crosses a wire, so throughput is a clean sum.
-    #[test]
-    fn aggregate_throughput_is_the_sum_of_independent_endpoints() {
-        let plan = fleet(&[member("a", 10), member("b", 10)], &[mac(), gpu()]).unwrap();
-        let sum: f64 = plan.placements.iter().map(|p| p.tokens_per_sec()).sum();
-        assert!((plan.aggregate_tokens_per_sec() - sum).abs() < 1e-9);
-    }
-
-    /// Sparsity helps here exactly as it does for a split: residency is charged
-    /// in full, streaming only on the active share.
-    #[test]
-    fn a_sparse_fleet_member_is_faster_without_needing_less_memory() {
-        let mut sparse = member("moe", 80);
-        sparse.model.active_weight_fraction = 0.11;
-        let dense = member("dense", 80);
-
-        let sp = fleet(&[sparse], &[mac()]).unwrap();
-        let de = fleet(&[dense], &[mac()]).unwrap();
-        assert_eq!(sp.placements[0].weight_bytes, de.placements[0].weight_bytes);
-        assert!(sp.aggregate_tokens_per_sec() > de.aggregate_tokens_per_sec() * 5.0);
-    }
-
-    /// Context is per agent, so a tool-caller does not have to reserve the
-    /// reasoner's KV cache.
-    #[test]
-    fn each_agent_reserves_only_the_context_it_asked_for() {
-        let mut short = member("tools", 10);
-        short.context_tokens = 4096;
-        let mut long = member("reasoner", 10);
-        long.context_tokens = 65536;
-
-        let plan = fleet(&[short, long], &[mac(), gpu()]).unwrap();
-        let t = plan
-            .placements
-            .iter()
-            .find(|p| p.model_name == "tools")
-            .unwrap();
-        let r = plan
-            .placements
-            .iter()
-            .find(|p| p.model_name == "reasoner")
-            .unwrap();
-        assert_eq!(t.context_tokens, 4096);
-        assert!(
-            r.kv_bytes > t.kv_bytes * 8,
-            "{} vs {}",
-            r.kv_bytes,
-            t.kv_bytes
-        );
-    }
-
-    /// A pin overrides the optimiser, even when it costs throughput.
-    #[test]
-    fn a_pinned_agent_stays_where_it_was_put() {
-        let mut small = member("small", 10);
-        small.pin = Some(2); // system RAM, far from optimal
-        let plan = fleet(&[small, member("other", 10)], &[mac(), gpu(), ram()]).unwrap();
-        let s = plan
-            .placements
-            .iter()
-            .find(|p| p.model_name == "small")
-            .unwrap();
-        assert_eq!(s.node_name, "pc-ram");
-        assert!(s.pinned);
-    }
-
-    /// Pinning something where it cannot fit is a config error, reported by
-    /// name rather than silently ignored or quietly relocated.
-    #[test]
-    fn pinning_an_agent_somewhere_it_does_not_fit_is_an_error() {
-        let mut big = member("big", 80);
-        big.pin = Some(1); // the 30 GiB GPU
-        let err = fleet(&[big], &[mac(), gpu(), ram()]).unwrap_err();
-        assert!(err.contains("big"), "unhelpful error: {err}");
-        assert!(err.contains("pc-gpu"), "unhelpful error: {err}");
-    }
-
-    #[test]
-    fn pinning_to_a_node_that_does_not_exist_is_an_error() {
-        let mut m = member("a", 10);
-        m.pin = Some(9);
-        assert!(fleet(&[m], &[mac()]).is_err());
-    }
-
-    /// Two agents pinned to the same pool cannot both run; one is reported
-    /// unplaced rather than both being squeezed in.
-    #[test]
-    fn two_agents_pinned_to_one_pool_leave_one_unplaced() {
-        let mut a = member("a", 10);
-        a.pin = Some(1);
-        let mut b = member("b", 10);
-        b.pin = Some(1);
-        let plan = fleet(&[a, b], &[mac(), gpu()]).unwrap();
-        assert_eq!(plan.endpoints(), 1);
-        assert_eq!(plan.unplaced.len(), 1);
-    }
-
-    /// A draft model shares its agent's pool, so it counts against the budget.
-    #[test]
-    fn a_draft_model_is_charged_to_the_pool_that_hosts_it() {
-        let mut m = member("target", 26);
-        m.speculation = Some(Speculation {
-            draft_weight_bytes: 6 << 30,
-            draft_tokens: 4,
-            acceptance_rate: 0.7,
-        });
-        // 26 + 6 GiB of draft plus KV does not fit the 30 GiB GPU.
-        let plan = fleet(&[m], &[gpu()]).unwrap();
-        assert_eq!(plan.endpoints(), 0);
-        assert_eq!(plan.unplaced, vec![0]);
-    }
-
-    /// Three endpoints on two computers is three endpoints and two computers.
-    /// Reporting it as three machines is the lie this exists to stop.
-    #[test]
-    fn endpoints_and_machines_are_counted_separately() {
-        let plan = fleet(
-            &[member("a", 10), member("b", 10), member("c", 10)],
-            &[mac(), gpu(), ram()],
-        )
-        .unwrap();
-        assert_eq!(plan.endpoints(), 3);
-        assert_eq!(plan.machines(), 2, "pc-gpu and pc-ram are one desktop");
-    }
-
-    #[test]
-    fn agents_sharing_a_desktop_are_marked_co_resident() {
-        let plan = fleet(
-            &[member("a", 10), member("b", 10), member("c", 10)],
-            &[mac(), gpu(), ram()],
-        )
-        .unwrap();
-        let names: Vec<&str> = plan.co_resident().map(|p| p.node_name.as_str()).collect();
-        assert_eq!(names.len(), 2, "got {names:?}");
-        assert!(
-            names.contains(&"pc-gpu") && names.contains(&"pc-ram"),
-            "got {names:?}"
-        );
-        let mac_placement = plan
-            .placements
-            .iter()
-            .find(|p| p.node_name == "mac")
-            .unwrap();
-        assert!(!mac_placement.co_resident, "the Mac is on its own");
-    }
-
-    /// A single agent on the desktop has the machine to itself, so nothing is
-    /// charged and nothing is flagged.
-    #[test]
-    fn one_agent_on_a_two_pool_machine_is_not_co_resident() {
-        let plan = fleet(&[member("a", 10)], &[gpu(), ram()]).unwrap();
-        assert_eq!(plan.endpoints(), 1);
-        assert_eq!(plan.machines(), 1);
-        assert!(plan.co_resident().next().is_none());
-    }
-
-    /// The default of 1.0 must leave the numbers exactly where they were, so
-    /// declaring a host is free until someone measures the interference.
-    #[test]
-    fn declaring_a_shared_host_alone_does_not_change_any_timing() {
-        let separate = {
-            let mut g = gpu();
-            g.host = None;
-            let mut r = ram();
-            r.host = None;
-            fleet(&[member("a", 10), member("b", 10)], &[g, r]).unwrap()
-        };
-        let shared = fleet(&[member("a", 10), member("b", 10)], &[gpu(), ram()]).unwrap();
-        assert_eq!(shared.machines(), 1);
-        assert_eq!(separate.machines(), 2);
-        assert!(
-            (shared.aggregate_tokens_per_sec() - separate.aggregate_tokens_per_sec()).abs() < 1e-9
-        );
-    }
-
-    /// Once a real contention figure is recorded, co-resident agents slow down
-    /// by exactly it and agents elsewhere do not.
-    #[test]
-    fn a_measured_contention_slows_only_the_co_resident_agents() {
-        let mut g = gpu();
-        g.contention = 0.5;
-        let free = fleet(&[member("solo", 10)], &[g.clone()]).unwrap();
-        let crowded = fleet(&[member("solo", 10), member("other", 10)], &[g, ram()]).unwrap();
-
-        let alone = free.placements[0].secs_per_token;
-        let shared = crowded
-            .placements
-            .iter()
-            .find(|p| p.node_name == "pc-gpu")
-            .unwrap()
-            .secs_per_token;
-        assert!((shared - alone * 2.0).abs() < 1e-12, "{shared} vs {alone}");
-    }
-
-    /// With contention charged, spreading over two machines can beat packing
-    /// two agents into one - and the search has to be able to see that.
-    #[test]
-    fn contention_can_move_an_agent_off_a_crowded_machine() {
-        let mut g = gpu();
-        g.contention = 0.01;
-        let mut r = ram();
-        r.contention = 0.01;
-        // Two agents, three pools. Packing both onto the desktop is legal but
-        // now costs a hundredfold; one of them should take the Mac instead.
-        let plan = fleet(&[member("a", 10), member("b", 10)], &[mac(), g, r]).unwrap();
-        assert_eq!(plan.endpoints(), 2);
-        assert_eq!(plan.machines(), 2, "both agents ended up on one machine");
-    }
-
-    #[test]
-    fn an_empty_agent_list_is_an_error_rather_than_an_empty_fleet() {
-        assert!(fleet(&[], &[mac()]).is_err());
-    }
-}
+mod tests;

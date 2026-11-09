@@ -8,12 +8,18 @@
 
 use crate::Link;
 
+/// Cap for the dense O(1) adjacency table; real clusters have a handful of nodes.
+const MAX_DENSE_NODES: usize = 256;
+
 /// Measured links between node pairs, plus an optional fallback for pairs that
 /// have not been measured.
 #[derive(Debug, Clone, Default)]
 pub struct Fabric {
     /// `(node_a, node_b, link)`. Links are symmetric, so order does not matter.
     edges: Vec<(usize, usize, Link)>,
+    /// Dense `stride * stride` lookup table into `edges` for O(1) `between(a, b)`.
+    matrix: Vec<Option<Link>>,
+    stride: usize,
     /// Applied to any pair with no specific measurement. `None` means an
     /// unmeasured pair is treated as unusable rather than optimistically
     /// guessed - a plan built on an invented link is worse than no plan.
@@ -29,6 +35,8 @@ impl Fabric {
     pub fn uniform(link: Link) -> Self {
         Self {
             edges: Vec::new(),
+            matrix: Vec::new(),
+            stride: 0,
             fallback: Some(link),
         }
     }
@@ -41,17 +49,51 @@ impl Fabric {
     pub fn connect(mut self, a: usize, b: usize, link: Link) -> Self {
         self.edges.retain(|(x, y, _)| !same_pair(*x, *y, a, b));
         self.edges.push((a, b, link));
+        self.rebuild_matrix();
         self
+    }
+
+    fn rebuild_matrix(&mut self) {
+        let max_idx = self
+            .edges
+            .iter()
+            .map(|&(a, b, _)| a.max(b))
+            .max()
+            .unwrap_or(0);
+        if self.edges.is_empty() || max_idx >= MAX_DENSE_NODES {
+            self.matrix.clear();
+            self.stride = 0;
+            return;
+        }
+        let stride = max_idx + 1;
+        self.stride = stride;
+        self.matrix.clear();
+        self.matrix.resize(stride * stride, None);
+        for (a, b, link) in &self.edges {
+            self.matrix[a * stride + b] = Some(link.clone());
+            self.matrix[b * stride + a] = Some(link.clone());
+        }
     }
 
     /// The link between two nodes, or `None` if that hop was never measured
     /// and no fallback was set.
+    #[inline]
     pub fn between(&self, a: usize, b: usize) -> Option<&Link> {
-        self.edges
-            .iter()
-            .find(|(x, y, _)| same_pair(*x, *y, a, b))
-            .map(|(_, _, l)| l)
-            .or(self.fallback.as_ref())
+        if a < self.stride && b < self.stride {
+            if let Some(link) = &self.matrix[a * self.stride + b] {
+                return Some(link);
+            }
+            return self.fallback.as_ref();
+        }
+        if self.stride == 0 && !self.edges.is_empty() {
+            return self
+                .edges
+                .iter()
+                .find(|(x, y, _)| same_pair(*x, *y, a, b))
+                .map(|(_, _, l)| l)
+                .or(self.fallback.as_ref());
+        }
+        self.fallback.as_ref()
     }
 
     /// The link applied to pairs with no specific measurement, if any.
