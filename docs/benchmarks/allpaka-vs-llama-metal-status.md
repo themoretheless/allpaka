@@ -327,6 +327,19 @@ matvec_qkv_q4k_q6k`), declines=0. Telemetry note: the per-layer
 dispatch counter is a static estimate (+8/layer), so fused variants do
 not move the printed dispatch count.
 
-Commit `def20ea`. Pending (quiet machine): SWFUSE=1 and QKV_MV=1 A/B on
-8B tg, then default flips for whichever wins; the mmbench q6_k re-run
+Commit `def20ea`. Pending (quiet machine): the mmbench q6_k re-run
 above; full 3-model matrix to re-baseline after the Q6_K rounds.
+
+### Verdicts from interleaved A/B (contended machine, order-reversed controls)
+
+- **`ALLPAKA_SWFUSE=1` on 8B decode: clear LOSS.** Forward pairs 1/6
+  negative, reversed pairs 0/6 negative, median ≈ −20% tg. Physics:
+  the fold doubles the down matvec's activation stream (gate+up instead
+  of precomputed act) — ≈+400 MB of L2 reads per token on 8B shapes,
+  matching the measured hit. Consistent with the 2026-09-26 default-off
+  flip (235B q3_k −7.7 ms/token). The new Q6_K SWIGLU_X support stays
+  available behind the flag; the default stays OFF. No flip.
+- **`ALLPAKA_QKV_MV=1` on 8B decode: NEUTRAL.** In the quiet window
+  (78-84 tok/s both arms) deltas were −1.3/+2.1/0.0/0.0/−0.1% — the
+  concurrent encoder already overlaps the three dispatches, so fusion
+  only removes launches, not bubbles. Stays opt-in, default OFF.
