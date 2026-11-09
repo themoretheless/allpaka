@@ -52,11 +52,23 @@ struct Queue {
     #[serde(default)]
     history: Vec<Change>,
 }
+/// What a history entry records. The words are the stored and API form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ChangeAction {
+    Create,
+    Assignment,
+    Archive,
+    Restore,
+    Complete,
+    Reopen,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Change {
     version: u64,
-    action: String,
+    action: ChangeAction,
     target_index: Option<usize>,
     reviewer: Option<String>,
     feedback_version: Option<u64>,
@@ -64,7 +76,7 @@ struct Change {
     archived: bool,
 }
 impl Queue {
-    fn record(&mut self, action: &str, index: Option<usize>) -> Result<()> {
+    fn record(&mut self, action: ChangeAction, index: Option<usize>) -> Result<()> {
         if self.history.len() >= 2000 {
             bail!("Review queue history limit reached");
         }
@@ -72,7 +84,7 @@ impl Queue {
         let evidence = index.and_then(|i| self.completions.get(&i));
         self.history.push(Change {
             version: self.version,
-            action: action.into(),
+            action,
             target_index: index,
             reviewer,
             feedback_version: evidence.map(|e| e.feedback_version),
@@ -183,7 +195,7 @@ impl Store {
             completions: Default::default(),
             history: Default::default(),
         };
-        queue.record("create", None)?;
+        queue.record(ChangeAction::Create, None)?;
         let bytes = serde_json::to_vec(&queue)?;
         if bytes.len() > MAX_BYTES {
             bail!("Review queue artifact exceeds limit");
@@ -424,7 +436,7 @@ impl Store {
             .version
             .checked_add(1)
             .context("Review queue version overflow")?;
-        queue.record("assignment", Some(input.target_index))?;
+        queue.record(ChangeAction::Assignment, Some(input.target_index))?;
         self.persist_update(&queue)?;
         Ok(queue)
     }
@@ -450,7 +462,14 @@ impl Store {
             .version
             .checked_add(1)
             .context("Review queue version overflow")?;
-        queue.record(if input.archived { "archive" } else { "restore" }, None)?;
+        queue.record(
+            if input.archived {
+                ChangeAction::Archive
+            } else {
+                ChangeAction::Restore
+            },
+            None,
+        )?;
         self.persist_update(&queue)?;
         Ok(queue)
     }
@@ -503,7 +522,7 @@ impl Store {
             .targets
             .get(input.target_index)
             .context("Review target does not exist")?;
-        match input.action.as_str() {
+        let action = match input.action.as_str() {
             "complete" => {
                 if queue.completions.contains_key(&input.target_index) {
                     bail!("Review target is already completed");
@@ -530,6 +549,7 @@ impl Store {
                         annotation_id: annotation,
                     },
                 );
+                ChangeAction::Complete
             }
             "reopen" => {
                 if input.feedback_version.is_some() || input.annotation_id.is_some() {
@@ -538,14 +558,15 @@ impl Store {
                 if queue.completions.remove(&input.target_index).is_none() {
                     bail!("Review target is not completed");
                 }
+                ChangeAction::Reopen
             }
             _ => bail!("Use complete or reopen review action"),
-        }
+        };
         queue.version = queue
             .version
             .checked_add(1)
             .context("Review queue version overflow")?;
-        queue.record(&input.action, Some(input.target_index))?;
+        queue.record(action, Some(input.target_index))?;
         self.persist_update(&queue)?;
         Ok(queue)
     }
@@ -886,8 +907,8 @@ mod tests {
             serde_json::to_value(&current.targets).unwrap()
         );
         assert_eq!(restored.assignments, current.assignments);
-        assert_eq!(restored.history.first().unwrap().action, "create");
-        assert_eq!(restored.history.last().unwrap().action, "restore");
+        assert_eq!(restored.history.first().unwrap().action, ChangeAction::Create);
+        assert_eq!(restored.history.last().unwrap().action, ChangeAction::Restore);
         assert_eq!(restored.history.last().unwrap().version, restored.version);
         assert!(restored
             .history
@@ -898,7 +919,7 @@ mod tests {
         let mut legacy: Queue = serde_json::from_value(legacy_value).unwrap();
         assert!(legacy.history.is_empty());
         legacy.version += 1;
-        legacy.record("archive", None).unwrap();
+        legacy.record(ChangeAction::Archive, None).unwrap();
         assert_ne!(legacy.history[0].version, 1);
         let mut duplicate = input();
         duplicate.targets.push(target.clone());
