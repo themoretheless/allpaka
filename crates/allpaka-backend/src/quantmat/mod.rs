@@ -12,7 +12,8 @@ pub(crate) mod dot_neon;
 pub(crate) mod q8_acts;
 
 use crate::ops::dot;
-use allpaka_gguf::{dequant, GgmlType};
+use allpaka_dtype::GgmlType;
+use allpaka_gguf::dequant;
 use anyhow::{bail, Result};
 use dot_f32::{
     as_f32, dot_bf16, dot_f16, dot_q2_k, dot_q3_k, dot_q4_k, dot_q5_0, dot_q5_k, dot_q6_k,

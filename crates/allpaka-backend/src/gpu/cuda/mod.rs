@@ -14,7 +14,7 @@ mod prefill;
 mod region;
 mod runtime;
 
-use allpaka_gguf::GgmlType;
+use allpaka_dtype::GgmlType;
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 use cudarc::driver::{CudaSlice, DevicePtr, LaunchConfig, PushKernelArg};
 use pdl::{LaunchArgsPdl, StreamPdlExt};

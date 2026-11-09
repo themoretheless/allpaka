@@ -4,7 +4,7 @@
 //! reason. This keeps callers from confusing an unsupported fast path with a
 //! successful CPU/GPU execution or an internal error.
 
-use allpaka_gguf::GgmlType;
+use allpaka_dtype::GgmlType;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeclineReason {

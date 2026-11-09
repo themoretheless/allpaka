@@ -2,7 +2,7 @@
 
 use crate::gpu::cuda::kernels::{EMBED_KERNELS, KERNELS};
 use crate::gpu::cuda::pdl::{LaunchArgsPdl, StreamPdlExt};
-use allpaka_gguf::GgmlType;
+use allpaka_dtype::GgmlType;
 use cudarc::cublaslt::{CudaBlasLT, Matmul, MatmulConfig};
 use cudarc::driver::{
     CudaContext, CudaEvent, CudaFunction, CudaGraph, CudaModule, CudaSlice, CudaStream, DevicePtr,

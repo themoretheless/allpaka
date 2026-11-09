@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use allpaka_gguf::GgmlType;
+use allpaka_dtype::GgmlType;
 
 pub use super::types::*;
 
