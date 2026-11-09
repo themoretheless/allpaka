@@ -80,7 +80,7 @@ fn request_within(
     serde_json::from_slice(&body_bytes).with_context(|| format!("parsing {path} response as JSON"))
 }
 
-fn dechunk(raw: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn dechunk(raw: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut rest = raw;
     loop {

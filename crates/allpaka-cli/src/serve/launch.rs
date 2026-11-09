@@ -1,7 +1,7 @@
 //! Disk catalog and a detached relaunch of `allpaka serve` on a chosen GGUF.
 //!
-//! The CUDA weight windows stay for the life of the process, so a different
-//! model is a new process, not a second attach.
+//! Resident weight mappings stay for the life of the process, so switching to
+//! a different model launches a fresh server process after the current one exits.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -44,30 +44,50 @@ pub fn schedule(path: &str, bind: &str) -> Result<()> {
     };
     if bind
         .chars()
-        .any(|c| c.is_whitespace() || "&|<>".contains(c))
+        .any(|c| c.is_whitespace() || "&|<>'\";`$".contains(c))
     {
         bail!("refusing bind address {bind}");
     }
-    let exe = std::env::current_exe().context("locating allpaka.exe")?;
+    let exe = std::env::current_exe().context("locating allpaka executable")?;
     let log = std::env::temp_dir().join("allpaka-serve.log");
-    let bat = std::env::temp_dir().join("allpaka-relaunch.cmd");
-    let cuda = std::env::var("CUDA_PATH").unwrap_or_default();
-    let cuda_line = if cuda.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "set CUDA_PATH={cuda}\r\nset PATH=%CUDA_PATH%\\bin\\x64;%CUDA_PATH%\\bin;%PATH%\r\n"
-        )
+
+    #[cfg(windows)]
+    let script_path = {
+        let bat = std::env::temp_dir().join("allpaka-relaunch.cmd");
+        let cuda = std::env::var("CUDA_PATH").unwrap_or_default();
+        let cuda_line = if cuda.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "set CUDA_PATH={cuda}\r\nset PATH=%CUDA_PATH%\\bin\\x64;%CUDA_PATH%\\bin;%PATH%\r\n"
+            )
+        };
+        let script = format!(
+            "@echo off\r\n{cuda_line}ping -n 4 127.0.0.1 >nul\r\necho ===== relaunch %DATE% %TIME% =====>> \"{}\"\r\n\"{}\" serve --bind {bind} --model \"{}\" >> \"{}\" 2>&1\r\n",
+            log.display(),
+            exe.display(),
+            model.display(),
+            log.display(),
+        );
+        std::fs::write(&bat, script).with_context(|| format!("writing {}", bat.display()))?;
+        bat
     };
-    let script = format!(
-        "@echo off\r\n{cuda_line}ping -n 4 127.0.0.1 >nul\r\necho ===== relaunch %DATE% %TIME% =====>> \"{}\"\r\n\"{}\" serve --bind {bind} --model \"{}\" >> \"{}\" 2>&1\r\n",
-        log.display(),
-        exe.display(),
-        model.display(),
-        log.display(),
-    );
-    std::fs::write(&bat, script).with_context(|| format!("writing {}", bat.display()))?;
-    spawn_detached(&bat)?;
+
+    #[cfg(not(windows))]
+    let script_path = {
+        let sh = std::env::temp_dir().join("allpaka-relaunch.sh");
+        let script = format!(
+            "#!/bin/sh\nsleep 2\necho \"===== relaunch $(date) =====\" >> \"{}\"\n\"{}\" serve --bind {bind} --model \"{}\" >> \"{}\" 2>&1\n",
+            log.display(),
+            exe.display(),
+            model.display(),
+            log.display(),
+        );
+        std::fs::write(&sh, script).with_context(|| format!("writing {}", sh.display()))?;
+        sh
+    };
+
+    spawn_detached(&script_path)?;
     Ok(())
 }
 
@@ -75,7 +95,7 @@ fn check_model_path(path: &str) -> Result<PathBuf> {
     if path.is_empty()
         || path
             .chars()
-            .any(|c| c == '"' || c == '\n' || c == '\r' || "&|<>".contains(c))
+            .any(|c| c == '"' || c == '\n' || c == '\r' || "&|<>'`;$".contains(c))
     {
         bail!("model path is empty or not safe to relaunch");
     }
@@ -137,22 +157,36 @@ fn walk(dir: &Path, out: &mut Vec<Value>, depth: usize) {
     }
 }
 
-fn spawn_detached(bat: &Path) -> Result<()> {
-    let mut cmd = std::process::Command::new("cmd");
-    cmd.arg("/c").arg(bat);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
+fn spawn_detached(script_path: &Path) -> Result<()> {
     #[cfg(windows)]
-    {
+    let mut cmd = {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x00000008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-    }
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/c").arg(script_path);
+        c.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+        c
+    };
+
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("sh");
+        c.arg(script_path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            c.process_group(0);
+        }
+        c
+    };
+
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
     cmd.spawn()
-        .with_context(|| format!("starting {}", bat.display()))?;
+        .with_context(|| format!("starting {}", script_path.display()))?;
     Ok(())
 }
 
@@ -165,5 +199,6 @@ mod tests {
         assert!(check_model_path("").is_err());
         assert!(check_model_path("model.bin").is_err());
         assert!(check_model_path("a&b.gguf").is_err());
+        assert!(check_model_path("a;b.gguf").is_err());
     }
 }

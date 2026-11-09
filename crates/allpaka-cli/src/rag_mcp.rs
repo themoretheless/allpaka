@@ -25,16 +25,58 @@ use std::time::Duration;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Where the sibling rag repo keeps its built server, its DuckDB index, and
-/// the notes corpus. `tests/plugin_smoke.rs` includes this module instead of
+/// Dynamic default locations for the sibling `rag` repository, its DuckDB index,
+/// and the notes corpus. `tests/plugin_smoke.rs` includes this module instead of
 /// restating them, so the smoke tests skip on exactly what the server falls
-/// back to.
-pub const DEFAULT_RAG_MCP_BIN: &str =
-    "/Users/themoretheless/Documents/Sources/rag/target/release/rag-mcp";
-pub const DEFAULT_RAG_DB: &str =
-    "/Users/themoretheless/Documents/Sources/rag/data/allpaka-notes.duckdb";
-pub const DEFAULT_RAG_NOTES_DIR: &str =
-    "/Users/themoretheless/.claude/projects/-Users-themoretheless-Documents-Sources-allpaka/memory";
+/// back to without hardcoding user-specific paths.
+fn workspace_root() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    manifest.canonicalize().unwrap_or(manifest)
+}
+
+fn default_rag_repo_root() -> PathBuf {
+    let sibling = workspace_root().join("../rag");
+    if sibling.exists() {
+        return sibling.canonicalize().unwrap_or(sibling);
+    }
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        let candidate = PathBuf::from(home).join("Documents/Sources/rag");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    sibling
+}
+
+pub fn default_rag_mcp_bin() -> PathBuf {
+    default_rag_repo_root().join("target/release/rag-mcp")
+}
+
+pub fn default_rag_db() -> PathBuf {
+    default_rag_repo_root().join("data/allpaka-notes.duckdb")
+}
+
+pub fn default_rag_notes_dir() -> PathBuf {
+    if let Ok(dir) =
+        std::env::var("ALLPAKA_RAG_NOTES_DIR").or_else(|_| std::env::var("RAG_INGEST_ROOTS"))
+    {
+        return PathBuf::from(dir);
+    }
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        let slug = workspace_root()
+            .to_string_lossy()
+            .replace(['/', '\\', ':'], "-");
+        let claude_memory = PathBuf::from(&home)
+            .join(".claude")
+            .join("projects")
+            .join(slug)
+            .join("memory");
+        if claude_memory.exists() {
+            return claude_memory;
+        }
+    }
+    workspace_root().join("notes")
+}
 
 /// Where the pieces live; every field has an env override so the same binary
 /// serves the dev repo and the installed plugin.
@@ -51,10 +93,10 @@ impl RagMcpConfig {
         RagMcpConfig {
             bin: std::env::var("RAG_MCP_BIN")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from(DEFAULT_RAG_MCP_BIN)),
+                .unwrap_or_else(|_| default_rag_mcp_bin()),
             db: std::env::var("RAG_DB_PATH")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from(DEFAULT_RAG_DB)),
+                .unwrap_or_else(|_| default_rag_db()),
             notes_dir: notes_dir.to_path_buf(),
             search_mode: std::env::var("RAG_MCP_SEARCH_MODE").unwrap_or_else(|_| "lex".into()),
         }

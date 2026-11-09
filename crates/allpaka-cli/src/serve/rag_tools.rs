@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use crate::rag_mcp::{RagMcp, RagMcpConfig, DEFAULT_RAG_NOTES_DIR};
+use crate::rag_mcp::{default_rag_notes_dir, RagMcp, RagMcpConfig};
 
 const RAG_SEARCH_MAX_RESULTS: usize = 5;
 const RAG_SEARCH_MAX_LINES: usize = 6;
@@ -27,10 +27,7 @@ impl RagToolConfig {
             Ok(value) => value != "0",
             Err(_) => true,
         };
-        let notes_dir = std::env::var("ALLPAKA_RAG_NOTES_DIR")
-            .map(PathBuf::from)
-            .or_else(|_| std::env::var("RAG_INGEST_ROOTS").map(PathBuf::from))
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_RAG_NOTES_DIR));
+        let notes_dir = default_rag_notes_dir();
         let search_max_results =
             parse_env_usize("ALLPAKA_RAG_SEARCH_MAX_RESULTS").unwrap_or(RAG_SEARCH_MAX_RESULTS);
         let search_max_lines =

@@ -1,5 +1,6 @@
 //! One-second resource samples for the chat page. Sampling stays off the
-//! inference thread: GPU numbers come from nvidia-smi, RAM from the process.
+//! inference thread: GPU numbers come from nvidia-smi or Apple unified memory,
+//! RAM from the OS process/host counters.
 
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -126,8 +127,8 @@ fn sample() {
     let Some(state) = STATE.get() else {
         return;
     };
-    let gpu = gpu_query();
     let (rss_mib, ram_used_mib, ram_total_mib) = memory_mib();
+    let gpu = gpu_query(rss_mib, ram_total_mib);
     let Ok(mut state) = state.lock() else {
         return;
     };
@@ -158,13 +159,22 @@ fn sample() {
     }
 }
 
-fn gpu_query() -> Option<(String, u64, u64, u32, i32, f64)> {
+fn gpu_query(rss_mib: u64, ram_total_mib: u64) -> Option<(String, u64, u64, u32, i32, f64)> {
     #[cfg(target_os = "macos")]
     {
-        None
+        static GPU_NAME: OnceLock<String> = OnceLock::new();
+        let name = GPU_NAME
+            .get_or_init(|| {
+                macos_sysctl_string(b"machdep.cpu.brand_string\0")
+                    .map(|brand| format!("{brand} (Metal)"))
+                    .unwrap_or_else(|| "Apple Metal GPU".to_string())
+            })
+            .clone();
+        Some((name, rss_mib, ram_total_mib, 0, 0, 0.0))
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = (rss_mib, ram_total_mib);
         use std::sync::atomic::{AtomicBool, Ordering};
         static NVIDIA_SMI_MISSING: AtomicBool = AtomicBool::new(false);
         if NVIDIA_SMI_MISSING.load(Ordering::Relaxed) {
@@ -220,9 +230,181 @@ fn memory_mib() -> (u64, u64, u64) {
     {
         linux_memory_mib()
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        macos_memory_mib()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         (0, 0, 0)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_sysctl_string(name_cstr: &[u8]) -> Option<String> {
+    extern "C" {
+        fn sysctlbyname(
+            name: *const i8,
+            oldp: *mut std::ffi::c_void,
+            oldlenp: *mut usize,
+            newp: *const std::ffi::c_void,
+            newlen: usize,
+        ) -> i32;
+    }
+    unsafe {
+        let mut len: usize = 0;
+        if sysctlbyname(
+            name_cstr.as_ptr().cast(),
+            std::ptr::null_mut(),
+            &mut len,
+            std::ptr::null(),
+            0,
+        ) != 0
+            || len == 0
+        {
+            return None;
+        }
+        let mut buf = vec![0u8; len];
+        if sysctlbyname(
+            name_cstr.as_ptr().cast(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null(),
+            0,
+        ) != 0
+        {
+            return None;
+        }
+        if let Some(nul) = buf.iter().position(|&b| b == 0) {
+            buf.truncate(nul);
+        }
+        String::from_utf8(buf).ok().map(|s| s.trim().to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_memory_mib() -> (u64, u64, u64) {
+    #[repr(C)]
+    struct MachTaskBasicInfo {
+        virtual_size: u64,
+        resident_size: u64,
+        resident_size_max: u64,
+        user_time: [u32; 2],
+        system_time: [u32; 2],
+        policy: i32,
+        suspend_count: i32,
+    }
+
+    #[repr(C)]
+    struct VmStatistics64 {
+        free_count: u32,
+        active_count: u32,
+        inactive_count: u32,
+        wire_count: u32,
+        zero_fill_count: u64,
+        reactivations: u64,
+        pageins: u64,
+        pageouts: u64,
+        faults: u64,
+        cow_faults: u64,
+        lookups: u64,
+        hits: u64,
+        purges: u64,
+        purgeable_count: u32,
+        speculative_count: u32,
+        decompressions: u64,
+        compressions: u64,
+        swapins: u64,
+        swapouts: u64,
+        compressor_page_count: u32,
+        throttled_count: u32,
+        external_page_count: u32,
+        internal_page_count: u32,
+        total_uncompressed_pages_in_compressor: u64,
+    }
+
+    extern "C" {
+        static mach_task_self_: u32;
+        fn mach_host_self() -> u32;
+        fn task_info(
+            target_task: u32,
+            flavor: u32,
+            task_info_out: *mut MachTaskBasicInfo,
+            task_info_outCnt: *mut u32,
+        ) -> i32;
+        fn host_page_size(host: u32, out_page_size: *mut usize) -> i32;
+        fn host_statistics64(
+            host: u32,
+            flavor: i32,
+            host_info64_out: *mut VmStatistics64,
+            host_info64_outCnt: *mut u32,
+        ) -> i32;
+        fn sysctlbyname(
+            name: *const i8,
+            oldp: *mut std::ffi::c_void,
+            oldlenp: *mut usize,
+            newp: *const std::ffi::c_void,
+            newlen: usize,
+        ) -> i32;
+    }
+
+    const MACH_TASK_BASIC_INFO: u32 = 20;
+    const HOST_VM_INFO64: i32 = 4;
+
+    static TOTAL_RAM_BYTES: OnceLock<u64> = OnceLock::new();
+    let total_bytes = *TOTAL_RAM_BYTES.get_or_init(|| unsafe {
+        let mut memsize: u64 = 0;
+        let mut size = std::mem::size_of::<u64>();
+        if sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&mut memsize as *mut u64).cast(),
+            &mut size,
+            std::ptr::null(),
+            0,
+        ) == 0
+        {
+            memsize
+        } else {
+            0
+        }
+    });
+
+    unsafe {
+        let mut info = std::mem::zeroed::<MachTaskBasicInfo>();
+        let mut count = (std::mem::size_of::<MachTaskBasicInfo>() / std::mem::size_of::<u32>()) as u32;
+        let rss_bytes = if task_info(
+            mach_task_self_,
+            MACH_TASK_BASIC_INFO,
+            &mut info,
+            &mut count,
+        ) == 0
+        {
+            info.resident_size
+        } else {
+            0
+        };
+
+        let host = mach_host_self();
+        let mut page_size: usize = 16384;
+        let _ = host_page_size(host, &mut page_size);
+        let mut vm_stat = std::mem::zeroed::<VmStatistics64>();
+        let mut vm_count =
+            (std::mem::size_of::<VmStatistics64>() / std::mem::size_of::<u32>()) as u32;
+        let used_bytes = if host_statistics64(host, HOST_VM_INFO64, &mut vm_stat, &mut vm_count) == 0
+        {
+            let used_pages = u64::from(vm_stat.active_count)
+                + u64::from(vm_stat.wire_count)
+                + u64::from(vm_stat.compressor_page_count);
+            used_pages.saturating_mul(page_size as u64)
+        } else {
+            0
+        };
+
+        (
+            rss_bytes >> 20,
+            used_bytes >> 20,
+            total_bytes >> 20,
+        )
     }
 }
 
@@ -313,5 +495,24 @@ fn windows_memory_mib() -> (u64, u64, u64) {
             used / (1024 * 1024),
             total / (1024 * 1024),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gpu_query, memory_mib};
+
+    #[test]
+    fn host_memory_and_gpu_queries_report_positive_capacity() {
+        let (rss_mib, used_mib, total_mib) = memory_mib();
+        assert!(total_mib > 0, "expected total_mib > 0, got {total_mib}");
+        assert!(used_mib > 0, "expected used_mib > 0, got {used_mib}");
+        let _ = rss_mib;
+        #[cfg(target_os = "macos")]
+        {
+            let gpu = gpu_query(rss_mib, total_mib).expect("macos gpu query");
+            assert!(!gpu.0.is_empty());
+            assert_eq!(gpu.2, total_mib);
+        }
     }
 }

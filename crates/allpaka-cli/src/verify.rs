@@ -49,31 +49,11 @@ fn post(addr: &str, path: &str, body: &Value) -> Result<Value> {
         })
     });
     let body_bytes = if is_chunked {
-        dechunk(rest_bytes)?
+        crate::client::dechunk(rest_bytes)?
     } else {
         rest_bytes.to_vec()
     };
     serde_json::from_slice(&body_bytes).with_context(|| format!("parsing {path} response as JSON"))
-}
-
-fn dechunk(raw: &[u8]) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut rest = raw;
-    loop {
-        let crlf = rest
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .context("truncated chunk header")?;
-        let size_line = std::str::from_utf8(&rest[..crlf]).context("non-UTF8 chunk header")?;
-        let size_hex = size_line.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_hex, 16).context("bad chunk size")?;
-        let tail = &rest[crlf + 2..];
-        if size == 0 {
-            return Ok(out);
-        }
-        out.extend_from_slice(tail.get(..size).context("truncated chunk body")?);
-        rest = tail.get(size + 2..).context("truncated chunk trailer")?;
-    }
 }
 
 /// Ask the server to tokenise the prompt, so both engines see identical ids.

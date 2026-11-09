@@ -5,76 +5,46 @@
 //! an agent framework pointed at this URL cannot tell it is not llama-server -
 //! same route, same response shape.
 
+mod http;
 mod ingress;
 mod launch;
+mod memory;
+mod messages;
+mod predict;
 mod rag_tools;
 mod request_control;
 mod resources;
+mod sampler;
+mod session;
+mod template;
+
+pub(crate) use http::{read_request, respond, respond_html, write_sse_event, write_sse_headers};
+pub(crate) use messages::{
+    append_valid_utf8, image_part_count, parse_tool_calls, render_messages, stream_safe_len,
+};
+pub(crate) use predict::{
+    extract_prediction_text, parse_prompt_lookup_k, predict_followup_prompts,
+    predict_prompt_continuation,
+};
+pub(crate) use sampler::Sampler;
+pub(crate) use session::{
+    exact_prefix_snapshot, model_prefix_namespace, prefix_key, ChatState, ModelService, PrefixSnap,
+};
+pub(crate) use template::Template;
+
 use rag_tools::{rag_default_tool_schemas, run_rag_tool, RagTools};
 use request_control::{Interrupted, Registry as RequestRegistry, RequestControl};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::serving_runtime::{ServingLimits, ServingRuntime};
 use allpaka_model::prefix_cache::PrefixCache;
-use allpaka_model::{Model, Session, Tokenizer};
-
-/// The KV cache carried across requests.
-///
-/// A chat regenerates the same prompt prefix on every turn: the whole prior
-/// conversation, byte for byte, plus one new user message. Keeping the session
-/// and the token list lets each request pay only for what is actually new -
-/// without this, turn N re-runs the forward pass over every earlier turn and
-/// the chat slows down linearly with its own length.
-mod memory;
-
-struct ChatState {
-    session: Session,
-    tokens: Vec<u32>,
-    memory: memory::Lease,
-}
-
-impl ChatState {
-    fn new(model: &Model<'static>, budget: &memory::Budget, capacity: usize) -> Result<Self> {
-        let memory = budget.reserve(memory::session_bytes(model, capacity)?)?;
-        Ok(Self {
-            session: model.new_session(capacity),
-            tokens: Vec::new(),
-            memory,
-        })
-    }
-
-    fn reset(&mut self, model: &Model<'static>, capacity: usize) -> Result<()> {
-        // Reserve the new storage while the old storage is still alive.
-        // A too-large KV allocation asserts inside the cache; keep the
-        // running session and report it instead of killing the process.
-        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::new(model, &self.memory.budget(), capacity)
-        }));
-        match built {
-            Ok(session) => {
-                *self = session?;
-                Ok(())
-            }
-            Err(_) => bail!("out of memory for a {capacity}-token session"),
-        }
-    }
-}
-
-/// Byte-budgeted prompt-boundary snapshot shared by requests for one model.
-struct PrefixSnap {
-    /// Token count of the prompt this state was captured after.
-    tokens: usize,
-    /// `SsmCache::snapshot()` at the prompt's end for hybrid models.
-    ssm_state: Option<Vec<f32>>,
-    /// Last-position logits let an exact repeated prompt skip all prefill.
-    logits: Arc<[f32]>,
-}
+use allpaka_model::{Model, Tokenizer};
 
 /// Generation cap the chat field is allowed to ask for. The session is this
 /// plus room for the prompt. KV is allocated up front, so a 512000-token
@@ -93,77 +63,14 @@ struct CompletionResult {
     decode_secs: f64,
 }
 
-struct ModelService {
-    model: Model<'static>,
-    tokenizer: Tokenizer,
-    force_think: bool,
-    chat: ChatState,
-    sessions: std::collections::HashMap<String, (ChatState, std::time::Instant)>,
-}
-
 struct QueuedConnection {
     stream: TcpStream,
     request_line: String,
-    body: String,
+    request: Value,
     control: RequestControl,
 }
 
 type ServerRuntime = ServingRuntime<Mutex<ModelService>, QueuedConnection, PrefixSnap>;
-
-fn model_prefix_namespace(model: &str) -> u32 {
-    model.bytes().fold(2_166_136_261u32, |hash, byte| {
-        (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
-    })
-}
-
-fn prefix_key(namespace: u32, tokens: &[u32]) -> Vec<u32> {
-    let mut key = Vec::with_capacity(tokens.len() + 1);
-    key.push(namespace);
-    key.extend_from_slice(tokens);
-    key
-}
-
-fn exact_prefix_snapshot(
-    cache: &mut PrefixCache<PrefixSnap>,
-    namespace: u32,
-    tokens: &[u32],
-) -> Option<Arc<PrefixSnap>> {
-    let key = prefix_key(namespace, tokens);
-    let hit = cache.longest_prefix(&key)?;
-    (hit.matched_tokens == key.len() && hit.value.tokens == tokens.len()).then_some(hit.value)
-}
-
-#[cfg(test)]
-mod prefix_snapshot_tests {
-    use super::{
-        exact_prefix_snapshot, model_prefix_namespace, prefix_key, Arc, PrefixCache, PrefixSnap,
-    };
-
-    #[test]
-    fn exact_hits_are_model_namespaced() {
-        let mut cache = PrefixCache::new(1024);
-        let first = model_prefix_namespace("first");
-        let second = model_prefix_namespace("second");
-        cache.insert(
-            prefix_key(first, &[1, 2, 3]),
-            PrefixSnap {
-                tokens: 3,
-                ssm_state: None,
-                logits: Arc::from([4.0f32]),
-            },
-            4,
-        );
-
-        assert_eq!(
-            &*exact_prefix_snapshot(&mut cache, first, &[1, 2, 3])
-                .unwrap()
-                .logits,
-            &[4.0]
-        );
-        assert!(exact_prefix_snapshot(&mut cache, first, &[1, 2]).is_none());
-        assert!(exact_prefix_snapshot(&mut cache, second, &[1, 2, 3]).is_none());
-    }
-}
 
 struct InferenceContext<'a> {
     model: &'a Model<'static>,
@@ -194,158 +101,35 @@ struct ServeRequestContext<'a> {
     rag: &'a RagTools,
 }
 
-/// Speculatively prefill `messages` into the active session and `PrefixCache`
-/// while the user is still typing, reducing Time-To-First-Token (TTFT) on submit.
-fn prewarm_prompt(
-    context: &mut InferenceContext<'_>,
-    messages: &[(String, String)],
-    reserve_tokens: usize,
-) -> Result<(usize, usize)> {
-    context.control.check()?;
-    let model = context.model;
-    let tok = context.tok;
-    let template = context.template;
-    let chat = &mut *context.chat;
-    let prefixes = &mut *context.prefixes;
-    let prefix_namespace = context.prefix_namespace;
-    let prompt = template.prompt(tok, messages)?;
-    let max_tokens = reserve_tokens.min(MAX_NEW_TOKENS);
-    if prompt.is_empty()
-        || prompt.len().saturating_add(max_tokens).saturating_add(1) > SESSION_TOKENS
-    {
-        return Ok((0, 0));
-    }
-
-    let mut common = chat
-        .tokens
-        .iter()
-        .zip(&prompt)
-        .take_while(|(a, b)| **a == **b)
-        .count();
-    let mut logits: Vec<f32> = Vec::new();
-    let mut skip_prefill = false;
-
-    if prompt.len() + max_tokens + 1 > chat.session.capacity() {
-        chat.reset(model, prompt.len() + max_tokens + 1)?;
-        chat.tokens.clear();
-        common = 0;
-    } else if chat.session.ssm.is_some() {
-        if common < chat.tokens.len() {
-            match exact_prefix_snapshot(prefixes, prefix_namespace, &prompt[..common]) {
-                Some(snap) => {
-                    let state = snap
-                        .ssm_state
-                        .as_ref()
-                        .expect("SSM prefix snapshot must contain recurrent state");
-                    chat.session
-                        .ssm
-                        .as_mut()
-                        .expect("ssm session")
-                        .restore(state);
-                    chat.session.truncate(common);
-                    chat.tokens.truncate(common);
-                    if common == prompt.len() {
-                        skip_prefill = true;
-                    }
-                }
-                None => {
-                    chat.reset(model, prompt.len() + max_tokens + 1)?;
-                    chat.tokens.clear();
-                    common = 0;
-                }
-            }
-        } else if common == prompt.len() {
-            if exact_prefix_snapshot(prefixes, prefix_namespace, &prompt).is_some() {
-                skip_prefill = true;
-            } else {
-                return Ok((0, common));
-            }
-        }
-    } else {
-        if common == prompt.len() {
-            if exact_prefix_snapshot(prefixes, prefix_namespace, &prompt).is_some() {
-                skip_prefill = true;
-            } else {
-                common = common.saturating_sub(1);
-            }
-        }
-        chat.session.truncate(common);
-        chat.tokens.truncate(common);
-    }
-
-    let prefill_chunk = allpaka_model::Model::prefill_chunk();
-    if !skip_prefill {
-        for chunk in prompt[common..].chunks(prefill_chunk) {
-            context.control.check()?;
-            logits = model.forward_batch(chunk, &mut chat.session)?;
-            chat.tokens.extend_from_slice(chunk);
-        }
-    }
-
-    if !logits.is_empty() {
-        let ssm_state = chat.session.ssm.as_ref().map(|ssm| ssm.snapshot());
-        let value_bytes = logits.len() * size_of::<f32>()
-            + ssm_state
-                .as_ref()
-                .map_or(0, |state| state.len() * size_of::<f32>());
-        prefixes.insert(
-            prefix_key(prefix_namespace, &prompt),
-            PrefixSnap {
-                tokens: prompt.len(),
-                ssm_state,
-                logits: Arc::from(logits),
-            },
-            value_bytes,
-        );
-    }
-
-    Ok((prompt.len().saturating_sub(common), common))
+struct PrefillOutcome {
+    common: usize,
+    prefill_secs: f64,
+    cached_logits: Option<Arc<[f32]>>,
 }
 
-fn run_inference(
+/// Shared prefix/SSM session alignment, chunked `forward_batch` prefill, and
+/// `PrefixCache` snapshot insertion used by both `prewarm_prompt` and `run_inference`.
+fn prefill_prompt(
     context: &mut InferenceContext<'_>,
-    request: GenerationRequest<'_>,
-) -> Result<CompletionResult> {
-    context.control.check()?;
+    prompt: &[u32],
+    max_tokens: usize,
+    need_logits: bool,
+) -> Result<PrefillOutcome> {
     let model = context.model;
-    let tok = context.tok;
-    let template = context.template;
     let chat = &mut *context.chat;
     let prefixes = &mut *context.prefixes;
     let prefix_namespace = context.prefix_namespace;
-    let GenerationRequest {
-        messages,
-        max_tokens,
-        temperature,
-        top_p,
-        repeat_penalty,
-        parse_tools,
-        prediction_tokens,
-        prompt_lookup_k,
-        mut stream,
-        emit_done,
-    } = request;
-    let prompt = template.prompt(tok, messages)?;
-    anyhow::ensure!(
-        max_tokens <= MAX_NEW_TOKENS
-            && prompt.len().saturating_add(max_tokens).saturating_add(1) <= SESSION_TOKENS,
-        "request exceeds the {MAX_NEW_TOKENS}-token generation limit"
-    );
-    let stops = template.stop_tokens(tok);
-    let mut sampler = Sampler::new(temperature, top_p, repeat_penalty);
-    // Greedy without a repeat penalty can take the on-GPU argmax: one word
-    // read back per token instead of the whole vocabulary.
-    let greedy = temperature <= 0.0 && repeat_penalty == 1.0;
 
     let mut common = chat
         .tokens
         .iter()
-        .zip(&prompt)
+        .zip(prompt)
         .take_while(|(a, b)| **a == **b)
         .count();
     let mut logits: Vec<f32> = Vec::new();
     let mut cached_logits: Option<Arc<[f32]>> = None;
     let mut skip_prefill = false;
+
     if prompt.len() + max_tokens + 1 > chat.session.capacity() {
         chat.reset(model, prompt.len() + max_tokens + 1)?;
         chat.tokens.clear();
@@ -370,8 +154,6 @@ fn run_inference(
                     chat.session.truncate(common);
                     chat.tokens.truncate(common);
                     if common == prompt.len() {
-                        // The prompt is fully covered: its last logits are
-                        // in the snapshot, no prefill at all.
                         cached_logits = Some(Arc::clone(&snap.logits));
                         skip_prefill = true;
                     }
@@ -383,13 +165,17 @@ fn run_inference(
                 }
             }
         } else if common == prompt.len() {
-            // History IS the prompt: the state already sits at its end and
-            // only the last logits are missing (KV-only models replay one
-            // token here; the SSM cannot step back). The snapshot has them.
-            match exact_prefix_snapshot(prefixes, prefix_namespace, &prompt) {
+            match exact_prefix_snapshot(prefixes, prefix_namespace, prompt) {
                 Some(snap) => {
                     cached_logits = Some(Arc::clone(&snap.logits));
                     skip_prefill = true;
+                }
+                None if !need_logits => {
+                    return Ok(PrefillOutcome {
+                        common,
+                        prefill_secs: 0.0,
+                        cached_logits: None,
+                    });
                 }
                 None => {
                     chat.reset(model, prompt.len() + max_tokens + 1)?;
@@ -398,11 +184,9 @@ fn run_inference(
                 }
             }
         }
-        // else: common == chat.tokens.len() < prompt.len() - the state is
-        // already exactly where the prefix ends; nothing to restore.
     } else {
         if common == prompt.len() {
-            if let Some(snap) = exact_prefix_snapshot(prefixes, prefix_namespace, &prompt) {
+            if let Some(snap) = exact_prefix_snapshot(prefixes, prefix_namespace, prompt) {
                 cached_logits = Some(Arc::clone(&snap.logits));
                 skip_prefill = true;
             } else {
@@ -427,7 +211,6 @@ fn run_inference(
     })?;
     let prefill_secs = t0.elapsed().as_secs_f64();
 
-    // Snapshot before generation, when state is exactly "prompt consumed".
     if !logits.is_empty() {
         let ssm_state = chat.session.ssm.as_ref().map(|ssm| ssm.snapshot());
         let shared_logits: Arc<[f32]> = Arc::from(std::mem::take(&mut logits));
@@ -437,7 +220,7 @@ fn run_inference(
                 .map_or(0, |state| state.len() * size_of::<f32>());
         cached_logits = Some(Arc::clone(&shared_logits));
         prefixes.insert(
-            prefix_key(prefix_namespace, &prompt),
+            prefix_key(prefix_namespace, prompt),
             PrefixSnap {
                 tokens: prompt.len(),
                 ssm_state,
@@ -446,6 +229,102 @@ fn run_inference(
             value_bytes,
         );
     }
+
+    Ok(PrefillOutcome {
+        common,
+        prefill_secs,
+        cached_logits,
+    })
+}
+
+/// Speculatively prefill `messages` into the active session and `PrefixCache`
+/// while the user is still typing, reducing Time-To-First-Token (TTFT) on submit.
+fn prewarm_prompt(
+    context: &mut InferenceContext<'_>,
+    messages: &[(String, String)],
+    reserve_tokens: usize,
+) -> Result<(usize, usize)> {
+    context.control.check()?;
+    let prompt = context.template.prompt(context.tok, messages)?;
+    let max_tokens = reserve_tokens.min(MAX_NEW_TOKENS);
+    if prompt.is_empty()
+        || prompt.len().saturating_add(max_tokens).saturating_add(1) > SESSION_TOKENS
+    {
+        return Ok((0, 0));
+    }
+
+    let outcome = prefill_prompt(context, &prompt, max_tokens, false)?;
+    Ok((prompt.len().saturating_sub(outcome.common), outcome.common))
+}
+
+fn emit_incremental_sse(
+    stream: &mut TcpStream,
+    raw_bytes: &[u8],
+    decoded_bytes: &mut usize,
+    complete_buf: &mut String,
+    emitted_len: &mut usize,
+    parse_tools: bool,
+    tokens_generated: usize,
+) -> Result<()> {
+    append_valid_utf8(raw_bytes, decoded_bytes, complete_buf, 0);
+    let complete = if parse_tools {
+        &complete_buf[..stream_safe_len(complete_buf)]
+    } else {
+        complete_buf.as_str()
+    };
+    if complete.len() > *emitted_len {
+        let delta = &complete[*emitted_len..];
+        let chunk = json!({
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": {"content": delta}}],
+            "tokens_generated": tokens_generated,
+        });
+        write_sse_event(stream, &chunk)?;
+        *emitted_len = complete.len();
+    }
+    Ok(())
+}
+
+fn run_inference(
+    context: &mut InferenceContext<'_>,
+    request: GenerationRequest<'_>,
+) -> Result<CompletionResult> {
+    context.control.check()?;
+    let GenerationRequest {
+        messages,
+        max_tokens,
+        temperature,
+        top_p,
+        repeat_penalty,
+        parse_tools,
+        prediction_tokens,
+        prompt_lookup_k,
+        mut stream,
+        emit_done,
+    } = request;
+    let prompt = context.template.prompt(context.tok, messages)?;
+    anyhow::ensure!(
+        max_tokens <= MAX_NEW_TOKENS
+            && prompt.len().saturating_add(max_tokens).saturating_add(1) <= SESSION_TOKENS,
+        "request exceeds the {MAX_NEW_TOKENS}-token generation limit"
+    );
+    let stops = context.template.stop_tokens(context.tok);
+    let mut sampler = Sampler::new(temperature, top_p, repeat_penalty);
+    // Greedy without a repeat penalty can take the on-GPU argmax: one word
+    // read back per token instead of the whole vocabulary.
+    let greedy = temperature <= 0.0 && repeat_penalty == 1.0;
+
+    let PrefillOutcome {
+        common,
+        prefill_secs,
+        mut cached_logits,
+    } = prefill_prompt(context, &prompt, max_tokens, true)?;
+    let mut logits: Vec<f32> = Vec::new();
+
+    let model = context.model;
+    let tok = context.tok;
+    let template = context.template;
+    let chat = &mut *context.chat;
 
     let streaming = stream.is_some();
     let think_prefix = template.think_prefix();
@@ -540,50 +419,16 @@ fn run_inference(
                         chat.session.truncate(valid_pos);
                     }
                 }
-                if streaming {
-                    match std::str::from_utf8(&raw_bytes[decoded_bytes..]) {
-                        Ok(valid) => {
-                            complete_buf.push_str(valid);
-                            decoded_bytes = raw_bytes.len();
-                        }
-                        Err(e) if e.error_len().is_none() => {
-                            let valid_len = e.valid_up_to();
-                            if valid_len > 0 {
-                                let valid = std::str::from_utf8(
-                                    &raw_bytes[decoded_bytes..decoded_bytes + valid_len],
-                                )
-                                .unwrap_or("");
-                                complete_buf.push_str(valid);
-                                decoded_bytes += valid_len;
-                            }
-                        }
-                        Err(_) => {
-                            let full = String::from_utf8_lossy(&raw_bytes);
-                            let trimmed = full.strip_suffix('\u{FFFD}').unwrap_or(&full);
-                            complete_buf.clear();
-                            complete_buf.push_str(trimmed);
-                            decoded_bytes = if full.ends_with('\u{FFFD}') {
-                                raw_bytes.len().saturating_sub(1)
-                            } else {
-                                raw_bytes.len()
-                            };
-                        }
-                    }
-                    let complete = if parse_tools {
-                        &complete_buf[..stream_safe_len(&complete_buf)]
-                    } else {
-                        complete_buf.as_str()
-                    };
-                    if complete.len() > emitted_len {
-                        let delta = &complete[emitted_len..];
-                        let chunk = json!({
-                            "object": "chat.completion.chunk",
-                            "choices": [{"index": 0, "delta": {"content": delta}}],
-                            "tokens_generated": generated.len(),
-                        });
-                        write_sse_event(stream.as_mut().unwrap(), &chunk)?;
-                        emitted_len = complete.len();
-                    }
+                if let Some(stream) = stream.as_mut() {
+                    emit_incremental_sse(
+                        stream,
+                        &raw_bytes,
+                        &mut decoded_bytes,
+                        &mut complete_buf,
+                        &mut emitted_len,
+                        parse_tools,
+                        generated.len(),
+                    )?;
                 }
                 if hit_stop || generated.len() >= max_tokens {
                     break;
@@ -593,50 +438,16 @@ fn run_inference(
             }
             generated.push(next);
             tok.append_token_bytes(next, &mut raw_bytes);
-            if streaming {
-                match std::str::from_utf8(&raw_bytes[decoded_bytes..]) {
-                    Ok(valid) => {
-                        complete_buf.push_str(valid);
-                        decoded_bytes = raw_bytes.len();
-                    }
-                    Err(e) if e.error_len().is_none() => {
-                        let valid_len = e.valid_up_to();
-                        if valid_len > 0 {
-                            let valid = std::str::from_utf8(
-                                &raw_bytes[decoded_bytes..decoded_bytes + valid_len],
-                            )
-                            .unwrap_or("");
-                            complete_buf.push_str(valid);
-                            decoded_bytes += valid_len;
-                        }
-                    }
-                    Err(_) => {
-                        let full = String::from_utf8_lossy(&raw_bytes);
-                        let trimmed = full.strip_suffix('\u{FFFD}').unwrap_or(&full);
-                        complete_buf.clear();
-                        complete_buf.push_str(trimmed);
-                        decoded_bytes = if full.ends_with('\u{FFFD}') {
-                            raw_bytes.len().saturating_sub(1)
-                        } else {
-                            raw_bytes.len()
-                        };
-                    }
-                }
-                let complete = if parse_tools {
-                    &complete_buf[..stream_safe_len(&complete_buf)]
-                } else {
-                    complete_buf.as_str()
-                };
-                if complete.len() > emitted_len {
-                    let delta = &complete[emitted_len..];
-                    let chunk = json!({
-                        "object": "chat.completion.chunk",
-                        "choices": [{"index": 0, "delta": {"content": delta}}],
-                        "tokens_generated": generated.len(),
-                    });
-                    write_sse_event(stream.as_mut().unwrap(), &chunk)?;
-                    emitted_len = complete.len();
-                }
+            if let Some(stream) = stream.as_mut() {
+                emit_incremental_sse(
+                    stream,
+                    &raw_bytes,
+                    &mut decoded_bytes,
+                    &mut complete_buf,
+                    &mut emitted_len,
+                    parse_tools,
+                    generated.len(),
+                )?;
             }
             if greedy {
                 greedy_next = Some(model.forward_greedy(next, &mut chat.session)?);
@@ -804,527 +615,6 @@ fn emit_stream_completion(
     )?;
     stream.write_all(b"data: [DONE]\n\n")?;
     Ok(())
-}
-
-/// The chat template families this server can format. Decided by which
-/// special tokens the vocabulary actually contains.
-pub(crate) enum Template {
-    /// `<|im_start|>role\n...<|im_end|>\n` - Qwen and much of the ecosystem.
-    /// `force_think` mirrors the GGUF chat template of the thinking Qwen
-    /// generations: the assistant turn is primed with a literal `<think>\n`
-    /// (llama.cpp renders the same prefix from the jinja template).
-    ChatMl {
-        im_start: u32,
-        im_end: u32,
-        think: Option<u32>,
-        force_think: bool,
-    },
-    /// `<|start_header_id|>role<|end_header_id|>\n\n...<|eot_id|>` - Llama 3.
-    Llama3 {
-        bos: u32,
-        start_header: u32,
-        end_header: u32,
-        eot: u32,
-    },
-    /// `[gMASK]<sop><|user|>\n...<|assistant|>\n` - GLM-4.x (ChatGLM).
-    Glm {
-        gmask: Option<u32>,
-        sop: Option<u32>,
-        system: u32,
-        user: u32,
-        assistant: u32,
-    },
-}
-
-impl Template {
-    pub(crate) fn detect(tok: &Tokenizer) -> Result<Self> {
-        if let (Some(im_start), Some(im_end)) =
-            (tok.piece_id("<|im_start|>"), tok.piece_id("<|im_end|>"))
-        {
-            return Ok(Template::ChatMl {
-                im_start,
-                im_end,
-                think: tok.piece_id("<think>"),
-                force_think: false,
-            });
-        }
-        if let (Some(start_header), Some(end_header), Some(eot)) = (
-            tok.piece_id("<|start_header_id|>"),
-            tok.piece_id("<|end_header_id|>"),
-            tok.piece_id("<|eot_id|>"),
-        ) {
-            return Ok(Template::Llama3 {
-                bos: tok.bos.context("llama3 template needs a BOS token")?,
-                start_header,
-                end_header,
-                eot,
-            });
-        }
-        if let (Some(system), Some(user), Some(assistant)) = (
-            tok.piece_id("<|system|>"),
-            tok.piece_id("<|user|>"),
-            tok.piece_id("<|assistant|>"),
-        ) {
-            return Ok(Template::Glm {
-                gmask: tok.piece_id("[gMASK]"),
-                sop: tok.piece_id("<sop>"),
-                system,
-                user,
-                assistant,
-            });
-        }
-        bail!("the vocabulary has neither ChatML nor Llama 3 nor GLM special tokens");
-    }
-
-    /// The literal prefix the assistant turn was primed with (`<think>\n`
-    /// for the thinking Qwens, empty otherwise). The reply text gets it back
-    /// so clients see the complete `<think>...</think>` block.
-    pub(crate) fn think_prefix(&self) -> &'static str {
-        match self {
-            Template::ChatMl {
-                force_think: true, ..
-            } => "<think>\n",
-            _ => "",
-        }
-    }
-
-    /// Format a conversation into token ids, ending where the assistant
-    /// starts writing.
-    pub(crate) fn prompt(
-        &self,
-        tok: &Tokenizer,
-        messages: &[(String, String)],
-    ) -> Result<Vec<u32>> {
-        let mut ids = Vec::new();
-        match self {
-            Template::ChatMl {
-                im_start,
-                im_end,
-                think,
-                force_think,
-            } => {
-                let nl = tok.encode("\n")?;
-                for (role, content) in messages {
-                    ids.push(*im_start);
-                    ids.extend(tok.encode(&format!("{role}\n{content}"))?);
-                    ids.push(*im_end);
-                    ids.extend_from_slice(&nl);
-                }
-                ids.push(*im_start);
-                ids.extend(tok.encode("assistant\n")?);
-                if *force_think {
-                    // The special token by id, exactly as the jinja template
-                    // renders it - plain BPE would split the literal text.
-                    match think {
-                        Some(t) => {
-                            ids.push(*t);
-                            ids.extend_from_slice(&nl);
-                        }
-                        None => ids.extend(tok.encode("<think>\n")?),
-                    }
-                }
-            }
-            Template::Llama3 {
-                bos,
-                start_header,
-                end_header,
-                eot,
-            } => {
-                ids.push(*bos);
-                for (role, content) in messages {
-                    ids.push(*start_header);
-                    ids.extend(tok.encode(role)?);
-                    ids.push(*end_header);
-                    ids.extend(tok.encode(&format!("\n\n{content}"))?);
-                    ids.push(*eot);
-                }
-                ids.push(*start_header);
-                ids.extend(tok.encode("assistant")?);
-                ids.push(*end_header);
-                ids.extend(tok.encode("\n\n")?);
-            }
-            Template::Glm {
-                gmask,
-                sop,
-                system,
-                user,
-                assistant,
-            } => {
-                if let Some(g) = gmask {
-                    ids.push(*g);
-                }
-                if let Some(s) = sop {
-                    ids.push(*s);
-                }
-                for (role, content) in messages {
-                    let role_id = match role.as_str() {
-                        "system" => *system,
-                        "assistant" => *assistant,
-                        _ => *user,
-                    };
-                    ids.push(role_id);
-                    ids.extend(tok.encode(&format!("\n{content}"))?);
-                }
-                ids.push(*assistant);
-                ids.extend(tok.encode("\n")?);
-            }
-        }
-        Ok(ids)
-    }
-
-    /// Tokens that end an assistant turn.
-    pub(crate) fn stop_tokens(&self, tok: &Tokenizer) -> Vec<u32> {
-        let mut stops = Vec::new();
-        match self {
-            Template::ChatMl { im_end, .. } => stops.push(*im_end),
-            Template::Llama3 { eot, .. } => stops.push(*eot),
-            Template::Glm { user, .. } => stops.push(*user),
-        }
-        if let Some(eos) = tok.eos {
-            stops.push(eos);
-        }
-        stops
-    }
-}
-
-/// A deliberately small sampler: greedy at temperature 0, otherwise
-/// repetition penalty, temperature scaling and nucleus (top-p) truncation.
-struct Sampler {
-    temperature: f64,
-    top_p: f64,
-    /// llama.cpp-style repeat penalty over the recent window: positive
-    /// logits of recent tokens are divided by it, negative multiplied.
-    /// Without it a heavily quantised model happily locks into "либо-либо-
-    /// либо" forever; 1.1 breaks such loops without visibly changing prose.
-    repeat_penalty: f64,
-    state: u64,
-}
-
-/// How many most recent tokens the repeat penalty looks at.
-const PENALTY_WINDOW: usize = 256;
-
-impl Sampler {
-    fn new(temperature: f64, top_p: f64, repeat_penalty: f64) -> Self {
-        let seed = if temperature > 0.0 {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0x5eed)
-                | 1
-        } else {
-            0x5eed
-        };
-        Self {
-            temperature,
-            top_p,
-            repeat_penalty,
-            state: seed,
-        }
-    }
-
-    fn next_f64(&mut self) -> f64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (self.state >> 11) as f64 / (1u64 << 53) as f64
-    }
-
-    /// Candidates that survive the top-k preselect. Nucleus sampling never
-    /// needs a total order of the vocabulary, and a full 152k-element sort
-    /// costs ~3 ms per token, serial with the forward pass.
-    const TOP_K: usize = 256;
-
-    /// Sample the next token. `recent` is the context so far; its tail feeds
-    /// the repeat penalty.
-    fn pick(&mut self, logits: &[f32], recent: &[u32]) -> u32 {
-        // Penalise recent tokens once each (not per occurrence), before any
-        // selection, so a penalised token can fall out of the candidate set.
-        let mut adjusted;
-        let logits: &[f32] = if self.repeat_penalty != 1.0 && !recent.is_empty() {
-            let rp = self.repeat_penalty as f32;
-            adjusted = logits.to_vec();
-            let start = recent.len().saturating_sub(PENALTY_WINDOW);
-            let tail = &recent[start..];
-            let mut window_buf = [0u32; PENALTY_WINDOW];
-            window_buf[..tail.len()].copy_from_slice(tail);
-            let window = &mut window_buf[..tail.len()];
-            window.sort_unstable();
-            let mut prev = u32::MAX;
-            for &t in window.iter() {
-                if t == prev {
-                    continue;
-                }
-                prev = t;
-                if let Some(v) = adjusted.get_mut(t as usize) {
-                    if *v > 0.0 {
-                        *v /= rp;
-                    } else {
-                        *v *= rp;
-                    }
-                }
-            }
-            &adjusted
-        } else {
-            logits
-        };
-
-        if self.temperature <= 0.0 {
-            return (0..logits.len())
-                .max_by(|&a, &b| logits[a].total_cmp(&logits[b]))
-                .unwrap_or(0) as u32;
-        }
-        // Maintain a fixed top-K buffer on the stack instead of
-        // allocating heap vectors on every token.
-        let k = Self::TOP_K.min(logits.len());
-        if k == 0 {
-            return 0;
-        }
-        let mut top_buf = [(0usize, 0.0f32); Self::TOP_K];
-        let top = &mut top_buf[..k];
-        for (idx, &v) in logits[..k].iter().enumerate() {
-            top[idx] = (idx, v);
-        }
-        let mut min_pos = 0usize;
-        let mut min_val = top[0].1;
-        for (idx, &(_, v)) in top.iter().enumerate().skip(1) {
-            if v.total_cmp(&min_val).is_lt() {
-                min_val = v;
-                min_pos = idx;
-            }
-        }
-        for (i, &v) in logits.iter().enumerate().skip(k) {
-            if v.total_cmp(&min_val).is_gt() {
-                top[min_pos] = (i, v);
-                min_pos = 0;
-                min_val = top[0].1;
-                for (idx, &(_, tv)) in top.iter().enumerate().skip(1) {
-                    if tv.total_cmp(&min_val).is_lt() {
-                        min_val = tv;
-                        min_pos = idx;
-                    }
-                }
-            }
-        }
-        top.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-
-        let inv_temp = 1.0 / self.temperature;
-        let max_scaled = top[0].1 as f64 * inv_temp;
-        let mut scaled_buf = [0.0f64; Self::TOP_K];
-        let scaled = &mut scaled_buf[..k];
-        let mut sum = 0.0f64;
-        for (dst, &(_, v)) in scaled.iter_mut().zip(top.iter()) {
-            let e = ((v as f64) * inv_temp - max_scaled).exp();
-            *dst = e;
-            sum += e;
-        }
-        let inv_sum = 1.0 / sum;
-        for p in scaled.iter_mut() {
-            *p *= inv_sum;
-        }
-
-        // Nucleus: keep the smallest prefix whose mass reaches top_p.
-        let mut kept = 0usize;
-        let mut mass = 0.0f64;
-        for &p in scaled.iter() {
-            kept += 1;
-            mass += p;
-            if mass >= self.top_p {
-                break;
-            }
-        }
-        let mut r = self.next_f64() * mass;
-        for (&(i, _), &p) in top[..kept].iter().zip(scaled.iter()) {
-            r -= p;
-            if r <= 0.0 {
-                return i as u32;
-            }
-        }
-        top[kept - 1].0 as u32
-    }
-}
-
-/// OpenAI messages carry `content` either as a plain string or as an array of
-/// typed parts. The engine is text-only today, so a parts array is flattened to
-/// its text and the images are only *counted*: the handler refuses them
-/// explicitly. Reading `content` with `as_str()` made a whole vision message -
-/// picture and text together - collapse into an empty turn.
-fn content_parts(content: &Value) -> (String, usize) {
-    if let Some(text) = content.as_str() {
-        return (text.to_string(), 0);
-    }
-    let mut text = String::new();
-    let mut images = 0usize;
-    for part in content.as_array().into_iter().flatten() {
-        match part["type"].as_str().unwrap_or_default() {
-            "text" | "input_text" => {
-                if let Some(chunk) = part["text"].as_str() {
-                    text.push_str(chunk);
-                }
-            }
-            "image_url" | "input_image" | "image" => images += 1,
-            _ => {}
-        }
-    }
-    (text, images)
-}
-
-/// Image parts anywhere in the request, across all messages.
-pub(crate) fn image_part_count(raw: &[Value]) -> usize {
-    raw.iter()
-        .map(|m| {
-            m["content"]
-                .as_array()
-                .map(|parts| {
-                    parts
-                        .iter()
-                        .filter(|part| {
-                            matches!(
-                                part["type"].as_str(),
-                                Some("image_url" | "input_image" | "image")
-                            )
-                        })
-                        .count()
-                })
-                .unwrap_or(0)
-        })
-        .sum()
-}
-
-/// Convert an OpenAI-shape message list (+ optional `tools`) into plain
-/// (role, content) turns in the Hermes convention Qwen3 was trained on:
-/// tool schemas inside `<tools>...</tools>` in the system turn, assistant
-/// calls as `<tool_call>{json}</tool_call>` blocks, tool results as user
-/// turns wrapped in `<tool_response>...</tool_response>` (consecutive
-/// results merged into one turn, as the reference chat template does).
-pub(crate) fn render_messages(raw: &[Value], tools: Option<&[Value]>) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut pending_tool: Vec<String> = Vec::new();
-    let flush_tools = |out: &mut Vec<(String, String)>, pending: &mut Vec<String>| {
-        if !pending.is_empty() {
-            let body = pending
-                .iter()
-                .map(|c| format!("<tool_response>\n{c}\n</tool_response>"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            out.push(("user".into(), body));
-            pending.clear();
-        }
-    };
-    for m in raw {
-        let role = m["role"].as_str().unwrap_or("user");
-        let content = content_parts(&m["content"]).0;
-        if role == "tool" {
-            pending_tool.push(content);
-            continue;
-        }
-        flush_tools(&mut out, &mut pending_tool);
-        if role == "assistant" {
-            let mut text = content;
-            if let Some(calls) = m["tool_calls"].as_array() {
-                for c in calls {
-                    let name = c["function"]["name"].as_str().unwrap_or_default();
-                    let name_json =
-                        serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string());
-                    // Arguments arrive as a JSON-encoded string per the
-                    // OpenAI shape; embed them as the object Hermes expects.
-                    let args = c["function"]["arguments"].as_str().unwrap_or("{}");
-                    text.push_str(&format!(
-                        "\n<tool_call>\n{{\"name\": {name_json}, \"arguments\": {args}}}\n</tool_call>"
-                    ));
-                }
-            }
-            out.push(("assistant".into(), text));
-        } else {
-            out.push((role.to_string(), content));
-        }
-    }
-    flush_tools(&mut out, &mut pending_tool);
-
-    if let Some(tools) = tools {
-        let schemas = tools
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let section = format!(
-            "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n\
-             You are provided with function signatures within <tools></tools> XML tags:\n\
-             <tools>\n{schemas}\n</tools>\n\n\
-             For each function call, return a json object with function name and arguments \
-             within <tool_call></tool_call> XML tags:\n\
-             <tool_call>\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n</tool_call>"
-        );
-        match out.iter_mut().find(|(role, _)| role == "system") {
-            Some((_, content)) => content.push_str(&section),
-            None => out.insert(
-                0,
-                (
-                    "system".into(),
-                    format!("You are a helpful assistant.{section}"),
-                ),
-            ),
-        }
-    }
-    out
-}
-
-/// Split generated text into visible content and Hermes tool-call blocks,
-/// returned in the OpenAI `tool_calls` shape (arguments re-encoded as a JSON
-/// string). Malformed blocks stay in the content untouched - the client sees
-/// what the model actually wrote instead of a silent drop.
-pub(crate) fn parse_tool_calls(text: &str) -> (String, Vec<Value>) {
-    let mut content = String::new();
-    let mut calls = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("<tool_call>") {
-        let after = &rest[start + "<tool_call>".len()..];
-        let Some(end) = after.find("</tool_call>") else {
-            break;
-        };
-        let inner = after[..end].trim();
-        let parsed: Option<Value> = serde_json::from_str(inner).ok();
-        let valid = parsed
-            .as_ref()
-            .is_some_and(|v| v["name"].is_string() && !v["arguments"].is_null());
-        if valid {
-            let v = parsed.unwrap();
-            calls.push(json!({
-                "id": format!("call_{}", calls.len()),
-                "type": "function",
-                "function": {
-                    "name": v["name"],
-                    "arguments": v["arguments"].to_string(),
-                },
-            }));
-            content.push_str(&rest[..start]);
-        } else {
-            content.push_str(&rest[..start + "<tool_call>".len() + end + "</tool_call>".len()]);
-        }
-        rest = &after[end + "</tool_call>".len()..];
-    }
-    content.push_str(rest);
-    (content.trim().to_string(), calls)
-}
-
-/// The longest prefix of `text` that is safe to stream when tool calls may
-/// follow: everything up to the first (possibly still incomplete) opening
-/// `<tool_call>` tag. A trailing partial match of the tag is held back too.
-pub(crate) fn stream_safe_len(text: &str) -> usize {
-    const TAG: &str = "<tool_call>";
-    if let Some(i) = text.find(TAG) {
-        return i;
-    }
-    let bytes = text.as_bytes();
-    let max_tail = (TAG.len() - 1).min(bytes.len());
-    for tail in (1..=max_tail).rev() {
-        if text.is_char_boundary(bytes.len() - tail)
-            && TAG.as_bytes().starts_with(&bytes[bytes.len() - tail..])
-        {
-            return bytes.len() - tail;
-        }
-    }
-    bytes.len()
 }
 
 pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits) -> Result<()> {
@@ -1506,6 +796,7 @@ fn prepare_connection(
             return Ok(None);
         }
     }
+    let body_len = body.len();
     let request: Value = if body.is_empty() {
         json!({})
     } else {
@@ -1549,14 +840,14 @@ fn prepare_connection(
         .map(ToOwned::to_owned)
         .filter(|model| model != "allpaka")
         .unwrap_or_else(|| default_model.to_string());
-    let context_tokens = body.len().div_ceil(4).clamp(1, max_context_tokens.max(1));
+    let context_tokens = body_len.div_ceil(4).clamp(1, max_context_tokens.max(1));
     Ok(Some((
         requested,
         context_tokens,
         QueuedConnection {
             stream,
             request_line,
-            body,
+            request,
             control,
         },
     )))
@@ -1609,8 +900,7 @@ fn dispatch_connection(
         );
     }
     if connection.request_line.starts_with("POST /v1/launch") {
-        let req: Value = serde_json::from_str(&connection.body).unwrap_or(Value::Null);
-        let path = req["path"].as_str().unwrap_or("");
+        let path = connection.request["path"].as_str().unwrap_or("");
         let mut stream = connection.stream;
         match launch::schedule(path, "") {
             Ok(()) => {
@@ -1657,8 +947,8 @@ fn dispatch_connection(
         || connection
             .request_line
             .starts_with("POST /v1/prompt/prewarm");
-    let request: Value = serde_json::from_str(&connection.body).unwrap_or(Value::Null);
-    let session_id = request
+    let session_id = connection
+        .request
         .get("session_id")
         .map(|value| {
             value
@@ -1672,45 +962,54 @@ fn dispatch_connection(
     service
         .sessions
         .retain(|_, (_, used)| now.duration_since(*used).as_secs() < 600);
-    let mut had_existing_session = false;
-    if is_chat {
-        if session_id
-            .as_ref()
-            .is_some_and(|id| !service.sessions.contains_key(id))
-            && service.sessions.len() >= 4
-        {
-            let mut stream = connection.stream;
-            return respond(
-                &mut stream,
-                429,
-                &json!({"error":"resident session capacity exhausted"}),
-            );
-        }
-        let restored = session_id
-            .as_ref()
-            .and_then(|id| service.sessions.remove(id));
-        had_existing_session = restored.is_some();
-        service.chat = match restored {
-            Some((chat, _)) => chat,
-            None => match ChatState::new(&service.model, &service.chat.memory.budget(), 1) {
-                Ok(chat) => chat,
-                Err(error) => {
-                    return respond(
-                        &mut connection.stream.try_clone()?,
-                        429,
-                        &json!({"error":error.to_string()}),
-                    )
-                }
-            },
-        };
-    }
+
     let ModelService {
         model,
         tokenizer,
         force_think,
-        chat,
-        ..
+        chat: default_chat,
+        sessions,
     } = &mut *service;
+
+    // Checkout a named session if `session_id` was provided on a chat/prewarm
+    // route; otherwise reuse `default_chat` across non-sessioned turns without
+    // destroying its KV cache or allocating dummy 1-token sessions.
+    let mut checked_out_session: Option<(String, ChatState, bool)> = None;
+    if is_chat {
+        if let Some(id) = session_id {
+            if !sessions.contains_key(&id) && sessions.len() >= 4 {
+                let mut stream = connection.stream;
+                return respond(
+                    &mut stream,
+                    429,
+                    &json!({"error":"resident session capacity exhausted"}),
+                );
+            }
+            match sessions.remove(&id) {
+                Some((session_chat, _)) => {
+                    checked_out_session = Some((id, session_chat, true));
+                }
+                None => match ChatState::new(model, &default_chat.memory.budget(), 1) {
+                    Ok(session_chat) => {
+                        checked_out_session = Some((id, session_chat, false));
+                    }
+                    Err(error) => {
+                        return respond(
+                            &mut connection.stream.try_clone()?,
+                            429,
+                            &json!({"error":error.to_string()}),
+                        );
+                    }
+                },
+            }
+        }
+    }
+
+    let active_chat: &mut ChatState = match checked_out_session.as_mut() {
+        Some((_, session_chat, _)) => session_chat,
+        None => default_chat,
+    };
+
     let mut template = Template::detect(tokenizer)?;
     if let Template::ChatMl {
         force_think: enabled,
@@ -1725,14 +1024,14 @@ fn dispatch_connection(
     let outcome = handle(
         connection.stream,
         connection.request_line,
-        connection.body,
+        connection.request,
         ServeRequestContext {
             model_name: &model_name,
             inference: InferenceContext {
                 model,
                 tok: tokenizer,
                 template: &template,
-                chat,
+                chat: active_chat,
                 prefixes,
                 prefix_namespace,
                 control: &connection.control,
@@ -1758,29 +1057,13 @@ fn dispatch_connection(
         }
     }
     if is_chat {
-        if let Some(id) = session_id {
+        if !succeeded {
+            active_chat.sanitize_after_failure(model)?;
+        }
+        if let Some((id, session_chat, had_existing_session)) = checked_out_session {
             if succeeded || had_existing_session {
-                let empty = ChatState::new(&service.model, &service.chat.memory.budget(), 1)?;
-                let mut chat = std::mem::replace(&mut service.chat, empty);
-                if !succeeded && chat.session.pos() != chat.tokens.len() {
-                    if chat.session.ssm.is_some() {
-                        let cap = chat.session.capacity();
-                        chat.reset(&service.model, cap)?;
-                        chat.tokens.clear();
-                    } else {
-                        let valid = chat.tokens.len().min(chat.session.pos());
-                        chat.session.truncate(valid);
-                        chat.tokens.truncate(valid);
-                    }
-                }
-                service
-                    .sessions
-                    .insert(id, (chat, std::time::Instant::now()));
-            } else {
-                service.chat = ChatState::new(&service.model, &service.chat.memory.budget(), 1)?;
+                sessions.insert(id, (session_chat, std::time::Instant::now()));
             }
-        } else {
-            service.chat = ChatState::new(&service.model, &service.chat.memory.budget(), 1)?;
         }
     }
     Ok(())
@@ -1814,7 +1097,7 @@ pub fn prewarm(mapping: &[u8]) {
 fn handle(
     mut stream: TcpStream,
     request_line: String,
-    body: String,
+    req: Value,
     mut context: ServeRequestContext<'_>,
 ) -> Result<()> {
     let model_name = context.model_name;
@@ -1860,7 +1143,6 @@ fn handle(
         return respond(&mut stream, 200, &json!({}));
     }
     if request_line.starts_with("POST /v1/prompt/predict") {
-        let req: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
         let draft = req["draft"].as_str().unwrap_or("");
         let max_k = req["max_tokens"].as_u64().unwrap_or(12).clamp(1, 64) as usize;
         let raw_messages = req["messages"].as_array().map_or(&[][..], Vec::as_slice);
@@ -1882,7 +1164,6 @@ fn handle(
         );
     }
     if request_line.starts_with("POST /v1/prompt/prewarm") {
-        let req: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({}));
         let raw_messages = req["messages"].as_array().map_or(&[][..], Vec::as_slice);
         let draft = req["draft"].as_str().unwrap_or("").trim();
         let reserve_tokens = req["max_tokens"].as_u64().unwrap_or(1024) as usize;
@@ -1912,16 +1193,6 @@ fn handle(
         return respond(&mut stream, 404, &json!({"error": "unknown route"}));
     }
 
-    let req: Value = match serde_json::from_str(&body) {
-        Ok(v) => v,
-        Err(e) => {
-            return respond(
-                &mut stream,
-                400,
-                &json!({"error": format!("bad JSON: {e}")}),
-            )
-        }
-    };
     let Some(raw_messages) = req["messages"].as_array() else {
         return respond(&mut stream, 400, &json!({"error": "messages[] required"}));
     };
@@ -2090,7 +1361,7 @@ fn handle(
         final_outcome.context("tool loop completed without output")?
     };
 
-    if streaming && !tools.is_none() && rag.cfg.enabled {
+    if streaming && tools.is_some() && rag.cfg.enabled {
         emit_stream_completion(&mut stream, &completion, false, &completion.finish)?;
         return Ok(());
     }
@@ -2123,480 +1394,6 @@ fn handle(
             },
         }),
     )
-}
-
-/// Largest accepted JSON request body. Image attachments arrive base64-encoded
-/// (Studio allows four images, ~6 MB before encoding, so ~8 MB on the wire), and
-/// the previous fixed 4 MiB ceiling rejected them before the handler could
-/// answer. Override with `ALLPAKA_MAX_BODY_MIB` (1..1024, default 16).
-fn max_body_bytes_from(configured: Option<&str>) -> usize {
-    const DEFAULT_MIB: usize = 16;
-    let mib = configured
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|mib| (1..=1024).contains(mib))
-        .unwrap_or(DEFAULT_MIB);
-    mib * 1024 * 1024
-}
-
-fn max_body_bytes() -> usize {
-    static MAX_BODY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *MAX_BODY
-        .get_or_init(|| max_body_bytes_from(std::env::var("ALLPAKA_MAX_BODY_MIB").ok().as_deref()))
-}
-
-pub(crate) fn read_request(stream: &mut TcpStream) -> Result<(String, String)> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    let header_end;
-    loop {
-        let n = stream.read(&mut chunk)?;
-        if n == 0 {
-            bail!("connection closed mid-request");
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if let Some(i) = find_header_end(&buf) {
-            header_end = i;
-            break;
-        }
-        if buf.len() > 1 << 20 {
-            bail!("request headers over 1 MiB");
-        }
-    }
-    let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
-    let request_line = head.lines().next().unwrap_or_default().to_string();
-    let content_length: usize = head
-        .lines()
-        .find_map(|l| {
-            l.split_once(':')
-                .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-        })
-        .and_then(|(_, v)| v.trim().parse().ok())
-        .unwrap_or(0);
-    let limit = max_body_bytes();
-    anyhow::ensure!(
-        content_length <= limit,
-        "request body exceeds {} MiB (raise ALLPAKA_MAX_BODY_MIB)",
-        limit >> 20
-    );
-
-    let mut body = buf[header_end + 4..].to_vec();
-    while body.len() < content_length {
-        let n = stream.read(&mut chunk)?;
-        if n == 0 {
-            bail!("connection closed mid-body");
-        }
-        body.extend_from_slice(&chunk[..n]);
-    }
-    body.truncate(content_length);
-    Ok((request_line, String::from_utf8_lossy(&body).into_owned()))
-}
-
-fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n")
-}
-
-pub(crate) fn respond(stream: &mut TcpStream, status: u16, body: &Value) -> Result<()> {
-    let text = body.to_string();
-    let reason = if status == 200 { "OK" } else { "Error" };
-    let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n\
-         Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Headers: Content-Type\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{text}",
-        text.len()
-    );
-    stream.write_all(response.as_bytes())?;
-    Ok(())
-}
-
-pub(crate) fn write_sse_headers(stream: &mut TcpStream) -> Result<()> {
-    stream.write_all(
-        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
-          Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n\
-          Connection: close\r\n\r\n",
-    )?;
-    Ok(())
-}
-
-pub(crate) fn write_sse_event(stream: &mut TcpStream, body: &Value) -> Result<()> {
-    stream.write_all(format!("data: {body}\n\n").as_bytes())?;
-    stream.flush()?;
-    Ok(())
-}
-
-fn respond_html(stream: &mut TcpStream, page: &str) -> Result<()> {
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{page}",
-        page.len()
-    );
-    stream.write_all(response.as_bytes())?;
-    Ok(())
-}
-
-/// Extract predicted text from an OpenAI `prediction` parameter:
-/// supports `"string"`, `{"type": "content", "content": "string"}`, or
-/// `{"type": "content", "content": [{"type": "text", "text": "..."}]}`.
-pub(crate) fn extract_prediction_text(prediction: &Value) -> String {
-    if let Some(s) = prediction.as_str() {
-        return s.to_string();
-    }
-    if prediction.is_object() {
-        return content_parts(&prediction["content"]).0;
-    }
-    String::new()
-}
-
-/// Resolve the number of prompt-lookup draft tokens per round (`0` disables PLD).
-pub(crate) fn parse_prompt_lookup_k(val: &Value, default_enabled: bool) -> usize {
-    if let Some(b) = val.as_bool() {
-        return if b { 4 } else { 0 };
-    }
-    if let Some(n) = val.as_u64() {
-        return (n as usize).min(16);
-    }
-    if default_enabled {
-        4
-    } else {
-        0
-    }
-}
-
-/// Predict inline ghost-text continuation for `draft` using conversation token
-/// N-grams and message text prefixes.
-pub(crate) fn predict_prompt_continuation(
-    tok: &Tokenizer,
-    context_tokens: &[u32],
-    raw_messages: &[Value],
-    draft: &str,
-    max_k: usize,
-) -> String {
-    if draft.is_empty() || max_k == 0 {
-        return String::new();
-    }
-
-    // 1. Token-level N-gram lookup against context_tokens + encoded messages.
-    if let Ok(draft_tokens) = tok.encode(draft) {
-        if let Some(&last_tok) = draft_tokens.last() {
-            let prefix_history = &draft_tokens[..draft_tokens.len() - 1];
-            let mut pool = Vec::with_capacity(context_tokens.len() + draft_tokens.len() + 256);
-            pool.extend_from_slice(context_tokens);
-            for m in raw_messages {
-                let text = content_parts(&m["content"]).0;
-                if !text.is_empty() {
-                    if let Ok(t) = tok.encode(&text) {
-                        pool.extend_from_slice(&t);
-                    }
-                }
-            }
-            // Append prefix_history at the tail of `pool` so `find_prompt_drafts`
-            // sees the draft's own preceding tokens as the suffix context.
-            let search_len = pool.len();
-            pool.extend_from_slice(prefix_history);
-            let min_n = if prefix_history.is_empty() { 1 } else { 2 };
-            let drafts = allpaka_model::speculate::find_prompt_drafts(
-                &pool,
-                &pool[..search_len],
-                last_tok,
-                max_k,
-                min_n,
-                4,
-            );
-            if !drafts.is_empty() {
-                let decoded = tok.decode(&drafts);
-                let clean = decoded
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim_end_matches('\u{FFFD}');
-                if !clean.is_empty() {
-                    return clean.to_string();
-                }
-            }
-        }
-    }
-
-    // 2. Fallback: case-insensitive substring/word-prefix continuation from raw messages.
-    let draft_lower = draft.to_lowercase();
-    let tail = draft_lower
-        .split_whitespace()
-        .rev()
-        .take(2)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if tail.len() >= 3 {
-        for m in raw_messages.iter().rev() {
-            let text = content_parts(&m["content"]).0;
-            let text_lower = text.to_lowercase();
-            if let Some(pos) = text_lower.rfind(&tail) {
-                let after_byte = pos + tail.len();
-                if text.is_char_boundary(after_byte) && after_byte < text.len() {
-                    let rest = &text[after_byte..];
-                    let line = rest.lines().next().unwrap_or("");
-                    let words: Vec<&str> =
-                        line.split_inclusive(char::is_whitespace).take(6).collect();
-                    let cont = words.concat();
-                    if !cont.trim().is_empty() {
-                        return cont;
-                    }
-                }
-            }
-        }
-    }
-
-    String::new()
-}
-
-/// Generate context-aware follow-up prompt suggestions for the chat UI.
-pub(crate) fn predict_followup_prompts(raw_messages: &[Value]) -> Vec<String> {
-    let Some(last) = raw_messages.last() else {
-        return vec![
-            "Объясни архитектуру этого проекта".into(),
-            "Напиши быстрый код на Rust с тестами".into(),
-            "Найди узкие места и точки оптимизации".into(),
-        ];
-    };
-    let text = content_parts(&last["content"]).0;
-    let lower = text.to_lowercase();
-    let mut out = Vec::with_capacity(4);
-    if text.contains("```") || lower.contains("fn ") || lower.contains("impl ") {
-        out.push("Напиши модульные тесты для этого кода".into());
-        out.push("Оптимизируй производительность и убери лишние аллокации".into());
-        out.push("Разбери возможные граничные случаи и ошибки".into());
-    } else if lower.contains("ошибк") || lower.contains("error") || lower.contains("bug") {
-        out.push("Предложи минимальный фикс и проверь тестами".into());
-        out.push("Почему возникла эта проблема?".into());
-        out.push("Как предотвратить подобные ошибки в будущем?".into());
-    } else {
-        out.push("Приведи конкретный пример кода".into());
-        out.push("Расскажи подробнее про внутреннее устройство".into());
-        out.push("Сравни плюсы и минусы этого подхода".into());
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extract_prediction_supports_string_and_openai_object() {
-        assert_eq!(extract_prediction_text(&json!("fast draft")), "fast draft");
-        assert_eq!(
-            extract_prediction_text(&json!({
-                "type": "content",
-                "content": "predicted output"
-            })),
-            "predicted output"
-        );
-        assert_eq!(
-            extract_prediction_text(&json!({
-                "type": "content",
-                "content": [{"type": "text", "text": "part1 "}, {"type": "text", "text": "part2"}]
-            })),
-            "part1 part2"
-        );
-        assert_eq!(extract_prediction_text(&json!(null)), "");
-    }
-
-    #[test]
-    fn prompt_lookup_k_parses_bool_int_and_defaults() {
-        assert_eq!(parse_prompt_lookup_k(&json!(null), true), 4);
-        assert_eq!(parse_prompt_lookup_k(&json!(null), false), 0);
-        assert_eq!(parse_prompt_lookup_k(&json!(false), true), 0);
-        assert_eq!(parse_prompt_lookup_k(&json!(true), false), 4);
-        assert_eq!(parse_prompt_lookup_k(&json!(8), false), 8);
-        assert_eq!(parse_prompt_lookup_k(&json!(100), true), 16);
-    }
-
-    #[test]
-    fn followup_suggestions_adapt_to_conversation_context() {
-        let initial = predict_followup_prompts(&[]);
-        assert_eq!(initial.len(), 3);
-        let code_turn = vec![json!({"role": "assistant", "content": "```rust\nfn main() {}\n```"})];
-        let after_code = predict_followup_prompts(&code_turn);
-        assert!(after_code[0].contains("тесты"));
-    }
-
-    #[test]
-    fn array_content_keeps_its_text_and_counts_images() {
-        let parts = json!([
-            {"type": "text", "text": "what is on this picture?"},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
-        ]);
-        let (text, images) = content_parts(&parts);
-        assert_eq!(text, "what is on this picture?");
-        assert_eq!(images, 1);
-
-        // The same message through render_messages must not collapse to "".
-        let msgs = vec![json!({"role": "user", "content": parts})];
-        assert_eq!(image_part_count(&msgs), 1);
-        let out = render_messages(&msgs, None);
-        assert_eq!(out.len(), 1);
-        assert_eq!(
-            out[0],
-            ("user".to_string(), "what is on this picture?".to_string())
-        );
-    }
-
-    #[test]
-    fn string_content_and_unknown_parts_are_handled() {
-        let (text, images) = content_parts(&json!("plain"));
-        assert_eq!((text.as_str(), images), ("plain", 0));
-        // A future/unknown part type is ignored, not counted as an image.
-        let (text, images) = content_parts(&json!([
-            {"type": "text", "text": "a"},
-            {"type": "audio", "audio": {"data": "x"}},
-            {"type": "text", "text": "b"},
-        ]));
-        assert_eq!((text.as_str(), images), ("ab", 0));
-        assert_eq!(
-            image_part_count(&[json!({"role": "user", "content": "hi"})]),
-            0
-        );
-    }
-
-    #[test]
-    fn body_limit_defaults_to_16_mib_and_accepts_overrides() {
-        assert_eq!(max_body_bytes_from(None), 16 << 20);
-        assert_eq!(max_body_bytes_from(Some(" 32 ")), 32 << 20);
-        // Out-of-range or unparsable values fall back to the default.
-        assert_eq!(max_body_bytes_from(Some("0")), 16 << 20);
-        assert_eq!(max_body_bytes_from(Some("2048")), 16 << 20);
-        assert_eq!(max_body_bytes_from(Some("nope")), 16 << 20);
-    }
-
-    #[test]
-    fn tools_section_lands_in_the_system_turn() {
-        let msgs = vec![json!({"role": "user", "content": "hi"})];
-        let tools = vec![json!({"type":"function","function":{"name":"search","parameters":{}}})];
-        let out = render_messages(&msgs, Some(&tools));
-        assert_eq!(out[0].0, "system");
-        assert!(out[0].1.contains("<tools>"));
-        assert!(out[0].1.contains("\"search\""));
-        assert_eq!(out[1], ("user".into(), "hi".into()));
-        // An existing system message is extended, not duplicated.
-        let msgs2 = vec![
-            json!({"role":"system","content":"be brief"}),
-            msgs[0].clone(),
-        ];
-        let out2 = render_messages(&msgs2, Some(&tools));
-        assert_eq!(out2.len(), 2);
-        assert!(out2[0].1.starts_with("be brief"));
-        assert!(out2[0].1.contains("<tools>"));
-    }
-
-    #[test]
-    fn assistant_calls_and_tool_results_round_trip_into_hermes_text() {
-        let msgs = vec![
-            json!({"role":"user","content":"weather?"}),
-            json!({"role":"assistant","content":"","tool_calls":[{"id":"call_0","type":"function",
-                "function":{"name":"get_weather","arguments":"{\"city\":\"Oslo\"}"}}]}),
-            json!({"role":"tool","tool_call_id":"call_0","content":"{\"temp\":-3}"}),
-            json!({"role":"tool","tool_call_id":"call_1","content":"{\"wind\":5}"}),
-        ];
-        let out = render_messages(&msgs, None);
-        assert!(out[1].1.contains("<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\":\"Oslo\"}}\n</tool_call>"));
-        // Both tool results merge into ONE user turn, each in its own wrapper.
-        assert_eq!(out[2].0, "user");
-        assert_eq!(out[2].1.matches("<tool_response>").count(), 2);
-        assert_eq!(out.len(), 3);
-    }
-
-    #[test]
-    fn tool_call_blocks_parse_and_malformed_ones_stay_in_content() {
-        let text = "Let me check.\n<tool_call>\n{\"name\": \"rag_search\", \"arguments\": {\"q\": \"kv cache\"}}\n</tool_call>";
-        let (content, calls) = parse_tool_calls(text);
-        assert_eq!(content, "Let me check.");
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["function"]["name"], "rag_search");
-        assert_eq!(calls[0]["function"]["arguments"], "{\"q\":\"kv cache\"}");
-        // Broken JSON is not silently dropped.
-        let (content2, calls2) = parse_tool_calls("<tool_call>not json</tool_call>done");
-        assert!(calls2.is_empty());
-        assert_eq!(content2, "<tool_call>not json</tool_call>done");
-    }
-
-    #[test]
-    fn stream_hold_back_covers_partial_opening_tags() {
-        assert_eq!(stream_safe_len("hello"), 5);
-        assert_eq!(stream_safe_len("hello <tool_call>{"), 6);
-        assert_eq!(stream_safe_len("hello <tool_c"), 6);
-        assert_eq!(stream_safe_len("<"), 0);
-        // A lone '<' that cannot start the tag is NOT held back.
-        assert_eq!(stream_safe_len("a < b"), 5);
-    }
-
-    #[test]
-    fn greedy_pick_is_argmax() {
-        let mut s = Sampler::new(0.0, 0.95, 1.0);
-        let mut logits = vec![0.0f32; 1000];
-        logits[421] = 3.5;
-        assert_eq!(s.pick(&logits, &[]), 421);
-    }
-
-    /// A dominant logit must win essentially always at moderate temperature,
-    /// and the preselect must never return an index outside the vocabulary.
-    #[test]
-    fn sampled_pick_follows_the_dominant_token() {
-        let mut s = Sampler::new(0.7, 0.95, 1.0);
-        let mut logits = vec![0.0f32; 152_000];
-        logits[123] = 20.0;
-        for _ in 0..50 {
-            assert_eq!(s.pick(&logits, &[]), 123);
-        }
-    }
-
-    /// With a flat-ish distribution the sampler must return varied but valid
-    /// tokens from the top candidates.
-    #[test]
-    fn sampled_pick_stays_within_the_top_candidates() {
-        let mut s = Sampler::new(1.0, 0.9, 1.0);
-        // 512 tokens clearly above the rest; everything sampled must be one.
-        let mut logits = vec![-10.0f32; 152_000];
-        for v in logits.iter_mut().take(512) {
-            *v = 1.0;
-        }
-        for _ in 0..100 {
-            let t = s.pick(&logits, &[]) as usize;
-            assert!(t < 512, "picked {t} from outside the plateau");
-        }
-    }
-
-    /// The repeat penalty must break a tie in favour of the token that has
-    /// NOT just been emitted - the "либо-либо-либо" loop breaker.
-    #[test]
-    fn repeat_penalty_demotes_a_recently_emitted_token() {
-        let mut s = Sampler::new(0.0, 0.95, 1.1);
-        let mut logits = vec![0.0f32; 1000];
-        logits[7] = 3.0; // the looping token
-        logits[8] = 2.9; // the almost-as-good alternative
-                         // Without history the loop token wins; with itself in the window it
-                         // is divided down below the alternative.
-        assert_eq!(s.pick(&logits, &[]), 7);
-        assert_eq!(s.pick(&logits, &[7]), 8);
-        // Negative logits move away from zero instead.
-        let mut neg = vec![-1.0f32; 10];
-        neg[3] = -0.5;
-        neg[4] = -0.52;
-        assert_eq!(s.pick(&neg, &[3]), 4);
-    }
-
-    /// One occurrence or ten in the window, the penalty applies once: the
-    /// classic repeat penalty is presence-based, not frequency-based.
-    #[test]
-    fn repeat_penalty_applies_once_per_distinct_token() {
-        let mut s = Sampler::new(0.0, 0.95, 1.3);
-        let mut logits = vec![0.0f32; 100];
-        logits[5] = 2.0;
-        logits[6] = 1.6;
-        // 2.0 / 1.3 = 1.538 < 1.6, so one mention already flips the choice;
-        // many mentions must not penalise 6 as well by compounding wrongly.
-        assert_eq!(s.pick(&logits, &[5, 5, 5, 5, 5]), 6);
-    }
 }
 
 /// The built-in chat page: zero dependencies, talks to this same server.

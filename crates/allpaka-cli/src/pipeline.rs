@@ -67,10 +67,7 @@ pub fn generate(
         bail!("prompt and generation must fit context");
     }
     let mut pipeline = Pipeline::connect(addresses, &key()?, context)?;
-    let mut logits = Vec::new();
-    for &token in tokens {
-        logits = pipeline.forward(token)?;
-    }
+    let mut logits = pipeline.forward_batch(tokens)?;
     let mut output = Vec::new();
     for index in 0..generate {
         let token = logits
@@ -170,17 +167,20 @@ pub fn serve_chat(
             {
                 bail!("tokenizer gateway and pipeline stages identify different models");
             }
-            let mut logits = Vec::new();
-            for token in &prompt {
-                logits = pipeline.forward(*token)?;
-            }
+            let mut logits = pipeline.forward_batch(&prompt)?;
             let streaming = request["stream"].as_bool().unwrap_or(false);
-            let mut emitted = String::new();
+            let think_prefix = template.think_prefix();
+            let mut raw_bytes = Vec::with_capacity(max_tokens * 4);
+            let mut complete_buf =
+                String::with_capacity(if streaming { think_prefix.len() + max_tokens * 4 } else { 0 });
             if streaming {
+                complete_buf.push_str(think_prefix);
                 serve::write_sse_headers(&mut stream)?;
                 stream_started = true;
             }
-            let mut generated = Vec::new();
+            let mut decoded_bytes = 0usize;
+            let mut emitted_len = 0usize;
+            let mut generated = Vec::with_capacity(max_tokens);
             let mut finish = "length";
             for index in 0..max_tokens {
                 let token = logits
@@ -194,37 +194,33 @@ pub fn serve_chat(
                     break;
                 }
                 generated.push(token);
+                tokenizer.append_token_bytes(token, &mut raw_bytes);
                 if streaming {
-                    let full = format!(
-                        "{}{}",
-                        template.think_prefix(),
-                        tokenizer.decode(&generated)
+                    serve::append_valid_utf8(
+                        &raw_bytes,
+                        &mut decoded_bytes,
+                        &mut complete_buf,
+                        think_prefix.len(),
                     );
-                    let complete = full.strip_suffix('\u{FFFD}').unwrap_or(&full);
                     let complete = if tool_schemas.is_some() {
-                        &complete[..serve::stream_safe_len(complete)]
+                        &complete_buf[..serve::stream_safe_len(&complete_buf)]
                     } else {
-                        complete
+                        complete_buf.as_str()
                     };
-                    if let Some(delta) = complete.strip_prefix(&emitted) {
-                        if !delta.is_empty() {
-                            serve::write_sse_event(
-                                &mut stream,
-                                &json!({"id":"allpaka-pipeline","object":"chat.completion.chunk","model":model_id,"choices":[{"index":0,"delta":{"content":delta},"finish_reason":null}]}),
-                            )?;
-                            emitted = complete.to_owned();
-                        }
+                    if complete.len() > emitted_len {
+                        let delta = &complete[emitted_len..];
+                        serve::write_sse_event(
+                            &mut stream,
+                            &json!({"id":"allpaka-pipeline","object":"chat.completion.chunk","model":model_id,"choices":[{"index":0,"delta":{"content":delta},"finish_reason":null}]}),
+                        )?;
+                        emitted_len = complete.len();
                     }
                 }
                 if index + 1 < max_tokens {
                     logits = pipeline.forward(token)?;
                 }
             }
-            let text = format!(
-                "{}{}",
-                template.think_prefix(),
-                tokenizer.decode(&generated)
-            );
+            let text = format!("{think_prefix}{}", String::from_utf8_lossy(&raw_bytes));
             let (content, calls) = if tool_schemas.is_some() {
                 serve::parse_tool_calls(&text)
             } else {
@@ -236,7 +232,7 @@ pub fn serve_chat(
             let usage = json!({"prompt_tokens":prompt.len(),"completion_tokens":generated.len(),"total_tokens":prompt.len()+generated.len()});
             if streaming {
                 let remaining = content
-                    .strip_prefix(&emitted)
+                    .strip_prefix(&complete_buf[..emitted_len])
                     .context("streamed content changed during decoding")?;
                 let mut delta = json!({"role":"assistant","content":remaining});
                 if !calls.is_empty() {

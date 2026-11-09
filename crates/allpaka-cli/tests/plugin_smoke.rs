@@ -495,8 +495,9 @@ fn rag_mcp_stdio_search() {
         eprintln!("SKIP: rag-mcp binary or DuckDB not found");
         return;
     };
-    let notes =
-        std::env::var("RAG_INGEST_ROOTS").unwrap_or_else(|_| rag_mcp::DEFAULT_RAG_NOTES_DIR.into());
+    let notes = std::env::var("RAG_INGEST_ROOTS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| rag_mcp::default_rag_notes_dir());
 
     let mut child = Command::new(bin)
         .env("RAG_DB_PATH", db)
