@@ -45,9 +45,9 @@
 | 2.4 | `gpu/common.rs`: общие `row_bytes`, окна весов, телеметрия, `attn_shape_ok` | M | низкий | todo |
 | 2.5 | backend импортирует `GgmlType` из dtype; MLX-деквант → mlx; `anyhow` из dtype | S | низкий | todo |
 | 2.6 | `core`: распил `plan.rs` и `fleet.rs` | M | низкий | todo |
-| 2.7 | `cli`: `serve.rs` → `serve/{inference,stream,router}`; диспетчер из `main.rs` | S | низкий | todo |
+| 2.7 | `cli`: `serve.rs` → `serve/{inference,router}`; диспетчер из `main.rs` | S | низкий | wip: inference и router вынесены (`576cd8b`), `serve.rs` 1 402 → 589; `handle` (300 строк) и `main.rs` — todo |
 | 2.8 | `chat`: `lib.rs` → `bootstrap`, `api/*`, `runtime/*` | M | низкий | todo |
-| 2.9 | `chat`: `observability.rs` → `observability/*` | M | низкий | todo |
+| 2.9 | `chat`: `observability.rs` → `observability/*` | M | средний | todo. Внимание: элементы с `pub(super)` при переносе на уровень глубже должны стать `pub(in crate)`/`pub(crate)`, иначе сузится видимость; тесты (1 000+ строк) опираются на `super::*` |
 | 2.10 | `scripts/`: подкаталоги, общий harness, `node --test` | S | низкий | todo |
 | 2.11 | `model/lib.rs`: сквозные тесты → `tests/` | S | — | todo |
 
@@ -104,6 +104,17 @@
 | 5.3 | `docs/roadmap.md`: закрыть D6, обновить D3/D4 | S | todo |
 | 5.4 | Тесты для непокрытых модулей; общие фикстуры Rust ↔ Python SDK | M | todo |
 | 5.5 | Таблица до/после в BASELINE, остаточный бэклог | S | todo |
+
+## Заметки по ходу работ
+
+- Распил `2140b62..4fbe7ab` не был чистым переносом: вместе с ним приехал новый
+  код (пул потоков, AVX2-пути, бинарный протокол pipeline, trie в prefix-кэше) и
+  две регрессии сборки под cfg, невидимые на macOS (B1, B10). Поэтому перед
+  каждым push теперь запускается `scripts/check-backends.sh`.
+- Перенос кода проверяется сравнением мультимножеств строк старого файла и новых
+  модулей (с точностью до `pub(super)`): отличаться должны только заголовки
+  модулей и объявления `mod`/`use`.
+- Два пункта аудита оказались не дефектами (B2, B6), см. INVENTORY.
 
 ## Требует решения
 

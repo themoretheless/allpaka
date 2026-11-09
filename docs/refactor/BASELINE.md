@@ -80,3 +80,15 @@
 | Qwen3-30B Q4_K_M | decode tok/s | — | — | — |
 | Qwen3-0.6B Q8_0 | prefill tok/s | — | — | — |
 | Qwen3-0.6B Q8_0 | decode tok/s | — | — | — |
+
+## Ход работ
+
+| Метрика | `279a667` | `576cd8b` |
+|---|---:|---:|
+| Самый большой `.rs` файл | 10 236 (`gpu/metal.rs`) | 4 914 (`gpu/cuda/mod.rs`) |
+| `gpu/metal`: файлов / максимум строк | 1 / 10 236 | 13 / 3 250 (`decode.rs`) |
+| `allpaka-cli/src/serve.rs` | 1 402 | 589 |
+| Предупреждения clippy | 5 | 0 |
+| Сборка без GPU (stub) | не компилируется | компилируется |
+| Сборка с CUDA (type-check) | не компилируется | компилируется |
+| `cargo test --workspace` | зелёный | зелёный |
