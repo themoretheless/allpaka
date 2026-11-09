@@ -555,3 +555,22 @@ Verified on the merge commit: release build OK, gpu_moe_tail 6/6,
 gpu_parity 8/8, 30B Q4_K_M pp480 logits-fnv `18259760d250fc77`
 (bit-identical). `perf-fa-db` (FA double-buffering) stays a branch pending
 a quiet-machine A/B.
+
+**llama v0.9.0 FA f16 kernel, detailed read** (source re-cloned to
+`~/.cache/allpaka/llama-src`, ggml/src/ggml-metal/kernels/fa_common.metal):
+- QK: NC=(C/8)/NSG=2 strips per simdgroup, inner 8 iterations of
+  {2x simdgroup_load Q, 2x K (device mem, transpose), 2x MMA} - exactly the
+  perf-fa-db restructure. No threadgroup staging of K in the f16 path.
+- PV (DV>64): NC=(C/8)/2=4 iterations of {2 score-strip loads, then
+  NO/2=2 rounds of FOUR V loads (mv[4]) + 4 MMAs}. Register accumulators
+  lo[NO=4] stay live across the whole tile; O threadgroup round-trip once
+  per tile (same as ours). perf-fa-db does 2-in-flight loads where llama
+  does 4 - if fa-db validates, a mv[4]-style PV variant is the next step.
+- Barriers per tile: 3 (post-QK, post-softmax, post-PV) - same as ours.
+- Mask: precomputed per-tile skip table (blk); irrelevant for causal
+  prefill - our per-position `t < valid` costs nothing extra there.
+- v0.9.0 also has a Metal fusion PASS (ggml-metal-fusion.cpp):
+  RMS_NORM+MUL(+ADD), MUL_MAT+ADD (residual into mm store), TOPK_MOE
+  (softmax+argsort+gather router), MOE_REDUCE (weighted expert sum).
+  Our decode already folds swiglu into down-matvec and gate+up into one
+  dispatch; norms/router are candidates if the dispatch count gap shows.
