@@ -322,7 +322,7 @@ pub(crate) async fn list(
     app.review_queues
         .list(&query)
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -616,9 +616,7 @@ pub(crate) async fn create(
         }
         Ok(serde_json::to_value(app.review_queues.create(input)?)?)
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 pub(crate) async fn detail(
     State(app): State<crate::App>,
@@ -628,7 +626,7 @@ pub(crate) async fn detail(
         .read(&id)
         .and_then(|queue| Ok(serde_json::to_value(queue)?))
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 #[cfg(test)]
 mod tests {

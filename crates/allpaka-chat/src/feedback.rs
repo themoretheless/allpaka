@@ -300,7 +300,7 @@ pub(crate) async fn list(
         .and_then(|_| app.feedback.load(&id, q.version))
         .map(response)
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -322,9 +322,7 @@ pub(crate) async fn history(
         app.observability.validate_target(&id, None)?;
         app.feedback.history(&id, query.offset, query.limit)
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 impl Store {
     fn history(&self, id: &str, offset: usize, limit: usize) -> Result<Value> {

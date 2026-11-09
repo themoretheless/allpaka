@@ -80,8 +80,8 @@ fn mutate(app: &App, id: &str, update: impl FnOnce(&mut Session)) -> crate::ApiR
     let mut session = shared.lock().unwrap();
     let mut candidate = session.clone();
     update(&mut candidate);
-    validate(&candidate).map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
-    crate::save(app, &candidate).map_err(|e| crate::error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    validate(&candidate).map_err(crate::bad_request)?;
+    crate::save(app, &candidate).map_err(crate::internal)?;
     *session = candidate;
     Ok(Json(json!({"bookmarks":session.bookmarks})))
 }

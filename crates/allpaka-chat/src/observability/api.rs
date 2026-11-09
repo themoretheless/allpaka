@@ -185,7 +185,7 @@ pub(crate) async fn evaluation_summary(
     app.observability
         .evaluation_summary(&query)
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) async fn list(
     State(app): State<crate::App>,
@@ -194,7 +194,7 @@ pub(crate) async fn list(
     app.observability
         .list(&query)
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) async fn get(
     State(app): State<crate::App>,
@@ -204,7 +204,7 @@ pub(crate) async fn get(
         .read_validated_record(&id, None, None)
         .and_then(|record| Ok(serde_json::to_value(record)?))
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -296,7 +296,7 @@ pub(crate) async fn remove(
     app.observability
         .change_visibility(&id, true)
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) async fn restore(
     State(app): State<crate::App>,
@@ -305,5 +305,5 @@ pub(crate) async fn restore(
     app.observability
         .change_visibility(&id, false)
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }

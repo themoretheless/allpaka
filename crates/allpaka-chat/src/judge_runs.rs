@@ -163,7 +163,7 @@ pub(crate) async fn list(
         ids.sort_by(|a, b| b.cmp(a));
         Ok(ids)
     })()
-    .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
+    .map_err(crate::bad_request)?;
     let total = ids.len();
     let mut runs = Vec::new();
     for id in ids.into_iter().skip(query.offset).take(limit) {
@@ -281,14 +281,8 @@ pub(crate) async fn start(
     });
     Ok(Json(response))
 }
-pub(crate) fn get_inner(
-    app: &App,
-    id: &str,
-) -> std::result::Result<Value, (StatusCode, Json<Value>)> {
-    let run = app
-        .judge_runs
-        .load(id)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
+pub(crate) fn get_inner(app: &App, id: &str) -> std::result::Result<Value, crate::ApiError> {
+    let run = app.judge_runs.load(id).map_err(crate::bad_request)?;
     let plan_id = run["plan_id"]
         .as_str()
         .ok_or_else(|| crate::error(StatusCode::BAD_REQUEST, "Missing judge plan"))?;
@@ -379,9 +373,7 @@ pub(crate) async fn cancel(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    app.judge_runs
-        .load(&id)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
+    app.judge_runs.load(&id).map_err(crate::bad_request)?;
     if let Some(sender) = app.judge_runs.active.lock().unwrap().get(&id) {
         let _ = sender.send(true);
     }
@@ -457,7 +449,5 @@ pub(crate) async fn compare(
         crate::evaluation::commit_new(&directory.join(format!("{id}.json")), &receipt)?;
         Ok(receipt)
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }

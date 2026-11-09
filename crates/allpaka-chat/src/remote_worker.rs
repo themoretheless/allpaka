@@ -103,26 +103,21 @@ pub(crate) async fn dispatch(
 pub(crate) async fn run(
     State(app): State<App>,
     Json(mut task): Json<Task>,
-) -> std::result::Result<axum::response::Response, (StatusCode, Json<Value>)> {
+) -> std::result::Result<axum::response::Response, crate::ApiError> {
     static LIMIT: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
     let _permit = LIMIT
         .get_or_init(|| tokio::sync::Semaphore::new(3))
         .try_acquire()
-        .map_err(|_| {
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({"error":"worker busy"})),
-            )
-        })?;
+        .map_err(|_| crate::error(StatusCode::TOO_MANY_REQUESTS, "worker busy"))?;
     task.settings.mode = Mode::Chat;
     task.settings.allow_writes = false;
     task.settings.max_steps = task.settings.max_steps.clamp(1, 8);
     task.settings.max_output_tokens = task.settings.max_output_tokens.clamp(1, 8192);
     task.settings.json_mode = false;
     if task.prompt.len() > 100_000 || task.system.len() > 100_000 {
-        return Err((
+        return Err(crate::error(
             StatusCode::BAD_REQUEST,
-            Json(json!({"error":"worker prompt too large"})),
+            "worker prompt too large",
         ));
     }
     if !app
@@ -138,9 +133,9 @@ pub(crate) async fn run(
             .iter()
             .any(|p| p.id == task.settings.provider)
     {
-        return Err((
+        return Err(crate::error(
             StatusCode::BAD_REQUEST,
-            Json(json!({"error":"unknown worker project or provider"})),
+            "unknown worker project or provider",
         ));
     }
     // Execute inside the response body future: Hyper drops this future on

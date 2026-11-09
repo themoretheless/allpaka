@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn bad(e: impl ToString) -> (StatusCode, Json<Value>) {
+pub(super) fn bad(e: impl ToString) -> crate::ApiError {
     error(StatusCode::BAD_REQUEST, e)
 }
 pub(crate) async fn start_api(
@@ -179,7 +179,7 @@ pub(crate) async fn list_api(
     Ok(Json(json!({"jobs": jobs})))
 }
 pub(crate) async fn get_api(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
-    let job = load_job(&app.data, &id).map_err(|e| error(StatusCode::NOT_FOUND, e))?;
+    let job = load_job(&app.data, &id).map_err(crate::not_found)?;
     let base = job
         .base_revision
         .as_deref()
@@ -208,12 +208,12 @@ pub(crate) async fn cancel_api(State(app): State<App>, Path(id): Path<String>) -
             j.events.push("cancelled".into());
         }
     })
-    .map_err(|e| error(StatusCode::NOT_FOUND, e))?;
+    .map_err(crate::not_found)?;
     let _ = std::fs::remove_dir_all(std::env::temp_dir().join("allpaka-harness").join(&id));
     Ok(Json(json!(job)))
 }
 pub(crate) async fn resume_api(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
-    let job = load_job(&app.data, &id).map_err(|e| error(StatusCode::NOT_FOUND, e))?;
+    let job = load_job(&app.data, &id).map_err(crate::not_found)?;
     if app.harness_jobs.running.lock().unwrap().contains_key(&id) || job.status == "completed" {
         return Err(bad("Job is running or already completed"));
     }
@@ -227,7 +227,7 @@ pub(crate) async fn adopt_api(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> ApiResult<Value> {
-    let job = load_job(&app.data, &id).map_err(|e| error(StatusCode::NOT_FOUND, e))?;
+    let job = load_job(&app.data, &id).map_err(crate::not_found)?;
     let result = match body.get("task").and_then(Value::as_u64) {
         Some(index) => job.results.iter().find(|r| r.index as u64 == index),
         None => job.results.iter().rev().find(|r| r.revision.is_some()),

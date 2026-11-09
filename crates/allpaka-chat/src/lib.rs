@@ -164,9 +164,35 @@ enum ActionKind {
     Rename,
     Move,
 }
-pub(crate) type ApiResult<T> = std::result::Result<Json<T>, (StatusCode, Json<Value>)>;
-pub(crate) fn error(status: StatusCode, message: impl ToString) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({"error":message.to_string()})))
+/// A handler failure: an HTTP status and the message sent as `{"error": message}`.
+#[derive(Debug)]
+pub(crate) struct ApiError {
+    pub(crate) status: StatusCode,
+    pub(crate) message: String,
+}
+
+impl axum::response::IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        (self.status, Json(json!({"error": self.message}))).into_response()
+    }
+}
+
+pub(crate) type ApiResult<T> = std::result::Result<Json<T>, ApiError>;
+
+pub(crate) fn error(status: StatusCode, message: impl ToString) -> ApiError {
+    ApiError {
+        status,
+        message: message.to_string(),
+    }
+}
+pub(crate) fn bad_request(message: impl ToString) -> ApiError {
+    error(StatusCode::BAD_REQUEST, message)
+}
+pub(crate) fn not_found(message: impl ToString) -> ApiError {
+    error(StatusCode::NOT_FOUND, message)
+}
+pub(crate) fn internal(message: impl ToString) -> ApiError {
+    error(StatusCode::INTERNAL_SERVER_ERROR, message)
 }
 pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> Result<()> {
     if !bind.ip().is_loopback() {

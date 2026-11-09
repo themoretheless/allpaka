@@ -785,7 +785,7 @@ pub(crate) async fn set_key(
         return Err(error(StatusCode::BAD_REQUEST, "Invalid API key"));
     }
     if let Some(workspace) = &key.workspace_id {
-        validate_workspace_id(workspace).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+        validate_workspace_id(workspace).map_err(crate::bad_request)?;
         if id != "anthropic" {
             return Err(error(
                 StatusCode::BAD_REQUEST,
@@ -823,8 +823,7 @@ pub(crate) async fn set_key(
         ));
     }
     if let Some(workspace) = &key.workspace_id {
-        save_workspace_id(&app.data, workspace)
-            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        save_workspace_id(&app.data, workspace).map_err(crate::internal)?;
     }
     let data = app.data.clone();
     let account = id.clone();
@@ -840,7 +839,7 @@ pub(crate) async fn set_key(
             "Credential operation failed",
         )
     })?
-    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .map_err(crate::internal)?;
     let mut providers = app.providers.lock().unwrap();
     let p = providers.iter_mut().find(|p| p.id == id).unwrap();
     p.saved = key.persist && !key.key.is_empty();
@@ -879,7 +878,7 @@ pub(crate) async fn model_list(State(app): State<App>, Path(id): Path<String>) -
         .find(|p| p.id == id)
         .cloned()
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "Unknown provider"))?;
-    require_api_key(&p).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    require_api_key(&p).map_err(crate::bad_request)?;
     let models = models(&app.client, &p)
         .await
         .map_err(|e| error(StatusCode::BAD_GATEWAY, e))?;
@@ -1036,21 +1035,19 @@ pub(crate) async fn save_provider(
         name: input.name.trim().to_string(),
         base: input.base.trim().to_string(),
     };
-    validate_custom_provider(&candidate).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    validate_custom_provider(&candidate).map_err(crate::bad_request)?;
     if BUILTIN_PROVIDERS.contains(&candidate.id.as_str()) {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "This provider ID is reserved",
         ));
     }
-    let mut list = load_custom_providers(app.data.as_path())
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut list = load_custom_providers(app.data.as_path()).map_err(crate::internal)?;
     match list.iter().position(|p| p.id == candidate.id) {
         Some(i) => list[i] = candidate.clone(),
         None => list.push(candidate.clone()),
     }
-    save_custom_providers(app.data.as_path(), &list)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    save_custom_providers(app.data.as_path(), &list).map_err(crate::internal)?;
     let mut providers = app.providers.lock().unwrap();
     let old = providers
         .iter()
@@ -1077,14 +1074,12 @@ pub(crate) async fn delete_provider(
             "Built-in providers cannot be removed",
         ));
     }
-    let mut list = load_custom_providers(app.data.as_path())
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut list = load_custom_providers(app.data.as_path()).map_err(crate::internal)?;
     if !list.iter().any(|p| p.id == id) {
         return Err(error(StatusCode::NOT_FOUND, "Custom provider not found"));
     }
     list.retain(|p| p.id != id);
-    save_custom_providers(app.data.as_path(), &list)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    save_custom_providers(app.data.as_path(), &list).map_err(crate::internal)?;
     if credentials::AVAILABLE {
         // Remove any persisted system-credential secret for this provider id.
         let _ = credentials::Store::new(app.data.as_path()).update(

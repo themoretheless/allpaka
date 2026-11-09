@@ -358,7 +358,7 @@ pub(crate) async fn list(
     project_exists(&app, &query.project_id)
         .and_then(|_| app.prompts.list(&query.project_id))
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) async fn save(
     State(app): State<crate::App>,
@@ -385,7 +385,7 @@ pub(crate) async fn snapshot(
         .load(&id, Some(version))
         .and_then(|s| Ok(serde_json::to_value(s)?))
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -406,7 +406,7 @@ pub(crate) async fn history(
     app.prompts
         .history(&id, query.offset, query.limit)
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -495,7 +495,7 @@ pub(crate) async fn preview(
         .and_then(|_| app.prompts.load(&id, Some(version)))
         .and_then(|prompt| preview_receipt(&prompt, &input))
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 #[cfg(test)]
 mod tests {

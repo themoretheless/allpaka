@@ -171,10 +171,8 @@ async fn run(app: App, input: Request, action: &'static str) -> ApiResult<Value>
         browse(&project, &input, &app.data, action)
     })
     .await
-    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    result
-        .map(Json)
-        .map_err(|e| error(StatusCode::BAD_REQUEST, e))
+    .map_err(crate::internal)?;
+    result.map(Json).map_err(crate::bad_request)
 }
 pub(crate) async fn list(State(app): State<App>, Json(input): Json<Request>) -> ApiResult<Value> {
     run(app, input, "list").await

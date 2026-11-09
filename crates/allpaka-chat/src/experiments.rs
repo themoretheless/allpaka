@@ -154,9 +154,7 @@ pub(crate) async fn offline_score(
         crate::evaluation::commit_new(&directory.join(format!("{id}.json")), &receipt)?;
         Ok(receipt)
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 pub(crate) fn read_offline_score_inner(app: &crate::App, id: &str) -> Result<Value> {
     if id.is_empty() || id.len() > 80 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -297,7 +295,7 @@ pub(crate) async fn list_offline_scores(
         ids.reverse();
         Ok(ids)
     })()
-    .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
+    .map_err(crate::bad_request)?;
     let mut rows = Vec::new();
     let mut invalid = 0usize;
     let mut scanned = 0usize;
@@ -408,9 +406,7 @@ pub(crate) async fn compare_offline_scores(
         crate::evaluation::commit_new(&directory.join(format!("{id}.json")), &receipt)?;
         Ok(receipt)
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 pub(crate) async fn metric_catalog() -> Json<Value> {
     let metrics = [
@@ -1270,7 +1266,7 @@ pub(crate) async fn list(
     crate::evaluation::project_exists(&app, &query.project_id)
         .and_then(|_| app.experiments.list(&query))
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 fn prepare_start(app: &crate::App, input: Start) -> Result<(Start, Snapshot, provider::Provider)> {
     let snapshot = app
@@ -1384,7 +1380,7 @@ pub(crate) async fn playground(
     result
         .and_then(|run| Ok(serde_json::to_value(run)?))
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) async fn start(
     State(app): State<crate::App>,
@@ -1395,7 +1391,7 @@ pub(crate) async fn start(
     result
         .and_then(|r| Ok(serde_json::to_value(r)?))
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) fn detail_inner(app: &crate::App, id: &str) -> Result<Value> {
     app.experiments
@@ -1408,7 +1404,7 @@ pub(crate) async fn detail(
 ) -> crate::ApiResult<Value> {
     detail_inner(&app, &id)
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1448,7 +1444,7 @@ pub(crate) async fn export(
     app.experiments
         .load(&id)
         .map(|run| Json(export_receipt(&run, query.include_outputs)))
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) async fn cancel(
     State(app): State<crate::App>,
@@ -1457,7 +1453,7 @@ pub(crate) async fn cancel(
     app.experiments
         .cancel(&id)
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1572,9 +1568,7 @@ pub(crate) async fn compare(
         crate::evaluation::commit_new(&path, &receipt)?;
         Ok(receipt)
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 
 #[derive(Deserialize)]
@@ -1655,9 +1649,7 @@ pub(crate) async fn list_comparisons(
             json!({"comparisons":rows.into_iter().skip(query.offset).take(query.limit).collect::<Vec<_>>(),"offset":query.offset,"has_more":has_more,"summaries_verified":false}),
         )
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 pub(crate) async fn read_comparison(
     State(app): State<crate::App>,
@@ -1713,9 +1705,7 @@ pub(crate) async fn read_comparison(
         }
         Ok(receipt)
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1852,9 +1842,7 @@ pub(crate) async fn list_matrices(
             json!({"matrices":rows.into_iter().skip(query.offset).take(query.limit).collect::<Vec<_>>(),"offset":query.offset,"has_more":has_more,"summaries_verified":false}),
         )
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 pub(crate) async fn save_matrix(
     State(app): State<crate::App>,
@@ -1876,9 +1864,7 @@ pub(crate) async fn save_matrix(
         crate::evaluation::commit_new(&root.join(format!("{id}.json")), &receipt)?;
         Ok(receipt)
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 pub(crate) fn read_matrix_inner(app: &crate::App, id: &str) -> Result<Value> {
     if id.is_empty() || id.len() > 80 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -1917,7 +1903,7 @@ pub(crate) async fn read_matrix(
 ) -> crate::ApiResult<Value> {
     read_matrix_inner(&app, &id)
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 
 #[cfg(test)]

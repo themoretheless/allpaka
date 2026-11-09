@@ -100,7 +100,7 @@ pub(crate) async fn create_session(
     State(app): State<App>,
     Json(settings): Json<Settings>,
 ) -> ApiResult<Value> {
-    validate_settings(&settings, &app).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    validate_settings(&settings, &app).map_err(crate::bad_request)?;
     let id = format!(
         "{:x}-{:x}",
         SystemTime::now()
@@ -110,7 +110,7 @@ pub(crate) async fn create_session(
         std::process::id()
     );
     let session = Session::new(id.clone(), settings);
-    save(&app, &session).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    save(&app, &session).map_err(crate::internal)?;
     attach(&app, session);
     Ok(Json(json!({"id":id})))
 }
@@ -179,7 +179,7 @@ pub(crate) async fn branch_session(
         session_id: id,
         message_count: n,
     });
-    save(&app, &branch).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    save(&app, &branch).map_err(crate::internal)?;
     attach(&app, branch);
     Ok(Json(json!({"id":new_id})))
 }
@@ -193,8 +193,7 @@ pub(crate) async fn session(State(app): State<App>, Path(id): Path<String>) -> A
     };
     let (mut value, stats) = {
         let session = shared.lock().unwrap();
-        let val = serde_json::to_value(&*session)
-            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let val = serde_json::to_value(&*session).map_err(crate::internal)?;
         let st = compact::statistics(&session);
         (val, st)
     };
@@ -245,7 +244,7 @@ pub(crate) async fn background_action(
     execute_background(&app, &id, &root.path, &args)
         .await
         .map(Json)
-        .map_err(|e| error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 
 pub(crate) async fn execute_background(
@@ -388,7 +387,7 @@ pub(crate) async fn save_plan(
         input.allow_reopen,
     )
     .map_err(|e| error(StatusCode::CONFLICT, e))?;
-    save(&app, &next).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    save(&app, &next).map_err(crate::internal)?;
     *state = next;
     Ok(Json(
         json!({"updated": true,"revision":state.plan_revision,"steps":state.plan,"evidence_basis":"reported"}),
@@ -428,7 +427,7 @@ pub(crate) async fn action(
                 _ => return Err(error(StatusCode::BAD_REQUEST, "Unknown history folder")),
             };
         }
-        save(&app, &state).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        save(&app, &state).map_err(crate::internal)?;
         return Ok(Json(json!({"accepted":true})));
     }
     if matches!(
@@ -450,7 +449,7 @@ pub(crate) async fn action(
         ));
     }
     if let Some(settings) = &action.settings {
-        validate_settings(settings, &app).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+        validate_settings(settings, &app).map_err(crate::bad_request)?;
     }
     let (current, folder) = {
         let sessions = app.sessions.lock().unwrap();
@@ -475,8 +474,7 @@ pub(crate) async fn action(
             "Start a new chat to change project",
         ));
     }
-    context::validate_images(&action.images, &chosen.provider)
-        .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    context::validate_images(&action.images, &chosen.provider).map_err(crate::bad_request)?;
     if action.kind == ActionKind::Steer && !action.images.is_empty() {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -510,9 +508,7 @@ pub(crate) async fn save_project(
     State(app): State<App>,
     Json(mut project): Json<context::Project>,
 ) -> ApiResult<Value> {
-    project
-        .validate(&app.data)
-        .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    project.validate(&app.data).map_err(crate::bad_request)?;
     if project.id.is_empty() {
         project.id = format!(
             "{:x}",
@@ -532,8 +528,7 @@ pub(crate) async fn save_project(
     } else {
         updated.push(project.clone());
     }
-    state_file::save_list(app.data.as_path(), "projects", &updated)
-        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state_file::save_list(app.data.as_path(), "projects", &updated).map_err(crate::internal)?;
     *projects = updated;
     Ok(Json(json!(project)))
 }

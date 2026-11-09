@@ -471,9 +471,7 @@ pub(crate) async fn start(
         };
         app.matrix_jobs.launch(app.clone(), job, prepared)
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 pub(crate) async fn detail(
     State(app): State<crate::App>,
@@ -482,7 +480,7 @@ pub(crate) async fn detail(
     app.matrix_jobs
         .load(&id)
         .map(|job| Json(job.view()))
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) async fn list(
     State(app): State<crate::App>,
@@ -505,9 +503,7 @@ pub(crate) async fn list(
             json!({"jobs":rows.into_iter().skip(query.offset).take(query.limit).collect::<Vec<_>>(),"offset":query.offset,"has_more":has_more}),
         )
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 pub(crate) async fn cancel(
     State(app): State<crate::App>,
@@ -522,9 +518,7 @@ pub(crate) async fn cancel(
         });
         Ok(json!({"cancel_requested":requested}))
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 pub(crate) async fn resume(
     State(app): State<crate::App>,
@@ -561,9 +555,7 @@ pub(crate) async fn resume(
         }
         app.matrix_jobs.launch(app.clone(), job, prepared)
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 
 fn invalid_retry_lineage(job: &Job) -> bool {
@@ -635,9 +627,7 @@ pub(crate) async fn retry(
         }
         app.matrix_jobs.launch(app.clone(), next, prepared)
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 
 #[cfg(test)]

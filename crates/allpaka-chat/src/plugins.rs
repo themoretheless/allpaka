@@ -270,7 +270,7 @@ pub(crate) async fn save_plugin(
         instructions: input.instructions,
         unlocks_tool: input.unlocks_tool,
     };
-    validate(&config).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    validate(&config).map_err(crate::bad_request)?;
     {
         let mut registry = app.plugins.write().unwrap();
         match registry.get_mut(&config.id) {
@@ -303,7 +303,7 @@ pub(crate) async fn save_plugin(
             .map(|state| state.config.clone())
             .collect()
     };
-    save(app.data.as_path(), &configs).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    save(app.data.as_path(), &configs).map_err(crate::internal)?;
     if config.enabled {
         spawn_plugin_connect(app.clone(), config.id.clone());
     }
@@ -324,7 +324,7 @@ pub(crate) async fn delete_plugin(
             .map(|state| state.config.clone())
             .collect()
     };
-    save(app.data.as_path(), &configs).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    save(app.data.as_path(), &configs).map_err(crate::internal)?;
     Ok(Json(json!({"deleted": id})))
 }
 pub(crate) async fn reload_plugin(

@@ -162,8 +162,8 @@ pub async fn import(State(app): State<App>, Json(input): Json<Import>) -> ApiRes
             "Unknown destination project",
         ));
     }
-    validate_messages(&input.session.messages).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
-    crate::bookmarks::validate(&input.session).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    validate_messages(&input.session.messages).map_err(crate::bad_request)?;
+    crate::bookmarks::validate(&input.session).map_err(crate::bad_request)?;
     if input.session.title.chars().count() > 100 || input.session.title.trim().is_empty() {
         return Err(error(StatusCode::BAD_REQUEST, "Invalid title"));
     }
@@ -216,7 +216,7 @@ pub async fn import(State(app): State<App>, Json(input): Json<Import>) -> ApiRes
     session.notice = Some(
         "Импортирована копия. Выбран режим Chat; очередь и разрешения записи не перенесены.".into(),
     );
-    save(&app, &session).map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    save(&app, &session).map_err(crate::internal)?;
     attach(&app, session);
     Ok(Json(json!({"id":id})))
 }

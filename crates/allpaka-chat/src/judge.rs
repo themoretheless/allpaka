@@ -69,10 +69,10 @@ pub(crate) async fn judge_source_inner(
     app: &App,
     hash: &str,
     input: SourceJudge,
-) -> std::result::Result<Value, (StatusCode, Json<Value>)> {
+) -> std::result::Result<Value, crate::ApiError> {
     let source =
         crate::online_sources::execution_source(&app.data, hash, &input.settings.project_id)
-            .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
+            .map_err(crate::bad_request)?;
     let request:Request=serde_json::from_value(json!({"settings":input.settings,"rubric":input.rubric,"input":source.input,"output":source.output,"reference":source.reference,"trace_ref":{"trace_id":source.trace_id,"trace_sha256":source.trace_sha256},"quality_source_ref":hash})).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))?;
     judge_inner(app, request).await
 }
@@ -116,7 +116,7 @@ fn hash(bytes: &[u8]) -> String {
 pub(crate) async fn judge_inner(
     app: &App,
     mut request: Request,
-) -> std::result::Result<Value, (StatusCode, Json<Value>)> {
+) -> std::result::Result<Value, crate::ApiError> {
     let _permit = app
         .judges
         .clone()
@@ -146,14 +146,14 @@ pub(crate) async fn judge_inner(
         .as_ref()
         .map(|selection| selection.prepare(&crate::guardrail_policies::Store::open(&app.data)?))
         .transpose()
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
+        .map_err(crate::bad_request)?;
     request.settings.max_output_tokens = request.settings.max_output_tokens.min(4096);
     // reasoning_effort is honoured as requested: it is part of the receipt's pinned settings.
     let id = crate::evaluation::new_id();
     let trace = app
         .observability
         .begin(&format!("judge-{id}"), &request.settings.project_id)
-        .map_err(|e| crate::error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(crate::internal)?;
     let mut root = trace.span("llm_judge", "rubric evaluation", None);
     let history = [Message::text("user", prepared.1.clone())];
     if let Some(guards) = &guards {
@@ -232,7 +232,7 @@ pub(crate) async fn judge_inner(
         },
         &Value::Null,
     );
-    result.map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map_err(crate::bad_request)
 }
 pub(crate) async fn judge(
     State(app): State<App>,
@@ -341,10 +341,7 @@ pub(crate) async fn plan(
         None => None,
     };
     let experiment = match &input.experiment_id {
-        Some(id) => Some(
-            crate::experiments::detail_inner(&app, id)
-                .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?,
-        ),
+        Some(id) => Some(crate::experiments::detail_inner(&app, id).map_err(crate::bad_request)?),
         None => None,
     };
     let result = (|| -> Result<Value> {
@@ -502,9 +499,7 @@ pub(crate) async fn plan(
         crate::evaluation::commit_new(&directory.join(format!("{id}.json")), &receipt)?;
         Ok(receipt)
     })();
-    result
-        .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+    result.map(Json).map_err(crate::bad_request)
 }
 pub(crate) fn read_plan_inner(app: &App, id: &str) -> Result<Value> {
     if id.is_empty() || id.len() > 80 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')

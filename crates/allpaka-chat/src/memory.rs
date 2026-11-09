@@ -483,7 +483,7 @@ pub(crate) async fn expiry(
             )
         })
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 #[derive(Deserialize)]
 pub(crate) struct ListQuery {
@@ -505,7 +505,7 @@ pub(crate) async fn list(
     project_exists(&app, &query.project_id)
         .and_then(|_| app.memory.list(&query.project_id))
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) async fn save(
     State(app): State<crate::App>,
@@ -540,7 +540,7 @@ pub(crate) async fn consolidation_input(
                 .consolidation_input(&input.project_id, &input.sources)
         })
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) async fn source_status(
     State(app): State<crate::App>,
@@ -549,7 +549,7 @@ pub(crate) async fn source_status(
     app.memory
         .source_status(&id, version)
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) async fn snapshot(
     State(app): State<crate::App>,
@@ -559,7 +559,7 @@ pub(crate) async fn snapshot(
         .load(&id, Some(version))
         .and_then(|s| Ok(serde_json::to_value(s)?))
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 
 impl Store {

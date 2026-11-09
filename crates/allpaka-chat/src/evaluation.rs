@@ -644,7 +644,7 @@ pub(crate) async fn list(
             )
         })
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) async fn lifecycle(
     State(app): State<crate::App>,
@@ -704,7 +704,7 @@ pub(crate) async fn versions(
             )
         })
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -723,7 +723,7 @@ pub(crate) async fn compare(
     project_exists(&app, &query.project_id)
         .and_then(|_| app.evaluation.compare(&id, &query))
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 pub(crate) async fn snapshot(
     State(app): State<crate::App>,
@@ -733,7 +733,7 @@ pub(crate) async fn snapshot(
         .load(&id, Some(version))
         .and_then(|s| Ok(serde_json::to_value(s)?))
         .map(Json)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
+        .map_err(crate::bad_request)
 }
 #[cfg(test)]
 mod tests {

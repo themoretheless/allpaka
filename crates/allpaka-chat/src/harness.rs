@@ -890,10 +890,10 @@ pub fn activate(data: &std::path::Path, project_id: &str, revision: Option<&str>
 
 // ---- HTTP ------------------------------------------------------------------
 
-fn bad(e: impl ToString) -> (StatusCode, Json<Value>) {
+fn bad(e: impl ToString) -> crate::ApiError {
     error(StatusCode::BAD_REQUEST, e)
 }
-fn known_project(app: &App, id: &str) -> std::result::Result<(), (StatusCode, Json<Value>)> {
+fn known_project(app: &App, id: &str) -> std::result::Result<(), crate::ApiError> {
     if app.projects.lock().unwrap().iter().any(|p| p.id == id) {
         Ok(())
     } else {
@@ -948,7 +948,7 @@ pub(crate) async fn revision_api(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> ApiResult<Value> {
-    let revision = load_revision(&app.data, &id).map_err(|e| error(StatusCode::NOT_FOUND, e))?;
+    let revision = load_revision(&app.data, &id).map_err(crate::not_found)?;
     let parent = revision
         .origin
         .as_deref()

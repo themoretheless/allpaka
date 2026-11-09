@@ -13,11 +13,10 @@
 //! entries whose cue shares the most words with their task; a job never sees
 //! its own entry.
 
-use crate::{error, harness, harness::Tree, ApiResult, App};
+use crate::{harness, harness::Tree, ApiResult, App};
 use anyhow::{bail, Result};
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -222,8 +221,8 @@ pub(crate) async fn list_api(
     State(app): State<App>,
     Query(q): Query<ProjectQuery>,
 ) -> ApiResult<Value> {
-    let list = entries(&app.data, &q.project_id).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
-    let base = root(&app.data, &q.project_id).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    let list = entries(&app.data, &q.project_id).map_err(crate::bad_request)?;
+    let base = root(&app.data, &q.project_id).map_err(crate::bad_request)?;
     let entries: Vec<Value> = list
         .iter()
         .rev()
