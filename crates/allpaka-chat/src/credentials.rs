@@ -70,10 +70,7 @@ impl Store {
         serde_json::from_slice(&bytes).context("Invalid credential index")
     }
     fn index(&self, ids: &BTreeSet<String>) -> Result<()> {
-        let temp = self.path.with_extension("tmp");
-        std::fs::write(&temp, serde_json::to_vec(ids)?)?;
-        std::fs::rename(temp, &self.path)?;
-        Ok(())
+        crate::storage::atomic_write_bytes(&self.path, &serde_json::to_vec(ids)?)
     }
     pub fn load(&self, vault: &dyn Vault, id: &str) -> Result<Option<String>> {
         if !self.saved()?.contains(id) {

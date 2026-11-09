@@ -211,10 +211,7 @@ pub(super) fn read_json<T: for<'de> Deserialize<'de>>(path: &std::path::Path) ->
 }
 pub(crate) fn write_json(path: &std::path::Path, value: &impl Serialize) -> Result<()> {
     std::fs::create_dir_all(path.parent().context("No parent directory")?)?;
-    let temp = path.with_extension(format!("{}.tmp", crate::evaluation::new_id()));
-    std::fs::write(&temp, serde_json::to_vec_pretty(value)?)?;
-    std::fs::rename(temp, path)?;
-    Ok(())
+    crate::storage::atomic_write_bytes(path, &serde_json::to_vec_pretty(value)?)
 }
 
 pub(super) struct Ledger {
