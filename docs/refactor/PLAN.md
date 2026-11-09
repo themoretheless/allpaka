@@ -57,11 +57,11 @@
 
 | # | Задача | Размер | Риск | Статус |
 |---|---|---|---|---|
-| 3.1 | chat: `ApiError: IntoResponse` вместо 161 ручной ошибки | M | низкий | todo |
-| 3.2 | chat: вся запись через `storage::atomic_write*` (B7, B8) | M | средний | todo |
-| 3.3 | chat: убрать дубли `digest`, времени, обёрток sha256, bounded-read | S | низкий | todo |
+| 3.1 | chat: `ApiError: IntoResponse` вместо ручного кортежа | M | низкий | done (`2189358`): тип введён, формат ответа прежний; `bad_request`/`not_found`/`internal` заменили частые замыкания. Остальные вызовы `error(StatusCode::…)` оставлены: они уже возвращают `ApiError` |
+| 3.2 | chat: запись через `storage::atomic_write*` | M | средний | done в реальном объёме (`e3e5dce`): индекс учётных данных и JSON harness-refine. Аудит завысил масштаб: почти все прямые `fs::write` находятся в тестах, а `state_file` уже атомарен. Осталось: `harness.rs:717` (temp+rename без fsync), собственный писатель `observability` (намеренно без fsync для бегущих трасс) |
+| 3.3 | chat: убрать дубли времени и идентичных `valid_id` | S | низкий | done (`98cfdd8`). Функции `digest` дублями не являются: у каждой свой набор полей |
 | 3.4 | chat: `valid_id` — одно правило (B9) | S | **требует решения** | todo |
-| 3.5 | chat: строковые status/kind/action → enum с прежними словами на проводе | M | средний | todo |
+| 3.5 | chat: строковые status/kind/action → enum с прежними словами на проводе | M | средний | wip: `background` done; observability, experiments, matrix_jobs, review_queues, guardrail_policies, online_evaluation — todo |
 | 3.6 | chat: `turn_traced` → стадии хода | L | высокий | todo |
 | 3.7 | chat: контекстные структуры вместо 8–14 параметров (`swarm`, `run_subagent`) | S | низкий | todo |
 | 3.8 | chat: блокирующий fs из async → `spawn_blocking` | M | средний | todo |
