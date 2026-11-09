@@ -108,15 +108,7 @@ fn dense_q4k_shapes_report_effective_bandwidth() {
     let q8 = q8_bytes(12288, 4096);
     let q8_count = ((len / q8).min(64)) - 1;
     let q8_mats: Vec<QuantMat> = (0..q8_count)
-        .map(|i| {
-            QuantMat::new(
-                &region[i * q8..(i + 1) * q8],
-                GgmlType::Q8_0,
-                12288,
-                4096,
-            )
-            .unwrap()
-        })
+        .map(|i| QuantMat::new(&region[i * q8..(i + 1) * q8], GgmlType::Q8_0, 12288, 4096).unwrap())
         .collect();
     let q8_items: Vec<(&QuantMat, &[f32])> =
         q8_mats.iter().map(|m| (m, x4096.as_slice())).collect();

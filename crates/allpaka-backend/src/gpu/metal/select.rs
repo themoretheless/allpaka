@@ -374,9 +374,7 @@ pub(super) fn serial_dispatch() -> metal::MTLDispatchType {
 /// <= 24 (or forced via `ALLPAKA_MMID_BN16=1`, disabled via `=0`).
 pub(super) fn mmid_use_bn16(avg_rows: usize) -> bool {
     static FORCE: OnceLock<Option<bool>> = OnceLock::new();
-    match *FORCE.get_or_init(|| {
-        std::env::var("ALLPAKA_MMID_BN16").ok().map(|v| v != "0")
-    }) {
+    match *FORCE.get_or_init(|| std::env::var("ALLPAKA_MMID_BN16").ok().map(|v| v != "0")) {
         Some(b) => b,
         None => mm_ll() && !(mm_k64() || mmid_k64()) && avg_rows <= 24,
     }
@@ -421,7 +419,11 @@ pub(super) fn mmid_swiglu_kernel_for(ty: GgmlType, bn16: bool) -> Option<(&'stat
     }
 }
 
-pub(super) fn mmid_kernel_for(ty: GgmlType, gather: bool, bn16: bool) -> Option<(&'static str, usize)> {
+pub(super) fn mmid_kernel_for(
+    ty: GgmlType,
+    gather: bool,
+    bn16: bool,
+) -> Option<(&'static str, usize)> {
     if mm_ll() {
         let k64 = mm_k64() || mmid_k64();
         if bn16 && !k64 {

@@ -273,8 +273,10 @@ pub fn rmsnorm_rows_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32)
     let src_addr = src.as_ptr() as usize;
     crate::thread_pool::par_for_chunks(rows, threads, |_worker, start, end| {
         let len = (end - start) * n;
-        let dc = unsafe { std::slice::from_raw_parts_mut((dst_addr as *mut f32).add(start * n), len) };
-        let sc = unsafe { std::slice::from_raw_parts((src_addr as *const f32).add(start * n), len) };
+        let dc =
+            unsafe { std::slice::from_raw_parts_mut((dst_addr as *mut f32).add(start * n), len) };
+        let sc =
+            unsafe { std::slice::from_raw_parts((src_addr as *const f32).add(start * n), len) };
         for (d, s) in dc.chunks_mut(n).zip(sc.chunks(n)) {
             rmsnorm_into(d, s, weight, eps);
         }

@@ -25,12 +25,12 @@ impl DataLock {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
         let workspace = workspace.canonicalize()?;
-        let locks = home
-            .join(".allpaka")
-            .join("studio-instances")
-            .join(crate::storage::hex_sha256(
-                workspace.as_os_str().as_encoded_bytes(),
-            ));
+        let locks =
+            home.join(".allpaka")
+                .join("studio-instances")
+                .join(crate::storage::hex_sha256(
+                    workspace.as_os_str().as_encoded_bytes(),
+                ));
         std::fs::create_dir_all(&locks)?;
         Self::acquire(&locks).context("Studio is already running for this workspace; use that instance or stop it before starting another, even with a different port or --data-dir")
     }

@@ -100,7 +100,10 @@ where
         })?
     };
 
-    let total_tensors: usize = parsed_shards.iter().map(|(_, info)| info.tensors.len()).sum();
+    let total_tensors: usize = parsed_shards
+        .iter()
+        .map(|(_, info)| info.tensors.len())
+        .sum();
     let mut tensors = Vec::with_capacity(total_tensors);
     let mut tensor_shards = Vec::with_capacity(total_tensors);
     let mut by_name = HashMap::with_capacity(total_tensors * 2);

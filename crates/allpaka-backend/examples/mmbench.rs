@@ -143,9 +143,9 @@ fn main() {
     // bytes 0x11, quant bytes 0x77.
     if std::env::var("MM_SANE").is_ok_and(|v| v == "1") {
         let block = match fmt.as_str() {
-            "q8_0" => 34usize,  // d f16 + 32 quants
+            "q8_0" => 34usize, // d f16 + 32 quants
             "q5_k" => 176,
-            _ => 144,           // q4_k: d, dmin, 12 scale bytes, 128 quants
+            _ => 144, // q4_k: d, dmin, 12 scale bytes, 128 quants
         };
         for chunk in w.chunks_mut(block) {
             for b in chunk.iter_mut() {
@@ -271,8 +271,7 @@ fn main() {
     // /tmp/mm_llama.metal extracted out of ggml-metal kernels/mul_mm.metal.
     // Same data, same tile count; grid transposed (x = token tiles).
     if std::env::var("MM_LLAMA").is_ok_and(|v| v == "1") {
-        let lsrc =
-            std::fs::read_to_string("/tmp/mm_llama.metal").expect("/tmp/mm_llama.metal");
+        let lsrc = std::fs::read_to_string("/tmp/mm_llama.metal").expect("/tmp/mm_llama.metal");
         let llib = device
             .new_library_with_source(&lsrc, &CompileOptions::new())
             .unwrap_or_else(|e| panic!("llama mm compile: {e}"));
@@ -324,8 +323,11 @@ fn main() {
                 let wo = iter_no.get() * w_step as u64;
                 iter_no.set(iter_no.get() + 1);
                 enc.set_compute_pipeline_state(&pipe);
-                enc.set_bytes(0, std::mem::size_of::<LlamaMmArgs2>() as u64,
-                    &args as *const LlamaMmArgs2 as *const _);
+                enc.set_bytes(
+                    0,
+                    std::mem::size_of::<LlamaMmArgs2>() as u64,
+                    &args as *const LlamaMmArgs2 as *const _,
+                );
                 enc.set_buffer(1, Some(&w_buf), wo);
                 enc.set_buffer(2, Some(&x_buf), 0);
                 enc.set_buffer(3, Some(y_buf), 0);
@@ -338,7 +340,11 @@ fn main() {
             10,
         );
         let fl = 2.0 * (m * n_in * n_out) as f64;
-        println!("llama {lfun}: {:.3} ms, {:.2} TFLOPS", t * 1e3, fl / t / 1e12);
+        println!(
+            "llama {lfun}: {:.3} ms, {:.2} TFLOPS",
+            t * 1e3,
+            fl / t / 1e12
+        );
     }
 
     // --- mmid (grouped) mode ---

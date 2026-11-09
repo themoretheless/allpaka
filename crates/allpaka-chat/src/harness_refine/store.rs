@@ -467,4 +467,3 @@ pub(super) fn stream_warnings(results: &[TaskResult], legacy_external: bool) -> 
     }
     out
 }
-

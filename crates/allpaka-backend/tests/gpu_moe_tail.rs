@@ -151,7 +151,10 @@ fn grouped_tail_stores_match_conservative_barriers() {
         // Verify BN=16 kernels match BN=32 kernels bit-for-bit across all
         // full-tile (m=16, m=32) and tail-tile (m=1, m=31, m=33, m=65) groups.
         let mut bn16_pairs = vec![
-            (format!("mmll_id_{suffix}"), format!("mmll_id_{suffix}_bn16")),
+            (
+                format!("mmll_id_{suffix}"),
+                format!("mmll_id_{suffix}_bn16"),
+            ),
             (
                 format!("mmllg_id_{suffix}"),
                 format!("mmllg_id_{suffix}_bn16"),
@@ -377,7 +380,11 @@ fn fused_qkv_kernels_match_separate_dispatches() {
         enc.end_encoding();
         cmd.commit();
         cmd.wait_until_completed();
-        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{qkv_name}");
+        assert_eq!(
+            cmd.status(),
+            MTLCommandBufferStatus::Completed,
+            "{qkv_name}"
+        );
 
         let s_ref =
             unsafe { std::slice::from_raw_parts(ref_out.contents().cast::<f32>(), total_out) };
@@ -459,8 +466,14 @@ fn fused_qkv_mixed_q4k_q6k_matches_separate() {
     let k_elems = (m * n_k) as usize;
     let v_elems = (m * n_v) as usize;
     let total_out = q_elems + k_elems + v_elems;
-    let ref_out = device.new_buffer((total_out * 4) as u64, MTLResourceOptions::StorageModeShared);
-    let fused_out = device.new_buffer((total_out * 4) as u64, MTLResourceOptions::StorageModeShared);
+    let ref_out = device.new_buffer(
+        (total_out * 4) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let fused_out = device.new_buffer(
+        (total_out * 4) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
 
     let cmd = queue.new_command_buffer();
     let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
@@ -470,9 +483,7 @@ fn fused_qkv_mixed_q4k_q6k_matches_separate() {
         ("mmllp_q6_k", n_v, wv_off, ((q_elems + k_elems) * 4) as u64),
     ] {
         let f = lib.get_function(name, None).unwrap();
-        let p = device
-            .new_compute_pipeline_state_with_function(&f)
-            .unwrap();
+        let p = device.new_compute_pipeline_state_with_function(&f).unwrap();
         enc.set_compute_pipeline_state(&p);
         enc.set_buffer(0, Some(&wb), 0);
         enc.set_buffer(1, Some(&xb), 0);
@@ -539,7 +550,6 @@ fn fused_qkv_mixed_q4k_q6k_matches_separate() {
         );
     }
 }
-
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -694,12 +704,18 @@ fn route_fused_matches_three_stage_router() {
     cmd.wait_until_completed();
     assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
 
-    let tab_a = unsafe { std::slice::from_raw_parts(table_a.contents().cast::<[u32; 3]>(), n_expert as usize) };
-    let tab_b = unsafe { std::slice::from_raw_parts(table_b.contents().cast::<[u32; 3]>(), n_expert as usize) };
+    let tab_a = unsafe {
+        std::slice::from_raw_parts(table_a.contents().cast::<[u32; 3]>(), n_expert as usize)
+    };
+    let tab_b = unsafe {
+        std::slice::from_raw_parts(table_b.contents().cast::<[u32; 3]>(), n_expert as usize)
+    };
     assert_eq!(tab_a, tab_b, "group tables differ");
 
-    let off_a = unsafe { std::slice::from_raw_parts(tok_off_a.contents().cast::<u32>(), (m + 1) as usize) };
-    let off_b = unsafe { std::slice::from_raw_parts(tok_off_b.contents().cast::<u32>(), (m + 1) as usize) };
+    let off_a =
+        unsafe { std::slice::from_raw_parts(tok_off_a.contents().cast::<u32>(), (m + 1) as usize) };
+    let off_b =
+        unsafe { std::slice::from_raw_parts(tok_off_b.contents().cast::<u32>(), (m + 1) as usize) };
     assert_eq!(off_a, off_b, "tok_off differs");
 
     let hw_a = unsafe { std::slice::from_raw_parts(hit_w_a.contents().cast::<f32>(), hit_len) };
@@ -708,8 +724,10 @@ fn route_fused_matches_three_stage_router() {
         assert_eq!(a.to_bits(), b.to_bits(), "hit_w[{i}] differs");
     }
 
-    let tk_a = unsafe { std::slice::from_raw_parts(tok_a.contents().cast::<u32>(), total_rows as usize) };
-    let tk_b = unsafe { std::slice::from_raw_parts(tok_b.contents().cast::<u32>(), total_rows as usize) };
+    let tk_a =
+        unsafe { std::slice::from_raw_parts(tok_a.contents().cast::<u32>(), total_rows as usize) };
+    let tk_b =
+        unsafe { std::slice::from_raw_parts(tok_b.contents().cast::<u32>(), total_rows as usize) };
     let hr_a = unsafe { std::slice::from_raw_parts(hit_row_a.contents().cast::<u32>(), hit_len) };
     let hr_b = unsafe { std::slice::from_raw_parts(hit_row_b.contents().cast::<u32>(), hit_len) };
 
@@ -737,9 +755,8 @@ fn route_fused_matches_three_stage_router() {
     // Tile descriptors: exact cover of each expert's rows in 32-row chunks,
     // experts in order, then a rows=0 tail up to tile_bound.
     let tile_bound = (n_expert + total_rows / 32) as usize;
-    let tiles = unsafe {
-        std::slice::from_raw_parts(tiles_b.contents().cast::<[u32; 3]>(), tile_bound)
-    };
+    let tiles =
+        unsafe { std::slice::from_raw_parts(tiles_b.contents().cast::<[u32; 3]>(), tile_bound) };
     let mut t = 0usize;
     for (e, entry) in tab_b.iter().enumerate().take(n_expert as usize) {
         let row0 = entry[1];
@@ -830,7 +847,9 @@ fn matvec_q6k_swiglu_fold_matches_separate() {
 
         // Reference: standalone swiglu over (act, up), then the plain matvec.
         let f_sw = lib.get_function("swiglu", None).unwrap();
-        let p_sw = device.new_compute_pipeline_state_with_function(&f_sw).unwrap();
+        let p_sw = device
+            .new_compute_pipeline_state_with_function(&f_sw)
+            .unwrap();
         enc.set_compute_pipeline_state(&p_sw);
         enc.set_buffer(0, Some(&act), 0);
         enc.set_buffer(1, Some(&ub), 0);
@@ -916,11 +935,14 @@ fn matvec_qkv_q4k_q6k_matches_separate() {
         *v = (i.wrapping_mul(59) + i / 97) as u8;
     }
     for (base, row) in [(wq_off, qk_row), (wk_off, qk_row)] {
-        for b in weights[base as usize..].chunks_exact_mut(row).take(if base == wq_off {
-            n_q as usize
-        } else {
-            n_k as usize
-        }) {
+        for b in weights[base as usize..]
+            .chunks_exact_mut(row)
+            .take(if base == wq_off {
+                n_q as usize
+            } else {
+                n_k as usize
+            })
+        {
             for blk in b.chunks_exact_mut(144) {
                 blk[0..2].copy_from_slice(&0x211fu16.to_le_bytes());
                 blk[2..4].copy_from_slice(&0x211fu16.to_le_bytes());
@@ -1037,8 +1059,7 @@ fn matvec_qkv_q4k_q6k_matches_separate() {
     assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
 
     let s_ref = unsafe { std::slice::from_raw_parts(ref_out.contents().cast::<f32>(), total) };
-    let s_fused =
-        unsafe { std::slice::from_raw_parts(fused_out.contents().cast::<f32>(), total) };
+    let s_fused = unsafe { std::slice::from_raw_parts(fused_out.contents().cast::<f32>(), total) };
     for (i, (&a, &b)) in s_ref.iter().zip(s_fused).enumerate() {
         assert!(
             a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),

@@ -606,9 +606,9 @@ fn call_exceeds_limit(v: &Value) -> bool {
     if base > 1_000_000 {
         return true;
     }
-    let extra = v
-        .get("extra_content")
-        .map_or(0, |e| crate::evaluation::json_serialized_len(e).unwrap_or(0));
+    let extra = v.get("extra_content").map_or(0, |e| {
+        crate::evaluation::json_serialized_len(e).unwrap_or(0)
+    });
     base + extra > 1_000_000
 }
 fn append(target: &mut Value, delta: &Value) {
@@ -691,8 +691,8 @@ where
             bail!("Provider stream frame too large");
         }
         while let Some(end) = buffer[cursor..].iter().position(|b| *b == b'\n') {
-            let line = std::str::from_utf8(&buffer[cursor..cursor + end])?
-                .trim_end_matches(['\r', '\n']);
+            let line =
+                std::str::from_utf8(&buffer[cursor..cursor + end])?.trim_end_matches(['\r', '\n']);
             cursor += end + 1;
             if line.is_empty() {
                 if !event_data.is_empty() {

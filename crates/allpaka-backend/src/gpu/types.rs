@@ -1,7 +1,7 @@
 //! Shared GPU request, response, and decode telemetry types across backends
 //! (`metal`, `cuda`, and `stub`).
 
-use allpaka_gguf::GgmlType;
+use allpaka_dtype::GgmlType;
 
 use super::SharedRegion;
 

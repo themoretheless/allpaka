@@ -598,8 +598,7 @@ fn a_sparse_model_tolerates_slow_memory_far_better_than_a_dense_one() {
     sparse.active_weight_fraction = 0.1;
 
     let nodes = [pc(), pc_ram()];
-    let Verdict::SplitRequired { plan: d } =
-        plan(&nodes, &dense, &fabric, &PlanRequest::default())
+    let Verdict::SplitRequired { plan: d } = plan(&nodes, &dense, &fabric, &PlanRequest::default())
     else {
         panic!()
     };

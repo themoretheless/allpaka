@@ -39,15 +39,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-
 mod engine;
 mod http;
 mod store;
+#[cfg(test)]
+mod tests;
 mod types;
 mod validation;
 mod workspace;
-#[cfg(test)]
-mod tests;
 
 pub use self::engine::*;
 pub(crate) use self::http::*;

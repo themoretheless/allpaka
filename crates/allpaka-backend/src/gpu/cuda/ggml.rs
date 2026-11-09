@@ -540,10 +540,10 @@ pub fn hybrid_replay(
     true
 }
 
-pub fn ggml_type_code(ty: allpaka_gguf::GgmlType) -> Option<i32> {
+pub fn ggml_type_code(ty: allpaka_dtype::GgmlType) -> Option<i32> {
     match ty {
-        allpaka_gguf::GgmlType::Q4K => Some(12),
-        allpaka_gguf::GgmlType::Q6K => Some(14),
+        allpaka_dtype::GgmlType::Q4K => Some(12),
+        allpaka_dtype::GgmlType::Q6K => Some(14),
         _ => None,
     }
 }

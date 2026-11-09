@@ -84,7 +84,11 @@ fn studio_reply(seen: &mut Seen, body: &Value) -> Value {
     let n = results.len();
     let proposer =
         system.contains("YOUR DIMENSION") || system.contains("composing THE final harness");
-    let proposed_memory = if seen.regression { REGRESSION_MEMORY } else { MEMORY };
+    let proposed_memory = if seen.regression {
+        REGRESSION_MEMORY
+    } else {
+        MEMORY
+    };
     if proposer && !tools.is_empty() {
         expect(
             !tools
@@ -524,12 +528,10 @@ async fn harness_end_to_end() {
     assert_eq!(outcome["validation"]["wins"], 1);
     assert_eq!(outcome["validation"]["losses"], 0);
     assert_eq!(outcome["validation"]["pairs"].as_array().unwrap().len(), 1);
-    assert!(
-        outcome["validation"]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("observed, not proven")
-    );
+    assert!(outcome["validation"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("observed, not proven"));
     assert!(
         outcome["runs"].as_array().unwrap().iter().all(|r| {
             r["delivered"] == true
@@ -580,10 +582,9 @@ async fn harness_end_to_end() {
         final_run["workspace_fingerprint"]
     );
     assert_ne!(base_run["cache_key"], final_run["cache_key"]);
-    let validation_base: Value = serde_json::from_slice(
-        &std::fs::read(rollouts.join("validation-base-1.json")).unwrap(),
-    )
-    .unwrap();
+    let validation_base: Value =
+        serde_json::from_slice(&std::fs::read(rollouts.join("validation-base-1.json")).unwrap())
+            .unwrap();
     let validation_champion: Value = serde_json::from_slice(
         &std::fs::read(rollouts.join("validation-champion-1.json")).unwrap(),
     )
@@ -622,12 +623,18 @@ async fn harness_end_to_end() {
     let regression_outcome = &regression_result["outcome"];
     assert_eq!(regression_outcome["rollouts"], 4);
     assert_eq!(regression_outcome["validation"]["rollout_count"], 2);
-    assert_eq!(regression_outcome["validation"]["status"], "regression_observed");
+    assert_eq!(
+        regression_outcome["validation"]["status"],
+        "regression_observed"
+    );
     assert_eq!(regression_outcome["validation"]["losses"], 1);
     assert_eq!(regression["active"], adopted["active"]);
     let regression_id = regression["job"]["id"].as_str().unwrap();
     let (status, message) = studio
-        .send(&format!("harness/jobs/{regression_id}/adopt"), Some(json!({})))
+        .send(
+            &format!("harness/jobs/{regression_id}/adopt"),
+            Some(json!({})),
+        )
         .await;
     assert_eq!(status, 409, "{message}");
     assert!(message["error"]

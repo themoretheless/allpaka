@@ -304,9 +304,7 @@ fn declaring_a_shared_host_alone_does_not_change_any_timing() {
     let shared = fleet(&[member("a", 10), member("b", 10)], &[gpu(), ram()]).unwrap();
     assert_eq!(shared.machines(), 1);
     assert_eq!(separate.machines(), 2);
-    assert!(
-        (shared.aggregate_tokens_per_sec() - separate.aggregate_tokens_per_sec()).abs() < 1e-9
-    );
+    assert!((shared.aggregate_tokens_per_sec() - separate.aggregate_tokens_per_sec()).abs() < 1e-9);
 }
 
 /// Once a real contention figure is recorded, co-resident agents slow down

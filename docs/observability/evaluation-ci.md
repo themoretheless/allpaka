@@ -256,7 +256,7 @@ are compared again through the verified native comparison endpoint; this creates
 comparison evidence without invoking a model. The panel shows per-example
 changes and opens individual experiments. Imported CI thresholds are not treated
 as trusted native gate results. Project changes/reopening the dialog discard
-stale import responses. `node scripts/test-studio-matrix-ui.js` exercises actual
+stale import responses. `node scripts/studio-ui-tests/test-studio-matrix-ui.js` exercises actual
 handler behavior with API fixtures. Browser verification on 2026-10-07 loaded a two-variant SDK report, showed native metric values and per-example paired changes, and opened the corresponding experiment. The browser console reported no warnings/errors. Fixture models are local mocks; real-model quality remains unqualified.
 
 `character_bigram_f1` compares multisets of adjacent Unicode scalar pairs with

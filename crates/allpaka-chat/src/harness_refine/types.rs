@@ -240,4 +240,3 @@ pub struct ValidationReport {
     pub reason: String,
     pub warnings: Vec<String>,
 }
-

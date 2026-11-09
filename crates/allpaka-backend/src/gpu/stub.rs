@@ -3,7 +3,7 @@
 //! Mirrors the public surface of the real backends: every entry point
 //! declines (`None` / `false`) so callers take their CPU paths unchanged.
 
-use allpaka_gguf::GgmlType;
+use allpaka_dtype::GgmlType;
 use std::sync::atomic::Ordering;
 
 pub use super::types::*;

@@ -131,9 +131,8 @@ pub(super) fn dot_q2_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
             let q = &qs[half * 32..half * 32 + 32];
             #[cfg(target_arch = "aarch64")]
             unsafe {
-                total += super::dot_neon::dot_q2_k_half_i8(
-                    q, scales, d, dmin, bi, half, &mut is, acts,
-                );
+                total +=
+                    super::dot_neon::dot_q2_k_half_i8(q, scales, d, dmin, bi, half, &mut is, acts);
             }
             #[cfg(not(target_arch = "aarch64"))]
             for (s_idx, shift) in [0u8, 2, 4, 6].into_iter().enumerate() {

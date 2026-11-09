@@ -111,7 +111,13 @@ pub(super) struct RouteLayout {
     pub(super) total: usize,
 }
 
-pub(super) fn route_layout(m: usize, n_expert: usize, n_used: usize, shared: bool, tile_w: usize) -> RouteLayout {
+pub(super) fn route_layout(
+    m: usize,
+    n_expert: usize,
+    n_used: usize,
+    shared: bool,
+    tile_w: usize,
+) -> RouteLayout {
     let align = |n: usize| (n + 63) & !63;
     let hits = n_used + shared as usize;
     let counts = 0;

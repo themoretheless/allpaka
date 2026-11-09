@@ -12,11 +12,11 @@ pub(crate) mod dot_neon;
 pub(crate) mod q8_acts;
 
 use crate::ops::dot;
-use allpaka_gguf::{dequant, GgmlType};
+use allpaka_dtype::GgmlType;
+use allpaka_gguf::dequant;
 use anyhow::{bail, Result};
 use dot_f32::{
-    as_f32, dot_bf16, dot_f16, dot_q2_k, dot_q3_k, dot_q4_k, dot_q5_0, dot_q5_k, dot_q6_k,
-    dot_q8_0,
+    as_f32, dot_bf16, dot_f16, dot_q2_k, dot_q3_k, dot_q4_k, dot_q5_0, dot_q5_k, dot_q6_k, dot_q8_0,
 };
 use q8_acts::{
     dot_q2_k_i8, dot_q3_k_i8, dot_q4_k_i8, dot_q5_0_i8, dot_q5_k_i8, dot_q6_k_i8, dot_q8_0_i8,
@@ -379,10 +379,7 @@ impl<'a> QuantMat<'a> {
         let threads = crate::thread_pool::cpu_threads().min(items.len().max(1));
         crate::thread_pool::par_for_chunks(items.len(), threads, |_worker, start, end| {
             let slots = unsafe {
-                std::slice::from_raw_parts_mut(
-                    (out_addr as *mut Vec<f32>).add(start),
-                    end - start,
-                )
+                std::slice::from_raw_parts_mut((out_addr as *mut Vec<f32>).add(start), end - start)
             };
             for (local_idx, slot) in slots.iter_mut().enumerate() {
                 let idx = start + local_idx;

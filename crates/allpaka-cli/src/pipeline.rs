@@ -171,8 +171,11 @@ pub fn serve_chat(
             let streaming = request["stream"].as_bool().unwrap_or(false);
             let think_prefix = template.think_prefix();
             let mut raw_bytes = Vec::with_capacity(max_tokens * 4);
-            let mut complete_buf =
-                String::with_capacity(if streaming { think_prefix.len() + max_tokens * 4 } else { 0 });
+            let mut complete_buf = String::with_capacity(if streaming {
+                think_prefix.len() + max_tokens * 4
+            } else {
+                0
+            });
             if streaming {
                 complete_buf.push_str(think_prefix);
                 serve::write_sse_headers(&mut stream)?;

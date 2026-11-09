@@ -241,9 +241,7 @@ pub(crate) async fn judge(
     judge_inner(&app, request).await.map(Json)
 }
 pub(crate) fn read_inner(app: &App, id: &str) -> Result<Value> {
-    if id.is_empty()
-        || id.len() > 80
-        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    if id.is_empty() || id.len() > 80 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
         bail!("Invalid judge ID");
     }
@@ -509,9 +507,7 @@ pub(crate) async fn plan(
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
 pub(crate) fn read_plan_inner(app: &App, id: &str) -> Result<Value> {
-    if id.is_empty()
-        || id.len() > 80
-        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    if id.is_empty() || id.len() > 80 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
         bail!("Invalid judge plan ID");
     }
@@ -557,9 +553,7 @@ pub(crate) fn read_plan_inner(app: &App, id: &str) -> Result<Value> {
                 .context("Missing pinned version")?,
         ),
     )?;
-    if receipt["dataset_sha256"] != dataset.sha256
-        || receipt["project_id"] != dataset.project_id
-    {
+    if receipt["dataset_sha256"] != dataset.sha256 || receipt["project_id"] != dataset.project_id {
         bail!("Judge plan dataset mismatch");
     }
     if let Some(value) = receipt.get("judge_preset") {
