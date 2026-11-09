@@ -5,7 +5,7 @@
 //! capped: a truncated or hand-pasted oversized file is rejected before it
 //! is parsed.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use std::path::Path;
 
@@ -21,18 +21,11 @@ where
     T: DeserializeOwned,
 {
     let path = data.join(format!("{file}.state"));
-    let meta = match std::fs::metadata(&path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
-    };
-    if meta.len() > MAX_STATE_BYTES as u64 {
-        bail!("Invalid {label} file");
+    if !path.exists() && std::fs::symlink_metadata(&path).is_err() {
+        return Ok(Vec::new());
     }
-    let bytes = std::fs::read(&path)?;
-    if bytes.len() > MAX_STATE_BYTES {
-        bail!("Invalid {label} file");
-    }
+    let bytes = crate::storage::read_bounded_bytes(&path, MAX_STATE_BYTES)
+        .map_err(|_| anyhow::anyhow!("Invalid {label} file"))?;
     let list: Vec<T> =
         serde_json::from_slice(&bytes).with_context(|| format!("Invalid {label} file"))?;
     for item in &list {
@@ -43,8 +36,6 @@ where
 
 pub fn save_list<T: Serialize + ?Sized>(data: &Path, file: &str, list: &T) -> Result<()> {
     let path = data.join(format!("{file}.state"));
-    let temp = data.join(format!("{file}.tmp"));
-    std::fs::write(&temp, serde_json::to_vec(list)?)?;
-    std::fs::rename(temp, path)?;
-    Ok(())
+    let bytes = serde_json::to_vec(list)?;
+    crate::storage::atomic_write_bytes(&path, &bytes)
 }

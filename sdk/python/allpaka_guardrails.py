@@ -237,6 +237,13 @@ def load_policy(path):
     return rules_from_manifest(manifest)
 
 
+_HEX_CHARS = frozenset('0123456789abcdef')
+
+
+def _is_sha256_hex(val):
+    return isinstance(val, str) and len(val) == 64 and all(c in _HEX_CHARS for c in val)
+
+
 def _trace_receipt(receipt):
     fields={'kind','schema_version','stage','action','passed','blocked','rules','policy_sha256','provider_calls','content_captured'}
     if (not isinstance(receipt,dict) or set(receipt)!=fields
@@ -245,8 +252,7 @@ def _trace_receipt(receipt):
             or type(receipt['passed']) is not bool or type(receipt['blocked']) is not bool
             or receipt['blocked'] != (not receipt['passed'] and receipt['action']=='block')
             or type(receipt['provider_calls']) is not int or receipt['provider_calls']!=0 or receipt['content_captured'] is not False
-            or not isinstance(receipt['policy_sha256'],str) or len(receipt['policy_sha256'])!=64
-            or any(c not in '0123456789abcdef' for c in receipt['policy_sha256'])):
+            or not _is_sha256_hex(receipt['policy_sha256'])):
         raise ValueError('Invalid guardrail trace receipt')
     rules=receipt['rules']
     if not isinstance(rules,list) or not 1<=len(rules)<=32:

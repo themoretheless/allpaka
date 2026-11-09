@@ -31,11 +31,9 @@ fn estimate(messages: &[Message]) -> usize {
         .iter()
         .map(|m| {
             (m.content.len()
-                + serde_json::to_vec(&m.reasoning_details).map_or(0, |v| v.len())
+                + crate::evaluation::json_serialized_len(&m.reasoning_details).unwrap_or(0)
                 + m.reasoning_content.as_ref().map_or(0, String::len)
-                + serde_json::to_string(&m.tool_calls)
-                    .unwrap_or_default()
-                    .len())
+                + crate::evaluation::json_serialized_len(&m.tool_calls).unwrap_or(0))
             .div_ceil(3)
                 + m.images.len() * 1500
                 + 12

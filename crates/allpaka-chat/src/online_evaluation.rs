@@ -149,11 +149,7 @@ impl Store {
         Ok(Self { directory })
     }
     fn path(&self, hash: &str) -> Result<std::path::PathBuf> {
-        if hash.len() != 64
-            || !hash
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
+        if !crate::storage::valid_sha256_hex(hash) {
             bail!("Invalid rule hash");
         }
         Ok(self.directory.join(format!("{hash}.json")))
@@ -338,18 +334,12 @@ impl Store {
             || job["provider_calls"] != 0
             || !technical(project)
             || !technical(trace)
-            || key.len() != 64
-            || !key
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !crate::storage::valid_sha256_hex(key)
             || path.file_stem().and_then(|s| s.to_str()) != Some(key)
         {
             bail!("Invalid pinned queue job");
         }
-        let job_hash = Sha256::digest(serde_json::to_vec(&job)?)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let job_hash = crate::storage::hex_sha256(&serde_json::to_vec(&job)?);
         let directory = self.directory.join("job-results");
         if !inspect_only {
             std::fs::create_dir_all(&directory)?;
@@ -378,10 +368,7 @@ impl Store {
                 .ok_or_else(|| anyhow::anyhow!("Invalid job result"))?
                 .remove("result_sha256")
                 .ok_or_else(|| anyhow::anyhow!("Missing result digest"))?;
-            let expected = Sha256::digest(serde_json::to_vec(&result)?)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>();
+            let expected = crate::storage::hex_sha256(&serde_json::to_vec(&result)?);
             if result.as_object().map(|v| v.len()) != Some(9)
                 || hash != expected
                 || result["kind"] != "online_evaluation_job_result"
@@ -425,10 +412,7 @@ impl Store {
                     bail!("Retained assessment exceeds limit");
                 }
                 let assessment = crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
-                let actual = Sha256::digest(serde_json::to_vec(&assessment)?)
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>();
+                let actual = crate::storage::hex_sha256(&serde_json::to_vec(&assessment)?);
                 if hash != actual {
                     bail!("Retained assessment evidence mismatch");
                 }
@@ -461,10 +445,7 @@ impl Store {
                     .unwrap()
                     .iter()
                     .all(|item| item["status"] == "completed");
-                let hash = Sha256::digest(serde_json::to_vec(&assessment)?)
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>();
+                let hash = crate::storage::hex_sha256(&serde_json::to_vec(&assessment)?);
                 (
                     success,
                     if success {
@@ -482,10 +463,8 @@ impl Store {
             ),
         };
         let mut result = serde_json::json!({"kind":"online_evaluation_job_result","schema_version":1,"selection_sha256":key,"job_sha256":job_hash,"status":if success{"completed"}else{"failed"},"error_code":error,"assessment_sha256":assessment_hash,"provider_calls":0,"automatic_execution":automatic});
-        result["result_sha256"] = serde_json::json!(Sha256::digest(serde_json::to_vec(&result)?)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>());
+        result["result_sha256"] =
+            serde_json::json!(crate::storage::hex_sha256(&serde_json::to_vec(&result)?));
         crate::evaluation::commit_new(&result_path, &result)?;
         Ok(Some(success))
     }
@@ -666,10 +645,7 @@ impl Store {
         if !technical(project) || !technical(trace) {
             bail!("Invalid selection identity");
         }
-        let key = Sha256::digest(serde_json::to_vec(&(project, trace))?)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let key = crate::storage::hex_sha256(&serde_json::to_vec(&(project, trace))?);
         let path = self
             .directory
             .join("selections")
@@ -691,11 +667,7 @@ impl Store {
             let hash = packet["trace_sha256"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("Missing trace hash"))?;
-            if hash.len() != 64
-                || !hash
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            {
+            if !crate::storage::valid_sha256_hex(hash) {
                 bail!("Invalid archived trace hash");
             }
             self.validate_selection(&packet, project, trace, hash)?;
@@ -707,10 +679,8 @@ impl Store {
             let decisions = packet["decisions"]
                 .as_array()
                 .ok_or_else(|| anyhow::anyhow!("Missing legacy decisions"))?;
-            let digest = Sha256::digest(serde_json::to_vec(&(project, trace, decisions))?)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>();
+            let digest =
+                crate::storage::hex_sha256(&serde_json::to_vec(&(project, trace, decisions))?);
             if packet["selection_sha256"] != digest {
                 bail!("Legacy selection integrity mismatch");
             }
@@ -719,12 +689,9 @@ impl Store {
             let mut checked = packet.clone();
             checked["schema_version"] = serde_json::json!(2);
             checked["trace_sha256"] = serde_json::json!(placeholder);
-            checked["selection_sha256"] = serde_json::json!(Sha256::digest(serde_json::to_vec(
-                &(project, trace, &placeholder, decisions)
-            )?)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>());
+            checked["selection_sha256"] = serde_json::json!(crate::storage::hex_sha256(
+                &serde_json::to_vec(&(project, trace, &placeholder, decisions))?
+            ));
             self.validate_selection(&checked, project, trace, &placeholder)?;
             false
         } else {
@@ -743,20 +710,14 @@ impl Store {
         use std::io::Read;
         if !technical(project)
             || !technical(trace)
-            || trace_hash.len() != 64
-            || !trace_hash
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !crate::storage::valid_sha256_hex(trace_hash)
         {
             bail!("Invalid selection identity or trace hash");
         }
         let _lock = WRITES
             .lock()
             .map_err(|_| anyhow::anyhow!("Rule storage lock unavailable"))?;
-        let key = Sha256::digest(serde_json::to_vec(&(project, trace))?)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let key = crate::storage::hex_sha256(&serde_json::to_vec(&(project, trace))?);
         let directory = self.directory.join("selections");
         std::fs::create_dir_all(&directory)?;
         let directory = directory.canonicalize()?;
@@ -805,12 +766,9 @@ impl Store {
                 decisions.push(serde_json::json!({"binding":binding,"selected":selected}));
             }
         }
-        let digest = Sha256::digest(serde_json::to_vec(&(
+        let digest = crate::storage::hex_sha256(&serde_json::to_vec(&(
             project, trace, trace_hash, &decisions,
-        ))?)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+        ))?);
         let packet = serde_json::json!({"kind":"online_evaluation_selection","schema_version":2,"project_id":project,"trace_id":trace,"trace_sha256":trace_hash,"decisions":decisions,"selection_sha256":digest,"provider_calls":0,"automatic_execution":false});
         if serde_json::to_vec(&packet)?.len() > 1024 * 1024 {
             bail!("Selection exceeds write limit");
@@ -843,12 +801,9 @@ impl Store {
         if decisions.len() > 1000 {
             bail!("Too many selection decisions");
         }
-        let digest = Sha256::digest(serde_json::to_vec(&(
+        let digest = crate::storage::hex_sha256(&serde_json::to_vec(&(
             project, trace, trace_hash, decisions,
-        ))?)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+        ))?);
         if packet["selection_sha256"] != digest {
             bail!("Selection integrity mismatch");
         }

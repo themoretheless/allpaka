@@ -81,11 +81,15 @@ fn bound_output(mut output: String) -> Result<(String, bool)> {
     let truncated = output.len() != original;
     Ok((output, truncated))
 }
+type ReservationCache = Arc<Mutex<HashMap<String, (u64, Option<std::time::SystemTime>, u64)>>>;
+
 #[derive(Clone)]
 pub(crate) struct Manager {
     root: Arc<PathBuf>,
     writes: Arc<Mutex<()>>,
     active: Arc<Mutex<HashMap<String, Option<oneshot::Sender<()>>>>>,
+    notify: Arc<tokio::sync::Notify>,
+    reservations: ReservationCache,
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -154,96 +158,96 @@ pub(crate) async fn offline_score(
         .map(Json)
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
+pub(crate) fn read_offline_score_inner(app: &crate::App, id: &str) -> Result<Value> {
+    if id.is_empty()
+        || id.len() > 80
+        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        bail!("Invalid score ID");
+    }
+    let path = app
+        .data
+        .join("evaluation/offline_scores")
+        .join(format!("{id}.json"));
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
+        bail!("Invalid offline receipt file");
+    }
+    let path = path.canonicalize()?;
+    if !path.starts_with(app.data.as_ref()) {
+        bail!("Offline receipt escapes Studio data");
+    }
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 16 * 1024 * 1024 {
+        bail!("Offline receipt too large");
+    }
+    let receipt: Value = crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
+    if receipt["id"] != id
+        || receipt["kind"] != "offline_score"
+        || receipt["provider_calls"] != 0
+    {
+        bail!("Offline identity mismatch");
+    }
+    let version = receipt["dataset_version"]
+        .as_u64()
+        .filter(|v| *v > 0)
+        .context("Missing pinned version")?;
+    let snapshot = app.evaluation.load(
+        receipt["dataset_id"].as_str().context("Missing dataset")?,
+        Some(version),
+    )?;
+    if receipt["dataset_sha256"] != snapshot.sha256
+        || receipt["project_id"] != snapshot.project_id
+    {
+        bail!("Offline dataset mismatch");
+    }
+    let metrics: Vec<Metric> = serde_json::from_value(receipt["metrics"].clone())?;
+    validate_metrics(&metrics, &snapshot)?;
+    let items = receipt["items"].as_array().context("Missing score items")?;
+    if snapshot.samples.is_empty()
+        || snapshot.samples.len() > 200
+        || items.len() != snapshot.samples.len()
+    {
+        bail!("Offline sample coverage mismatch");
+    }
+    let mut means = BTreeMap::<String, f64>::new();
+    for (sample, item) in snapshot.samples.iter().zip(items) {
+        let output = item["output"].as_str().context("Missing output")?;
+        if item["sample_id"] != sample.id || output.len() > 64000 {
+            bail!("Offline sample mismatch");
+        }
+        let scores = score(sample, output, &metrics);
+        if item["scores"] != serde_json::to_value(&scores)? {
+            bail!("Offline score integrity failure");
+        }
+        for (metric, value) in scores {
+            *means.entry(metric).or_default() += value / snapshot.samples.len() as f64;
+        }
+    }
+    let Some(stored_means) = receipt["mean_scores"].as_object() else {
+        bail!("Offline mean integrity failure");
+    };
+    if stored_means.len() != means.len()
+        || means.iter().any(|(metric, expected)| {
+            stored_means
+                .get(metric)
+                .and_then(|v| v.as_f64())
+                .is_none_or(|actual| !actual.is_finite() || (actual - expected).abs() > 1e-9)
+        })
+    {
+        bail!("Offline mean integrity failure");
+    }
+    Ok(receipt)
+}
 pub(crate) async fn read_offline_score(
     State(app): State<crate::App>,
     Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        if id.is_empty()
-            || id.len() > 80
-            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        {
-            bail!("Invalid score ID");
-        }
-        let path = app
-            .data
-            .join("evaluation/offline_scores")
-            .join(format!("{id}.json"));
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
-            bail!("Invalid offline receipt file");
-        }
-        let path = path.canonicalize()?;
-        if !path.starts_with(app.data.as_ref()) {
-            bail!("Offline receipt escapes Studio data");
-        }
-        use std::io::Read;
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(16 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > 16 * 1024 * 1024 {
-            bail!("Offline receipt too large");
-        }
-        let receipt: Value = crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
-        if receipt["id"] != id
-            || receipt["kind"] != "offline_score"
-            || receipt["provider_calls"] != 0
-        {
-            bail!("Offline identity mismatch");
-        }
-        let version = receipt["dataset_version"]
-            .as_u64()
-            .filter(|v| *v > 0)
-            .context("Missing pinned version")?;
-        let snapshot = app.evaluation.load(
-            receipt["dataset_id"].as_str().context("Missing dataset")?,
-            Some(version),
-        )?;
-        if receipt["dataset_sha256"] != snapshot.sha256
-            || receipt["project_id"] != snapshot.project_id
-        {
-            bail!("Offline dataset mismatch");
-        }
-        let metrics: Vec<Metric> = serde_json::from_value(receipt["metrics"].clone())?;
-        validate_metrics(&metrics, &snapshot)?;
-        let items = receipt["items"].as_array().context("Missing score items")?;
-        if snapshot.samples.is_empty()
-            || snapshot.samples.len() > 200
-            || items.len() != snapshot.samples.len()
-        {
-            bail!("Offline sample coverage mismatch");
-        }
-        let mut means = BTreeMap::<String, f64>::new();
-        for (sample, item) in snapshot.samples.iter().zip(items) {
-            let output = item["output"].as_str().context("Missing output")?;
-            if item["sample_id"] != sample.id || output.len() > 64000 {
-                bail!("Offline sample mismatch");
-            }
-            let scores = score(sample, output, &metrics);
-            if item["scores"] != serde_json::to_value(&scores)? {
-                bail!("Offline score integrity failure");
-            }
-            for (metric, value) in scores {
-                *means.entry(metric).or_default() += value / snapshot.samples.len() as f64;
-            }
-        }
-        let Some(stored_means) = receipt["mean_scores"].as_object() else {
-            bail!("Offline mean integrity failure");
-        };
-        if stored_means.len() != means.len()
-            || means.iter().any(|(metric, expected)| {
-                stored_means
-                    .get(metric)
-                    .and_then(|v| v.as_f64())
-                    .is_none_or(|actual| !actual.is_finite() || (actual - expected).abs() > 1e-9)
-            })
-        {
-            bail!("Offline mean integrity failure");
-        }
-        Ok(receipt)
-    })();
-    result.map(Json).map_err(|_| {
+    read_offline_score_inner(&app, &id).map(Json).map_err(|_| {
         crate::error(
             StatusCode::BAD_REQUEST,
             "Offline scoring receipt unavailable or invalid",
@@ -319,8 +323,8 @@ pub(crate) async fn list_offline_scores(
         }
         scanned += 1;
         bytes = bytes.saturating_add(size);
-        match read_offline_score(State(app.clone()), Path(id)).await {
-            Ok(Json(receipt)) => {
+        match read_offline_score_inner(&app, &id) {
+            Ok(receipt) => {
                 if receipt["project_id"] != query.project_id
                     || query
                         .dataset_id
@@ -351,12 +355,18 @@ pub(crate) async fn compare_offline_scores(
     State(app): State<crate::App>,
     Json(input): Json<Compare>,
 ) -> crate::ApiResult<Value> {
-    let baseline = read_offline_score(State(app.clone()), Path(input.baseline_id))
-        .await?
-        .0;
-    let candidate = read_offline_score(State(app.clone()), Path(input.candidate_id))
-        .await?
-        .0;
+    let baseline = read_offline_score_inner(&app, &input.baseline_id).map_err(|_| {
+        crate::error(
+            StatusCode::BAD_REQUEST,
+            "Offline scoring receipt unavailable or invalid",
+        )
+    })?;
+    let candidate = read_offline_score_inner(&app, &input.candidate_id).map_err(|_| {
+        crate::error(
+            StatusCode::BAD_REQUEST,
+            "Offline scoring receipt unavailable or invalid",
+        )
+    })?;
     let result = (|| -> Result<Value> {
         for field in [
             "project_id",
@@ -685,6 +695,8 @@ impl Manager {
             root: Arc::new(root),
             writes: Default::default(),
             active: Default::default(),
+            notify: Default::default(),
+            reservations: Default::default(),
         })
     }
     /// Called only at startup under the exclusive Studio directory lock.
@@ -770,15 +782,30 @@ impl Manager {
                     .file_stem()
                     .and_then(|id| id.to_str())
                     .context("Invalid experiment filename")?;
-                let existing = self.load(id)?;
-                let weight = if existing.status == "running" {
-                    run_reservation(&existing)? as u64
+                let file_meta = entry.metadata()?;
+                let file_len = file_meta.len();
+                let file_mtime = file_meta.modified().ok();
+                let weight = if let Some((_, _, cached_weight)) = file_mtime
+                    .and_then(|_| self.reservations.lock().unwrap().get(id).copied())
+                    .filter(|(cl, cm, _)| *cl == file_len && *cm == file_mtime)
+                {
+                    cached_weight
                 } else {
-                    entry
-                        .metadata()?
-                        .len()
-                        .checked_add(PROGRESS_RESERVE as u64)
-                        .context("Experiment capacity overflow")?
+                    let existing = self.load(id)?;
+                    let w = if existing.status == "running" {
+                        run_reservation(&existing)? as u64
+                    } else {
+                        file_len
+                            .checked_add(PROGRESS_RESERVE as u64)
+                            .context("Experiment capacity overflow")?
+                    };
+                    if file_mtime.is_some() {
+                        self.reservations
+                            .lock()
+                            .unwrap()
+                            .insert(id.to_owned(), (file_len, file_mtime, w));
+                    }
+                    w
                 };
                 reserved = reserved
                     .checked_add(weight)
@@ -801,11 +828,27 @@ impl Manager {
             let mut file = options.open(&temp)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
-            std::fs::rename(&temp, path)?;
+            std::fs::rename(&temp, &path)?;
             std::fs::File::open(self.root.as_ref())?.sync_all()?;
             Ok(())
         })();
         let _ = std::fs::remove_file(temp);
+        if result.is_ok() {
+            if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                let weight = if run.status == "running" {
+                    run_reservation(run).map(|w| w as u64).ok()
+                } else {
+                    meta.len().checked_add(PROGRESS_RESERVE as u64)
+                };
+                if let (Some(mtime), Some(w)) = (meta.modified().ok(), weight) {
+                    self.reservations
+                        .lock()
+                        .unwrap()
+                        .insert(run.id.clone(), (meta.len(), Some(mtime), w));
+                }
+            }
+            self.notify.notify_waiters();
+        }
         result
     }
     fn load(&self, id: &str) -> Result<Run> {
@@ -1013,6 +1056,7 @@ impl Drop for RunGuard {
             eprintln!("Experiment persistence failed: {e}");
         }
         self.manager.active.lock().unwrap().remove(&self.run.id);
+        self.manager.notify.notify_waiters();
     }
 }
 async fn execute(
@@ -1359,13 +1403,16 @@ pub(crate) async fn start(
         .map(Json)
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
+pub(crate) fn detail_inner(app: &crate::App, id: &str) -> Result<Value> {
+    app.experiments
+        .load(id)
+        .and_then(|r| Ok(serde_json::to_value(r)?))
+}
 pub(crate) async fn detail(
     State(app): State<crate::App>,
     Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    app.experiments
-        .load(&id)
-        .and_then(|r| Ok(serde_json::to_value(r)?))
+    detail_inner(&app, &id)
         .map(Json)
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
@@ -1839,44 +1886,44 @@ pub(crate) async fn save_matrix(
         .map(Json)
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }
+pub(crate) fn read_matrix_inner(app: &crate::App, id: &str) -> Result<Value> {
+    if id.is_empty()
+        || id.len() > 80
+        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        bail!("Invalid matrix ID");
+    }
+    let path = app
+        .data
+        .join("evaluation/matrices")
+        .join(format!("{id}.json"));
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if !metadata.is_file() || metadata.len() > 4 * 1024 * 1024 {
+        bail!("Invalid matrix artifact");
+    }
+    let path = path.canonicalize()?;
+    if !path.starts_with(app.data.as_ref()) {
+        bail!("Matrix escapes Studio data");
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        bail!("Oversize matrix artifact");
+    }
+    let receipt = crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
+    let input: MatrixSave = serde_json::from_value(receipt["request"].clone())?;
+    if matrix_receipt(app, id, &input)? != receipt {
+        bail!("Matrix does not match pinned results");
+    }
+    Ok(receipt)
+}
 pub(crate) async fn read_matrix(
     State(app): State<crate::App>,
     Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        if id.is_empty()
-            || id.len() > 80
-            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        {
-            bail!("Invalid matrix ID");
-        }
-        let path = app
-            .data
-            .join("evaluation/matrices")
-            .join(format!("{id}.json"));
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if !metadata.is_file() || metadata.len() > 4 * 1024 * 1024 {
-            bail!("Invalid matrix artifact");
-        }
-        let path = path.canonicalize()?;
-        if !path.starts_with(app.data.as_ref()) {
-            bail!("Matrix escapes Studio data");
-        }
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(4 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > 4 * 1024 * 1024 {
-            bail!("Oversize matrix artifact");
-        }
-        let receipt = crate::strict_json::parse(std::str::from_utf8(&bytes)?)?;
-        let input: MatrixSave = serde_json::from_value(receipt["request"].clone())?;
-        if matrix_receipt(&app, &id, &input)? != receipt {
-            bail!("Matrix does not match pinned results");
-        }
-        Ok(receipt)
-    })();
-    result
+    read_matrix_inner(&app, &id)
         .map(Json)
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
 }

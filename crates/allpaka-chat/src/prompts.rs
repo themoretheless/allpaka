@@ -340,10 +340,11 @@ impl Store {
                 continue;
             }
             let id = entry.file_name().to_string_lossy().to_string();
-            if self.latest(&id)? == 0 {
+            let latest = self.latest(&id)?;
+            if latest == 0 {
                 continue;
             }
-            let snapshot = self.load(&id, None)?;
+            let snapshot = self.load(&id, Some(latest))?;
             if snapshot.project_id == project {
                 rows.push(json!({"id":snapshot.id,"name":snapshot.name,"project_id":snapshot.project_id,"version":snapshot.version,"sha256":snapshot.sha256}));
             }

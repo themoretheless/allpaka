@@ -6,7 +6,6 @@ use crate::{
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{io::Read, path::Path};
 static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[derive(Serialize, Deserialize)]
@@ -26,16 +25,10 @@ struct Snapshot {
     definition: Definition,
 }
 fn digest(definition: &Definition) -> Result<String> {
-    Ok(Sha256::digest(serde_json::to_vec(definition)?)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(crate::storage::hex_sha256(&serde_json::to_vec(definition)?))
 }
 fn valid_hash(id: &str) -> bool {
-    id.len() == 64
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    crate::storage::valid_sha256_hex(id)
 }
 fn directory(data: &Path) -> Result<std::path::PathBuf> {
     let root = data.join("evaluation/model-evaluators");

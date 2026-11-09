@@ -67,18 +67,14 @@ pub(crate) struct Manager {
     writes: Arc<Mutex<()>>,
 }
 fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 80 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+    crate::storage::valid_hex_id(id)
 }
 fn provider_route(provider: &provider::Provider) -> String {
-    use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(
         &json!({"id":provider.id,"base":provider.base,"anthropic":provider.anthropic}),
     )
     .unwrap();
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::storage::hex_sha256(&bytes)
 }
 impl Manager {
     pub(crate) fn new(data: &FsPath) -> Result<Self> {
@@ -385,6 +381,7 @@ async fn execute_job(
             bail!("Unexpected experiment at an unsent reservation");
         }
         loop {
+            let notified = app.experiments.notify.notified();
             let run = app.experiments.load(&id)?;
             if run.status != "running" {
                 verify_variant(&run, &request, &snapshot)?;
@@ -401,7 +398,10 @@ async fn execute_job(
             if stop.load(Ordering::SeqCst) {
                 app.experiments.cancel(&id)?;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            }
         }
         if stop.load(Ordering::SeqCst) {
             bail!("Matrix stopped");
@@ -434,10 +434,8 @@ async fn execute_job(
     }
     let path = root.join(format!("{}.json", guard.job.matrix_id));
     if path.exists() {
-        let Json(existing) =
-            super::read_matrix(State(app.clone()), Path(guard.job.matrix_id.clone()))
-                .await
-                .map_err(|_| anyhow::anyhow!("Cannot verify saved matrix"))?;
+        let existing = super::read_matrix_inner(app, &guard.job.matrix_id)
+            .map_err(|_| anyhow::anyhow!("Cannot verify saved matrix"))?;
         if existing != receipt {
             bail!("Saved matrix differs from job results");
         }

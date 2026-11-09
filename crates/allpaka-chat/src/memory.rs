@@ -7,7 +7,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{
     io::Read,
     path::{Path as FsPath, PathBuf},
@@ -69,11 +68,7 @@ pub(crate) struct SaveMemory {
     consolidation_sources: Option<Vec<ConsolidationSource>>,
 }
 fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 80
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    crate::storage::valid_id(id)
 }
 use crate::evaluation::{commit_new, new_id};
 fn digest(snapshot: &Snapshot) -> Result<String> {
@@ -92,10 +87,7 @@ fn digest(snapshot: &Snapshot) -> Result<String> {
     if let Some(sources) = &snapshot.consolidation_sources {
         bytes.extend(serde_json::to_vec(sources)?);
     }
-    Ok(Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    Ok(crate::storage::hex_sha256(&bytes))
 }
 fn validate(snapshot: &Snapshot) -> Result<()> {
     if !valid_id(&snapshot.id)
@@ -346,10 +338,7 @@ impl Store {
         if bytes.len() > 24000 {
             bail!("Consolidation input exceeds 24 KiB");
         }
-        let hash = Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let hash = crate::storage::hex_sha256(&bytes);
         Ok(
             json!({"kind":"memory_consolidation_input","project_id":project,"sources":rows,"source_sha256":hash,"source_bytes":bytes.len(),"provider_calls":0,"notes_modified":false}),
         )
@@ -375,7 +364,7 @@ impl Store {
             json!({"kind":"memory_consolidation_source_status","id":note.id,"version":note.version,"sha256":note.sha256,"project_id":note.project_id,"sources":sources,"semantics":"revision_status","provider_calls":0,"notes_modified":false}),
         )
     }
-    fn list(&self, project: &str) -> Result<Value> {
+    fn list_snapshots(&self, project: &str) -> Result<Vec<Snapshot>> {
         let mut rows = Vec::new();
         let mut visited = 0;
         for entry in std::fs::read_dir(self.root.as_ref())? {
@@ -388,15 +377,24 @@ impl Store {
                 continue;
             }
             let id = entry.file_name().to_string_lossy().to_string();
-            if self.latest(&id)? == 0 {
+            let latest = self.latest(&id)?;
+            if latest == 0 {
                 continue;
             }
-            let snapshot = self.load(&id, None)?;
+            let snapshot = self.load(&id, Some(latest))?;
             if snapshot.project_id == project {
-                rows.push(serde_json::to_value(snapshot)?);
+                rows.push(snapshot);
             }
         }
-        rows.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_owned());
+        rows.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(rows)
+    }
+    fn list(&self, project: &str) -> Result<Value> {
+        let rows: Vec<Value> = self
+            .list_snapshots(project)?
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<_, _>>()?;
         Ok(json!({"notes":rows}))
     }
 }
@@ -420,12 +418,7 @@ impl Store {
             vec![project]
         };
         for scope in scopes {
-            let catalog = self.list(scope)?;
-            for value in catalog["notes"]
-                .as_array()
-                .context("Invalid memory catalog")?
-            {
-                let note: Snapshot = serde_json::from_value(value.clone())?;
+            for note in self.list_snapshots(scope)? {
                 if note.removed {
                     removed += 1;
                     continue;
@@ -595,12 +588,7 @@ impl Store {
             if index == 1 && project == "global" {
                 continue;
             }
-            let catalog = self.list(scope)?;
-            for value in catalog["notes"]
-                .as_array()
-                .context("Invalid memory catalog")?
-            {
-                let note: Snapshot = serde_json::from_value(value.clone())?;
+            for note in self.list_snapshots(scope)? {
                 if note.removed || note.expires_ms.is_some_and(|expiry| expiry <= now) {
                     continue;
                 }

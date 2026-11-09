@@ -1,7 +1,6 @@
 //! Explicit caller-supplied text snapshots for trace-linked quality evaluation.
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     io::Read,
     path::{Path, PathBuf},
@@ -19,10 +18,7 @@ pub(crate) struct Source {
     pub(crate) reference: Option<String>,
 }
 fn sha(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    crate::storage::valid_sha256_hex(value)
 }
 fn identity(value: &str) -> bool {
     !value.is_empty()
@@ -32,10 +28,7 @@ fn identity(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
 fn digest(source: &Source) -> Result<String> {
-    Ok(Sha256::digest(serde_json::to_vec(source)?)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(crate::storage::hex_sha256(&serde_json::to_vec(source)?))
 }
 impl Source {
     fn validate(&self) -> Result<()> {

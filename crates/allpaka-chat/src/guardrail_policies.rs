@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,10 +70,7 @@ impl Manifest {
         if bytes.len() > 128 * 1024 {
             bail!("Policy exceeds 128 KiB");
         }
-        let policy_sha256 = Sha256::digest(&bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let policy_sha256 = crate::storage::hex_sha256(&bytes);
         Ok(Self {
             kind: "local_guardrail_policy".into(),
             schema_version: 1,
@@ -359,11 +355,7 @@ impl Store {
         Ok(Self { root })
     }
     fn path(&self, hash: &str) -> Result<std::path::PathBuf> {
-        if hash.len() != 64
-            || !hash
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
+        if !crate::storage::valid_sha256_hex(hash) {
             bail!("Invalid policy fingerprint");
         }
         if std::fs::symlink_metadata(&self.root)?

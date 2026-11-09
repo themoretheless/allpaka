@@ -8,7 +8,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 // Reserve room for both requests admitted by App::memory_extractions.
 // Keeping this conservative avoids oversubscription without holding a filesystem lock across await.
 const PROPOSAL_MAX_BYTES: u64 = 128000;
@@ -163,10 +162,7 @@ pub(crate) async fn extract(
             }
             source_text(&source.messages, input.message_count)?
         };
-        let hash = Sha256::digest(&bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let hash = crate::storage::hex_sha256(&bytes);
         let provider = app
             .providers
             .lock()
@@ -481,10 +477,7 @@ pub(crate) async fn source_status(
             current_count = Some(session.messages.len());
             running = session.status == SessionStatus::Running;
             if let Ok(bytes) = source_text(&session.messages, count) {
-                let hash = Sha256::digest(bytes)
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>();
+                let hash = crate::storage::hex_sha256(&bytes);
                 status = if hash == expected {
                     "current"
                 } else {

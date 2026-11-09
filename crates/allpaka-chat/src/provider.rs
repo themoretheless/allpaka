@@ -545,7 +545,7 @@ impl Accumulator {
             || self.thinking_blocks.len() > 1024
             || self.text.len() + self.reasoning.len() > 2_000_000
             || self.calls.len() > 64
-            || self.calls.values().any(|v| v.to_string().len() > 1_000_000)
+            || self.calls.values().any(call_exceeds_limit)
         {
             bail!("Provider output exceeded limit");
         }
@@ -599,9 +599,24 @@ impl Accumulator {
         ))
     }
 }
+fn call_exceeds_limit(v: &Value) -> bool {
+    let base = v["id"].as_str().map_or(0, str::len)
+        + v["function"]["name"].as_str().map_or(0, str::len)
+        + v["function"]["arguments"].as_str().map_or(0, str::len);
+    if base > 1_000_000 {
+        return true;
+    }
+    let extra = v
+        .get("extra_content")
+        .map_or(0, |e| crate::evaluation::json_serialized_len(e).unwrap_or(0));
+    base + extra > 1_000_000
+}
 fn append(target: &mut Value, delta: &Value) {
     if let Some(s) = delta.as_str() {
-        *target = Value::String(format!("{}{s}", target.as_str().unwrap_or("")));
+        match target {
+            Value::String(ref mut buf) => buf.push_str(s),
+            _ => *target = Value::String(s.to_owned()),
+        }
     }
 }
 
@@ -667,16 +682,18 @@ where
     }
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
+    let mut cursor = 0usize;
     let mut acc = Accumulator::default();
     let mut event_data: Vec<String> = vec![];
     while let Some(chunk) = stream.next().await {
         buffer.extend_from_slice(&chunk?);
-        if buffer.len() > 2_000_000 {
+        if buffer.len() - cursor > 2_000_000 {
             bail!("Provider stream frame too large");
         }
-        while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = buffer.drain(..=end).collect();
-            let line = std::str::from_utf8(&line)?.trim_end_matches(['\r', '\n']);
+        while let Some(end) = buffer[cursor..].iter().position(|b| *b == b'\n') {
+            let line = std::str::from_utf8(&buffer[cursor..cursor + end])?
+                .trim_end_matches(['\r', '\n']);
+            cursor += end + 1;
             if line.is_empty() {
                 if !event_data.is_empty() {
                     let reasoning_start = acc.reasoning.len();
@@ -696,6 +713,13 @@ where
                 }
                 event_data.push(data.strip_prefix(' ').unwrap_or(data).to_owned());
             }
+        }
+        if cursor == buffer.len() {
+            buffer.clear();
+            cursor = 0;
+        } else if cursor >= 65536 {
+            buffer.drain(..cursor);
+            cursor = 0;
         }
     }
     acc.finish()

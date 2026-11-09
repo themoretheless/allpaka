@@ -99,13 +99,7 @@ impl Write for DigestWriter {
 }
 
 pub(crate) fn hex_sha256(hasher: Sha256) -> String {
-    use std::fmt::Write as _;
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
+    crate::storage::hex_sha256_hasher(hasher)
 }
 
 pub(crate) struct CountWriter(pub(crate) usize);
@@ -590,10 +584,11 @@ impl Store {
                 continue;
             }
             let id = entry.file_name().to_string_lossy().to_string();
-            if self.latest(&id)? == 0 {
+            let latest = self.latest(&id)?;
+            if latest == 0 {
                 continue;
             }
-            let snapshot = self.load(&id, None)?;
+            let snapshot = self.load(&id, Some(latest))?;
             let lifecycle = self.lifecycle(&id)?;
             if snapshot.project_id == project && lifecycle.archived == archived {
                 rows.push(json!({"id":snapshot.id,"name":snapshot.name,"project_id":snapshot.project_id,"version":snapshot.version,"sha256":snapshot.sha256,"samples":snapshot.samples.len(),"archived":lifecycle.archived,"lifecycle_revision":lifecycle.revision}));

@@ -16,8 +16,9 @@ pub(crate) fn search(root: &Path, args: &Value, excluded: Option<&Path>) -> Resu
     if !(1..=100).contains(&limit) {
         bail!("limit must be 1–100");
     }
+    let canonical_root = root.canonicalize()?;
     let start = super::tools::resolve(
-        root,
+        &canonical_root,
         args["path"].as_str().context("path is required")?,
         false,
     )?;
@@ -37,13 +38,19 @@ pub(crate) fn search(root: &Path, args: &Value, excluded: Option<&Path>) -> Resu
         if excluded.is_some_and(|p| path.starts_with(p)) {
             continue;
         }
-        let relative = path.strip_prefix(root)?;
-        // Apply the same hidden-path and symlink contract to every descendant.
-        if super::tools::resolve(root, &relative.to_string_lossy(), false).is_err() {
+        let relative = path.strip_prefix(&canonical_root)?;
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        // Apply the same symlink contract to every descendant without per-file canonicalize().
+        if metadata.file_type().is_symlink() {
             skipped += 1;
             continue;
         }
-        let metadata = std::fs::symlink_metadata(&path)?;
         if metadata.is_dir() {
             let mut children = Vec::new();
             for entry in std::fs::read_dir(&path)? {

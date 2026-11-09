@@ -39,7 +39,8 @@ fn browse(project: &Project, input: &Request, excluded: &Path, action: &str) -> 
         .find(|r| r.alias == input.root)
         .context("Unknown project folder")?
         .path;
-    let start = checked(root, &input.path, excluded)?;
+    let canonical_root = root.canonicalize()?;
+    let start = checked(&canonical_root, &input.path, excluded)?;
     if action == "read" {
         if !start.is_file() {
             bail!("Choose a regular text file");
@@ -83,12 +84,16 @@ fn browse(project: &Project, input: &Request, excluded: &Path, action: &str) -> 
                 continue;
             }
             let path = entry.path();
-            let Some(relative) = path.strip_prefix(root)?.to_str().map(str::to_owned) else {
-                continue;
-            };
-            if checked(root, &relative, excluded).is_err() {
+            if path.starts_with(excluded) {
                 continue;
             }
+            let Some(relative) = path
+                .strip_prefix(&canonical_root)?
+                .to_str()
+                .map(str::to_owned)
+            else {
+                continue;
+            };
             if recursive
                 && kind.is_dir()
                 && !matches!(

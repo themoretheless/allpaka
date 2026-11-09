@@ -11,12 +11,24 @@ import threading
 import functools
 import inspect
 from contextlib import nullcontext
+import http.client
 import urllib.error
 import urllib.parse
 import urllib.request
 
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 _ACTIVE_TRACE = contextvars.ContextVar('allpaka_active_trace', default=None)
+_HEX_CHARS = frozenset("0123456789abcdef")
+
+
+def _is_sha256_hex(val):
+    return isinstance(val, str) and len(val) == 64 and all(c in _HEX_CHARS for c in val)
+
+
+def _csv_safe(val):
+    if isinstance(val, str) and (val.lstrip().startswith(("=", "+", "-", "@")) or val.startswith(("\t", "\r", "\n"))):
+        return "'" + val
+    return val
 
 
 class EvaluationError(Exception):
@@ -391,8 +403,7 @@ class Studio:
             if (not isinstance(row,dict) or set(row)!={'policy_sha256','schema_version','rule_count'}
                     or row['schema_version']!=1 or type(row['schema_version']) is not int
                     or type(row['rule_count']) is not int or not 1<=row['rule_count']<=32
-                    or not isinstance(row['policy_sha256'],str) or len(row['policy_sha256'])!=64
-                    or any(c not in '0123456789abcdef' for c in row['policy_sha256'])):
+                    or not _is_sha256_hex(row['policy_sha256'])):
                 raise ValueError('Incompatible policy catalog row')
             hashes.append(row['policy_sha256'])
         if hashes!=sorted(set(hashes)):
@@ -411,7 +422,7 @@ class Studio:
     def save_online_quality_source(self,project_id,trace_id,trace_sha256,input_text,output,reference=None):
         """Persist explicit text; selected pinned model rules may automatically queue assessments."""
         project_id=self._id(project_id);trace_id=self._id(trace_id)
-        if not isinstance(trace_sha256,str) or len(trace_sha256)!=64 or any(c not in '0123456789abcdef' for c in trace_sha256):raise ValueError('Invalid trace fingerprint')
+        if not _is_sha256_hex(trace_sha256):raise ValueError('Invalid trace fingerprint')
         if not isinstance(input_text,str) or len(input_text.encode('utf-8'))>16000 or not isinstance(output,str) or not output.strip() or len(output.encode('utf-8'))>64000 or (reference is not None and (not isinstance(reference,str) or len(reference.encode('utf-8'))>64000)):raise ValueError('Invalid quality source text bounds')
         return self.request('observability/online-quality-sources',dict(project_id=project_id,trace_id=trace_id,trace_sha256=trace_sha256,input=input_text,output=output,reference=reference))
 
@@ -422,12 +433,12 @@ class Studio:
 
     def online_model_evaluator(self,project_id,evaluator_sha256):
         project_id=self._id(project_id)
-        if not isinstance(evaluator_sha256,str) or len(evaluator_sha256)!=64 or any(c not in '0123456789abcdef' for c in evaluator_sha256):raise ValueError('Invalid evaluator hash')
+        if not _is_sha256_hex(evaluator_sha256):raise ValueError('Invalid evaluator hash')
         return self.request('observability/online-model-evaluators/'+evaluator_sha256+'?'+urllib.parse.urlencode(dict(project_id=project_id)))
 
     def submit_online_quality_job(self,source_sha256,settings,rubric):
         """Queue one durable model assessment; identical requests reuse their job."""
-        if not isinstance(source_sha256,str) or len(source_sha256)!=64 or any(c not in '0123456789abcdef' for c in source_sha256):raise ValueError('Invalid quality source fingerprint')
+        if not _is_sha256_hex(source_sha256):raise ValueError('Invalid quality source fingerprint')
         if not isinstance(rubric,str) or not rubric.strip() or len(rubric.encode('utf-8'))>16000:raise ValueError('Invalid quality rubric')
         return self.request('observability/online-quality-jobs',dict(source_sha256=source_sha256,settings=settings,rubric=rubric))
 
@@ -438,18 +449,18 @@ class Studio:
         return self.request('observability/online-quality-jobs?'+urllib.parse.urlencode(dict(project_id=project_id,offset=offset,limit=limit)))
 
     def online_quality_job(self,job_id):
-        if not isinstance(job_id,str) or len(job_id)!=64 or any(c not in '0123456789abcdef' for c in job_id):raise ValueError('Invalid quality job ID')
+        if not _is_sha256_hex(job_id):raise ValueError('Invalid quality job ID')
         return self.request('observability/online-quality-jobs/'+job_id)
 
     def judge_online_quality_source(self,source_sha256,settings,rubric):
         """Evaluate exactly the retained text source using an explicit model/rubric."""
-        if not isinstance(source_sha256,str) or len(source_sha256)!=64 or any(c not in '0123456789abcdef' for c in source_sha256):raise ValueError('Invalid quality source fingerprint')
+        if not _is_sha256_hex(source_sha256):raise ValueError('Invalid quality source fingerprint')
         return self.request('observability/online-quality-sources/'+source_sha256+'/judge',dict(settings=settings,rubric=rubric),timeout=65)
 
     def online_quality_source(self,project_id,source_sha256):
         """Read explicitly retained quality text and its immutable provenance."""
         project_id=self._id(project_id)
-        if not isinstance(source_sha256,str) or len(source_sha256)!=64 or any(c not in '0123456789abcdef' for c in source_sha256):raise ValueError('Invalid quality source fingerprint')
+        if not _is_sha256_hex(source_sha256):raise ValueError('Invalid quality source fingerprint')
         return self.request('observability/online-quality-sources/'+source_sha256+'?'+urllib.parse.urlencode(dict(project_id=project_id)))
 
     def online_evaluation_jobs(self,project_id,*,offset=0,limit=20):
@@ -477,7 +488,7 @@ class Studio:
 
     def bind_online_evaluation_rule(self,fingerprint,*,base_version,active):
         """Persist an optimistic rule binding used by automatic trace admission."""
-        if not isinstance(fingerprint,str) or len(fingerprint)!=64 or any(c not in '0123456789abcdef' for c in fingerprint) or type(base_version) is not int or not 0<=base_version<1000 or type(active) is not bool:raise ValueError('Invalid online rule binding')
+        if not _is_sha256_hex(fingerprint) or type(base_version) is not int or not 0<=base_version<1000 or type(active) is not bool:raise ValueError('Invalid online rule binding')
         return self.request('observability/online-rule-bindings',dict(rule_sha256=fingerprint,base_version=base_version,active=active))
 
     def online_evaluation_binding(self,project_id,rule_id):
@@ -491,12 +502,11 @@ class Studio:
 
     def online_evaluation_rule(self,fingerprint):
         """Read a verified retained rule snapshot without invoking an evaluator."""
-        if not isinstance(fingerprint,str) or len(fingerprint)!=64 or any(c not in '0123456789abcdef' for c in fingerprint):raise ValueError('Invalid rule hash')
+        if not _is_sha256_hex(fingerprint):raise ValueError('Invalid rule hash')
         return self.request('observability/online-rules/'+fingerprint)
 
     def check_guardrail_policy(self, fingerprint, text, *, stage, action):
-        if (not isinstance(fingerprint,str) or len(fingerprint)!=64
-                or any(c not in '0123456789abcdef' for c in fingerprint)):
+        if not _is_sha256_hex(fingerprint):
             raise ValueError('Use a SHA-256 policy fingerprint')
         if not isinstance(text,str) or len(text.encode('utf-8'))>64000:
             raise ValueError('Use text up to 64000 UTF-8 bytes')
@@ -540,8 +550,7 @@ class Studio:
 
     def guardrail_policy(self, fingerprint):
         from allpaka_guardrails import rules_from_manifest
-        if (not isinstance(fingerprint,str) or len(fingerprint)!=64
-                or any(c not in '0123456789abcdef' for c in fingerprint)):
+        if not _is_sha256_hex(fingerprint):
             raise ValueError('Use a SHA-256 policy fingerprint')
         result=self.request('guardrail-policies/'+fingerprint)
         rules_from_manifest(result.get('policy'))
@@ -632,7 +641,7 @@ class Studio:
             if value is None:return ''
             if type(value) is int:return value
             if not isinstance(value,str):invalid()
-            return "'"+value if value.lstrip().startswith(('=','+','-','@')) or value.startswith(('\t','\r','\n')) else value
+            return _csv_safe(value)
         stream=io.StringIO(newline='');writer=csv.writer(stream)
         writer.writerow(['queue_id','queue_version','project_id','queue_name','archived','target_index','trace_id','span_id','status','reviewer','feedback_version','annotation_id'])
         seen=set()
@@ -1017,26 +1026,74 @@ class Studio:
         # Validate the port before making a request.
         parsed.port
         self.base_url = base_url.rstrip("/")
+        self._scheme = parsed.scheme
+        self._host = parsed.hostname
+        self._port = parsed.port
+        self._pool = []
+        self._pool_lock = threading.Lock()
         self.opener = urllib.request.build_opener(_NoRedirect())
 
     def request(self, path, body=None, timeout=10):
-        request = urllib.request.Request(
-            self.base_url + "/api/" + path,
-            data=None if body is None else json.dumps(body, allow_nan=False).encode(),
-            headers={"Content-Type": "application/json", "X-Allpaka-Client": "studio"},
-        )
+        payload = None if body is None else json.dumps(body, allow_nan=False).encode()
+        method = "GET" if payload is None else "POST"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Allpaka-Client": "studio",
+            "Connection": "keep-alive",
+        }
+        if payload is not None:
+            headers["Content-Length"] = str(len(payload))
+        if not hasattr(self, "_pool_lock"):
+            parsed = urllib.parse.urlsplit(self.base_url)
+            self._scheme = parsed.scheme
+            self._host = parsed.hostname
+            self._port = parsed.port
+            self._pool = []
+            self._pool_lock = threading.Lock()
+        cls = http.client.HTTPSConnection if self._scheme == "https" else http.client.HTTPConnection
+        with self._pool_lock:
+            conn = self._pool.pop() if self._pool else None
+        reused = conn is not None
         try:
-            with self.opener.open(request, timeout=timeout) as response:
-                data = response.read(MAX_RESPONSE_BYTES + 1)
-                if len(data) > MAX_RESPONSE_BYTES:
-                    raise EvaluationError("response_too_large")
-                return json.loads(data, parse_constant=_reject_nonfinite)
-        except urllib.error.HTTPError as error:
-            # Provider/server text may contain private input; don't echo it into CI logs.
-            code = error.code
-            error.close()
-            raise EvaluationError("http_" + str(code)) from None
-        except (urllib.error.URLError, TimeoutError, OSError):
+            for attempt in range(2):
+                if conn is None:
+                    conn = cls(self._host, self._port, timeout=timeout)
+                else:
+                    conn.timeout = timeout
+                    if conn.sock is not None:
+                        conn.sock.settimeout(timeout)
+                try:
+                    conn.request(method, "/api/" + path, body=payload, headers=headers)
+                    response = conn.getresponse()
+                    break
+                except (http.client.RemoteDisconnected, http.client.BadStatusLine, BrokenPipeError, ConnectionResetError):
+                    conn.close()
+                    conn = None
+                    if not reused or attempt == 1:
+                        raise
+            if not 200 <= response.status < 300:
+                # Provider/server text may contain private input; don't echo it into CI logs.
+                code = response.status
+                conn.close()
+                raise EvaluationError("http_" + str(code))
+            data = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(data) > MAX_RESPONSE_BYTES:
+                conn.close()
+                raise EvaluationError("response_too_large")
+            if not response.will_close and response.isclosed():
+                with self._pool_lock:
+                    if len(self._pool) < 8:
+                        self._pool.append(conn)
+                    else:
+                        conn.close()
+            else:
+                conn.close()
+            return json.loads(data, parse_constant=_reject_nonfinite)
+        except EvaluationError:
+            raise
+        except (http.client.HTTPException, urllib.error.URLError, TimeoutError, OSError):
+            if conn is not None:
+                conn.close()
             raise EvaluationError("connection_error") from None
         except (ValueError, UnicodeError):
             raise EvaluationError("invalid_response") from None
@@ -1142,7 +1199,7 @@ class Studio:
         """Browse persisted metadata; guardrail filters select reported SDK outcomes."""
         if guardrail is not None and guardrail not in ('any','failed','blocked'):
             raise ValueError('Invalid guardrail trace filter')
-        if guardrail_policy_sha256 is not None and (not isinstance(guardrail_policy_sha256,str) or len(guardrail_policy_sha256)!=64 or any(c not in '0123456789abcdef' for c in guardrail_policy_sha256)):
+        if guardrail_policy_sha256 is not None and not _is_sha256_hex(guardrail_policy_sha256):
             raise ValueError('Invalid guardrail policy SHA-256')
         if type(removed) is not bool or type(offset) is not int or not 0<=offset<=100000 or type(limit) is not int or not 1<=limit<=200:
             raise ValueError('Invalid trace pagination or visibility')
@@ -1170,13 +1227,7 @@ class Studio:
         if since_ms is not None and until_ms is not None and since_ms>until_ms:raise ValueError('Invalid evaluation summary range')
         return self.request('observability/evaluations/summary?'+urllib.parse.urlencode(query))
 
-    def export_callback_evaluation_summary(self,project_id,*,format='json',since_ms=None,until_ms=None):
-        """Export all reported groups from one scoped receipt, without model calls.
-
-        CSV repeats global counters on each row; an empty summary has one context row.
-        Evaluator identities and scores are reported by caller code.
-        """
-        if format not in ('json','csv'):raise ValueError('Invalid callback summary export format')
+    def _validated_callback_evaluation_summary(self,project_id,*,since_ms=None,until_ms=None):
         packet=self.callback_evaluation_summary(project_id,since_ms=since_ms,until_ms=until_ms)
         def invalid():raise EvaluationError('invalid_callback_summary_export')
         if not isinstance(packet,dict):invalid()
@@ -1219,20 +1270,31 @@ class Studio:
                 if row['completed_assessments']+row['failed_assessments']==0:invalid()
             if totals!=[packet['completed_assessments'],packet['failed_assessments']]:invalid()
             if any((row['evaluator_id'],row['evaluator_version']) not in identities for row in rows):invalid()
+        return packet
+
+    def export_callback_evaluation_summary(self,project_id,*,format='json',since_ms=None,until_ms=None):
+        """Export all reported groups from one scoped receipt, without model calls.
+
+        CSV repeats global counters on each row; an empty summary has one context row.
+        Evaluator identities and scores are reported by caller code.
+        """
+        if format not in ('json','csv'):raise ValueError('Invalid callback summary export format')
+        packet=self._validated_callback_evaluation_summary(project_id,since_ms=since_ms,until_ms=until_ms)
         if format=='json':return json.dumps(packet,ensure_ascii=False,allow_nan=False,indent=2)
+        counters=['trace_count','selected_tasks','skipped_tasks','completed_assessments','failed_assessments']
+        rows=packet['metrics']
         columns=['project_id','since_ms','until_ms']+counters+['assessment_source','provider_calls','automatic_promotion','evaluator_id','evaluator_version','metric','count','mean','min','max']
         def cell(value):
             if value is None:return ''
             if type(value) is bool:return str(value).lower()
-            if isinstance(value,str) and value.lstrip().startswith(('=','+','-','@')):return "'"+value
-            return value
+            return _csv_safe(value)
         stream=io.StringIO(newline='');writer=csv.writer(stream);writer.writerow(columns)
         for row in rows or [{}]:writer.writerow([cell(row.get(key) if key in ('evaluator_id','evaluator_version','metric','count','mean','min','max') else packet[key]) for key in columns])
         return stream.getvalue()
 
     def export_callback_evaluator_attempts_csv(self,project_id,*,since_ms=None,until_ms=None):
         """Export attempt groups, including failed-only and unidentified evaluators."""
-        packet=json.loads(self.export_callback_evaluation_summary(project_id,since_ms=since_ms,until_ms=until_ms))
+        packet=self._validated_callback_evaluation_summary(project_id,since_ms=since_ms,until_ms=until_ms)
         if 'evaluators' not in packet:raise EvaluationError('callback_evaluator_attempts_unavailable')
         columns=['project_id','since_ms','until_ms','assessment_source','provider_calls','automatic_promotion','evaluator_id','evaluator_version','completed_assessments','failed_assessments']
         stream=io.StringIO(newline='');writer=csv.writer(stream);writer.writerow(columns)
@@ -1242,7 +1304,7 @@ class Studio:
                 value=row.get(key) if key in ('evaluator_id','evaluator_version','completed_assessments','failed_assessments') else packet[key]
                 if value is None:value=''
                 elif type(value) is bool:value=str(value).lower()
-                elif isinstance(value,str) and value.lstrip().startswith(('=','+','-','@')):value="'"+value
+                else:value=_csv_safe(value)
                 values.append(value)
             writer.writerow(values)
         return stream.getvalue()
@@ -1271,7 +1333,7 @@ class Studio:
             if identity in seen:raise ValueError('Duplicate callback metric requirement')
             seen.add(identity);normalized.append(dict(requirement))
         if max_failed_assessments is not None and (type(max_failed_assessments) is not int or not 0<=max_failed_assessments<=20000000):raise ValueError('Invalid callback failure limit')
-        summary=json.loads(self.export_callback_evaluation_summary(project_id,since_ms=since_ms,until_ms=until_ms))
+        summary=self._validated_callback_evaluation_summary(project_id,since_ms=since_ms,until_ms=until_ms)
         groups={(row['evaluator_id'],row['evaluator_version'],row['metric']):row for row in summary['metrics']}
         attempts={(row['evaluator_id'],row['evaluator_version']):row for row in summary.get('evaluators',[])}
         checks=[]
@@ -1343,7 +1405,7 @@ class Studio:
             raise ValueError('Invalid dataset name')
         source=self.request('evaluation/datasets/'+dataset_id+'/versions/'+str(dataset_version))
         digest=source.get('sha256')
-        if source.get('id')!=dataset_id or source.get('project_id')!=project_id or source.get('version')!=dataset_version or not isinstance(digest,str) or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
+        if source.get('id')!=dataset_id or source.get('project_id')!=project_id or source.get('version')!=dataset_version or not _is_sha256_hex(digest):
             raise ValueError('Dataset source identity/hash mismatch')
         return self.request('evaluation/datasets',dict(project_id=project_id,name=name,base_version=0,samples=source['samples'],origin=dict(id=dataset_id,version=dataset_version,sha256=digest)))
 
@@ -1365,7 +1427,7 @@ class Studio:
     def start_playground(self,prompt_id,prompt_version,prompt_sha256,input_text,settings,*,contexts=None,expected_output=None,metrics=None,item_timeout_secs=120):
         """Run one question on a reviewed prompt; saves its sample/run and native trace."""
         prompt_id=self._id(prompt_id)
-        if type(prompt_version) is not int or prompt_version<1 or not isinstance(prompt_sha256,str) or len(prompt_sha256)!=64 or any(c not in '0123456789abcdef' for c in prompt_sha256):
+        if type(prompt_version) is not int or prompt_version<1 or not _is_sha256_hex(prompt_sha256):
             raise ValueError('Pin a saved prompt version/hash')
         if not isinstance(input_text,str) or not input_text.strip() or len(input_text.encode('utf-8'))>65536:
             raise ValueError('Invalid playground question')
@@ -1422,7 +1484,7 @@ class Studio:
                     or before.get('version')!=from_version or after.get('version')!=to_version):invalid()
             for snapshot in (before,after):
                 digest=snapshot.get('sha256')
-                if not isinstance(digest,str) or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):invalid()
+                if not _is_sha256_hex(digest):invalid()
             identity=(before['sha256'],after['sha256'],total,tuple(counts[k] for k in ('added','removed','changed','unchanged')))
             if pin is None:pin=identity
             elif pin!=identity:invalid()
@@ -1440,7 +1502,7 @@ class Studio:
         if any(observed[k]!=counts[k] for k in observed):invalid()
         stream=io.StringIO(newline='');writer=csv.writer(stream)
         writer.writerow(['dataset_id','project_id','from_version','from_sha256','to_version','to_sha256','sample_id','change','fields'])
-        writer.writerows([[("'"+v if v.lstrip().startswith(('=','+','-','@')) or v.startswith(('\t','\r','\n')) else v) if isinstance(v,str) else v for v in row] for row in rows])
+        writer.writerows([[_csv_safe(v) for v in row] for row in rows])
         return stream.getvalue()
 
     def dataset_versions(self,dataset_id,project_id,*,offset=0,limit=20):
@@ -1628,7 +1690,7 @@ class Studio:
     def judge_trace(self,trace_id,trace_sha256,settings,rubric,input_text,output,reference=None):
         """Judge explicitly supplied text, pinning completed trace metadata separately."""
         trace_id=self._id(trace_id)
-        if not isinstance(trace_sha256,str) or len(trace_sha256)!=64 or any(c not in '0123456789abcdef' for c in trace_sha256):raise ValueError('Invalid trace fingerprint')
+        if not _is_sha256_hex(trace_sha256):raise ValueError('Invalid trace fingerprint')
         return self.request('evaluation/judge',dict(settings=settings,rubric=rubric,input=input_text,output=output,reference=reference,trace_ref=dict(trace_id=trace_id,trace_sha256=trace_sha256)),timeout=65)
 
     def judge_sample(self, dataset_id, dataset_version, sample_id, settings, rubric, output):
@@ -1991,7 +2053,7 @@ class Studio:
         for source in sources:
             if not isinstance(source,dict) or set(source)!={'id','version','sha256'}:raise ValueError('Invalid memory source pin')
             identity=self._id(source['id']);version=source['version'];fingerprint=source['sha256']
-            if identity in seen or type(version) is not int or not 1<=version<=1000 or not isinstance(fingerprint,str) or len(fingerprint)!=64 or any(c not in '0123456789abcdef' for c in fingerprint):raise ValueError('Invalid or duplicate source pin')
+            if identity in seen or type(version) is not int or not 1<=version<=1000 or not _is_sha256_hex(fingerprint):raise ValueError('Invalid or duplicate source pin')
             seen.add(identity);pins.append(dict(id=identity,version=version,sha256=fingerprint))
         return self.request('memory/consolidation-proposals',dict(settings=dict(settings),sources=pins),timeout=65)
 
@@ -2015,7 +2077,7 @@ class Studio:
         for source in sources:
             if not isinstance(source,dict) or set(source)!={'id','version','sha256'}:raise ValueError('Invalid memory source pin')
             identity=self._id(source['id']);version=source['version'];fingerprint=source['sha256']
-            if identity in seen or type(version) is not int or not 1<=version<=1000 or not isinstance(fingerprint,str) or len(fingerprint)!=64 or any(c not in '0123456789abcdef' for c in fingerprint):raise ValueError('Invalid or duplicate memory source pin')
+            if identity in seen or type(version) is not int or not 1<=version<=1000 or not _is_sha256_hex(fingerprint):raise ValueError('Invalid or duplicate memory source pin')
             seen.add(identity);pins.append(dict(id=identity,version=version,sha256=fingerprint))
         return self.request('memory/notes',dict(project_id=project_id,name=name,content=content,base_version=0,consolidation_sources=pins))
 
@@ -2193,11 +2255,11 @@ class Studio:
             label=variant['label'];digest=variant['sha256'];request=variant['request']
             if not isinstance(label,str) or not label.strip() or len(label.encode('utf-8'))>200 or label in labels:
                 raise ValueError('Use unique bounded labels')
-            if not isinstance(digest,str) or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
+            if not _is_sha256_hex(digest):
                 raise ValueError('Pin a dataset SHA-256')
             if 'prompt_sha256' in variant:
                 prompt_hash=variant['prompt_sha256']
-                if not isinstance(prompt_hash,str) or len(prompt_hash)!=64 or any(c not in '0123456789abcdef' for c in prompt_hash):
+                if not _is_sha256_hex(prompt_hash):
                     raise ValueError('Pin a prompt SHA-256')
             if not isinstance(request,dict) or not isinstance(request.get('settings'),dict) or request['settings'].get('project_id')!=project_id:
                 raise ValueError('Each request must belong to the matrix project')
@@ -2283,7 +2345,7 @@ class Studio:
             raise EvaluationError('invalid_comparison_receipt',comparison_id)
         def cell(value):
             if not isinstance(value,str):raise EvaluationError('invalid_comparison_receipt',comparison_id)
-            return "'"+value if value.lstrip().startswith(('=','+','-','@')) or value.startswith(('\t','\r','\n')) else value
+            return _csv_safe(value)
         fixed=[cell(packet.get(key)) for key in ['id','baseline_id','candidate_id','project_id','dataset_id','dataset_sha256']]
         version=packet.get('dataset_version')
         if type(version) is not int or version<1:raise EvaluationError('invalid_comparison_receipt',comparison_id)
@@ -2344,7 +2406,7 @@ class Studio:
             raise EvaluationError('invalid_experiment_export',run_id)
         def text_cell(value):
             if not isinstance(value,str):raise EvaluationError('invalid_experiment_export',run_id)
-            return "'"+value if value.lstrip().startswith(('=','+','-','@')) or value.startswith(('\t','\r','\n')) else value
+            return _csv_safe(value)
         prompt=packet.get('prompt_ref')
         if prompt is not None and (not isinstance(prompt,dict) or type(prompt.get('version')) is not int or prompt['version']<1):
             raise EvaluationError('invalid_experiment_export',run_id)

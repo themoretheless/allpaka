@@ -6,23 +6,16 @@ use crate::{
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{
     io::Read,
     path::{Path, PathBuf},
 };
 static WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn hash(value: &Value) -> Result<String> {
-    Ok(Sha256::digest(serde_json::to_vec(value)?)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(crate::storage::hex_sha256(&serde_json::to_vec(value)?))
 }
 fn valid_hash(id: &str) -> bool {
-    id.len() == 64
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    crate::storage::valid_sha256_hex(id)
 }
 fn read(path: &Path) -> Result<Value> {
     read_bound(path, 64000)
@@ -260,18 +253,18 @@ pub(crate) async fn list_api(
         .map(axum::Json)
         .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
 }
+fn get_inner(app: &App, id: &str) -> Result<Value> {
+    let (packet, _) = plan(&app.data, id)?;
+    let (status, result) = state(&app.data, id)?;
+    Ok(
+        json!({"kind":"online_quality_job_status","id":id,"status":status,"plan":packet,"result":result}),
+    )
+}
 pub(crate) async fn get_api(
     axum::extract::State(app): axum::extract::State<App>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> crate::ApiResult<Value> {
-    let outcome = (|| -> Result<_> {
-        let (packet, _) = plan(&app.data, &id)?;
-        let (status, result) = state(&app.data, &id)?;
-        Ok(
-            json!({"kind":"online_quality_job_status","id":id,"status":status,"plan":packet,"result":result}),
-        )
-    })();
-    outcome.map(axum::Json).map_err(|_| {
+    get_inner(&app, &id).map(axum::Json).map_err(|_| {
         crate::error(
             axum::http::StatusCode::NOT_FOUND,
             "Quality job unavailable or invalid",
@@ -284,7 +277,12 @@ pub(crate) async fn submit_api(
 ) -> crate::ApiResult<Value> {
     let outcome =
         enqueue(&app, input).map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))?;
-    get_api(axum::extract::State(app), axum::extract::Path(outcome)).await
+    get_inner(&app, &outcome).map(axum::Json).map_err(|_| {
+        crate::error(
+            axum::http::StatusCode::NOT_FOUND,
+            "Quality job unavailable or invalid",
+        )
+    })
 }
 pub(crate) fn enqueue(app: &App, input: Input) -> Result<String> {
     crate::validate_settings(&input.settings, app)?;
@@ -381,14 +379,11 @@ pub(crate) fn spawn(app: App) -> Worker {
                             settings: input.settings,
                             rubric: input.rubric,
                         };
-                        let verdict = crate::judge::judge_source(
-                            axum::extract::State(app.clone()),
-                            axum::extract::Path(input.source_sha256),
-                            axum::Json(request),
-                        )
-                        .await;
+                        let verdict =
+                            crate::judge::judge_source_inner(&app, &input.source_sha256, request)
+                                .await;
                         match verdict {
-                            Ok(verdict) => finish(&app.data, &id, "completed", Some(&verdict.0))?,
+                            Ok(verdict) => finish(&app.data, &id, "completed", Some(&verdict))?,
                             Err(_) => finish(&app.data, &id, "failed", None)?,
                         }
                     }

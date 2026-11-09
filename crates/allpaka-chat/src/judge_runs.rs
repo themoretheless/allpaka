@@ -167,7 +167,7 @@ pub(crate) async fn list(
     let total = ids.len();
     let mut runs = Vec::new();
     for id in ids.into_iter().skip(query.offset).take(limit) {
-        let run = get(State(app.clone()), Path(id)).await?.0;
+        let run = get_inner(&app, &id)?;
         runs.push(json!({"id":run["id"],"project_id":run["project_id"],"plan_id":run["plan_id"],"trace_id":run["trace_id"],"status":run["status"],"sample_count":run["sample_count"],"completed":run["items"].as_array().map(|items|items.len()),"mean_score":run["mean_score"]}));
     }
     Ok(Json(
@@ -178,9 +178,8 @@ pub(crate) async fn start(
     State(app): State<App>,
     Json(input): Json<Start>,
 ) -> crate::ApiResult<Value> {
-    let plan = judge::read_plan(State(app.clone()), Path(input.plan_id))
-        .await?
-        .0;
+    let plan = judge::read_plan_inner(&app, &input.plan_id)
+        .map_err(|_| crate::error(StatusCode::BAD_REQUEST, "Judge plan unavailable or invalid"))?;
     let permit = app
         .judge_runs
         .capacity
@@ -226,7 +225,7 @@ pub(crate) async fn start(
             let request = json!({"settings":plan["settings"],"rubric":plan["rubric"],"input":sample["input"],"output":sample["output"],"reference":sample["reference"],"dataset_ref":{"dataset_id":plan["dataset_id"],"dataset_version":plan["dataset_version"],"sample_id":sample["sample_id"]}});
             let result = match serde_json::from_value(request) {
                 Ok(request) => {
-                    tokio::select! {biased;result=judge::judge(State(app.clone()),Json(request))=>Some(result),_=cancellation.changed()=>None}
+                    tokio::select! {biased;result=judge::judge_inner(&app, request)=>Some(result),_=cancellation.changed()=>None}
                 }
                 Err(_) => {
                     item_span.finish("failed", &Value::Null);
@@ -235,7 +234,7 @@ pub(crate) async fn start(
                 }
             };
             match result {
-                Some(Ok(Json(receipt))) => {
+                Some(Ok(receipt)) => {
                     let item = json!({"sample_id":sample["sample_id"],"receipt_id":receipt["id"],"receipt_sha256":receipt["receipt_sha256"],"score":receipt["score"],"trace_id":receipt["trace_id"]});
                     if crate::evaluation::commit_new(
                         &prepared.1.join(format!("item-{index:04}.json")),
@@ -282,17 +281,19 @@ pub(crate) async fn start(
     });
     Ok(Json(response))
 }
-pub(crate) async fn get(State(app): State<App>, Path(id): Path<String>) -> crate::ApiResult<Value> {
+pub(crate) fn get_inner(
+    app: &App,
+    id: &str,
+) -> std::result::Result<Value, (StatusCode, Json<Value>)> {
     let run = app
         .judge_runs
-        .load(&id)
+        .load(id)
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
     let plan_id = run["plan_id"]
         .as_str()
         .ok_or_else(|| crate::error(StatusCode::BAD_REQUEST, "Missing judge plan"))?;
-    let plan = judge::read_plan(State(app.clone()), Path(plan_id.into()))
-        .await?
-        .0;
+    let plan = judge::read_plan_inner(app, plan_id)
+        .map_err(|_| crate::error(StatusCode::BAD_REQUEST, "Judge plan unavailable or invalid"))?;
     if run["id"] != id
         || run["plan_sha256"] != plan["plan_sha256"]
         || run["sample_count"] != plan["samples"].as_array().map(|s| s.len()).unwrap_or(0)
@@ -320,9 +321,12 @@ pub(crate) async fn get(State(app): State<App>, Path(id): Path<String>) -> crate
         let receipt_id = item["receipt_id"]
             .as_str()
             .ok_or_else(|| crate::error(StatusCode::BAD_REQUEST, "Missing judge receipt"))?;
-        let receipt = judge::read(State(app.clone()), Path(receipt_id.into()))
-            .await?
-            .0;
+        let receipt = judge::read_inner(app, receipt_id).map_err(|_| {
+            crate::error(
+                StatusCode::BAD_REQUEST,
+                "Judge receipt unavailable or invalid",
+            )
+        })?;
         if receipt["settings"] != plan["settings"]
             || receipt["project_id"] != plan["project_id"]
             || receipt["input"] != plan["samples"][index]["input"]
@@ -366,7 +370,10 @@ pub(crate) async fn get(State(app): State<App>, Path(id): Path<String>) -> crate
             ));
         }
     }
-    Ok(Json(run))
+    Ok(run)
+}
+pub(crate) async fn get(State(app): State<App>, Path(id): Path<String>) -> crate::ApiResult<Value> {
+    get_inner(&app, &id).map(Json)
 }
 pub(crate) async fn cancel(
     State(app): State<App>,
@@ -390,20 +397,12 @@ pub(crate) async fn compare(
     State(app): State<App>,
     Json(input): Json<Compare>,
 ) -> crate::ApiResult<Value> {
-    let baseline = get(State(app.clone()), Path(input.baseline_id)).await?.0;
-    let candidate = get(State(app.clone()), Path(input.candidate_id)).await?.0;
-    let left = judge::read_plan(
-        State(app.clone()),
-        Path(baseline["plan_id"].as_str().unwrap().into()),
-    )
-    .await?
-    .0;
-    let right = judge::read_plan(
-        State(app.clone()),
-        Path(candidate["plan_id"].as_str().unwrap().into()),
-    )
-    .await?
-    .0;
+    let baseline = get_inner(&app, &input.baseline_id)?;
+    let candidate = get_inner(&app, &input.candidate_id)?;
+    let left = judge::read_plan_inner(&app, baseline["plan_id"].as_str().unwrap())
+        .map_err(|_| crate::error(StatusCode::BAD_REQUEST, "Judge plan unavailable or invalid"))?;
+    let right = judge::read_plan_inner(&app, candidate["plan_id"].as_str().unwrap())
+        .map_err(|_| crate::error(StatusCode::BAD_REQUEST, "Judge plan unavailable or invalid"))?;
     let result = (|| -> Result<Value> {
         if baseline["status"] != "completed" || candidate["status"] != "completed" {
             bail!("Judge comparisons require completed batches");

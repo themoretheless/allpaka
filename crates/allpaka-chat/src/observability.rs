@@ -18,10 +18,13 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+type TraceCache = Arc<Mutex<std::collections::HashMap<String, (u64, Option<SystemTime>, Record)>>>;
+
 #[derive(Clone)]
 pub(crate) struct Store {
     root: Arc<PathBuf>,
     lifecycle: Arc<Mutex<()>>,
+    cache: TraceCache,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Record {
@@ -184,6 +187,7 @@ pub(crate) struct Trace {
     record: Arc<Mutex<Record>>,
     path: Arc<PathBuf>,
     writer: Arc<Mutex<()>>,
+    cache: TraceCache,
 }
 pub(crate) struct Guard {
     trace: Trace,
@@ -208,12 +212,22 @@ fn atomic_write(path: &std::path::Path, record: &Record) -> Result<()> {
             .create_new(true)
             .open(&temp)?;
         file.write_all(&bytes)?;
-        file.sync_all()?;
+        if record.status != "running" {
+            file.sync_all()?;
+        }
         std::fs::rename(&temp, path)?;
         Ok(())
     })();
     let _ = std::fs::remove_file(temp);
     result
+}
+fn update_cache(cache: &TraceCache, path: &std::path::Path, record: &Record) {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        cache
+            .lock()
+            .unwrap()
+            .insert(record.id.clone(), (meta.len(), meta.modified().ok(), record.clone()));
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -460,15 +474,10 @@ impl Store {
         }
         let keyed = request.idempotency_key.is_some();
         let id = if let Some(key) = request.idempotency_key {
-            use sha2::{Digest, Sha256};
             // Scope keys to the project; no raw key is retained in metadata.
-            let digest = Sha256::digest(serde_json::to_vec(&(request.project_id.as_str(), key))?);
             format!(
                 "trace-external-{}",
-                digest
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
+                crate::storage::hex_sha256(&serde_json::to_vec(&(request.project_id.as_str(), key))?)
             )
         } else {
             format!("trace-external-{}", crate::evaluation::new_id())
@@ -504,6 +513,7 @@ impl Store {
             }
             return Err(error);
         }
+        update_cache(&self.cache, &path, &record);
         Ok(
             json!({"id":id,"source":"external","span_count":record.spans.len(),"provider_calls":0,"deduplicated":false}),
         )
@@ -567,6 +577,16 @@ impl Store {
         if !metadata.is_file() || metadata.len() > 1024 * 1024 {
             bail!("Invalid trace record");
         }
+        let mtime = metadata.modified().ok();
+        if mtime.is_some() {
+            if let Some((cached_len, cached_mtime, cached_record)) =
+                self.cache.lock().unwrap().get(id)
+            {
+                if *cached_len == metadata.len() && *cached_mtime == mtime {
+                    return Ok(cached_record.clone());
+                }
+            }
+        }
         let mut bytes = Vec::new();
         std::fs::File::open(path)?
             .take(1024 * 1024 + 1)
@@ -578,21 +598,41 @@ impl Store {
         if record.id != id {
             bail!("Trace or span identity does not exist");
         }
+        if mtime.is_some() {
+            self.cache
+                .lock()
+                .unwrap()
+                .insert(id.to_owned(), (metadata.len(), mtime, record.clone()));
+        }
+        Ok(record)
+    }
+    fn read_validated_record(
+        &self,
+        id: &str,
+        span: Option<usize>,
+        project: Option<&str>,
+    ) -> Result<Record> {
+        let record = self.read_record(id)?;
+        if self.is_removed(id)? {
+            bail!("Trace was removed");
+        }
+        if span.is_some_and(|n| !record.spans.iter().any(|s| s.id == n)) {
+            bail!("Trace span does not exist");
+        }
+        if project.is_some_and(|p| record.project_id != p) {
+            bail!("Review target belongs to another project");
+        }
         Ok(record)
     }
     pub(crate) fn completed_trace_health(&self, id: &str, project: &str) -> Result<(String, f64)> {
-        self.validate_project_target(id, None, project)?;
-        let record = self.read_record(id)?;
+        let record = self.read_validated_record(id, None, Some(project))?;
         if record.status != "completed"
             || record.spans.is_empty()
             || record.spans.iter().any(|span| span.status == "running")
         {
             bail!("Assessment requires a completed trace with spans");
         }
-        let hash = Sha256::digest(serde_json::to_vec(&record)?)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let hash = crate::storage::hex_sha256(&serde_json::to_vec(&record)?);
         let score = record
             .spans
             .iter()
@@ -602,16 +642,12 @@ impl Store {
         Ok((hash, score))
     }
     pub(crate) fn completed_trace_fingerprint(&self, id: &str, project: &str) -> Result<String> {
-        self.validate_project_target(id, None, project)?;
-        let record = self.read_record(id)?;
+        let record = self.read_validated_record(id, None, Some(project))?;
         if record.status != "completed" || record.spans.iter().any(|span| span.status == "running")
         {
             bail!("Online selection requires a completed trace");
         }
-        Ok(Sha256::digest(serde_json::to_vec(&record)?)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect())
+        Ok(crate::storage::hex_sha256(&serde_json::to_vec(&record)?))
     }
     pub(crate) fn validate_project_target(
         &self,
@@ -619,21 +655,11 @@ impl Store {
         span: Option<usize>,
         project: &str,
     ) -> Result<()> {
-        self.validate_target(id, span)?;
-        if self.read_record(id)?.project_id != project {
-            bail!("Review target belongs to another project");
-        }
-        Ok(())
+        self.read_validated_record(id, span, Some(project))
+            .map(|_| ())
     }
     pub(crate) fn validate_target(&self, id: &str, span: Option<usize>) -> Result<()> {
-        let record = self.read_record(id)?;
-        if self.is_removed(id)? {
-            bail!("Trace was removed");
-        }
-        if span.is_some_and(|n| !record.spans.iter().any(|s| s.id == n)) {
-            bail!("Trace span does not exist");
-        }
-        Ok(())
+        self.read_validated_record(id, span, None).map(|_| ())
     }
     pub(crate) fn new(data: &std::path::Path) -> Result<Self> {
         let root = data.join("observability/traces");
@@ -645,6 +671,7 @@ impl Store {
         Ok(Self {
             root: Arc::new(root),
             lifecycle: Arc::new(Mutex::new(())),
+            cache: Default::default(),
         })
     }
     /// Called once at startup while the data-directory OS lock is held.
@@ -687,6 +714,7 @@ impl Store {
                 atomic_write(&path, &record)?;
                 recovered += 1;
             }
+            update_cache(&self.cache, &path, &record);
         }
         Ok(recovered)
     }
@@ -710,6 +738,7 @@ impl Store {
                 spans: vec![],
             })),
             writer: Arc::new(Mutex::new(())),
+            cache: self.cache.clone(),
         };
         trace.persist()?;
         Ok(trace)
@@ -1111,7 +1140,10 @@ impl Trace {
     }
     fn persist(&self) -> Result<()> {
         let _writer = self.writer.lock().unwrap();
-        atomic_write(self.path.as_ref(), &self.record.lock().unwrap())
+        let record = self.record.lock().unwrap().clone();
+        atomic_write(self.path.as_ref(), &record)?;
+        update_cache(&self.cache, self.path.as_ref(), &record);
+        Ok(())
     }
     fn flush(&self) {
         if let Err(error) = self.persist() {
@@ -1339,10 +1371,7 @@ fn public_guardrail_receipt(value: &Value) -> Option<Value> {
     )
 }
 fn valid_policy_hash(hash: &str) -> bool {
-    hash.len() == 64
-        && hash
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    crate::storage::valid_sha256_hex(hash)
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1652,10 +1681,7 @@ pub(crate) async fn get(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> crate::ApiResult<Value> {
     app.observability
-        .validate_target(&id, None)
-        .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
-    app.observability
-        .read_record(&id)
+        .read_validated_record(&id, None, None)
         .and_then(|record| Ok(serde_json::to_value(record)?))
         .map(Json)
         .map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))
@@ -1666,8 +1692,7 @@ pub(crate) struct ExportOptions {
     include_feedback: Option<bool>,
 }
 fn export_packet(app: &crate::App, id: &str, include_feedback: bool) -> Result<Value> {
-    app.observability.validate_target(id, None)?;
-    let record = app.observability.read_record(id)?;
+    let record = app.observability.read_validated_record(id, None, None)?;
     if record.status == "running" || record.spans.iter().any(|span| span.status == "running") {
         bail!("Export requires a completed trace snapshot");
     }

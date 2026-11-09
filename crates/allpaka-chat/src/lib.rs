@@ -36,6 +36,7 @@ mod rag;
 mod remote_worker;
 mod review_queues;
 mod state_file;
+pub mod storage;
 mod strict_json;
 mod swarm;
 mod tools;
@@ -1603,7 +1604,7 @@ async fn turn_traced(
     let harness_hooks = harness::hooks(&harness_tree)?;
     let nested = ephemeral.as_ref().is_some_and(|e| e.nested);
     let policy = ephemeral.as_ref().map_or_else(
-        || ExecutionPolicy::trusted_unsandboxed(),
+        ExecutionPolicy::trusted_unsandboxed,
         |e| e.policy,
     );
     let restricted = !policy.external_tools;
