@@ -1276,7 +1276,7 @@ impl Gpu {
         let sum: f64 = total.values().map(|v| v.0).sum();
         eprintln!("gpu counters: {n} stamps, {sum:.2} ms attributed");
         let mut v: Vec<_> = total.into_iter().collect();
-        v.sort_by(|a, b| (b.1).0.partial_cmp(&(a.1).0).unwrap());
+        v.sort_by(|a, b| (b.1).0.total_cmp(&(a.1).0));
         for (l, (s, c, mx)) in v {
             eprintln!(
                 "  {l:<6} {s:8.3} ms  n={c:<3} mean {:.3} max {:.3}  ({:.1}%)",
