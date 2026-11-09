@@ -22,7 +22,7 @@
   --text: #2b2419;
   --bg: #f4eedf;
   --line: #e4dac3;
-  --muted: #8d8170;
+  --muted: #6e665a;
   --accent: #9c6a13;
   --accent-on: #fffdf5;
   --accent-hover: #83570d;
@@ -167,7 +167,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
 /* ===== Typography ===== */
 .eyebrow {
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 1.4px;
   font-weight: 650;
   color: var(--muted);
@@ -327,7 +327,7 @@ label {
 
 .history-controls select {
   flex: 1;
-  font-size: 11px;
+  font-size: 12px;
   padding: 7px 8px;
 }
 
@@ -392,7 +392,7 @@ label {
 .chat-actions { display: flex; gap: 4px; flex-wrap: wrap; }
 
 .chat-actions button {
-  font-size: 10px;
+  font-size: 12px;
   padding: 3px 7px;
   border: 1px solid var(--line);
   flex: none;
@@ -400,7 +400,7 @@ label {
 }
 
 #sessions small {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted);
   overflow-wrap: anywhere;
 }
@@ -435,11 +435,11 @@ label {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11px;
+  font-size: 12px;
   padding: 4px 2px;
 }
 
-#sessions-status button { font-size: 10px; padding: 3px 8px; }
+#sessions-status button { font-size: 12px; padding: 3px 8px; }
 
 #sessions-more {
   display: flex;
@@ -447,7 +447,7 @@ label {
   padding: 4px 0;
 }
 
-#sessions-more button { font-size: 11px; width: 100%; }
+#sessions-more button { font-size: 12px; width: 100%; }
 
 /* Sidebar Bottom */
 .sidebar-bottom {
@@ -468,7 +468,7 @@ label {
 }
 
 .sidebar-bottom .muted {
-  font-size: 10px;
+  font-size: 12px;
   padding: 8px 10px;
   line-height: 1.5;
 }
@@ -506,14 +506,14 @@ header {
 }
 
 .header-actions button {
-  font-size: 11px;
+  font-size: 12px;
   padding: 7px 10px;
   border-radius: var(--radius-sm);
 }
 
 /* Badge */
 .badge {
-  font-size: 10px;
+  font-size: 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 5px 10px;
@@ -560,7 +560,7 @@ header {
   background: var(--surface);
 }
 
-.toolbar label { font-size: 10px; gap: 5px; }
+.toolbar label { font-size: 12px; gap: 5px; }
 
 .toolbar select, .toolbar input {
   padding: 8px 10px;
@@ -571,7 +571,7 @@ header {
 .model-field { flex: 1; }
 
 .toolbar button {
-  font-size: 10px;
+  font-size: 12px;
   padding: 8px 12px;
   white-space: nowrap;
 }
@@ -642,7 +642,7 @@ header {
 }
 
 .message .role {
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 1.2px;
   color: var(--muted);
   margin-bottom: 8px;
@@ -804,7 +804,7 @@ header {
 }
 
 .message-actions button {
-  font-size: 11px;
+  font-size: 12px;
   padding: 5px 10px;
   border-radius: var(--radius-sm);
 }
@@ -819,7 +819,7 @@ header {
 
 .role details.reasoning summary {
   padding: 0;
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 1px;
 }
 
@@ -873,7 +873,7 @@ header {
   flex-wrap: wrap;
   gap: 6px;
   margin: 8px 0;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .chip {
@@ -951,7 +951,7 @@ header {
 }
 
 .compose-options button, .send-options button, .compose-options select {
-  font-size: 11px;
+  font-size: 12px;
   padding: 7px 10px;
   border-radius: var(--radius-sm);
 }
@@ -981,7 +981,7 @@ header {
 .attach {
   cursor: pointer;
   display: block;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--secondary);
   padding: 7px 10px;
   border-radius: var(--radius-sm);
@@ -999,7 +999,7 @@ header {
   gap: 10px;
   align-items: center;
   margin: 10px 4px 0;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted);
   flex-wrap: wrap;
 }
@@ -1012,7 +1012,7 @@ header {
 }
 
 .composer-hint {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--muted);
   padding: 3px 8px;
   background: var(--inset);
@@ -1023,7 +1023,7 @@ header {
 .composer-foot label {
   flex-direction: row;
   align-items: center;
-  font-size: 10px;
+  font-size: 12px;
   gap: 5px;
 }
 
@@ -1032,13 +1032,13 @@ header {
   padding: 4px 6px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .composer-foot #output-tokens { width: 76px; }
 
 .composer-foot button {
-  font-size: 10px;
+  font-size: 12px;
   padding: 5px 9px;
   border-radius: var(--radius-sm);
 }
@@ -1084,7 +1084,7 @@ header {
 }
 
 #command-menu .cmd { font-weight: 650; }
-#command-menu .desc { color: var(--muted); font-size: 11px; }
+#command-menu .desc { color: var(--muted); font-size: 12px; }
 #command-menu button.active .desc { color: color-mix(in srgb, var(--accent-on) 78%, transparent); }
 
 /* Context Statistics */
@@ -1093,14 +1093,14 @@ header {
 }
 
 #context-statistics summary {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--secondary);
   cursor: pointer;
   padding: 4px 0;
 }
 
 #context-statistics-body {
-  font-size: 11px;
+  font-size: 12px;
   padding: 8px 0;
 }
 
@@ -1120,7 +1120,7 @@ header {
 #swarm-config > summary {
   cursor: pointer;
   color: var(--secondary);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 #swarm-config p { margin: 8px 0; }
@@ -1134,7 +1134,7 @@ header {
 }
 
 .swarm-row input, .swarm-row select {
-  font-size: 11px;
+  font-size: 12px;
   padding: 6px;
   background: var(--surface);
 }
@@ -1151,7 +1151,7 @@ header {
 .swarm-row .swarm-remove:hover { opacity: 1; }
 
 .swarm-actions { display: flex; gap: 6px; margin: 8px 0; }
-.swarm-actions button { font-size: 11px; padding: 6px 9px; width: auto; }
+.swarm-actions button { font-size: 12px; padding: 6px 9px; width: auto; }
 
 .swarm-options {
   display: flex;
@@ -1165,13 +1165,13 @@ header {
   flex-direction: row;
   align-items: center;
   gap: 5px;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .swarm-options input[type=number] { width: 52px; padding: 4px; }
-.swarm-options select, .swarm-options input { font-size: 11px; padding: 5px; }
+.swarm-options select, .swarm-options input { font-size: 12px; padding: 5px; }
 
-#swarm-cost { font-size: 11px; }
+#swarm-cost { font-size: 12px; }
 
 .swarm-reports summary { font-weight: 600; }
 
@@ -1188,10 +1188,10 @@ header {
   margin-bottom: 4px;
 }
 
-.swarm-report-head small { color: var(--muted); font-size: 10px; }
+.swarm-report-head small { color: var(--muted); font-size: 12px; }
 
 .swarm-report-head span {
-  font-size: 10px;
+  font-size: 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 2px 7px;
@@ -1217,7 +1217,7 @@ header {
 }
 
 .context-panel button {
-  font-size: 11px;
+  font-size: 12px;
   width: 100%;
   margin-top: 10px;
   padding: 8px 12px;
@@ -1233,7 +1233,7 @@ header {
 .root-card small {
   display: block;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   margin-top: 5px;
   overflow-wrap: anywhere;
 }
@@ -1294,7 +1294,7 @@ header {
 
 #plan .plan-delete:hover { opacity: 1; }
 
-#plan-add { font-size: 11px; margin-top: 6px; }
+#plan-add { font-size: 12px; margin-top: 6px; }
 
 /* Context Settings */
 .context-settings {
@@ -1307,7 +1307,7 @@ header {
 }
 
 .context-settings label {
-  font-size: 11px;
+  font-size: 12px;
   gap: 6px;
 }
 
@@ -1316,7 +1316,7 @@ header {
 }
 
 .context-settings summary {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--secondary);
   cursor: pointer;
 }
@@ -1382,7 +1382,7 @@ dialog h2 {
   background: var(--surface);
 }
 
-#root-editor input { width: 100%; font-size: 11px; }
+#root-editor input { width: 100%; font-size: 12px; }
 
 #root-editor label {
   grid-column: 2;
@@ -1408,7 +1408,7 @@ dialog h2 {
 .key-row input { width: 100%; }
 
 .key-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.key-actions button { font-size: 11px; }
+.key-actions button { font-size: 12px; }
 
 /* History Actions */
 .history-actions {
@@ -1460,7 +1460,7 @@ dialog h2 {
 .code-toolbar button {
   margin-left: auto;
   padding: 4px 10px;
-  font-size: 11px;
+  font-size: 12px;
   border-radius: var(--radius-sm);
 }
 
@@ -1551,7 +1551,7 @@ dialog h2 {
 
 .message summary .diff-count {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
   margin-left: 4px;
 }
 
@@ -1805,7 +1805,7 @@ dialog h2 {
   header h1 { font-size: 14px; }
 
   .header-actions { gap: 5px; }
-  .header-actions button { padding: 6px 8px; font-size: 10px; }
+  .header-actions button { padding: 6px 8px; font-size: 12px; }
   .header-actions #export { display: none; }
 
   .toolbar { padding: 8px 16px 14px; }
@@ -2021,7 +2021,7 @@ header .eyebrow { display: none; }
 .memory-removed-label { flex-direction:row; align-items:center; }
 .memory-removed-label input { width:auto; margin:0; }
 
-.trace-series-bars{display:flex;gap:4px;overflow-x:auto;align-items:end;padding:8px 0;max-width:100%}.trace-series-bucket{display:flex;flex-direction:column;align-items:center;justify-content:end;flex:0 0 44px;gap:4px;height:220px;font-size:11px;padding:4px}.trace-series-bar{display:block;width:24px;background:var(--accent,#d4ad73);border-radius:3px}.trace-series-bucket:focus-visible{outline:2px solid currentColor}
+.trace-series-bars{display:flex;gap:4px;overflow-x:auto;align-items:end;padding:8px 0;max-width:100%}.trace-series-bucket{display:flex;flex-direction:column;align-items:center;justify-content:end;flex:0 0 44px;gap:4px;height:220px;font-size: 12px;padding:4px}.trace-series-bar{display:block;width:24px;background:var(--accent,#d4ad73);border-radius:3px}.trace-series-bucket:focus-visible{outline:2px solid currentColor}
 
 #online-jobs-dialog,#online-rules-dialog{box-sizing:border-box;max-width:min(720px,calc(100vw - 32px));width:100%;}
 #online-jobs-body summary{overflow-wrap:anywhere;}
@@ -2149,7 +2149,7 @@ button svg, summary svg, .attach svg { vertical-align: -2px; }
   border-radius: var(--radius-sm);
 }
 .mode-item .cmd { font-weight: 600; font-size: 13px; }
-.mode-item .desc { color: var(--muted); font-size: 11px; }
+.mode-item .desc { color: var(--muted); font-size: 12px; }
 .mode-item.on { background: var(--selected); }
 
 /* ===== Призрачный предикшн в композере (Tab принимает) ===== */
@@ -2164,7 +2164,7 @@ button svg, summary svg, .attach svg { vertical-align: -2px; }
 .prompt-ghost .ghost-badge {
   margin-left: 6px; padding: 1px 6px; border-radius: 5px;
   border: 1px solid var(--line); background: var(--inset); color: var(--muted);
-  font-size: 10px; font-family: var(--font-mono); letter-spacing: 0.3px;
+  font-size: 12px; font-family: var(--font-mono); letter-spacing: 0.3px;
 }
 
 /* ===== Панель ревью: шторка справа со списком изменённых файлов ===== */
@@ -2202,7 +2202,7 @@ button svg, summary svg, .attach svg { vertical-align: -2px; }
 
 /* Подписи «Запрос» / «Ответ» внутри карточки инструмента */
 .tool-io-label {
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 1.2px;
   text-transform: uppercase;
   color: var(--muted);
@@ -2239,3 +2239,120 @@ button svg, summary svg, .attach svg { vertical-align: -2px; }
 @media(max-width:640px){#file-panel{padding:14px}.file-columns{grid-template-columns:1fr;grid-template-rows:minmax(100px,30%) minmax(0,1fr);gap:10px}.file-toolbar{align-items:end;gap:8px}.file-toolbar select{max-width:140px}.file-ranges{gap:6px}.file-ranges input{width:60px}}
 
 #file-panel label{margin:0}button.file-entry:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+
+/* ===== Правки по дизайн-критике ===== */
+
+/* Шторка «Контекст»: заголовок и крестик, как у «Ревью» */
+.context-panel .review-head { margin-bottom: 12px; }
+.panel-close, #review-close {
+  border: 0; font-size: 20px; width: 32px; height: 32px; padding: 0; margin: 0; flex: none;
+  display: flex; align-items: center; justify-content: center; border-radius: 50%;
+}
+.context-panel .panel-close { width: 32px; margin-top: 0; font-size: 20px; padding: 0; }
+.panel-close:hover { background: var(--soft); }
+.context-panel h3 { font-size: 14px; margin: 8px 0 6px; }
+.context-panel #context-statistics { margin: 0; }
+.context-panel #context-statistics summary { font-size: 13px; color: var(--text); }
+.context-panel #context-statistics-body { font-size: 12px; }
+.context-panel details.panel-group {
+  margin-top: 10px; border: 1px solid var(--line); border-radius: var(--radius-md); padding: 8px 12px;
+}
+.context-panel details.panel-group > summary { cursor: pointer; font-size: 12px; color: var(--secondary); }
+.context-panel details.panel-group > button:first-of-type { margin-top: 8px; }
+
+/* Лента: плотнее, без резерва под действия и без рамки в рамке */
+.message { position: relative; margin: 10px 0 14px; line-height: 1.65; }
+.message.user { margin-top: 22px; padding: 10px 16px; }
+.message-actions:empty { display: none; }
+@media (hover: hover) {
+  .message:hover, .message:focus-within { z-index: 6; }
+  .message-actions {
+    position: absolute; top: calc(100% - 6px); left: 0; margin: 0; padding: 3px; gap: 2px;
+    flex-wrap: nowrap; z-index: 6; pointer-events: none;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 10px; box-shadow: var(--shadow-md, var(--shadow-sm));
+  }
+  .message.user .message-actions { left: auto; right: 0; }
+  .message:hover .message-actions, .message:focus-within .message-actions { pointer-events: auto; }
+  .message-actions button { border-color: transparent; white-space: nowrap; padding: 4px 9px; }
+}
+.message.tool {
+  background: none; border: 0; padding: 0; margin: 6px 0; max-width: 780px;
+}
+.message.tool .role { display: none; }
+.message.tool > details {
+  margin-top: 0; background: var(--tool-bg); border: 1px solid var(--tool-line);
+  border-radius: var(--radius-md);
+}
+
+/* Композер: подсказка режима живёт в title чипа, а не отдельной строкой */
+.composer-foot { display: none; }
+
+/* «Запись» — заметный тумблер: это единственный контрол, разрешающий правки */
+#writes-label {
+  box-sizing: border-box; height: 34px; padding: 0 12px 0 8px; gap: 8px;
+  display: inline-flex; flex-direction: row; align-items: center;
+  border: 1px solid var(--line); border-radius: 999px;
+  font-size: 13px; font-weight: 500; color: var(--secondary); cursor: pointer; user-select: none;
+}
+#writes-label[hidden] { display: none; }
+#writes-label input {
+  appearance: none; -webkit-appearance: none; margin: 0; padding: 0; flex: none;
+  width: 28px; height: 16px; min-height: 0; border-radius: 999px; border: 0;
+  background: var(--strong-line); position: relative; cursor: pointer;
+  transition: background var(--transition-fast);
+}
+#writes-label input::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px;
+  border-radius: 50%; background: var(--surface); transition: transform var(--transition-fast);
+}
+#writes-label input:checked { background: var(--arena-red); }
+#writes-label input:checked::after { transform: translateX(12px); }
+#writes-label:has(input:checked) {
+  color: var(--arena-red); border-color: var(--arena-red);
+  background: color-mix(in srgb, var(--arena-red) 10%, transparent);
+}
+#writes-label:has(input:focus-visible) { box-shadow: 0 0 0 2px var(--focus); }
+
+/* Шапка: единая высота кнопок, иконка + подпись */
+.header-actions { flex-wrap: nowrap; }
+.header-actions > button {
+  box-sizing: border-box; min-height: 32px; padding: 0 10px; font-size: 12px;
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+}
+.header-title { min-width: 0; }
+.header-title h1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Сайдбар: раздел на виду, сортировка и закладки за кнопкой фильтра */
+.history-controls { align-items: center; }
+.history-controls > select { flex: 1; min-width: 0; }
+.history-more > summary { min-height: 34px; width: 34px; padding: 0; justify-content: center; color: var(--secondary); }
+.history-more > summary::after { content: none; }
+.history-more .pop-body { bottom: auto; top: calc(100% + 6px); left: auto; right: 0; width: 230px; padding: 12px; }
+.history-more .pop-body label { flex-direction: column; align-items: stretch; gap: 6px; font-size: 12px; }
+.history-more .pop-body label.history-bookmark-filter { flex-direction: row; align-items: center; margin: 0; }
+.history-more:has(#history-bookmarked:checked) > summary { color: var(--accent); border-color: var(--accent); }
+
+/* Телефон: шапка в одну строку иконками, контролы композера в один ряд */
+@media (max-width: 700px) {
+  header { flex-wrap: nowrap; gap: 8px; }
+  .header-actions .hb-label { display: none; }
+  .header-actions > button { padding: 0 9px; min-height: 36px; font-size: 12px; }
+  .composer-bottom { flex-wrap: nowrap; }
+  .compose-options { flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .compose-options::-webkit-scrollbar { display: none; }
+  .compose-options > * { flex: none; }
+  .compose-options .pop > summary { max-width: 150px; }
+  .send-options { flex: none; }
+  .history-more .pop-body { position: absolute; left: auto; right: 0; bottom: auto; }
+}
+
+/* Тач: действия остаются на виду, но одной тихой строкой, а не блоком кнопок */
+@media (hover: none) {
+  .message-actions { margin-top: 4px; gap: 14px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .message-actions::-webkit-scrollbar { display: none; }
+  .message-actions button {
+    flex: none; border: 0; background: none; padding: 4px 0; min-height: 28px;
+    color: var(--muted); white-space: nowrap;
+  }
+}

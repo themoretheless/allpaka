@@ -2779,8 +2779,11 @@ async function control(kind, actionText) {
 }
 function modeHelp() {
   const mode=$('mode').value;$('writes-label').hidden=!['auto','goal'].includes(mode);
+  // Чип режима обновляется сразу, а не по таймеру оболочки.
+  if(mode)$('mode-chip').textContent=mode[0].toUpperCase()+mode.slice(1);
   $('swarm-config').hidden=mode!=='swarm';
   $('mode-help').textContent={chat:'Chat · чтение контекста и ответы',plan:'Plan · исследование и план, без записи',auto:'Auto · инструменты до результата или лимита',goal:'Goal · автономная работа к цели с планом и проверкой',swarm:'Swarm · волна независимых агентов и сводный MASTER, без записи'}[mode]||'';
+  $('mode-chip').title=$('mode-help').textContent||'Режим';
   if(mode==='swarm'){if(!swarmPanel().children.length)fillSwarmDefaults(false);fillSynthProviders();updateSwarmCost();}
 }
 const LAYOUT_EN='qwertyuiopasdfghjklzxcvbnm';
@@ -3029,7 +3032,20 @@ function rootRow(root={alias:'',path:'',writable:false}){
   alias.placeholder='Имя контекста';alias.value=root.alias;alias.dataset.field='alias';path.placeholder='/абсолютный/путь';path.value=root.path;path.dataset.field='path';write.type='checkbox';write.checked=root.writable;write.dataset.field='writable';label.prepend(write);remove.onclick=()=>div.remove();div.append(alias,path,remove,label);$('root-editor').append(div);
 }
 function editProject(fresh=false){const p=fresh?{id:'',name:'',instructions:'',roots:[]}:config.projects.find(p=>p.id===$('project').value);editingProject=p.id;$('project-title').value=p.name;$('project-instructions').value=p.instructions;$('root-editor').replaceChildren();p.roots.forEach(rootRow);if(!p.roots.length)rootRow();$('project-dialog').showModal();}
-$('context-toggle').onclick=()=>document.querySelector('.context-panel').classList.toggle('open');
+// Шторки справа закрываются одинаково: крестик, Esc и клик мимо. Раньше
+// «Контекст» перекрывал собственную кнопку и закрыть его было нечем.
+const sidePanels=()=>[...document.querySelectorAll('.context-panel,.review-panel')];
+const closeSidePanels=()=>sidePanels().forEach(panel=>panel.classList.remove('open'));
+$('context-toggle').onclick=()=>{
+  const panel=document.querySelector('.context-panel'),open=!panel.classList.contains('open');
+  closeSidePanels();panel.classList.toggle('open',open);
+};
+$('context-close').onclick=closeSidePanels;
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!document.querySelector('dialog[open]'))closeSidePanels();});
+document.addEventListener('pointerdown',e=>{
+  if(e.target.closest('.context-panel,.review-panel,#context-toggle,#review-toggle,dialog'))return;
+  closeSidePanels();
+});
 $('review-toggle').onclick=()=>{
   const panel=document.querySelector('.review-panel');
   panel.classList.toggle('open');
