@@ -659,7 +659,7 @@ fn run_fleet(config_path: &std::path::Path, ad_hoc: &[PathBuf], ctx: Option<u32>
         members_from_config(&cfg, config_path)?
     };
 
-    let plan = fleet(&members, &nodes).map_err(|e| anyhow::anyhow!(e))?;
+    let plan = fleet(&members, &nodes)?;
     let ports: Vec<Option<u16>> = if ad_hoc.is_empty() {
         cfg.agents.iter().map(|a| a.port).collect()
     } else {
@@ -721,7 +721,7 @@ fn run_launch(config_path: &std::path::Path) -> Result<()> {
     })?;
     let nodes = cfg.resolve_nodes()?;
     let members = members_from_config(&cfg, config_path)?;
-    let plan = fleet(&members, &nodes).map_err(|e| anyhow::anyhow!(e))?;
+    let plan = fleet(&members, &nodes)?;
     report::launch(&cfg, &nodes, &plan);
     Ok(())
 }

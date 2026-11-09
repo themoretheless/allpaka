@@ -18,7 +18,7 @@ pub mod replicate;
 pub mod speculation;
 
 pub use fabric::Fabric;
-pub use fleet::{fleet, FleetPlan, Placement};
+pub use fleet::{fleet, FleetError, FleetPlan, Placement};
 pub use link::Link;
 pub use model::Model;
 pub use node::{Backend, Node};

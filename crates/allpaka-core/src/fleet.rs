@@ -159,37 +159,85 @@ struct Cand {
     secs_per_token: f64,
 }
 
+/// Why a fleet request was rejected before any placement was searched.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FleetError {
+    NoAgents,
+    NoNodes,
+    /// The exhaustive search is capped at this many agents and pools.
+    TooLarge {
+        cap: usize,
+    },
+    PinOutOfRange {
+        agent: String,
+        pin: usize,
+    },
+    PinDoesNotFit {
+        agent: String,
+        node: String,
+        needs_bytes: u64,
+        usable_bytes: u64,
+    },
+}
+
+impl std::fmt::Display for FleetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoAgents => f.write_str("no agents given"),
+            Self::NoNodes => f.write_str("no nodes configured"),
+            Self::TooLarge { cap } => write!(
+                f,
+                "fleet placement searches every assignment and is capped at {cap} agents \
+                 and {cap} pools"
+            ),
+            Self::PinOutOfRange { agent, pin } => write!(
+                f,
+                "agent {agent:?} is pinned to node index {pin}, which does not exist"
+            ),
+            Self::PinDoesNotFit {
+                agent,
+                node,
+                needs_bytes,
+                usable_bytes,
+            } => write!(
+                f,
+                "agent {agent:?} is pinned to {node:?}, but does not fit there: needs {:.1} GiB \
+                 of {:.1} GiB usable",
+                crate::gib(*needs_bytes),
+                crate::gib(*usable_bytes),
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FleetError {}
+
 /// Assign each agent to at most one pool, maximising coverage then throughput.
-pub fn fleet(members: &[FleetMember], nodes: &[Node]) -> Result<FleetPlan, String> {
+pub fn fleet(members: &[FleetMember], nodes: &[Node]) -> Result<FleetPlan, FleetError> {
     if members.is_empty() {
-        return Err("no agents given".into());
+        return Err(FleetError::NoAgents);
     }
     if nodes.is_empty() {
-        return Err("no nodes configured".into());
+        return Err(FleetError::NoNodes);
     }
     if members.len() > MAX_SEARCH || nodes.len() > MAX_SEARCH {
-        return Err(format!(
-            "fleet placement searches every assignment and is capped at {MAX_SEARCH} agents \
-             and {MAX_SEARCH} pools"
-        ));
+        return Err(FleetError::TooLarge { cap: MAX_SEARCH });
     }
     for (i, m) in members.iter().enumerate() {
         if let Some(pin) = m.pin {
             if pin >= nodes.len() {
-                return Err(format!(
-                    "agent {:?} is pinned to node index {pin}, which does not exist",
-                    m.model.name
-                ));
+                return Err(FleetError::PinOutOfRange {
+                    agent: m.model.name.clone(),
+                    pin,
+                });
             }
             if place(i, m, pin, &nodes[pin]).is_none() {
-                return Err(format!(
-                    "agent {:?} is pinned to {:?}, but does not fit there: needs {:.1} GiB \
-                     of {:.1} GiB usable",
-                    m.model.name,
-                    nodes[pin].name,
-                    crate::gib(required_bytes(m)),
-                    crate::gib(nodes[pin].usable_bytes),
-                ));
+                return Err(FleetError::PinDoesNotFit {
+                    agent: m.model.name.clone(),
+                    node: nodes[pin].name.clone(),
+                    needs_bytes: required_bytes(m),
+                    usable_bytes: nodes[pin].usable_bytes,
+                });
             }
         }
     }

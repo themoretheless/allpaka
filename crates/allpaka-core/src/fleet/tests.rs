@@ -207,8 +207,15 @@ fn pinning_an_agent_somewhere_it_does_not_fit_is_an_error() {
     let mut big = member("big", 80);
     big.pin = Some(1); // the 30 GiB GPU
     let err = fleet(&[big], &[mac(), gpu(), ram()]).unwrap_err();
-    assert!(err.contains("big"), "unhelpful error: {err}");
-    assert!(err.contains("pc-gpu"), "unhelpful error: {err}");
+    assert!(
+        matches!(&err, FleetError::PinDoesNotFit { agent, node, .. } if agent == "big" && node == "pc-gpu"),
+        "wrong error: {err:?}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("big") && text.contains("pc-gpu"),
+        "unhelpful error: {text}"
+    );
 }
 
 #[test]
