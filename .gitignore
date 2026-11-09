@@ -7,3 +7,5 @@ rag.duckdb
 .DS_Store
 .airbug-bench/
 .rbench/
+.kimi-worktrees/
+__pycache__/
