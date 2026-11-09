@@ -1,5 +1,6 @@
-//! Byte-budgeted longest-prefix cache with ref-counted leases.
+//! Byte-budgeted longest-prefix cache with ref-counted leases and a prefix-trie index.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 #[derive(Debug)]
@@ -8,6 +9,12 @@ struct Entry<V> {
     value: Arc<V>,
     bytes: usize,
     last_used: u64,
+}
+
+#[derive(Debug, Default)]
+struct TrieNode {
+    children: HashMap<u32, usize>,
+    entry_index: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -19,6 +26,7 @@ pub struct PrefixHit<V> {
 #[derive(Debug)]
 pub struct PrefixCache<V> {
     entries: Vec<Entry<V>>,
+    trie: Vec<TrieNode>,
     budget_bytes: usize,
     resident_bytes: usize,
     clock: u64,
@@ -32,6 +40,7 @@ impl<V> PrefixCache<V> {
     pub fn new(budget_bytes: usize) -> Self {
         Self {
             entries: Vec::new(),
+            trie: vec![TrieNode::default()],
             budget_bytes,
             resident_bytes: 0,
             clock: 0,
@@ -93,20 +102,65 @@ impl<V> PrefixCache<V> {
         self.entries.is_empty()
     }
 
-    pub fn longest_prefix(&mut self, tokens: &[u32]) -> Option<PrefixHit<V>> {
-        let index = match self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| tokens.starts_with(&entry.tokens))
-            .max_by_key(|(_, entry)| entry.tokens.len())
-            .map(|(index, _)| index)
-        {
-            Some(idx) => idx,
-            None => {
-                self.misses = self.misses.saturating_add(1);
-                return None;
+    fn trie_insert(&mut self, tokens: &[u32], entry_index: usize) {
+        let mut node_idx = 0usize;
+        for &tok in tokens {
+            if let Some(&next) = self.trie[node_idx].children.get(&tok) {
+                node_idx = next;
+            } else {
+                let next = self.trie.len();
+                self.trie.push(TrieNode::default());
+                self.trie[node_idx].children.insert(tok, next);
+                node_idx = next;
             }
+        }
+        self.trie[node_idx].entry_index = Some(entry_index);
+    }
+
+    fn trie_set(&mut self, tokens: &[u32], entry_index: Option<usize>) {
+        let mut node_idx = 0usize;
+        for &tok in tokens {
+            let Some(&next) = self.trie[node_idx].children.get(&tok) else {
+                return;
+            };
+            node_idx = next;
+        }
+        self.trie[node_idx].entry_index = entry_index;
+    }
+
+    fn trie_exact(&self, tokens: &[u32]) -> Option<usize> {
+        let mut node_idx = 0usize;
+        for &tok in tokens {
+            node_idx = *self.trie[node_idx].children.get(&tok)?;
+        }
+        self.trie[node_idx].entry_index
+    }
+
+    fn remove_entry(&mut self, index: usize) -> Entry<V> {
+        let removed = self.entries.swap_remove(index);
+        self.trie_set(&removed.tokens, None);
+        if index < self.entries.len() {
+            let moved_tokens = Arc::clone(&self.entries[index].tokens);
+            self.trie_set(&moved_tokens, Some(index));
+        }
+        removed
+    }
+
+    pub fn longest_prefix(&mut self, tokens: &[u32]) -> Option<PrefixHit<V>> {
+        let mut node_idx = 0usize;
+        let mut best_index = self.trie[0].entry_index;
+        for &tok in tokens {
+            let Some(&next) = self.trie[node_idx].children.get(&tok) else {
+                break;
+            };
+            node_idx = next;
+            if let Some(idx) = self.trie[node_idx].entry_index {
+                best_index = Some(idx);
+            }
+        }
+        let Some(index) = best_index else {
+            self.misses = self.misses.saturating_add(1);
+            return None;
         };
         self.clock = self.clock.wrapping_add(1);
         self.hits = self.hits.saturating_add(1);
@@ -134,12 +188,8 @@ impl<V> PrefixCache<V> {
             alive
         });
         self.clock = self.clock.wrapping_add(1);
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.tokens.as_ref() == tokens.as_slice())
-        {
-            let removed = self.entries.swap_remove(index);
+        if let Some(index) = self.trie_exact(&tokens) {
+            let removed = self.remove_entry(index);
             self.resident_bytes -= removed.bytes;
             if Arc::strong_count(&removed.value) > 1 {
                 self.retired
@@ -162,7 +212,7 @@ impl<V> PrefixCache<V> {
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(index, _)| index);
             if let Some(index) = unpinned_lru {
-                let removed = self.entries.swap_remove(index);
+                let removed = self.remove_entry(index);
                 self.resident_bytes -= removed.bytes;
                 continue;
             }
@@ -175,7 +225,7 @@ impl<V> PrefixCache<V> {
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(index, _)| index)
             {
-                let removed = self.entries.swap_remove(index);
+                let removed = self.remove_entry(index);
                 self.resident_bytes -= removed.bytes;
                 if Arc::strong_count(&removed.value) > 1 {
                     self.retired
@@ -184,8 +234,11 @@ impl<V> PrefixCache<V> {
             }
             return;
         }
+        let new_index = self.entries.len();
+        let tokens_arc: Arc<[u32]> = tokens.into();
+        self.trie_insert(&tokens_arc, new_index);
         self.entries.push(Entry {
-            tokens: tokens.into(),
+            tokens: tokens_arc,
             value: Arc::new(value),
             bytes,
             last_used: self.clock,

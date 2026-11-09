@@ -16,16 +16,20 @@
 //! not claimed.
 
 use anyhow::{bail, Context, Result};
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 
 pub struct Tokenizer {
     pieces: Vec<String>,
     piece_bytes: Vec<Box<[u8]>>,
     ids: HashMap<String, u32>,
-    /// Merge rank by "left right" pair; lower rank merges first.
-    ranks: HashMap<String, usize>,
-    /// GPT-2 byte <-> printable char maps.
-    byte_to_char: [char; 256],
+    /// Merge table indexed by `(left_sym, right_sym) -> (rank, merged_sym)`.
+    /// Eliminates all per-step string formatting and hashing during BPE encoding.
+    merges: HashMap<(u32, u32), (usize, u32)>,
+    /// Precomputed symbol ID for each raw byte `0..256` after `BYTE_TO_CHAR` mapping.
+    byte_sym: [u32; 256],
+    /// Precomputed vocabulary token ID for each raw byte `0..256` (`u32::MAX` if absent).
+    byte_vocab_id: [u32; 256],
     pub eos: Option<u32>,
     pub bos: Option<u32>,
 }
@@ -39,7 +43,7 @@ impl Tokenizer {
             .vocab_tokens()
             .context("GGUF carries no tokenizer.ggml.tokens; cannot tokenise text")?
             .to_vec();
-        let merges = f
+        let merge_rules = f
             .merges()
             .context("GGUF carries no tokenizer.ggml.merges")?;
 
@@ -47,17 +51,50 @@ impl Tokenizer {
         for (i, p) in pieces.iter().enumerate() {
             ids.insert(p.clone(), i as u32);
         }
-        let mut ranks = HashMap::with_capacity(merges.len());
-        for (rank, rule) in merges.iter().enumerate() {
-            let _ = rule
-                .split_once(' ')
-                .with_context(|| format!("malformed merge rule {rule:?}"))?;
-            ranks.insert(rule.clone(), rank);
+
+        // Symbol table: `0..pieces.len()` match vocabulary token IDs directly;
+        // any intermediate merge pieces not in `pieces` receive IDs `>= pieces.len()`.
+        let mut sym_ids: HashMap<String, u32> = ids.clone();
+        let mut next_sym = pieces.len() as u32;
+        let mut intern_sym = |s: &str, sym_ids: &mut HashMap<String, u32>| -> u32 {
+            if let Some(&id) = sym_ids.get(s) {
+                id
+            } else {
+                let id = next_sym;
+                next_sym += 1;
+                sym_ids.insert(s.to_owned(), id);
+                id
+            }
+        };
+
+        let mut byte_sym = [0u32; 256];
+        let mut byte_vocab_id = [u32::MAX; 256];
+        let mut single_buf = [0u8; 4];
+        for b in 0..256 {
+            let ch = BYTE_TO_CHAR[b];
+            let s: &str = ch.encode_utf8(&mut single_buf);
+            byte_sym[b] = intern_sym(s, &mut sym_ids);
+            if let Some(&vid) = ids.get(s) {
+                byte_vocab_id[b] = vid;
+            }
         }
 
-        let byte_to_char = BYTE_TO_CHAR;
-        let char_to_byte = &CHAR_TO_BYTE;
+        let mut merges = HashMap::with_capacity(merge_rules.len());
+        let mut merged_buf = String::with_capacity(32);
+        for (rank, rule) in merge_rules.iter().enumerate() {
+            let (left, right) = rule
+                .split_once(' ')
+                .with_context(|| format!("malformed merge rule {rule:?}"))?;
+            let l_sym = intern_sym(left, &mut sym_ids);
+            let r_sym = intern_sym(right, &mut sym_ids);
+            merged_buf.clear();
+            merged_buf.push_str(left);
+            merged_buf.push_str(right);
+            let m_sym = intern_sym(&merged_buf, &mut sym_ids);
+            merges.entry((l_sym, r_sym)).or_insert((rank, m_sym));
+        }
 
+        let char_to_byte = &CHAR_TO_BYTE;
         let mut piece_bytes = Vec::with_capacity(pieces.len());
         let mut buf = Vec::with_capacity(16);
         let mut utf8_tmp = [0u8; 4];
@@ -80,8 +117,9 @@ impl Tokenizer {
             pieces,
             piece_bytes,
             ids,
-            ranks,
-            byte_to_char,
+            merges,
+            byte_sym,
+            byte_vocab_id,
         })
     }
 
@@ -106,69 +144,88 @@ impl Tokenizer {
     }
 
     fn encode_segment(&self, segment: &str, out: &mut Vec<u32>) -> Result<()> {
-        if segment.is_empty() {
+        let raw = segment.as_bytes();
+        let n = raw.len();
+        if n == 0 {
             return Ok(());
         }
-        // Build the mapped printable string once and record initial byte-symbol spans.
-        let mut mapped = String::with_capacity(segment.len() * 2);
-        let n = segment.len();
-        let mut starts = Vec::with_capacity(n);
-        let mut ends = Vec::with_capacity(n);
-        let mut next = Vec::with_capacity(n);
-        for (idx, b) in segment.bytes().enumerate() {
-            let start = mapped.len();
-            mapped.push(self.byte_to_char[b as usize]);
-            let end = mapped.len();
-            starts.push(start);
-            ends.push(end);
-            next.push(if idx + 1 < n { idx + 1 } else { usize::MAX });
-        }
-
-        // Greedy lowest-rank merging over linked contiguous spans in `mapped`:
-        // merging adjacent spans `i` and `j = next[i]` simply sets `ends[i] = ends[j]`
-        // and `next[i] = next[j]` without any string reallocation or vector shifting!
-        let mut pair_buf = String::with_capacity(32);
-        loop {
-            let mut best: Option<(usize, usize)> = None; // (rank, left_idx)
-            let mut i = 0;
-            while i != usize::MAX {
-                let j = next[i];
-                if j == usize::MAX {
-                    break;
-                }
-                pair_buf.clear();
-                pair_buf.push_str(&mapped[starts[i]..ends[i]]);
-                pair_buf.push(' ');
-                pair_buf.push_str(&mapped[starts[j]..ends[j]]);
-                if let Some(&rank) = self.ranks.get(pair_buf.as_str()) {
-                    if best.is_none_or(|(r, _)| rank < r) {
-                        best = Some((rank, i));
-                    }
-                }
-                i = j;
+        if n == 1 {
+            let b = raw[0] as usize;
+            let vid = self.byte_vocab_id[b];
+            if vid == u32::MAX {
+                bail!("byte piece {:?} missing from vocab", BYTE_TO_CHAR[b]);
             }
-            let Some((_, best_i)) = best else { break };
-            let best_j = next[best_i];
-            ends[best_i] = ends[best_j];
-            next[best_i] = next[best_j];
+            out.push(vid);
+            return Ok(());
         }
 
+        let mut syms: Vec<u32> = raw.iter().map(|&b| self.byte_sym[b as usize]).collect();
+        let mut prev: Vec<usize> = (0..n)
+            .map(|i| if i == 0 { usize::MAX } else { i - 1 })
+            .collect();
+        let mut next: Vec<usize> = (0..n)
+            .map(|i| if i + 1 < n { i + 1 } else { usize::MAX })
+            .collect();
+        let mut span_end: Vec<usize> = (1..=n).collect();
+
+        // Priority queue of candidate merges: (Reverse(rank), Reverse(left_pos), left_pos, right_pos, left_sym, right_sym)
+        let mut heap = BinaryHeap::with_capacity(n);
+        for i in 0..(n - 1) {
+            let l_sym = syms[i];
+            let r_sym = syms[i + 1];
+            if let Some(&(rank, _)) = self.merges.get(&(l_sym, r_sym)) {
+                heap.push((Reverse(rank), Reverse(i), i, i + 1, l_sym, r_sym));
+            }
+        }
+
+        while let Some((Reverse(_rank), Reverse(_), i, j, l_sym, r_sym)) = heap.pop() {
+            if next[i] != j || syms[i] != l_sym || syms[j] != r_sym {
+                continue;
+            }
+            let &(_, merged_sym) = self
+                .merges
+                .get(&(l_sym, r_sym))
+                .expect("validated merge pair must exist");
+            syms[i] = merged_sym;
+            syms[j] = u32::MAX;
+            span_end[i] = span_end[j];
+            let nx = next[j];
+            next[i] = nx;
+            if nx != usize::MAX {
+                prev[nx] = i;
+            }
+
+            let p = prev[i];
+            if p != usize::MAX {
+                let pl_sym = syms[p];
+                if let Some(&(r, _)) = self.merges.get(&(pl_sym, merged_sym)) {
+                    heap.push((Reverse(r), Reverse(p), p, i, pl_sym, merged_sym));
+                }
+            }
+            if nx != usize::MAX {
+                let nr_sym = syms[nx];
+                if let Some(&(r, _)) = self.merges.get(&(merged_sym, nr_sym)) {
+                    heap.push((Reverse(r), Reverse(i), i, nx, merged_sym, nr_sym));
+                }
+            }
+        }
+
+        let vocab_len = self.pieces.len() as u32;
         let mut i = 0;
         while i != usize::MAX {
-            let s = &mapped[starts[i]..ends[i]];
-            match self.ids.get(s) {
-                Some(&id) => out.push(id),
-                // A symbol not in the vocabulary decays to per-byte tokens.
-                None => {
-                    let mut single_buf = [0u8; 4];
-                    for ch in s.chars() {
-                        let single: &str = ch.encode_utf8(&mut single_buf);
-                        let id = self
-                            .ids
-                            .get(single)
-                            .with_context(|| format!("byte piece {single:?} missing from vocab"))?;
-                        out.push(*id);
+            let sym = syms[i];
+            if sym < vocab_len {
+                out.push(sym);
+            } else {
+                for &b in &raw[i..span_end[i]] {
+                    let vid = self.byte_vocab_id[b as usize];
+                    if vid == u32::MAX {
+                        bail!(
+                            "byte piece {:?} missing from vocab",
+                            BYTE_TO_CHAR[b as usize]
+                        );
                     }
+                    out.push(vid);
                 }
             }
             i = next[i];
