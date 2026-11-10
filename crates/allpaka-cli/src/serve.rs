@@ -19,6 +19,7 @@ mod resources;
 #[cfg(test)]
 mod route_tests;
 mod router;
+mod routes;
 mod sampler;
 mod session;
 mod template;
@@ -41,6 +42,7 @@ use inference::*;
 use rag_tools::{rag_default_tool_schemas, run_rag_tool, RagTools};
 use request_control::{Interrupted, Registry as RequestRegistry, RequestControl};
 use router::*;
+use routes::{Matched, Route};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -284,33 +286,24 @@ pub fn prewarm(mapping: &[u8]) {
     crate::airbug::gauge("weights_gib", gib);
 }
 
+/// Answers a model-stage route under the model lock. Routes answered by an
+/// earlier stage never get here; any other line, matched or not, gets the
+/// "unknown route" 404.
 fn handle(
     mut stream: TcpStream,
-    request_line: String,
+    route: Option<Route>,
     req: Value,
     mut context: ServeRequestContext<'_>,
 ) -> Result<()> {
-    // Prefix match, deliberately: `/stats?ts=...` is a normal request from a
-    // polling client. Tightening it to an exact line is a separate call.
-    if request_line.starts_with("GET /stats") {
-        return handlers::stats(&mut stream, &context);
+    match route {
+        Some(Route::Stats) => handlers::stats(&mut stream, &context),
+        Some(Route::ChatPage) => respond_html(&mut stream, CHAT_PAGE),
+        Some(Route::Options) => respond(&mut stream, 200, &json!({})),
+        Some(Route::PromptPredict) => handlers::prompt_predict(&mut stream, &req, &context),
+        Some(Route::PromptPrewarm) => handlers::prompt_prewarm(&mut stream, &req, &mut context),
+        Some(Route::ChatCompletions) => handlers::chat_completions(&mut stream, &req, &mut context),
+        _ => respond(&mut stream, 404, &json!({"error": "unknown route"})),
     }
-    if request_line.starts_with("GET / ") || request_line.starts_with("GET /index") {
-        return respond_html(&mut stream, CHAT_PAGE);
-    }
-    if request_line.starts_with("OPTIONS ") {
-        return respond(&mut stream, 200, &json!({}));
-    }
-    if request_line.starts_with("POST /v1/prompt/predict") {
-        return handlers::prompt_predict(&mut stream, &req, &context);
-    }
-    if request_line.starts_with("POST /v1/prompt/prewarm") {
-        return handlers::prompt_prewarm(&mut stream, &req, &mut context);
-    }
-    if !request_line.starts_with("POST /v1/chat/completions") {
-        return respond(&mut stream, 404, &json!({"error": "unknown route"}));
-    }
-    handlers::chat_completions(&mut stream, &req, &mut context)
 }
 
 /// The built-in chat page: zero dependencies, talks to this same server.

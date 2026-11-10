@@ -16,26 +16,29 @@ pub(super) fn prepare_connection(
     registry: &Arc<RequestRegistry>,
 ) -> Result<Option<(String, usize, QueuedConnection)>> {
     let (request_line, body) = read_request(&mut stream)?;
-    // Exact request line: a prefix match here used to answer 200 for
-    // `/healthz` and anything else starting with `/health`.
-    if request_line == "GET /health HTTP/1.1" {
-        respond(&mut stream, 200, &json!({"status":"ok"}))?;
-        return Ok(None);
-    }
-    if request_line.starts_with("GET /resources ") {
-        respond(&mut stream, 200, &resources::snapshot())?;
-        return Ok(None);
-    }
-    if let Some(route) = request_line.strip_prefix("POST /v1/requests/") {
-        if let Some(id) = route.strip_suffix("/cancel HTTP/1.1") {
-            let cancelled = registry.cancel(id);
-            respond(
-                &mut stream,
-                if cancelled { 200 } else { 404 },
-                &json!({"cancelled":cancelled}),
-            )?;
+    match routes::classify(&request_line) {
+        Some(Matched {
+            route: Route::Health,
+            ..
+        }) => {
+            respond(&mut stream, 200, &json!({"status":"ok"}))?;
             return Ok(None);
         }
+        Some(Matched {
+            route: Route::Resources,
+            ..
+        }) => {
+            respond(&mut stream, 200, &resources::snapshot())?;
+            return Ok(None);
+        }
+        Some(Matched {
+            route: Route::CancelRequest,
+            param: id,
+        }) => {
+            cancel_request(&mut stream, registry, id)?;
+            return Ok(None);
+        }
+        _ => {}
     }
     let body_len = body.len();
     let request: Value = if body.is_empty() {
@@ -112,39 +115,12 @@ pub(super) fn dispatch_connection(
     runtime: &mut ServerRuntime,
     rag: &RagTools,
 ) -> Result<()> {
-    if connection.request_line.starts_with("GET /v1/catalog") {
-        return respond(
-            &mut connection.stream.try_clone()?,
-            200,
-            &json!({"object": "list", "data": launch::list_models()}),
-        );
-    }
-    if connection.request_line.starts_with("POST /v1/launch") {
-        let path = connection.request["path"].as_str().unwrap_or("");
-        let mut stream = connection.stream;
-        match launch::schedule(path, "") {
-            Ok(()) => {
-                respond(&mut stream, 200, &json!({"status": "restarting"}))?;
-                let _ = stream.flush();
-                println!("relaunch: {path}");
-                std::process::exit(0);
-            }
-            Err(error) => {
-                return respond(&mut stream, 400, &json!({"error": error.to_string()}));
-            }
-        }
-    }
-    if connection.request_line.starts_with("GET /v1/models") {
-        let data = runtime
-            .model_names()
-            .into_iter()
-            .map(|id| json!({"id": id, "object": "model", "owned_by": "allpaka"}))
-            .collect::<Vec<_>>();
-        return respond(
-            &mut connection.stream.try_clone()?,
-            200,
-            &json!({"object": "list", "data": data}),
-        );
+    let route = routes::classify(&connection.request_line).map(|matched| matched.route);
+    match route {
+        Some(Route::Catalog) => return catalog(&connection.stream),
+        Some(Route::Launch) => return relaunch(connection),
+        Some(Route::Models) => return list_models(&connection.stream, runtime),
+        _ => {}
     }
     let available_models = runtime.model_names();
     let Some(model_name) = resolve_model_name(&model_name, &available_models) else {
@@ -161,12 +137,7 @@ pub(super) fn dispatch_connection(
     let mut service = service
         .lock()
         .map_err(|_| anyhow::anyhow!("model service lock poisoned: {model_name}"))?;
-    let is_chat = connection
-        .request_line
-        .starts_with("POST /v1/chat/completions")
-        || connection
-            .request_line
-            .starts_with("POST /v1/prompt/prewarm");
+    let is_chat = matches!(route, Some(Route::ChatCompletions | Route::PromptPrewarm));
     let session_id = connection
         .request
         .get("session_id")
@@ -243,7 +214,7 @@ pub(super) fn dispatch_connection(
     let mut error_stream = connection.stream.try_clone()?;
     let outcome = handle(
         connection.stream,
-        connection.request_line,
+        route,
         connection.request,
         ServeRequestContext {
             model_name: &model_name,
@@ -287,6 +258,56 @@ pub(super) fn dispatch_connection(
         }
     }
     Ok(())
+}
+
+/// `POST /v1/requests/{id}/cancel`: 200 when a live request was cancelled,
+/// 404 when no request has that id.
+fn cancel_request(stream: &mut TcpStream, registry: &RequestRegistry, id: &str) -> Result<()> {
+    let cancelled = registry.cancel(id);
+    respond(
+        stream,
+        if cancelled { 200 } else { 404 },
+        &json!({"cancelled":cancelled}),
+    )
+}
+
+/// `GET /v1/catalog`: GGUF files found on disk that `/v1/launch` can start.
+fn catalog(stream: &TcpStream) -> Result<()> {
+    respond(
+        &mut stream.try_clone()?,
+        200,
+        &json!({"object": "list", "data": launch::list_models()}),
+    )
+}
+
+/// `POST /v1/launch`: schedule a restart on another model and exit, or 400
+/// when the path cannot be launched.
+fn relaunch(connection: QueuedConnection) -> Result<()> {
+    let path = connection.request["path"].as_str().unwrap_or("");
+    let mut stream = connection.stream;
+    match launch::schedule(path, "") {
+        Ok(()) => {
+            respond(&mut stream, 200, &json!({"status": "restarting"}))?;
+            let _ = stream.flush();
+            println!("relaunch: {path}");
+            std::process::exit(0);
+        }
+        Err(error) => respond(&mut stream, 400, &json!({"error": error.to_string()})),
+    }
+}
+
+/// `GET /v1/models`: the resident models, OpenAI list shape.
+fn list_models(stream: &TcpStream, runtime: &ServerRuntime) -> Result<()> {
+    let data = runtime
+        .model_names()
+        .into_iter()
+        .map(|id| json!({"id": id, "object": "model", "owned_by": "allpaka"}))
+        .collect::<Vec<_>>();
+    respond(
+        &mut stream.try_clone()?,
+        200,
+        &json!({"object": "list", "data": data}),
+    )
 }
 
 #[cfg(test)]
