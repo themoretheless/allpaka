@@ -1,6 +1,7 @@
 //! Single-token decode, multi-token GPU verification, and greedy chain execution.
 
 use super::attention::{AttnInputs, AttnLayer, AttnMode};
+use super::moe::RoutingPolicy;
 use super::{
     attn_zero_enabled, cpu_attn_enabled, greedy_chain_enabled, moe::Ffn, moe_zero_enabled,
     no_argmax_enabled, no_tokenbuf_enabled, skip_host_rope_enabled, tokenbuf_debug_enabled, Model,
@@ -223,7 +224,7 @@ impl<'a> Model<'a> {
                 .iter()
                 .enumerate()
                 .map(|(li, layer)| {
-                    if layer.gdn.is_some() {
+                    if layer.mixer.gdn().is_some() {
                         (ssm.conv_off(li), ssm.state_off(li))
                     } else {
                         (0, 0)
@@ -265,11 +266,8 @@ impl<'a> Model<'a> {
                     up_exps,
                     down_exps,
                     shared,
-                    gating,
-                    weights_norm,
-                    weights_scale,
+                    routing: RoutingPolicy { gating, n_used, .. },
                     expert_ffn,
-                    n_used,
                     ..
                 } => {
                     let (gt, gb) = gate_exps.raw();
@@ -306,7 +304,7 @@ impl<'a> Model<'a> {
                     }
                 }
             };
-            let gdn = layer.gdn.as_ref().map(|g| {
+            let gdn = layer.mixer.gdn().map(|g| {
                 let (at, ab) = g.alpha.raw();
                 let (bt, bb) = g.beta.raw();
                 debug_assert_eq!(at, allpaka_gguf::GgmlType::F32);
@@ -333,7 +331,7 @@ impl<'a> Model<'a> {
                     state_off,
                 }
             });
-            let (wq, wk, wv, wo) = match &layer.attn {
+            let (wq, wk, wv, wo) = match layer.mixer.attn() {
                 Some(aw) => (aw.wq.desc(), aw.wk.desc(), aw.wv.desc(), aw.wo.desc()),
                 None => (
                     (allpaka_gguf::GgmlType::F32, &[][..], 0),
@@ -351,7 +349,7 @@ impl<'a> Model<'a> {
                 wo,
                 q_norm: layer.q_norm.as_deref(),
                 k_norm: layer.k_norm.as_deref(),
-                gate_in_q: layer.attn.as_ref().is_some_and(|aw| aw.gate_in_q),
+                gate_in_q: layer.mixer.attn().is_some_and(|aw| aw.gate_in_q),
                 q_bias: layer.bias.as_ref().map(|b| b.q.1),
                 k_bias: layer.bias.as_ref().map(|b| b.k.1),
                 v_bias: layer.bias.as_ref().map(|b| b.v.1),
@@ -450,16 +448,13 @@ impl<'a> Model<'a> {
             }
 
             // The gated-delta-net branch (linear-attention layers).
-            if let Some(g) = &layer.gdn {
+            if let Some(g) = layer.mixer.gdn() {
                 let projected = self.gdn_forward(li, g, &h, 1, s)?;
                 ops::add_assign_slice(&mut x, &projected);
                 ffn_residual(layer, &mut x, &mut h, c.rms_eps, false)?;
                 continue;
             }
-            let aw = layer
-                .attn
-                .as_ref()
-                .expect("attention layer without weights");
+            let aw = layer.mixer.attn().expect("attention layer without weights");
             let rope_pairs =
                 &s.rope_cache[pos * s.rope_cache_pairs..(pos + 1) * s.rope_cache_pairs];
 
@@ -741,9 +736,13 @@ pub(crate) fn token_path_decline(layers: &[super::Layer<'_>]) -> Option<&'static
             return Some("a layer norm is not raw F32");
         }
         if let Ffn::Moe {
-            gating,
-            weights_norm,
-            weights_scale,
+            routing:
+                RoutingPolicy {
+                    gating,
+                    weights_norm,
+                    weights_scale,
+                    ..
+                },
             ..
         } = &layer.ffn
         {

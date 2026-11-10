@@ -42,16 +42,35 @@ pub(crate) struct Layer<'a> {
     /// tensor is not plain F32 and the whole-token path then declines).
     pub(crate) attn_norm_raw: &'a [u8],
     pub(crate) ffn_norm_raw: &'a [u8],
-    /// Full-attention projections; None on gated-delta-net layers (qwen35moe).
-    pub(crate) attn: Option<AttnWeights<'a>>,
-    /// Gated delta net branch; None on full-attention layers.
-    pub(crate) gdn: Option<GdnLayer<'a>>,
+    /// The token mixer: full attention, or a gated delta net (qwen35moe's
+    /// linear-attention layers). Exactly one per layer.
+    pub(crate) mixer: Mixer<'a>,
     pub(crate) bias: Option<AttnBias<'a>>,
     /// Qwen3 per-head norms, absent on Llama/Mistral.
     pub(crate) q_norm: Option<Vec<f32>>,
     pub(crate) k_norm: Option<Vec<f32>>,
     pub(crate) ffn_norm: Vec<f32>,
     pub(crate) ffn: Ffn<'a>,
+}
+
+pub(crate) enum Mixer<'a> {
+    Attention(AttnWeights<'a>),
+    Gdn(GdnLayer<'a>),
+}
+
+impl<'a> Mixer<'a> {
+    pub(crate) fn attn(&self) -> Option<&AttnWeights<'a>> {
+        match self {
+            Mixer::Attention(aw) => Some(aw),
+            Mixer::Gdn(_) => None,
+        }
+    }
+    pub(crate) fn gdn(&self) -> Option<&GdnLayer<'a>> {
+        match self {
+            Mixer::Gdn(g) => Some(g),
+            Mixer::Attention(_) => None,
+        }
+    }
 }
 
 pub(crate) struct AttnWeights<'a> {

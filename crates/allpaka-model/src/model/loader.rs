@@ -1,5 +1,7 @@
 //! GGUF weight loading, stage slicing, and BF16-to-F32 router weight conversion.
 
+use super::moe::RoutingPolicy;
+use super::Mixer;
 use super::{
     gdn::GdnLayer,
     moe::{Ffn, SharedFfn},
@@ -116,12 +118,7 @@ impl<'a> Model<'a> {
                 attn_norm: norm_vec(f, &name("attn_norm"), hidden)?,
                 attn_norm_raw: norm_raw(f, &name("attn_norm")),
                 ffn_norm_raw: norm_raw(f, &ffn_norm),
-                attn: if is_gdn {
-                    None
-                } else {
-                    Some(attn_weights(f, &name, &config)?)
-                },
-                gdn: if is_gdn {
+                mixer: if is_gdn {
                     let s = config.ssm.as_ref().expect("is_gdn implies ssm");
                     let value_dim = (s.dt_rank * s.d_state) as usize;
                     let channels = s.d_inner as usize + 2 * (s.n_group * s.d_state) as usize;
@@ -133,7 +130,7 @@ impl<'a> Model<'a> {
                             conv1d_t[j * channels + ch] = conv1d[ch * d_conv + j];
                         }
                     }
-                    Some(GdnLayer {
+                    Mixer::Gdn(GdnLayer {
                         wqkv: qmat(f, &name("attn_qkv"), channels, hidden)?,
                         zgate: qmat(f, &name("attn_gate"), value_dim, hidden)?,
                         alpha: qmat(f, &name("ssm_alpha"), s.dt_rank as usize, hidden)?,
@@ -147,7 +144,7 @@ impl<'a> Model<'a> {
                         ssm_out: qmat(f, &name("ssm_out"), hidden, value_dim)?,
                     })
                 } else {
-                    None
+                    Mixer::Attention(attn_weights(f, &name, &config)?)
                 },
                 bias,
                 // Only full-attention layers carry q/k norms (qwen35moe's
@@ -367,12 +364,14 @@ fn moe_ffn<'a>(
         up_exps: qmat3(f, &name("ffn_up_exps"), expert_ffn, hidden, n_expert)?,
         down_exps: qmat3(f, &name("ffn_down_exps"), hidden, expert_ffn, n_expert)?,
         shared,
-        gating: moe.gating,
-        weights_norm: moe.weights_norm,
-        weights_scale: moe.weights_scale,
+        routing: RoutingPolicy {
+            gating: moe.gating,
+            weights_norm: moe.weights_norm,
+            weights_scale: moe.weights_scale,
+            n_used: moe.n_used as usize,
+        },
         expert_ffn,
         hidden,
-        n_used: moe.n_used as usize,
     })
 }
 

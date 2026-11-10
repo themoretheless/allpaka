@@ -1,6 +1,7 @@
 //! Batched prompt prefill and speculative verification passes.
 
 use super::attention::{AttnInputs, AttnLayer, AttnMode};
+use super::moe::RoutingPolicy;
 use super::{
     attn_zero_enabled, cpu_attn_enabled,
     moe::{route_gated_into_slice, Ffn},
@@ -131,7 +132,7 @@ impl<'a> Model<'a> {
             // The gated-delta-net branch (linear-attention layers): the
             // recurrence is sequential by construction, the projections stay
             // batched over the whole chunk.
-            if let Some(g) = &layer.gdn {
+            if let Some(g) = layer.mixer.gdn() {
                 let projected = self.gdn_forward(li, g, hs, m, s)?;
                 {
                     let _s = profile::span(profile::Phase::AttnOut);
@@ -153,10 +154,7 @@ impl<'a> Model<'a> {
                 trace("l_out", li, &xs[..hidden]);
                 continue;
             }
-            let aw = layer
-                .attn
-                .as_ref()
-                .expect("attention layer without weights");
+            let aw = layer.mixer.attn().expect("attention layer without weights");
             let rope_flat =
                 &s.rope_cache[base * s.rope_cache_pairs..(base + m) * s.rope_cache_pairs];
             // The whole attention half - qkv, per-row norm+rope, cache
@@ -342,7 +340,7 @@ impl<'a> Model<'a> {
             });
             // The gated-delta-net branch (qwen35moe linear-attention layers):
             // its own fused block, same contract as the attention one.
-            let logits = if let Some(g) = &layer.gdn {
+            let logits = if let Some(g) = layer.mixer.gdn() {
                 let ssm = s.ssm.as_mut().expect("gdn layer without ssm cache");
                 let (conv_off, state_off) = (ssm.conv_off(li), ssm.state_off(li));
                 let (region, slots) = ssm.regions_for_gpu();
@@ -374,7 +372,7 @@ impl<'a> Model<'a> {
                     fusion,
                 )?
             } else {
-                let aw = layer.attn.as_ref().expect("attn weights");
+                let aw = layer.mixer.attn().expect("attn weights");
                 let _s = profile::span(profile::Phase::Attend);
                 QuantMat::prefill_attn_block(
                     &aw.wq,
@@ -417,10 +415,13 @@ impl<'a> Model<'a> {
                     down_exps,
                     shared,
                     expert_ffn,
-                    n_used,
-                    gating,
-                    weights_norm,
-                    weights_scale,
+                    routing:
+                        RoutingPolicy {
+                            n_used,
+                            gating,
+                            weights_norm,
+                            weights_scale,
+                        },
                     router_bias,
                     ..
                 } => {

@@ -80,13 +80,21 @@ pub(crate) enum Ffn<'a> {
         up_exps: QuantMat<'a>,
         down_exps: QuantMat<'a>,
         shared: Option<SharedFfn<'a>>,
-        gating: Gating,
-        weights_norm: bool,
-        weights_scale: f32,
+        routing: RoutingPolicy,
         expert_ffn: usize,
         hidden: usize,
-        n_used: usize,
     },
+}
+
+/// How a MoE router turns logits into the experts a token uses: the gating
+/// function, how many experts win, and how their weights are normalised and
+/// scaled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RoutingPolicy {
+    pub(crate) gating: Gating,
+    pub(crate) weights_norm: bool,
+    pub(crate) weights_scale: f32,
+    pub(crate) n_used: usize,
 }
 
 impl Ffn<'_> {
@@ -135,11 +143,14 @@ impl Ffn<'_> {
             up_exps,
             down_exps,
             shared,
-            gating,
-            weights_norm,
-            weights_scale,
+            routing:
+                RoutingPolicy {
+                    gating,
+                    weights_norm,
+                    weights_scale,
+                    n_used,
+                },
             expert_ffn,
-            n_used,
             ..
         } = self
         else {
@@ -407,12 +418,15 @@ impl Ffn<'_> {
                 up_exps,
                 down_exps,
                 shared,
-                gating,
-                weights_norm,
-                weights_scale,
+                routing:
+                    RoutingPolicy {
+                        gating,
+                        weights_norm,
+                        weights_scale,
+                        n_used,
+                    },
                 expert_ffn,
                 hidden,
-                n_used,
             } => {
                 let router_span = profile::span(profile::Phase::Router);
                 let logits = router.matmul(h, 1)?;

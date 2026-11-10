@@ -55,9 +55,17 @@ impl<'a> Model<'a> {
     /// (index n_layers); plain sessions do not pay for it.
     pub fn new_session_mtp(&self, context_tokens: usize) -> Session {
         let context_tokens = context_tokens.max(allpaka_backend::gpu::minimum_kv_capacity());
-        let mut kv_active: Vec<bool> = self.layers.iter().map(|l| l.attn.is_some()).collect();
+        let mut kv_active: Vec<bool> = self
+            .layers
+            .iter()
+            .map(|l| l.mixer.attn().is_some())
+            .collect();
         kv_active.extend(std::iter::repeat_n(true, self.config.nextn as usize));
-        let ssm_active: Vec<bool> = self.layers.iter().map(|l| l.gdn.is_some()).collect();
+        let ssm_active: Vec<bool> = self
+            .layers
+            .iter()
+            .map(|l| l.mixer.gdn().is_some())
+            .collect();
         Session {
             kv: KvCache::with_active_layers(&kv_active, self.config.kv_dim(), context_tokens),
             rope_cache: Vec::new(),
@@ -76,8 +84,16 @@ impl<'a> Model<'a> {
 
     pub fn new_session(&self, context_tokens: usize) -> Session {
         let context_tokens = context_tokens.max(allpaka_backend::gpu::minimum_kv_capacity());
-        let kv_active: Vec<bool> = self.layers.iter().map(|l| l.attn.is_some()).collect();
-        let ssm_active: Vec<bool> = self.layers.iter().map(|l| l.gdn.is_some()).collect();
+        let kv_active: Vec<bool> = self
+            .layers
+            .iter()
+            .map(|l| l.mixer.attn().is_some())
+            .collect();
+        let ssm_active: Vec<bool> = self
+            .layers
+            .iter()
+            .map(|l| l.mixer.gdn().is_some())
+            .collect();
         Session {
             kv: KvCache::with_active_layers(&kv_active, self.config.kv_dim(), context_tokens),
             rope_cache: Vec::new(),
