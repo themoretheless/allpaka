@@ -493,8 +493,13 @@ impl Ffn<'_> {
     }
 }
 
+/// Expert count the routers keep on the stack; wider routers use the heap.
+/// The output buffer is sized by `k` (top-k), not by this count.
+const STACK_EXPERTS: usize = 256;
+
 /// Zero-heap-allocation top-k router writing directly into `dst` (length `k`).
-/// Uses stack buffers for `n_expert <= 256` (all Qwen3-MoE, GLM, DeepSeek models).
+/// Uses stack buffers for `n_expert <= STACK_EXPERTS` (all Qwen3-MoE, GLM,
+/// DeepSeek models) and the heap above that.
 #[inline]
 pub(crate) fn route_gated_into_slice(
     logits: &[f32],
@@ -511,7 +516,7 @@ pub(crate) fn route_gated_into_slice(
         return;
     }
 
-    let mut scores_stack = [0.0f32; 256];
+    let mut scores_stack = [0.0f32; STACK_EXPERTS];
     let mut scores_vec;
     let scores: &mut [f32] = if n <= scores_stack.len() {
         scores_stack[..n].copy_from_slice(logits);
@@ -526,7 +531,7 @@ pub(crate) fn route_gated_into_slice(
         Gating::Sigmoid => ops::sigmoid(scores),
     }
 
-    let mut sel_stack = [0.0f32; 256];
+    let mut sel_stack = [0.0f32; STACK_EXPERTS];
     let selection: Cow<'_, [f32]> = match bias {
         Some(b) if n <= sel_stack.len() => {
             for i in 0..n {
@@ -538,7 +543,7 @@ pub(crate) fn route_gated_into_slice(
         None => Cow::Borrowed(scores),
     };
 
-    let mut order_buf = [0usize; 256];
+    let mut order_buf = [0usize; STACK_EXPERTS];
     let mut order_vec;
     let order: &mut [usize] = if n <= order_buf.len() {
         for (i, slot) in order_buf[..n].iter_mut().enumerate() {
@@ -600,7 +605,7 @@ pub fn route(probs: &[f32], k: usize) -> Vec<(usize, f32)> {
     if k == 0 {
         return Vec::new();
     }
-    let mut order_buf = [0usize; 256];
+    let mut order_buf = [0usize; STACK_EXPERTS];
     let mut order_vec;
     let order: &mut [usize] = if probs.len() <= order_buf.len() {
         for (i, slot) in order_buf[..probs.len()].iter_mut().enumerate() {
@@ -630,4 +635,73 @@ pub fn route(probs: &[f32], k: usize) -> Vec<(usize, f32)> {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod stack_boundary_tests {
+    use super::*;
+
+    fn logits(n: usize) -> Vec<f32> {
+        // 331 is prime and above every n used here, so no two logits tie.
+        (0..n)
+            .map(|i| ((i * 37 % 331) as f32 - 165.0) * 0.03)
+            .collect()
+    }
+
+    fn close(a: &[(usize, f32)], b: &[(usize, f32)]) {
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b) {
+            assert_eq!(x.0, y.0, "{a:?} vs {b:?}");
+            assert!((x.1 - y.1).abs() < 1e-6, "{a:?} vs {b:?}");
+        }
+    }
+
+    /// Crossing from the stack path (256 experts) to the heap path (257)
+    /// must not change routing: an extra expert that can never win leaves
+    /// the picks and their weights as they were.
+    #[test]
+    fn routing_is_the_same_on_both_sides_of_the_stack_limit() {
+        let base = logits(STACK_EXPERTS);
+        let mut wide = base.clone();
+        wide.push(f32::NEG_INFINITY);
+        for (gating, norm) in [
+            (Gating::Softmax, true),
+            (Gating::Softmax, false),
+            (Gating::Sigmoid, true),
+        ] {
+            for k in [1, 8] {
+                close(
+                    &route_gated(&base, k, gating, norm, 1.5, None),
+                    &route_gated(&wide, k, gating, norm, 1.5, None),
+                );
+            }
+        }
+        let bias: Vec<f32> = (0..STACK_EXPERTS)
+            .map(|i| 0.5 + (i % 7) as f32 * 0.01)
+            .collect();
+        let mut wide_bias = bias.clone();
+        wide_bias.push(0.0);
+        close(
+            &route_gated(&base, 8, Gating::Sigmoid, true, 2.5, Some(&bias)),
+            &route_gated(&wide, 8, Gating::Sigmoid, true, 2.5, Some(&wide_bias)),
+        );
+        let probs: Vec<f32> = route_gated(&base, STACK_EXPERTS, Gating::Softmax, false, 1.0, None)
+            .into_iter()
+            .map(|p| p.1)
+            .collect();
+        let mut wide_probs = probs.clone();
+        wide_probs.push(0.0);
+        assert_eq!(route(&probs, 8), route(&wide_probs, 8));
+    }
+
+    /// More than 256 experts route on the heap and still pick the true
+    /// top-k, best first.
+    #[test]
+    fn wide_routers_pick_the_true_top_k() {
+        let wide = logits(STACK_EXPERTS + 64);
+        let picks = route_gated(&wide, 4, Gating::Softmax, false, 1.0, None);
+        let mut order: Vec<usize> = (0..wide.len()).collect();
+        order.sort_by(|&a, &b| wide[b].total_cmp(&wide[a]));
+        assert_eq!(picks.iter().map(|p| p.0).collect::<Vec<_>>(), order[..4]);
+    }
 }
