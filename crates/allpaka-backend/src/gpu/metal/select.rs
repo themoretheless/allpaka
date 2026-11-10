@@ -141,6 +141,26 @@ pub(super) fn attend_mm() -> bool {
     crate::runtime::get().attend_mm
 }
 
+/// FA inner-loop pipelining experiment (`ALLPAKA_FA_DB=1`): swaps
+/// attend_mm/attend_mm_fq for the _db variants shaped like llama's fa_f16
+/// (QK two dim-blocks in flight, PV four V loads in flight). Bit-identical
+/// by accumulate order; default OFF until a quiet-machine A/B decides.
+pub(super) fn attend_mm_kernel() -> &'static str {
+    if crate::runtime::get().fa_db {
+        "attend_mm_db"
+    } else {
+        "attend_mm"
+    }
+}
+
+pub(super) fn attend_mm_fq_kernel() -> &'static str {
+    if crate::runtime::get().fa_db {
+        "attend_mm_fq_db"
+    } else {
+        "attend_mm_fq"
+    }
+}
+
 /// Prefill attention row tiling: `ALLPAKA_ATTN_T4=0` reverts to the
 /// row-per-threadgroup kernel.
 pub(super) fn attend_rows_kernel() -> &'static str {

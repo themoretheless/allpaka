@@ -638,7 +638,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 enc.set_bytes(1, 4, &zw as *const u32 as *const _);
                 enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(64, 1, 1));
                 enc.memory_barrier_with_resources(&[&gpu.pf_attn_sync]);
-                enc.set_compute_pipeline_state(&gpu.pipelines[&("attend_mm_fq", 1, 1)]);
+                enc.set_compute_pipeline_state(&gpu.pipelines[&(attend_mm_fq_kernel(), 1, 1)]);
                 enc.set_buffer(0, Some(&req.cache.buf), 0);
                 enc.set_buffer(1, Some(&req.cache.buf), 0);
                 enc.set_buffer(2, Some(y), e(q_at));
@@ -782,7 +782,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 if attend_mm() {
                     // MMA tiles: same bindings as attend_rows, 8 rows per
                     // threadgroup.
-                    enc.set_compute_pipeline_state(&gpu.pipelines[&("attend_mm", 1, 1)]);
+                    enc.set_compute_pipeline_state(&gpu.pipelines[&(attend_mm_kernel(), 1, 1)]);
                     let rows32 = req.m as u32;
                     enc.set_bytes(12, 4, &rows32 as *const u32 as *const _);
                     enc.dispatch_thread_groups(
