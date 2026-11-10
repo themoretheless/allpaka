@@ -100,19 +100,22 @@ pub(crate) async fn create_session(
     State(app): State<App>,
     Json(settings): Json<Settings>,
 ) -> ApiResult<Value> {
-    validate_settings(&settings, &app).map_err(crate::bad_request)?;
-    let id = format!(
-        "{:x}-{:x}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-        std::process::id()
-    );
-    let session = Session::new(id.clone(), settings);
-    save(&app, &session).map_err(crate::internal)?;
-    attach(&app, session);
-    Ok(Json(json!({"id":id})))
+    crate::blocking(move || {
+        validate_settings(&settings, &app).map_err(crate::bad_request)?;
+        let id = format!(
+            "{:x}-{:x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        );
+        let session = Session::new(id.clone(), settings);
+        save(&app, &session).map_err(crate::internal)?;
+        attach(&app, session);
+        Ok(Json(json!({"id":id})))
+    })
+    .await
 }
 pub(crate) fn attach(app: &App, session: Session) {
     let id = session.id.clone();
@@ -133,55 +136,58 @@ pub(crate) async fn branch_session(
     Path(id): Path<String>,
     Json(request): Json<BranchRequest>,
 ) -> ApiResult<Value> {
-    let source = {
-        let registry = app.sessions.lock().unwrap();
-        let (source, _) = registry
-            .get(&id)
-            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
-        let snapshot = source.lock().unwrap().clone();
-        snapshot
-    };
-    if source.status == SessionStatus::Running {
-        return Err(error(
-            StatusCode::CONFLICT,
-            "Stop generation before branching",
-        ));
-    }
-    let n = request.message_count;
-    if n > source.messages.len()
-        || (n > 0 && {
-            let last = &source.messages[n - 1];
-            last.role != "assistant" || !last.tool_calls.is_empty() || last.truncated
-        })
-    {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "Branch at a completed assistant response or before the first message",
-        ));
-    }
-    let new_id = format!(
-        "{:x}-{:x}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-        std::process::id()
-    );
-    let mut branch = Session::new(new_id.clone(), source.settings);
-    branch.title = format!("Ветка · {}", source.title);
-    branch.messages = source.messages[..n].to_vec();
-    branch.bookmarks = source
-        .bookmarks
-        .into_iter()
-        .filter(|m| m.message_index < n)
-        .collect();
-    branch.parent = Some(BranchOrigin {
-        session_id: id,
-        message_count: n,
-    });
-    save(&app, &branch).map_err(crate::internal)?;
-    attach(&app, branch);
-    Ok(Json(json!({"id":new_id})))
+    crate::blocking(move || {
+        let source = {
+            let registry = app.sessions.lock().unwrap();
+            let (source, _) = registry
+                .get(&id)
+                .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
+            let snapshot = source.lock().unwrap().clone();
+            snapshot
+        };
+        if source.status == SessionStatus::Running {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Stop generation before branching",
+            ));
+        }
+        let n = request.message_count;
+        if n > source.messages.len()
+            || (n > 0 && {
+                let last = &source.messages[n - 1];
+                last.role != "assistant" || !last.tool_calls.is_empty() || last.truncated
+            })
+        {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "Branch at a completed assistant response or before the first message",
+            ));
+        }
+        let new_id = format!(
+            "{:x}-{:x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        );
+        let mut branch = Session::new(new_id.clone(), source.settings);
+        branch.title = format!("Ветка · {}", source.title);
+        branch.messages = source.messages[..n].to_vec();
+        branch.bookmarks = source
+            .bookmarks
+            .into_iter()
+            .filter(|m| m.message_index < n)
+            .collect();
+        branch.parent = Some(BranchOrigin {
+            session_id: id,
+            message_count: n,
+        });
+        save(&app, &branch).map_err(crate::internal)?;
+        attach(&app, branch);
+        Ok(Json(json!({"id":new_id})))
+    })
+    .await
 }
 pub(crate) async fn session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
     let shared = {
@@ -316,24 +322,27 @@ pub(crate) async fn delete_session(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> ApiResult<Value> {
-    let folder = {
-        let sessions = app.sessions.lock().unwrap();
-        let Some((shared, _)) = sessions.get(&id) else {
-            return Err(error(StatusCode::NOT_FOUND, "Conversation not found"));
+    crate::blocking(move || {
+        let folder = {
+            let sessions = app.sessions.lock().unwrap();
+            let Some((shared, _)) = sessions.get(&id) else {
+                return Err(error(StatusCode::NOT_FOUND, "Conversation not found"));
+            };
+            let folder = shared.lock().unwrap().folder;
+            folder
         };
-        let folder = shared.lock().unwrap().folder;
-        folder
-    };
-    if folder != HistoryFolder::Trash {
-        return Err(error(
-            StatusCode::CONFLICT,
-            "Only conversations in Trash can be permanently deleted",
-        ));
-    }
-    app.background.cancel_owned(&id);
-    app.sessions.lock().unwrap().remove(&id);
-    let _ = std::fs::remove_file(app.data.join(format!("{id}.json")));
-    Ok(Json(json!({"deleted": id})))
+        if folder != HistoryFolder::Trash {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Only conversations in Trash can be permanently deleted",
+            ));
+        }
+        app.background.cancel_owned(&id);
+        app.sessions.lock().unwrap().remove(&id);
+        let _ = std::fs::remove_file(app.data.join(format!("{id}.json")));
+        Ok(Json(json!({"deleted": id})))
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -359,39 +368,42 @@ pub(crate) async fn save_plan(
     Path(id): Path<String>,
     Json(input): Json<PlanInput>,
 ) -> ApiResult<Value> {
-    if input.steps.len() > 30 {
-        return Err(error(StatusCode::BAD_REQUEST, "Too many plan steps"));
-    }
-    for step in &input.steps {
-        if step.title.trim().is_empty() || step.title.chars().count() > 300 {
-            return Err(error(StatusCode::BAD_REQUEST, "Invalid plan step title"));
+    crate::blocking(move || {
+        if input.steps.len() > 30 {
+            return Err(error(StatusCode::BAD_REQUEST, "Too many plan steps"));
         }
-    }
-    let sessions = app.sessions.lock().unwrap();
-    let (shared, _) = sessions
-        .get(&id)
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
-    let mut state = shared.lock().unwrap();
-    if state.folder != HistoryFolder::Active {
-        return Err(error(
-            StatusCode::CONFLICT,
-            "Conversation is archived or in trash; restore it first",
-        ));
-    }
-    let mut next = state.clone();
-    plan::update(
-        &mut next,
-        input.steps,
-        input.base_revision,
-        "user",
-        input.allow_reopen,
-    )
-    .map_err(|e| error(StatusCode::CONFLICT, e))?;
-    save(&app, &next).map_err(crate::internal)?;
-    *state = next;
-    Ok(Json(
-        json!({"updated": true,"revision":state.plan_revision,"steps":state.plan,"evidence_basis":"reported"}),
-    ))
+        for step in &input.steps {
+            if step.title.trim().is_empty() || step.title.chars().count() > 300 {
+                return Err(error(StatusCode::BAD_REQUEST, "Invalid plan step title"));
+            }
+        }
+        let sessions = app.sessions.lock().unwrap();
+        let (shared, _) = sessions
+            .get(&id)
+            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
+        let mut state = shared.lock().unwrap();
+        if state.folder != HistoryFolder::Active {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Conversation is archived or in trash; restore it first",
+            ));
+        }
+        let mut next = state.clone();
+        plan::update(
+            &mut next,
+            input.steps,
+            input.base_revision,
+            "user",
+            input.allow_reopen,
+        )
+        .map_err(|e| error(StatusCode::CONFLICT, e))?;
+        save(&app, &next).map_err(crate::internal)?;
+        *state = next;
+        Ok(Json(
+            json!({"updated": true,"revision":state.plan_revision,"steps":state.plan,"evidence_basis":"reported"}),
+        ))
+    })
+    .await
 }
 pub(crate) async fn action(
     State(app): State<App>,
@@ -508,27 +520,30 @@ pub(crate) async fn save_project(
     State(app): State<App>,
     Json(mut project): Json<context::Project>,
 ) -> ApiResult<Value> {
-    project.validate(&app.data).map_err(crate::bad_request)?;
-    if project.id.is_empty() {
-        project.id = format!(
-            "{:x}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-    }
-    if project.id != "default" && !valid_id(&project.id) {
-        return Err(error(StatusCode::BAD_REQUEST, "Invalid project ID"));
-    }
-    let mut projects = app.projects.lock().unwrap();
-    let mut updated = projects.clone();
-    if let Some(p) = updated.iter_mut().find(|p| p.id == project.id) {
-        *p = project.clone();
-    } else {
-        updated.push(project.clone());
-    }
-    state_file::save_list(app.data.as_path(), "projects", &updated).map_err(crate::internal)?;
-    *projects = updated;
-    Ok(Json(json!(project)))
+    crate::blocking(move || {
+        project.validate(&app.data).map_err(crate::bad_request)?;
+        if project.id.is_empty() {
+            project.id = format!(
+                "{:x}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+        }
+        if project.id != "default" && !valid_id(&project.id) {
+            return Err(error(StatusCode::BAD_REQUEST, "Invalid project ID"));
+        }
+        let mut projects = app.projects.lock().unwrap();
+        let mut updated = projects.clone();
+        if let Some(p) = updated.iter_mut().find(|p| p.id == project.id) {
+            *p = project.clone();
+        } else {
+            updated.push(project.clone());
+        }
+        state_file::save_list(app.data.as_path(), "projects", &updated).map_err(crate::internal)?;
+        *projects = updated;
+        Ok(Json(json!(project)))
+    })
+    .await
 }

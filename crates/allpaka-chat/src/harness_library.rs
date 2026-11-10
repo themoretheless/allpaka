@@ -221,19 +221,22 @@ pub(crate) async fn list_api(
     State(app): State<App>,
     Query(q): Query<ProjectQuery>,
 ) -> ApiResult<Value> {
-    let list = entries(&app.data, &q.project_id).map_err(crate::bad_request)?;
-    let base = root(&app.data, &q.project_id).map_err(crate::bad_request)?;
-    let entries: Vec<Value> = list
-        .iter()
-        .rev()
-        .map(|e| {
-            json!({
-                "entry": e,
-                "experience": std::fs::read_to_string(base.join("entries").join(&e.job_id).join("EXPERIENCE.md")).unwrap_or_default(),
+    crate::blocking(move || {
+        let list = entries(&app.data, &q.project_id).map_err(crate::bad_request)?;
+        let base = root(&app.data, &q.project_id).map_err(crate::bad_request)?;
+        let entries: Vec<Value> = list
+            .iter()
+            .rev()
+            .map(|e| {
+                json!({
+                    "entry": e,
+                    "experience": std::fs::read_to_string(base.join("entries").join(&e.job_id).join("EXPERIENCE.md")).unwrap_or_default(),
+                })
             })
-        })
-        .collect();
-    Ok(Json(json!({"entries": entries})))
+            .collect();
+        Ok(Json(json!({"entries": entries})))
+    })
+    .await
 }
 
 #[cfg(test)]
