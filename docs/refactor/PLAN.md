@@ -45,6 +45,11 @@
 - `tests/gpu_parity.rs`: запись через `&mut` поверх общего `&'static` среза
   при параллельных тестах (FIXME(soundness)).
 - `gpu/shaders/kernels.metal` — неиспользуемая копия `metal_kernels.rs`.
+- `allpaka verify` (CPU-эталон) на x86 расходится с llama.cpp по argmax на
+  Qwen2.5-7B-Instruct-Q4_K_M, промпт по умолчанию: llama.cpp 12095, мы 135958;
+  логиты топ-10 llama.cpp у нас на ~9–13 ниже. Одинаково у `0066c2b` и HEAD,
+  то есть было до захода. Воспроизведение: `llama-server -m <7B> --port 8080`,
+  затем `allpaka verify --model <7B> --decode 32`. Не расследовано.
 - CUDA prefill при pp128 в режиме по умолчанию (без ggml) недетерминирован от
   запуска к запуску (разный хэш логитов и argmax); при pp512 стабилен, decode
   стабилен. Было и до этого захода; не расследовано.
@@ -69,7 +74,7 @@
 | # | Задача | Размер | Риск | Статус |
 |---|---|---|---|---|
 | 0.1 | `docs/refactor/*` | S | — | done |
-| 0.2 | Парный бенчмарк `bc82c0a` против `main` + `verify --decode` | S | — | частично: Metal A/B без регрессии (BASELINE); на CUDA A/B горячих правок — логиты бит в бит, скорость в шуме (`docs/benchmarks/2026-11-10-refactor-ab-rtx5090.md`). Сравнение с llama.cpp и `verify --decode` на Mac — todo |
+| 0.2 | Парный бенчмарк `bc82c0a` против `main` + `verify --decode` | S | — | частично: Metal A/B без регрессии (BASELINE); на CUDA A/B — логиты бит в бит, скорость в шуме (`docs/benchmarks/2026-11-10-refactor-ab-rtx5090.md`); `verify --decode` на Windows против llama-server (Vulkan) дал одинаковые до бита логиты у `0066c2b` и HEAD — регрессии нет, но argmax расходится с llama.cpp (см. «Открытые находки»). Сравнение скорости с llama.cpp на 8B/30B — на Mac, todo |
 | 0.3 | Проверка `gpu/stub.rs` против API бэкендов | S | низкий | done: `scripts/check-backends.sh` |
 | 0.4 | Характеризационные тесты: `route_gated_into_slice` (граница 256), `Config::from_gguf`, `dq_fmt`/`row_bytes`, `valid_id`, `state_file` | M | — | done: граница стек/куча (`a35e381`), `dq_fmt` (`ff0d2eb`), `row_bytes` (`1df5fc5`), `state_file` (`29d9570`), `valid_id` (`ca42438`), `Config` и capability (`7cab90f`) |
 
