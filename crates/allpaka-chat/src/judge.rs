@@ -115,38 +115,49 @@ fn hash(bytes: &[u8]) -> String {
 }
 pub(crate) async fn judge_inner(
     app: &App,
-    mut request: Request,
+    request: Request,
 ) -> std::result::Result<Value, crate::ApiError> {
     let _permit = app
         .judges
         .clone()
         .try_acquire_owned()
         .map_err(|_| crate::error(StatusCode::TOO_MANY_REQUESTS, "Judge capacity reached"))?;
-    let prepared=(||->Result<_>{
-        crate::validate_settings(&request.settings,app)?;
-        request.verify_quality_source(&app.data)?;
-        if request.settings.mode!=Mode::Chat || request.settings.allow_writes { bail!("Judges require Chat without writes"); }
-        if request.rubric.trim().is_empty() || request.rubric.len()>16000 || request.input.len()>16000 || request.output.len()>64000 || request.reference.as_ref().is_some_and(|s|s.len()>64000) { bail!("Judge text exceeds bounds"); }
-        if let Some(source)=&request.trace_ref{source.validate(&app.observability,&request.settings.project_id)?;}
-        let (source,contexts)=if let Some(source)=&request.dataset_ref {
-            if source.dataset_version==0 {bail!("Pin a dataset version");}
-            let dataset=app.evaluation.load(&source.dataset_id,Some(source.dataset_version))?;
-            let sample=dataset.samples.iter().find(|sample|sample.id==source.sample_id).context("Dataset sample not found")?;
-            if dataset.project_id!=request.settings.project_id || sample.input!=request.input || sample.expected_output!=request.reference {bail!("Judge source differs from pinned dataset sample");}
-            if sample.contexts.iter().map(String::len).sum::<usize>()>16000 {bail!("Judge contexts exceed 16000 bytes");}
-            (json!({"dataset_id":dataset.id,"dataset_version":dataset.version,"dataset_sha256":dataset.sha256,"sample_id":sample.id}),sample.contexts.clone())
-        }else{(Value::Null,Vec::new())};
-        let provider=app.providers.lock().unwrap().iter().find(|p|p.id==request.settings.provider).cloned().context("Provider not found")?;
-        let data=json!({"rubric":request.rubric,"input":request.input,"answer":request.output,"reference":request.reference,"contexts":contexts});
-        Ok((provider,serde_json::to_string(&data)?,source))
-    })().map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))?;
-    let guards = request
-        .settings
-        .guardrails
-        .as_ref()
-        .map(|selection| selection.prepare(&crate::guardrail_policies::Store::open(&app.data)?))
-        .transpose()
-        .map_err(crate::bad_request)?;
+    // Preparation loads datasets, trace receipts and guardrail policies from
+    // disk: keep it off the async worker threads.
+    let task_app = app.clone();
+    let (mut request, prepared, guards) = crate::blocking(move || {
+        let app = &task_app;
+        let prepared=(||->Result<_>{
+            crate::validate_settings(&request.settings,app)?;
+            request.verify_quality_source(&app.data)?;
+            if request.settings.mode!=Mode::Chat || request.settings.allow_writes { bail!("Judges require Chat without writes"); }
+            if request.rubric.trim().is_empty() || request.rubric.len()>16000 || request.input.len()>16000 || request.output.len()>64000 || request.reference.as_ref().is_some_and(|s|s.len()>64000) { bail!("Judge text exceeds bounds"); }
+            if let Some(source)=&request.trace_ref{source.validate(&app.observability,&request.settings.project_id)?;}
+            let (source,contexts)=if let Some(source)=&request.dataset_ref {
+                if source.dataset_version==0 {bail!("Pin a dataset version");}
+                let dataset=app.evaluation.load(&source.dataset_id,Some(source.dataset_version))?;
+                let sample=dataset.samples.iter().find(|sample|sample.id==source.sample_id).context("Dataset sample not found")?;
+                if dataset.project_id!=request.settings.project_id || sample.input!=request.input || sample.expected_output!=request.reference {bail!("Judge source differs from pinned dataset sample");}
+                if sample.contexts.iter().map(String::len).sum::<usize>()>16000 {bail!("Judge contexts exceed 16000 bytes");}
+                (json!({"dataset_id":dataset.id,"dataset_version":dataset.version,"dataset_sha256":dataset.sha256,"sample_id":sample.id}),sample.contexts.clone())
+            }else{(Value::Null,Vec::new())};
+            let provider=app.providers.lock().unwrap().iter().find(|p|p.id==request.settings.provider).cloned().context("Provider not found")?;
+            let data=json!({"rubric":request.rubric,"input":request.input,"answer":request.output,"reference":request.reference,"contexts":contexts});
+            Ok((provider,serde_json::to_string(&data)?,source))
+        })();
+        let guards = prepared.as_ref().map_or(Ok(None), |_| {
+            request
+                .settings
+                .guardrails
+                .as_ref()
+                .map(|selection| selection.prepare(&crate::guardrail_policies::Store::open(&app.data)?))
+                .transpose()
+        });
+        (request, prepared, guards)
+    })
+    .await;
+    let prepared = prepared.map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
+    let guards = guards.map_err(crate::bad_request)?;
     request.settings.max_output_tokens = request.settings.max_output_tokens.min(4096);
     // reasoning_effort is honoured as requested: it is part of the receipt's pinned settings.
     let id = crate::evaluation::new_id();
