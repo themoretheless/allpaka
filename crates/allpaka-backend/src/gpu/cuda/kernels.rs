@@ -164,7 +164,12 @@ extern "C" __global__ void rmsnorm_into_f32(
     }
 }
 
-// RMSNorm into dst, then pack dst as block_q8_1 for mmvq reuse.
+// RMSNorm into dst, then pack dst as block_q8_1 for mmvq reuse. One block per
+// row; blockDim is a multiple of 32 (1024 on decode). Each thread keeps its
+// strided elements in registers, the sum of squares reduces by warp shuffle,
+// and every warp quantizes the 32-element block it just normalized, so src is
+// read once and dst never reread. Requires n % 32 == 0.
+#define RMSQ8_REGS 16
 extern "C" __global__ void rmsnorm_into_f32_q8(
     float* __restrict__ dst,
     const float* __restrict__ src,
@@ -179,32 +184,33 @@ extern "C" __global__ void rmsnorm_into_f32_q8(
     if (row >= rows) return;
     const float* sr = src + (size_t)row * n;
     float* dr = dst + (size_t)row * n;
-    __shared__ float buf[256];
-    float local = 0.f;
+    block_q8_1* yr = y + (size_t)row * (n / 32u);
+    const unsigned T = blockDim.x;
+    const unsigned lane = threadIdx.x & 31u;
+    const unsigned warp = threadIdx.x >> 5;
+    __shared__ float wsum[32];
     pdl_sync();
-    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
+    float vals[RMSQ8_REGS];
+    float local = 0.f;
+    unsigned k = 0;
+    for (unsigned i = threadIdx.x; i < n; i += T, ++k) {
         float v = sr[i];
+        if (k < RMSQ8_REGS) vals[k] = v;
         local += v * v;
     }
-    buf[threadIdx.x] = local;
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) local += __shfl_xor_sync(0xffffffffu, local, off);
+    if (lane == 0) wsum[warp] = local;
     __syncthreads();
-    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (threadIdx.x < s) buf[threadIdx.x] += buf[threadIdx.x + s];
-        __syncthreads();
-    }
-    float mean = buf[0] / (float)n;
-    float scale = rsqrtf(mean + eps);
-    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
-        dr[i] = sr[i] * scale * w[i];
-    }
-    __syncthreads();
-    // One warp-worth of lanes quantize 32-groups (blockDim.x should be 256).
-    unsigned nblk = n / 32u;
-    block_q8_1* yr = y + (size_t)row * nblk;
-    for (unsigned blk = threadIdx.x / 32u; blk < nblk; blk += blockDim.x / 32u) {
-        unsigned lane = threadIdx.x & 31u;
-        unsigned base = blk * 32u;
-        float v = dr[base + lane];
+    float tot = lane < (T >> 5) ? wsum[lane] : 0.f;
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) tot += __shfl_xor_sync(0xffffffffu, tot, off);
+    const float scale = rsqrtf(tot / (float)n + eps);
+    k = 0;
+    for (unsigned i = threadIdx.x; i < n; i += T, ++k) {
+        float v = (k < RMSQ8_REGS ? vals[k] : sr[i]) * scale * w[i];
+        dr[i] = v;
+        // The warp covers elements [i - lane, i - lane + 32): one q8 block.
         float amax = fabsf(v);
         #pragma unroll
         for (int off = 16; off > 0; off >>= 1) {
@@ -215,6 +221,7 @@ extern "C" __global__ void rmsnorm_into_f32_q8(
         int qi = __float2int_rn(v / d);
         if (qi > 127) qi = 127;
         if (qi < -127) qi = -127;
+        unsigned blk = i >> 5;
         yr[blk].qs[lane] = (int8_t)qi;
         store_q8_meta(&yr[blk], lane, qi, d);
     }

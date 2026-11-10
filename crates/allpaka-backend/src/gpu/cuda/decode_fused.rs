@@ -686,6 +686,11 @@ impl FusedCtx<'_> {
         if q8_on && n % 256 == 0 {
             gpu.ensure_q8(n, rows)?;
             let f = gpu.func_owned("rmsnorm_into_f32_q8")?;
+            // 1024 threads: the row stays in registers (up to 16 per thread).
+            let cfg = LaunchConfig {
+                block_dim: (1024, 1, 1),
+                ..cfg
+            };
             let mut q = gpu.q8_q.slice_mut(0..(n / 32) * 44 * rows);
             unsafe {
                 stream
