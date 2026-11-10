@@ -143,7 +143,7 @@ fn source_text(messages: &[Message], boundary: usize) -> Result<Vec<u8>> {
 pub(crate) async fn extract(
     State(app): State<App>,
     Path(id): Path<String>,
-    Json(mut input): Json<Request>,
+    Json(input): Json<Request>,
 ) -> crate::ApiResult<Value> {
     let _permit = app
         .memory_extractions
@@ -155,46 +155,58 @@ pub(crate) async fn extract(
                 "Memory extraction capacity reached",
             )
         })?;
-    let prepared = (|| -> Result<_> {
-        crate::validate_settings(&input.settings, &app)?;
-        admit_proposal_storage(&app.data)?;
-        if input.settings.mode != Mode::Chat || input.settings.allow_writes {
-            bail!("Memory extraction requires Chat without writes");
-        }
-        let bytes = {
-            let sessions = app.sessions.lock().unwrap();
-            let source = sessions
-                .get(&id)
-                .context("Conversation not found")?
-                .0
-                .lock()
-                .unwrap();
-            if source.status == SessionStatus::Running
-                || source.settings.project_id != input.settings.project_id
-            {
-                bail!("Invalid extraction project or running conversation");
+    // Admission scans the proposal directory and guardrails read policy
+    // files: keep both off the async worker threads.
+    let (task_app, source_id) = (app.clone(), id.clone());
+    let (mut input, prepared, guards) = crate::blocking(move || {
+        let (app, id) = (task_app, source_id);
+        let prepared = (|| -> Result<_> {
+            crate::validate_settings(&input.settings, &app)?;
+            admit_proposal_storage(&app.data)?;
+            if input.settings.mode != Mode::Chat || input.settings.allow_writes {
+                bail!("Memory extraction requires Chat without writes");
             }
-            source_text(&source.messages, input.message_count)?
-        };
-        let hash = crate::storage::hex_sha256(&bytes);
-        let provider = app
-            .providers
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|p| p.id == input.settings.provider)
-            .cloned()
-            .context("Provider not found")?;
-        Ok((String::from_utf8(bytes)?, hash, provider))
-    })()
-    .map_err(crate::bad_request)?;
-    let guards = input
-        .settings
-        .guardrails
-        .as_ref()
-        .map(|selection| selection.prepare(&crate::guardrail_policies::Store::open(&app.data)?))
-        .transpose()
-        .map_err(crate::bad_request)?;
+            let bytes = {
+                let sessions = app.sessions.lock().unwrap();
+                let source = sessions
+                    .get(&id)
+                    .context("Conversation not found")?
+                    .0
+                    .lock()
+                    .unwrap();
+                if source.status == SessionStatus::Running
+                    || source.settings.project_id != input.settings.project_id
+                {
+                    bail!("Invalid extraction project or running conversation");
+                }
+                source_text(&source.messages, input.message_count)?
+            };
+            let hash = crate::storage::hex_sha256(&bytes);
+            let provider = app
+                .providers
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| p.id == input.settings.provider)
+                .cloned()
+                .context("Provider not found")?;
+            Ok((String::from_utf8(bytes)?, hash, provider))
+        })();
+        let guards = prepared.as_ref().map_or(Ok(None), |_| {
+            input
+                .settings
+                .guardrails
+                .as_ref()
+                .map(|selection| {
+                    selection.prepare(&crate::guardrail_policies::Store::open(&app.data)?)
+                })
+                .transpose()
+        });
+        (input, prepared, guards)
+    })
+    .await;
+    let prepared = prepared.map_err(crate::bad_request)?;
+    let guards = guards.map_err(crate::bad_request)?;
     input.settings.max_output_tokens = input.settings.max_output_tokens.min(4096);
     // reasoning_effort is honoured as requested: it is part of the receipt's pinned settings.
     let proposal_id = crate::evaluation::new_id();
@@ -253,9 +265,15 @@ pub(crate) async fn extract(
         }
         let candidates = parse(&message)?;
         let receipt = json!({"id":proposal_id,"project_id":input.settings.project_id,"session_id":id,"message_count":input.message_count,"source_sha256":prepared.1,"settings":input.settings,"trace_id":trace.id(),"usage":usage,"notes":candidates.notes,"accepted":false});
-        commit_proposal(&app.data, &proposal_id, &receipt)?;
         Ok(receipt)
     })();
+    let receipt = match receipt {
+        Ok(receipt) => {
+            let (data, id) = (app.data.clone(), proposal_id.clone());
+            crate::blocking(move || commit_proposal(&data, &id, &receipt).map(|()| receipt)).await
+        }
+        Err(error) => Err(error),
+    };
     root.finish(
         if receipt.is_ok() {
             "completed"
@@ -275,7 +293,7 @@ pub(crate) struct ConsolidationRequest {
 }
 pub(crate) async fn consolidate(
     State(app): State<App>,
-    Json(mut input): Json<ConsolidationRequest>,
+    Json(input): Json<ConsolidationRequest>,
 ) -> crate::ApiResult<Value> {
     let _permit = app
         .memory_extractions
@@ -287,38 +305,51 @@ pub(crate) async fn consolidate(
                 "Memory extraction capacity reached",
             )
         })?;
-    let prepared = (|| -> Result<_> {
-        crate::validate_settings(&input.settings, &app)?;
-        admit_proposal_storage(&app.data)?;
-        if input.settings.mode != Mode::Chat || input.settings.allow_writes {
-            bail!("Memory extraction requires Chat without writes");
-        }
-        let source = app
-            .memory
-            .consolidation_input(&input.settings.project_id, &input.sources)?;
-        let bytes = serde_json::to_vec(&source["sources"])?;
-        let hash = source["source_sha256"]
-            .as_str()
-            .context("Missing source hash")?
-            .to_owned();
-        let provider = app
-            .providers
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|p| p.id == input.settings.provider)
-            .cloned()
-            .context("Provider not found")?;
-        Ok((String::from_utf8(bytes)?, hash, provider))
-    })()
-    .map_err(crate::bad_request)?;
-    let guards = input
-        .settings
-        .guardrails
-        .as_ref()
-        .map(|selection| selection.prepare(&crate::guardrail_policies::Store::open(&app.data)?))
-        .transpose()
-        .map_err(crate::bad_request)?;
+    // Admission scans the proposal directory, consolidation reads memory
+    // snapshots and guardrails read policy files: keep them off the async
+    // worker threads.
+    let task_app = app.clone();
+    let (mut input, prepared, guards) = crate::blocking(move || {
+        let app = task_app;
+        let prepared = (|| -> Result<_> {
+            crate::validate_settings(&input.settings, &app)?;
+            admit_proposal_storage(&app.data)?;
+            if input.settings.mode != Mode::Chat || input.settings.allow_writes {
+                bail!("Memory extraction requires Chat without writes");
+            }
+            let source = app
+                .memory
+                .consolidation_input(&input.settings.project_id, &input.sources)?;
+            let bytes = serde_json::to_vec(&source["sources"])?;
+            let hash = source["source_sha256"]
+                .as_str()
+                .context("Missing source hash")?
+                .to_owned();
+            let provider = app
+                .providers
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| p.id == input.settings.provider)
+                .cloned()
+                .context("Provider not found")?;
+            Ok((String::from_utf8(bytes)?, hash, provider))
+        })();
+        let guards = prepared.as_ref().map_or(Ok(None), |_| {
+            input
+                .settings
+                .guardrails
+                .as_ref()
+                .map(|selection| {
+                    selection.prepare(&crate::guardrail_policies::Store::open(&app.data)?)
+                })
+                .transpose()
+        });
+        (input, prepared, guards)
+    })
+    .await;
+    let prepared = prepared.map_err(crate::bad_request)?;
+    let guards = guards.map_err(crate::bad_request)?;
     input.settings.max_output_tokens = input.settings.max_output_tokens.min(4096);
     // reasoning_effort is honoured as requested: it is part of the receipt's pinned settings.
     let proposal_id = crate::evaluation::new_id();
@@ -380,9 +411,15 @@ pub(crate) async fn consolidate(
             bail!("Consolidation must produce exactly one reviewed candidate");
         }
         let receipt = json!({"kind":"memory_consolidation_proposal","id":proposal_id,"project_id":input.settings.project_id,"session_id":null,"consolidation_sources":input.sources,"source_sha256":prepared.1,"settings":input.settings,"trace_id":trace.id(),"usage":usage,"notes":candidates.notes,"accepted":false});
-        commit_proposal(&app.data, &proposal_id, &receipt)?;
         Ok(receipt)
     })();
+    let receipt = match receipt {
+        Ok(receipt) => {
+            let (data, id) = (app.data.clone(), proposal_id.clone());
+            crate::blocking(move || commit_proposal(&data, &id, &receipt).map(|()| receipt)).await
+        }
+        Err(error) => Err(error),
+    };
     root.finish(
         if receipt.is_ok() {
             "completed"
