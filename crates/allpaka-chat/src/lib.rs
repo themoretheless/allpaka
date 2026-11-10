@@ -195,6 +195,24 @@ pub(crate) fn not_found(message: impl ToString) -> ApiError {
 pub(crate) fn internal(message: impl ToString) -> ApiError {
     error(StatusCode::INTERNAL_SERVER_ERROR, message)
 }
+/// Run synchronous filesystem work on Tokio's blocking pool so a slow disk
+/// does not stall the async worker threads that serve every other request.
+///
+/// A panic inside `work` is resumed in the caller, exactly as if the work had
+/// run inline; the work itself always runs to completion once started.
+pub(crate) async fn blocking<T, F>(work: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => value,
+        Err(error) => match error.try_into_panic() {
+            Ok(payload) => std::panic::resume_unwind(payload),
+            Err(error) => panic!("Blocking task did not complete: {error}"),
+        },
+    }
+}
 pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> Result<()> {
     if !bind.ip().is_loopback() {
         bail!("Studio is a local single-user service: bind to a loopback address");

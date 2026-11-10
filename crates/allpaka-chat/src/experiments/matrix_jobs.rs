@@ -432,112 +432,127 @@ pub(crate) async fn start(
     State(app): State<crate::App>,
     Json(input): Json<Input>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        let prepared = prepare(&app, &input.project_id, &input.variants)?;
-        let job = Job {
-            schema_version: 1,
-            id: crate::evaluation::new_id(),
-            project_id: input.project_id,
-            run_ids: vec![None; input.variants.len()],
-            run_attempted: vec![false; input.variants.len()],
-            provider_routes: prepared
-                .iter()
-                .map(|(_, _, provider)| provider_route(provider))
-                .collect(),
-            variants: input.variants,
-            status: "running".into(),
-            matrix_id: crate::evaluation::new_id(),
-            error: None,
-            retry_of: None,
-            previous_run_ids: None,
-        };
-        app.matrix_jobs.launch(app.clone(), job, prepared)
-    })();
-    result.map(Json).map_err(crate::bad_request)
+    crate::blocking(move || {
+        let result = (|| -> Result<Value> {
+            let prepared = prepare(&app, &input.project_id, &input.variants)?;
+            let job = Job {
+                schema_version: 1,
+                id: crate::evaluation::new_id(),
+                project_id: input.project_id,
+                run_ids: vec![None; input.variants.len()],
+                run_attempted: vec![false; input.variants.len()],
+                provider_routes: prepared
+                    .iter()
+                    .map(|(_, _, provider)| provider_route(provider))
+                    .collect(),
+                variants: input.variants,
+                status: "running".into(),
+                matrix_id: crate::evaluation::new_id(),
+                error: None,
+                retry_of: None,
+                previous_run_ids: None,
+            };
+            app.matrix_jobs.launch(app.clone(), job, prepared)
+        })();
+        result.map(Json).map_err(crate::bad_request)
+    })
+    .await
 }
 pub(crate) async fn detail(
     State(app): State<crate::App>,
     Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    app.matrix_jobs
-        .load(&id)
-        .map(|job| Json(job.view()))
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        app.matrix_jobs
+            .load(&id)
+            .map(|job| Json(job.view()))
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 pub(crate) async fn list(
     State(app): State<crate::App>,
     Query(query): Query<MatrixCatalog>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        crate::evaluation::project_exists(&app, &query.project_id)?;
-        if query.limit == 0 || query.limit > 100 || query.offset > 1000 {
-            bail!("Invalid matrix job page");
-        }
-        let mut rows = Vec::new();
-        for id in app.matrix_jobs.ids()? {
-            let job = app.matrix_jobs.load(&id)?;
-            if job.project_id == query.project_id {
-                rows.push(job.view());
+    crate::blocking(move || {
+        let result = (|| -> Result<Value> {
+            crate::evaluation::project_exists(&app, &query.project_id)?;
+            if query.limit == 0 || query.limit > 100 || query.offset > 1000 {
+                bail!("Invalid matrix job page");
             }
-        }
-        let has_more = rows.len() > query.offset + query.limit;
-        Ok(
-            json!({"jobs":rows.into_iter().skip(query.offset).take(query.limit).collect::<Vec<_>>(),"offset":query.offset,"has_more":has_more}),
-        )
-    })();
-    result.map(Json).map_err(crate::bad_request)
+            let mut rows = Vec::new();
+            for id in app.matrix_jobs.ids()? {
+                let job = app.matrix_jobs.load(&id)?;
+                if job.project_id == query.project_id {
+                    rows.push(job.view());
+                }
+            }
+            let has_more = rows.len() > query.offset + query.limit;
+            Ok(
+                json!({"jobs":rows.into_iter().skip(query.offset).take(query.limit).collect::<Vec<_>>(),"offset":query.offset,"has_more":has_more}),
+            )
+        })();
+        result.map(Json).map_err(crate::bad_request)
+    })
+    .await
 }
 pub(crate) async fn cancel(
     State(app): State<crate::App>,
     Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        app.matrix_jobs.load(&id)?;
-        let active = app.matrix_jobs.active.lock().unwrap();
-        let requested = active.get(&id).is_some_and(|flag| {
-            flag.store(true, Ordering::SeqCst);
-            true
-        });
-        Ok(json!({"cancel_requested":requested}))
-    })();
-    result.map(Json).map_err(crate::bad_request)
+    crate::blocking(move || {
+        let result = (|| -> Result<Value> {
+            app.matrix_jobs.load(&id)?;
+            let active = app.matrix_jobs.active.lock().unwrap();
+            let requested = active.get(&id).is_some_and(|flag| {
+                flag.store(true, Ordering::SeqCst);
+                true
+            });
+            Ok(json!({"cancel_requested":requested}))
+        })();
+        result.map(Json).map_err(crate::bad_request)
+    })
+    .await
 }
 pub(crate) async fn resume(
     State(app): State<crate::App>,
     Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        let job = app.matrix_jobs.load(&id)?;
-        if !matches!(job.status.as_str(), "interrupted" | "failed") {
-            bail!("Only interrupted or failed jobs can be resumed");
-        }
-        let prepared = prepare(&app, &job.project_id, &job.variants)?;
-        if prepared
-            .iter()
-            .map(|(_, _, provider)| provider_route(provider))
-            .collect::<Vec<_>>()
-            != job.provider_routes
-        {
-            bail!("Provider routing changed since matrix admission");
-        }
-        for (((request, snapshot, _), id), attempted) in
-            prepared.iter().zip(&job.run_ids).zip(&job.run_attempted)
-        {
-            if let Some(id) = id {
-                if app.experiments.path(id)?.exists() {
-                    if !attempted {
-                        bail!("Unexpected experiment at an unsent reservation");
+    crate::blocking(move || {
+        let result = (|| -> Result<Value> {
+            let job = app.matrix_jobs.load(&id)?;
+            if !matches!(job.status.as_str(), "interrupted" | "failed") {
+                bail!("Only interrupted or failed jobs can be resumed");
+            }
+            let prepared = prepare(&app, &job.project_id, &job.variants)?;
+            if prepared
+                .iter()
+                .map(|(_, _, provider)| provider_route(provider))
+                .collect::<Vec<_>>()
+                != job.provider_routes
+            {
+                bail!("Provider routing changed since matrix admission");
+            }
+            for (((request, snapshot, _), id), attempted) in
+                prepared.iter().zip(&job.run_ids).zip(&job.run_attempted)
+            {
+                if let Some(id) = id {
+                    if app.experiments.path(id)?.exists() {
+                        if !attempted {
+                            bail!("Unexpected experiment at an unsent reservation");
+                        }
+                        let run = app.experiments.load(id)?;
+                        verify_variant(&run, request, snapshot)?;
+                    } else if *attempted {
+                        bail!("Attempted experiment receipt is missing; replay refused");
                     }
-                    let run = app.experiments.load(id)?;
-                    verify_variant(&run, request, snapshot)?;
-                } else if *attempted {
-                    bail!("Attempted experiment receipt is missing; replay refused");
                 }
             }
-        }
-        app.matrix_jobs.launch(app.clone(), job, prepared)
-    })();
-    result.map(Json).map_err(crate::bad_request)
+            app.matrix_jobs.launch(app.clone(), job, prepared)
+        })();
+        result.map(Json).map_err(crate::bad_request)
+    })
+    .await
 }
 
 fn invalid_retry_lineage(job: &Job) -> bool {
@@ -556,60 +571,63 @@ pub(crate) async fn retry(
     State(app): State<crate::App>,
     Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        let original = app.matrix_jobs.load(&id)?;
-        if !matches!(
-            original.status.as_str(),
-            "interrupted" | "failed" | "cancelled"
-        ) {
-            bail!("Only interrupted, failed or cancelled jobs can be retried");
-        }
-        if app.matrix_jobs.active.lock().unwrap().contains_key(&id) {
-            bail!("Original matrix job is still active");
-        }
-        let prepared = prepare(&app, &original.project_id, &original.variants)?;
-        if prepared
-            .iter()
-            .map(|(_, _, provider)| provider_route(provider))
-            .collect::<Vec<_>>()
-            != original.provider_routes
-        {
-            bail!("Provider routing changed since matrix admission");
-        }
-        let mut next = original.clone();
-        next.id = crate::evaluation::new_id();
-        next.matrix_id = crate::evaluation::new_id();
-        next.retry_of = Some(original.id.clone());
-        next.previous_run_ids = Some(original.run_ids.clone());
-        for (index, (request, snapshot, _)) in prepared.iter().enumerate() {
-            let mut reusable = false;
-            if let Some(run_id) = original.run_ids[index].as_ref() {
-                if app.experiments.active.lock().unwrap().contains_key(run_id) {
-                    bail!("Original experiment is still active");
+    crate::blocking(move || {
+        let result = (|| -> Result<Value> {
+            let original = app.matrix_jobs.load(&id)?;
+            if !matches!(
+                original.status.as_str(),
+                "interrupted" | "failed" | "cancelled"
+            ) {
+                bail!("Only interrupted, failed or cancelled jobs can be retried");
+            }
+            if app.matrix_jobs.active.lock().unwrap().contains_key(&id) {
+                bail!("Original matrix job is still active");
+            }
+            let prepared = prepare(&app, &original.project_id, &original.variants)?;
+            if prepared
+                .iter()
+                .map(|(_, _, provider)| provider_route(provider))
+                .collect::<Vec<_>>()
+                != original.provider_routes
+            {
+                bail!("Provider routing changed since matrix admission");
+            }
+            let mut next = original.clone();
+            next.id = crate::evaluation::new_id();
+            next.matrix_id = crate::evaluation::new_id();
+            next.retry_of = Some(original.id.clone());
+            next.previous_run_ids = Some(original.run_ids.clone());
+            for (index, (request, snapshot, _)) in prepared.iter().enumerate() {
+                let mut reusable = false;
+                if let Some(run_id) = original.run_ids[index].as_ref() {
+                    if app.experiments.active.lock().unwrap().contains_key(run_id) {
+                        bail!("Original experiment is still active");
+                    }
+                    if app.experiments.path(run_id)?.exists() {
+                        if !original.run_attempted[index] {
+                            bail!("Unexpected experiment at an unsent reservation");
+                        }
+                        let run = app.experiments.load(run_id)?;
+                        verify_variant_configuration(&run, request, snapshot)?;
+                        if run.status == "running" {
+                            bail!("Original experiment has no confirmed terminal state");
+                        }
+                        if run.status == "completed" && run.strict_quality {
+                            verify_variant(&run, request, snapshot)?;
+                            reusable = true;
+                        }
+                    }
                 }
-                if app.experiments.path(run_id)?.exists() {
-                    if !original.run_attempted[index] {
-                        bail!("Unexpected experiment at an unsent reservation");
-                    }
-                    let run = app.experiments.load(run_id)?;
-                    verify_variant_configuration(&run, request, snapshot)?;
-                    if run.status == "running" {
-                        bail!("Original experiment has no confirmed terminal state");
-                    }
-                    if run.status == "completed" && run.strict_quality {
-                        verify_variant(&run, request, snapshot)?;
-                        reusable = true;
-                    }
+                if !reusable {
+                    next.run_ids[index] = None;
+                    next.run_attempted[index] = false;
                 }
             }
-            if !reusable {
-                next.run_ids[index] = None;
-                next.run_attempted[index] = false;
-            }
-        }
-        app.matrix_jobs.launch(app.clone(), next, prepared)
-    })();
-    result.map(Json).map_err(crate::bad_request)
+            app.matrix_jobs.launch(app.clone(), next, prepared)
+        })();
+        result.map(Json).map_err(crate::bad_request)
+    })
+    .await
 }
 
 #[cfg(test)]
