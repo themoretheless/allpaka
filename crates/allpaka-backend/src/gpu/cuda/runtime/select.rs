@@ -62,20 +62,83 @@ pub fn row_bytes(ty: GgmlType, n_in: usize) -> Option<usize> {
     Some(n_in / be * bb)
 }
 
+/// `fmt` codes the CUDA dequant kernels switch on. They must match the
+/// `// fmt:` line above `dequant_rows_f16` in `kernels.rs`; a test parses it.
+/// Metal numbers its formats differently (`metal::decode::fmt`).
+pub mod fmt {
+    pub const Q4K: u32 = 0;
+    pub const Q5K: u32 = 1;
+    pub const Q6K: u32 = 2;
+    pub const Q8_0: u32 = 3;
+    pub const Q2K: u32 = 4;
+    pub const Q3K: u32 = 5;
+    pub const Q5_0: u32 = 6;
+    pub const F16: u32 = 7;
+    pub const F32: u32 = 8;
+    pub const BF16: u32 = 9;
+}
+
 pub fn dq_fmt(ty: GgmlType) -> Option<u32> {
     Some(match ty {
-        GgmlType::Q4K => 0,
-        GgmlType::Q5K => 1,
-        GgmlType::Q6K => 2,
-        GgmlType::Q8_0 => 3,
-        GgmlType::Q2K => 4,
-        GgmlType::Q3K => 5,
-        GgmlType::Q5_0 => 6,
-        GgmlType::F16 => 7,
-        GgmlType::F32 => 8,
-        GgmlType::BF16 => 9,
+        GgmlType::Q4K => fmt::Q4K,
+        GgmlType::Q5K => fmt::Q5K,
+        GgmlType::Q6K => fmt::Q6K,
+        GgmlType::Q8_0 => fmt::Q8_0,
+        GgmlType::Q2K => fmt::Q2K,
+        GgmlType::Q3K => fmt::Q3K,
+        GgmlType::Q5_0 => fmt::Q5_0,
+        GgmlType::F16 => fmt::F16,
+        GgmlType::F32 => fmt::F32,
+        GgmlType::BF16 => fmt::BF16,
         GgmlType::MlxQ4 | GgmlType::MlxQ8 | GgmlType::Other(_) => return None,
     })
+}
+
+#[cfg(test)]
+mod dq_fmt_tests {
+    use super::*;
+
+    /// The kernel source documents its codes as `// fmt: 0=q4_k 1=q5_k ...`;
+    /// every type the host maps must sit at the same code there.
+    #[test]
+    fn codes_match_the_kernel_comment() {
+        let line = crate::gpu::cuda::kernels::KERNELS
+            .lines()
+            .find(|l| l.trim_start().starts_with("// fmt: 0="))
+            .expect("kernels.rs documents the dequant fmt codes");
+        let documented: Vec<(u32, &str)> = line
+            .trim_start()
+            .trim_start_matches("// fmt:")
+            .split_whitespace()
+            .map(|pair| {
+                let (code, name) = pair.split_once('=').unwrap();
+                (code.parse().unwrap(), name)
+            })
+            .collect();
+        let host = [
+            (GgmlType::Q4K, "q4_k"),
+            (GgmlType::Q5K, "q5_k"),
+            (GgmlType::Q6K, "q6_k"),
+            (GgmlType::Q8_0, "q8_0"),
+            (GgmlType::Q2K, "q2_k"),
+            (GgmlType::Q3K, "q3_k"),
+            (GgmlType::Q5_0, "q5_0"),
+            (GgmlType::F16, "f16"),
+            (GgmlType::F32, "f32"),
+            (GgmlType::BF16, "bf16"),
+        ];
+        assert_eq!(documented.len(), host.len());
+        for (ty, name) in host {
+            let code = dq_fmt(ty).unwrap();
+            assert!(
+                documented.contains(&(code, name)),
+                "{ty:?} maps to {code}, kernel comment says {line}"
+            );
+        }
+        for ty in [GgmlType::MlxQ4, GgmlType::MlxQ8, GgmlType::Other(99)] {
+            assert_eq!(dq_fmt(ty), None);
+        }
+    }
 }
 
 pub fn resolve_w(gpu: &CudaGpu, w: &[u8]) -> Option<(usize, u64)> {

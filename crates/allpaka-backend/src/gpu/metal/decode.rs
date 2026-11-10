@@ -2338,19 +2338,79 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     Some(out)
 }
 
+/// `fmt` codes `embed_row_f32_dtoken` and the other Metal dequant kernels
+/// switch on. CUDA numbers its formats differently (BF16 is 6 here, 9 there).
+pub(super) mod fmt {
+    pub const Q4K: u32 = 0;
+    pub const Q5K: u32 = 1;
+    pub const Q6K: u32 = 2;
+    pub const Q8_0: u32 = 3;
+    pub const Q2K: u32 = 4;
+    pub const Q3K: u32 = 5;
+    pub const BF16: u32 = 6;
+    pub const F16: u32 = 7;
+    pub const F32: u32 = 8;
+}
+
 pub(super) fn dq_fmt(ty: GgmlType) -> Option<u32> {
     Some(match ty {
-        GgmlType::Q4K => 0,
-        GgmlType::Q5K => 1,
-        GgmlType::Q6K => 2,
-        GgmlType::Q8_0 => 3,
-        GgmlType::Q2K => 4,
-        GgmlType::Q3K => 5,
-        GgmlType::BF16 => 6,
-        GgmlType::F16 => 7,
-        GgmlType::F32 => 8,
+        GgmlType::Q4K => fmt::Q4K,
+        GgmlType::Q5K => fmt::Q5K,
+        GgmlType::Q6K => fmt::Q6K,
+        GgmlType::Q8_0 => fmt::Q8_0,
+        GgmlType::Q2K => fmt::Q2K,
+        GgmlType::Q3K => fmt::Q3K,
+        GgmlType::BF16 => fmt::BF16,
+        GgmlType::F16 => fmt::F16,
+        GgmlType::F32 => fmt::F32,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod dq_fmt_tests {
+    use super::fmt;
+
+    /// The embed kernel's per-format branches read blocks of the size (or
+    /// element type) the host code means by each `fmt` number.
+    #[test]
+    fn embed_kernel_branches_match_the_host_codes() {
+        let src = crate::gpu::metal_kernels::KERNELS;
+        let start = src
+            .find("kernel void embed_row_f32_dtoken(")
+            .expect("embed_row_f32_dtoken exists");
+        let body = &src[start..];
+        let body = &body[..body[1..]
+            .find(
+                "
+kernel void",
+            )
+            .map_or(body.len(), |i| i + 1)];
+        let branch = |code: u32| {
+            let at = body
+                .find(&format!("fmt == {code}u"))
+                .unwrap_or_else(|| panic!("no branch for fmt {code}"));
+            &body[at..(at + 200).min(body.len())]
+        };
+        assert!(
+            body.contains("fmt <= 2u"),
+            "K formats 0..=2 share one block"
+        );
+        assert!(
+            branch(fmt::Q4K).contains("b * 144u"),
+            "Q4_K blocks are 144 bytes"
+        );
+        assert!(
+            branch(fmt::Q5K).contains("b * 176u"),
+            "Q5_K blocks are 176 bytes"
+        );
+        for code in [fmt::Q8_0, fmt::Q2K, fmt::Q3K] {
+            branch(code);
+        }
+        assert!(branch(fmt::BF16).contains("device const ushort*"));
+        assert!(branch(fmt::F16).contains("device const half*"));
+        assert!(branch(fmt::F32).contains("device const float*"));
+    }
 }
 
 pub(super) fn row_bytes(ty: GgmlType, n_in: usize) -> Option<usize> {
