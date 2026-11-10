@@ -61,13 +61,13 @@
 | 3.2 | chat: запись через `storage::atomic_write*` | M | средний | done в реальном объёме (`e3e5dce`): индекс учётных данных и JSON harness-refine. Аудит завысил масштаб: почти все прямые `fs::write` находятся в тестах, а `state_file` уже атомарен. Осталось: `harness.rs:717` (temp+rename без fsync), собственный писатель `observability` (намеренно без fsync для бегущих трасс) |
 | 3.3 | chat: убрать дубли времени и идентичных `valid_id` | S | низкий | done (`98cfdd8`). Функции `digest` дублями не являются: у каждой свой набор полей |
 | 3.4 | chat: `valid_id` — одно правило (B9) | S | **требует решения** | todo |
-| 3.5 | chat: строковые status/kind/action → enum с прежними словами на проводе | M | средний | wip: `background` и история `review_queues` done. `experiments` и `matrix_jobs` отложены: длина строки статуса участвует там в расчёте байтового бюджета записи (`fixed.status.clear()`), нужен отдельный разбор. observability, guardrail_policies, online_evaluation — todo |
+| 3.5 | chat: строковые status/kind/action → enum с прежними словами на проводе | M | средний | частично: `background` и история `review_queues` done. Статусы спанов observability **не переводятся**: их пишут 40+ мест в 15 файлах, набор открытый (`token_limit`, `step_limit`, выражения), записи лежат на диске, и значение вне enum сделало бы старую трассу нечитаемой. `experiments`/`matrix_jobs` отложены из-за байтового бюджета записи. guardrail_policies, online_evaluation — todo |
 | 3.6 | chat: `turn_traced` → стадии хода | L | высокий | todo |
-| 3.7 | chat: контекстные структуры вместо 8–14 параметров | S | низкий | wip: `run_subagent` и `run_member`/`run_member_inner` done; `retry`, `synthesize`, `merge_pass` в `swarm.rs` (8–10 параметров) — todo |
+| 3.7 | chat: контекстные структуры вместо 8–14 параметров | S | низкий | done: `run_subagent`, `MemberRun`, `SwarmTurn`, `MergeTarget`/`Synthesizer`/`MergePass` (`b71ef9a`); в `swarm.rs` не осталось `too_many_arguments` |
 | 3.8 | chat: блокирующий fs из async → `spawn_blocking` | M | средний | todo |
 | 3.9 | chat: реестр инструментов вместо `match name`; токены отмены в experiments, judge_runs, memory_extract, swarm | M | средний | todo |
 | 3.10 | cli: таблица маршрутов вместо `starts_with` | M | средний | todo |
-| 3.11 | core: `PoolPlacement`, общий co-residency, типизированные ошибки | M | низкий | wip: `FleetError` done; `Verdict::Infeasible.reason` оставлен строкой (это текст отчёта, а не ошибка для ветвления); `PoolPlacement` и co-residency — todo |
+| 3.11 | core: общий co-residency, типизированные ошибки | M | низкий | done: `FleetError` (`e3159c0`), `cost::charge_co_residency` через трейт `PoolLoad` (`fcb018e`). Общий тип для `Placement`/`Replica` не вводился: у них разные поля отчёта, общий хелпер снял единственное дублирование логики |
 | 3.12 | model: один `Architecture` enum; `ModelError`; дедупликация `loader.rs` | M | низкий | todo |
 | 3.13 | gguf/mlx/dtype: типизированные ошибки | M | низкий | todo |
 
