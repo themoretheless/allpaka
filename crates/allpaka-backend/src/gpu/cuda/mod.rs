@@ -19,10 +19,9 @@ use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 use cudarc::driver::{CudaSlice, DevicePtr, LaunchConfig, PushKernelArg};
 use pdl::{LaunchArgsPdl, StreamPdlExt};
 use runtime::{
-    dq_fmt, launch_embed_row, launch_embed_row_dtoken_ptr, launch_gemm_dequant, launch_inc_u32_ptr,
-    launch_matvec_q4k_2, launch_matvec_q4k_qkv, launch_matvec_y_ptr, launch_store_u32_at_ptr,
-    note_call, q8_decode_enabled, resolve_w, row_bytes, run_matvec, try_init, with_gpu, CudaGpu,
-    CALLS, DISPATCHES, ENCODE_NS, GPU, GPU_BUSY_NS, MM_MIN_M, SCHED_NS, WAIT_NS,
+    dq_fmt, launch_embed_row, launch_gemm_dequant, launch_matvec_q4k_2, launch_matvec_q4k_qkv,
+    launch_matvec_y_ptr, note_call, q8_decode_enabled, resolve_w, row_bytes, run_matvec, try_init,
+    with_gpu, CudaGpu, CALLS, DISPATCHES, ENCODE_NS, GPU, GPU_BUSY_NS, MM_MIN_M, SCHED_NS, WAIT_NS,
 };
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -86,10 +85,13 @@ pub fn has_device_rope_freq() -> bool {
 
 /// Prefer on-GPU token_embd dequant (skip host embd.row + x H2D). Opt-in: ALLPAKA_GPU_EMBED=1.
 pub fn prefer_gpu_embed() -> bool {
+    static PREFER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     is_attached()
-        && std::env::var("ALLPAKA_GPU_EMBED")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+        && *PREFER.get_or_init(|| {
+            std::env::var("ALLPAKA_GPU_EMBED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        })
 }
 
 pub fn can_embed_on_gpu(ty: GgmlType, bytes: &[u8], n_in: usize) -> bool {

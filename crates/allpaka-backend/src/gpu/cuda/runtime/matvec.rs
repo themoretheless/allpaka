@@ -3,6 +3,65 @@
 
 use super::*;
 
+struct MatvecFlags {
+    nwarps: Option<u8>,
+    mmvq_rows2: bool,
+    out_n4: bool,
+    q6_f32: bool,
+    k8192: bool,
+    k5120: bool,
+    q6_k25600: bool,
+    ggml_mmvq: bool,
+    ggml_decode: bool,
+    gu_q8: bool,
+    gu_n8: bool,
+    k5120_gu: bool,
+    fuse_log: bool,
+    qkv_split: bool,
+}
+
+fn matvec_flags() -> &'static MatvecFlags {
+    static FLAGS: OnceLock<MatvecFlags> = OnceLock::new();
+    FLAGS.get_or_init(|| {
+        let on = |k: &str| {
+            std::env::var(k)
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        };
+        let off_default_on = |k: &str| {
+            std::env::var(k)
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(true)
+        };
+        MatvecFlags {
+            nwarps: std::env::var("ALLPAKA_NWARPS")
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok()),
+            mmvq_rows2: std::env::var("ALLPAKA_MMVQ_ROWS")
+                .map(|v| v == "2")
+                .unwrap_or(false),
+            out_n4: off_default_on("ALLPAKA_OUT_N4"),
+            q6_f32: on("ALLPAKA_Q6_F32"),
+            k8192: off_default_on("ALLPAKA_K8192"),
+            k5120: on("ALLPAKA_K5120"),
+            q6_k25600: on("ALLPAKA_Q6_K25600"),
+            ggml_mmvq: on("ALLPAKA_GGML_MMVQ"),
+            ggml_decode: on("ALLPAKA_GGML_DECODE"),
+            gu_q8: std::env::var("ALLPAKA_GU_Q8")
+                .map(|v| v == "1")
+                .unwrap_or(false),
+            gu_n8: std::env::var("ALLPAKA_GU_N8")
+                .map(|v| v == "1")
+                .unwrap_or(false),
+            k5120_gu: on("ALLPAKA_K5120_GU"),
+            fuse_log: std::env::var("ALLPAKA_FUSE_LOG")
+                .map(|v| v == "1")
+                .unwrap_or(false),
+            qkv_split: on("ALLPAKA_QKV_SPLIT"),
+        }
+    })
+}
+
 pub(super) fn launch_qk_q8_matvec_on(
     gpu: &mut CudaGpu,
     stream: &CudaStream,
@@ -19,30 +78,23 @@ pub(super) fn launch_qk_q8_matvec_on(
     if n_in % 256 != 0 {
         return None;
     }
+    let flags = matvec_flags();
     // Prefer nwarps=8 for long-K Q6 (down-proj). Q4 stays at 4.
     // Huge n_out (LM head ~152k) prefers nwarps=4: more CTAs on short K.
     let long_q6 = matches!(ty, GgmlType::Q6K) && n_in >= 4096;
     let huge_out = n_out >= 65536;
-    let nwarps_env = std::env::var("ALLPAKA_NWARPS").ok();
-    let force2 = nwarps_env.as_deref() == Some("2");
-    let force8 = nwarps_env.as_deref() == Some("8");
-    let force4 = nwarps_env.as_deref() == Some("4");
-    let rows2 = std::env::var("ALLPAKA_MMVQ_ROWS")
-        .map(|v| v == "2")
-        .unwrap_or(false);
-    let out4 = huge_out
-        && std::env::var("ALLPAKA_OUT_N4")
-            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-            .unwrap_or(true); // nwarps=4 on LM head (~152k rows) beats n8 on 5090
+    let force2 = flags.nwarps == Some(2);
+    let force8 = flags.nwarps == Some(8);
+    let force4 = flags.nwarps == Some(4);
+    let rows2 = flags.mmvq_rows2;
+    let out4 = huge_out && flags.out_n4; // nwarps=4 on LM head (~152k rows) beats n8 on 5090
     let auto8 = long_q6 && !force2 && !force4 && !rows2 && !(out4 && !force8);
     // Q6 + f32 X: pack Q8 in smem inside the matvec (skip separate quantize_q8_1).
     // Opt-in only: measured slower than quantize+q8 on 5090 (~43 vs ~64 tg).
     let q6_f32 = matches!(ty, GgmlType::Q6K)
         && auto8
         && gpu.fns.contains_key("matvec_q6_k_f32_n8")
-        && std::env::var("ALLPAKA_Q6_F32")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        && flags.q6_f32;
     // FA→WO: consume pending FA f32 ptr with fused pack-in-mmvq (skips permute_q8).
     let wo_fa = matches!(ty, GgmlType::Q4K)
         && m == 1
@@ -120,21 +172,12 @@ pub(super) fn launch_qk_q8_matvec_on(
         }
         (GgmlType::Q4K, true, _, _) => ("matvec_q4_k_q8_n8", 8u32, n_out as u32),
         (GgmlType::Q4K, false, true, _) => ("matvec_q4_k_q8_n2", 2u32, n_out as u32),
-        (GgmlType::Q4K, false, false, false)
-            if n_in == 8192
-                && std::env::var("ALLPAKA_K8192")
-                    .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                    .unwrap_or(true) =>
-        {
+        (GgmlType::Q4K, false, false, false) if n_in == 8192 && flags.k8192 => {
             ("matvec_q4_k_q8_k8192", 4u32, n_out as u32)
         }
         // Opt-in: measured ~61 tg vs ~70.6 generic on Qwen3-32B / 5090.
         (GgmlType::Q4K, false, false, false)
-            if n_in == 5120
-                && gpu.fns.contains_key("matvec_q4_k_q8_k5120")
-                && std::env::var("ALLPAKA_K5120")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false) =>
+            if n_in == 5120 && gpu.fns.contains_key("matvec_q4_k_q8_k5120") && flags.k5120 =>
         {
             ("matvec_q4_k_q8_k5120", 4u32, n_out as u32)
         }
@@ -143,9 +186,7 @@ pub(super) fn launch_qk_q8_matvec_on(
         (GgmlType::Q6K, true, _, _)
             if n_in == 25600
                 && gpu.fns.contains_key("matvec_q6_k_q8_n8_k25600")
-                && std::env::var("ALLPAKA_Q6_K25600")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false) =>
+                && flags.q6_k25600 =>
         {
             ("matvec_q6_k_q8_n8_k25600", 8u32, n_out as u32)
         }
@@ -291,6 +332,7 @@ pub fn run_matvec(
 
 /// Device-resident matvec: `y_arena[y_off..]` ← W · `y_arena[x_off..]`.
 /// No H2D / D2H / synchronize — caller owns stream ordering.
+#[allow(dead_code)]
 pub fn launch_matvec_y(
     gpu: &mut CudaGpu,
     ty: GgmlType,
@@ -356,14 +398,9 @@ pub fn launch_matvec_y_ptr_on(
     // ALLPAKA_GGML_DECODE=1: llama MMVQ for non-add (legacy; disables fusion in decode).
     // ALLPAKA_GGML_MMVQ=1: llama MMVQ for all m=1 including add, keep our QKV/gate fusion.
     // Opt-in: native MMVQ measured ~70 tg vs ~66 ggml on 32B/5090 (hot window).
-    let ggml_mmvq = crate::gpu::cuda::ggml::enabled()
-        && (std::env::var("ALLPAKA_GGML_MMVQ")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-            || (std::env::var("ALLPAKA_GGML_DECODE")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-                && !add));
+    let flags = matvec_flags();
+    let ggml_mmvq =
+        crate::gpu::cuda::ggml::enabled() && (flags.ggml_mmvq || (flags.ggml_decode && !add));
     if m == 1 && ggml_mmvq && matches!(ty, GgmlType::Q4K | GgmlType::Q6K) && n_in % 256 == 0 {
         if let Some(wty) = crate::gpu::cuda::ggml::ggml_type_code(ty) {
             // Prefill clears shared stream; force rebind so MMVQ and residual share one queue.
@@ -495,12 +532,8 @@ pub fn launch_matvec_q4k_2(
         }
         // Opt-in SwiGLU→Q8 epilogue (ALLPAKA_GU_Q8=1). Default keeps parallel
         // matvec_q4_k_q8_2 + separate quantize (faster on 5090 than serial-32 pack).
-        if n_out % 32 == 0
-            && gpu.fns.contains_key("matvec_q4_k_q8_2_q8")
-            && std::env::var("ALLPAKA_GU_Q8")
-                .map(|v| v == "1")
-                .unwrap_or(false)
-        {
+        let flags = matvec_flags();
+        if n_out % 32 == 0 && gpu.fns.contains_key("matvec_q4_k_q8_2_q8") && flags.gu_q8 {
             let pack_in = q8_packed_elems(n_in, m);
             let pack_out = q8_packed_elems(n_out, m);
             gpu.ensure_q8_bytes(pack_in + pack_out)?;
@@ -560,26 +593,18 @@ pub fn launch_matvec_q4k_2(
             return Some(());
         }
         // nwarps=4 wins for gate+up on 5090; n8 dual kernel kept for A/B (ALLPAKA_GU_N8=1).
-        let use_n8 = n_in >= 4096
-            && gpu.fns.contains_key("matvec_q4_k_q8_2_n8")
-            && std::env::var("ALLPAKA_GU_N8")
-                .map(|v| v == "1")
-                .unwrap_or(false);
+        let use_n8 = n_in >= 4096 && gpu.fns.contains_key("matvec_q4_k_q8_2_n8") && flags.gu_n8;
         // Balanced nb=20 GU dual (5 warps, 2 blocks each). Opt-in; do not enable single-row k5120.
         let use_k5120_gu = !use_n8
             && n_in == 5120
             && gpu.fns.contains_key("matvec_q4_k_q8_2_k5120_bal")
-            && std::env::var("ALLPAKA_K5120_GU")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+            && flags.k5120_gu;
         // Opt-in only; imbalanced 4-warp k5120 regressed on 5090.
         let use_k5120 = !use_n8
             && !use_k5120_gu
             && n_in == 5120
             && gpu.fns.contains_key("matvec_q4_k_q8_2_k5120")
-            && std::env::var("ALLPAKA_K5120")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+            && flags.k5120;
         let f = gpu.func_owned(if use_n8 {
             "matvec_q4_k_q8_2_n8"
         } else if use_k5120_gu {
@@ -679,11 +704,9 @@ pub fn launch_matvec_q4k_qkv(
     v_ty: GgmlType,
     v_cache: Option<(&cudarc::driver::CudaSlice<u8>, u64, u32)>,
 ) -> Option<()> {
+    let flags = matvec_flags();
     if chunk_q != chunk_k || chunk_q != chunk_v || n_in % 256 != 0 {
-        if std::env::var("ALLPAKA_FUSE_LOG")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
+        if flags.fuse_log {
             eprintln!("cuda: qkv fuse skip chunks=({chunk_q},{chunk_k},{chunk_v}) n_in={n_in}");
         }
         return None;
@@ -730,12 +753,7 @@ pub fn launch_matvec_q4k_qkv(
     let f = gpu.func_owned(kern)?;
     // GQA split (opt-in): fat Q4/Q4/Q6 kernel only for n_kv rows; thin Q4 for Q tail.
     // Decode m=1 only — thin matvec stride must match contiguous Q[n_kv..).
-    let split = matches!(v_ty, GgmlType::Q6K)
-        && m == 1
-        && n_q > n_kv
-        && std::env::var("ALLPAKA_QKV_SPLIT")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+    let split = matches!(v_ty, GgmlType::Q6K) && m == 1 && n_q > n_kv && flags.qkv_split;
     let grid_x = if split { n_kv_u } else { n_q_u.max(n_kv_u) };
     let cfg = LaunchConfig {
         grid_dim: (grid_x, m_u, 1),
@@ -816,10 +834,7 @@ pub fn launch_matvec_q4k_qkv(
             m,
             false,
         )?;
-        if std::env::var("ALLPAKA_FUSE_LOG")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
+        if flags.fuse_log {
             eprintln!("cuda: qkv_split n_kv={n_kv} q_tail={q_tail}");
         }
     }

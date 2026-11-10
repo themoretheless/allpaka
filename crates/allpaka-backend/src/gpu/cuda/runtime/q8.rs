@@ -4,11 +4,12 @@
 use super::*;
 
 pub(crate) fn q8_decode_enabled() -> bool {
-    match std::env::var("ALLPAKA_Q8") {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("ALLPAKA_Q8") {
         // Default on: Q4_K+Q6_K dp4a mmvq. Set ALLPAKA_Q8=0 to force float Metal.
         Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
         Err(_) => true,
-    }
+    })
 }
 
 pub(super) fn quantize_q8_cfg(n: u32, rows: u32) -> LaunchConfig {

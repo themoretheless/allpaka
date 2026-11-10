@@ -82,6 +82,7 @@ struct Api {
     bind_peer: Option<BindPeerFn>,
     wait_peer: Option<PeerFn>,
     signal_peer: Option<PeerFn>,
+    #[allow(dead_code)]
     peer_is_shared: Option<PeerSharedFn>,
     clear_shared: Option<ClearSharedFn>,
 }
@@ -214,18 +215,22 @@ fn load() -> Option<&'static Api> {
 }
 
 pub fn enabled() -> bool {
-    match std::env::var("ALLPAKA_GGML") {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("ALLPAKA_GGML") {
         Ok(v) => v == "1" || v.eq_ignore_ascii_case("true"),
         Err(_) => false,
-    }
+    })
 }
 
 pub fn fa_kv_floor() -> usize {
-    std::env::var("ALLPAKA_FA_KV_FLOOR")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&v| (16..=8192).contains(&v))
-        .unwrap_or(256)
+    static FLOOR: OnceLock<usize> = OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        std::env::var("ALLPAKA_FA_KV_FLOOR")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| (16..=8192).contains(&v))
+            .unwrap_or(256)
+    })
 }
 
 /// Bind cudarc's stream so ggml can share it (preferred) or use events.

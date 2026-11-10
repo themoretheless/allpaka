@@ -119,20 +119,28 @@ pub(super) fn decode_token_one_fused(
     // (direct fattn is stream-capturable). Without FA, one whole-token graph.
     // Drain ggml *before* capture — sync during capture corrupts the graph.
     let use_graph = crate::runtime::get().cuda_graph;
-    let use_fa = crate::gpu::cuda::ggml::enabled()
-        && std::env::var("ALLPAKA_NO_FA")
+    struct DecodeFaFlags {
+        allow_fa: bool,
+        fa_inline: bool,
+        native_shallow: bool,
+    }
+    static DECODE_FA_FLAGS: std::sync::OnceLock<DecodeFaFlags> = std::sync::OnceLock::new();
+    let fa_flags = DECODE_FA_FLAGS.get_or_init(|| DecodeFaFlags {
+        allow_fa: std::env::var("ALLPAKA_NO_FA")
             .map(|v| !(v == "1" || v.eq_ignore_ascii_case("true")))
-            .unwrap_or(true);
-    let fa_inline = use_fa
-        && std::env::var("ALLPAKA_FA_INLINE")
+            .unwrap_or(true),
+        fa_inline: std::env::var("ALLPAKA_FA_INLINE")
             .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-            .unwrap_or(true); // default on with ggml FA + graphs
-                              // Shallow-ctx whole graph: skip FA (pads to ≥256) and use native dpos attend.
-                              // Opt-in only — default FA wins tg on 5090 (native-auto regressed ~66.4→64.4).
-    let native_shallow = std::env::var("ALLPAKA_NATIVE_ATTEND")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let fa_inline = fa_inline && !native_shallow;
+            .unwrap_or(true), // default on with ggml FA + graphs
+        // Shallow-ctx whole graph: skip FA (pads to ≥256) and use native dpos attend.
+        // Opt-in only — default FA wins tg on 5090 (native-auto regressed ~66.4→64.4).
+        native_shallow: std::env::var("ALLPAKA_NATIVE_ATTEND")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false),
+    });
+    let use_fa = crate::gpu::cuda::ggml::enabled() && fa_flags.allow_fa;
+    let native_shallow = fa_flags.native_shallow;
+    let fa_inline = use_fa && fa_flags.fa_inline && !native_shallow;
     let hybrid_fa = use_graph && use_fa && !fa_inline && !native_shallow;
     let whole_graph = use_graph && (!use_fa || fa_inline || native_shallow);
 
@@ -1443,7 +1451,7 @@ pub(super) fn decode_token_one_fused(
                                 fa_attn.push(g);
                                 captured_fa = true;
                             }
-                            (_, Ok(None)) | (false, Ok(Some(_))) | (false, Ok(None)) => {
+                            (_, Ok(None)) | (false, Ok(Some(_))) => {
                                 fa_attn_ok = false;
                                 fa_attn.clear();
                             }
