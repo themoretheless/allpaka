@@ -102,7 +102,7 @@ struct Evidence {
     annotation_id: String,
 }
 fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 100 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    crate::storage::valid_id(id)
 }
 impl Store {
     pub(crate) fn new(data: &FsPath) -> Result<Self> {
@@ -653,11 +653,11 @@ pub(crate) async fn detail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// PLAN 0.4 / B9: review queue ids are [A-Za-z0-9-], 1..=100.
+    /// PLAN 3.4: review queue ids follow storage::valid_id.
     #[test]
-    fn review_queue_identifier_rule_as_it_stands() {
-        assert!(valid_id("Ab-9") && valid_id(&"a".repeat(100)));
-        assert!(!valid_id("") && !valid_id(&"a".repeat(101)) && !valid_id("a_b"));
+    fn review_queue_identifier_rule() {
+        assert!(valid_id("Ab-9") && valid_id("a_b") && valid_id(&"a".repeat(100)));
+        assert!(!valid_id("") && !valid_id(&"a".repeat(101)) && !valid_id("a.b"));
     }
     #[test]
     fn durable_queue_preserves_sources_and_rejects_duplicates() {

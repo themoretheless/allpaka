@@ -94,7 +94,7 @@ pub(crate) fn validate_settings(s: &Settings, app: &App) -> Result<()> {
     Ok(())
 }
 pub(crate) fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() < 80 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    crate::storage::valid_hex_id(id)
 }
 pub(crate) async fn create_session(
     State(app): State<App>,

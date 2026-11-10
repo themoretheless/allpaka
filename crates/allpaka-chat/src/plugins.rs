@@ -51,11 +51,7 @@ pub struct PluginState {
 pub type Registry = Arc<RwLock<HashMap<String, PluginState>>>;
 
 pub fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() < 80
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    crate::storage::valid_id(id)
 }
 
 pub fn validate(config: &PluginConfig) -> Result<()> {

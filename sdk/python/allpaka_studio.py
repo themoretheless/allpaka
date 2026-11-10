@@ -694,7 +694,7 @@ class Studio:
         if not isinstance(author,str) or not author.strip() or len(author.encode('utf-8'))>200:
             raise ValueError('Provide a reviewer name within 200 UTF-8 bytes')
         annotation_id=frozen.get('id')
-        if annotation_id is not None and (not isinstance(annotation_id,str) or not 1<=len(annotation_id)<=100 or any(not (c.isascii() and (c.isalnum() or c=='-')) for c in annotation_id)):
+        if annotation_id is not None and (not isinstance(annotation_id,str) or not 1<=len(annotation_id)<=100 or any(not (c.isascii() and (c.isalnum() or c in '_-')) for c in annotation_id)):
             raise ValueError('Invalid annotation ID')
         span=frozen.get('span_id')
         if span is not None and (type(span) is not int or not 0<=span<2**64):raise ValueError('Invalid review span')
