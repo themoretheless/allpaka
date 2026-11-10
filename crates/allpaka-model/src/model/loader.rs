@@ -203,6 +203,7 @@ impl<'a> Model<'a> {
             None
         };
 
+        let token_path_decline = super::decode::token_path_decline(&layers);
         let model = Model {
             embd: if first == 0 {
                 Some(qmat(f, "token_embd.weight", config.vocab as usize, hidden)?)
@@ -224,6 +225,7 @@ impl<'a> Model<'a> {
             mtp,
             output,
             rope_inv_freq: ops::rope_inv_freq(config.rope_dim as usize, config.rope_freq_base),
+            token_path_decline,
             config,
             attached,
             _owned_weights: owned_weights,

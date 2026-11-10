@@ -239,14 +239,14 @@ impl<'a> Model<'a> {
                 return Ok(None);
             }
         }
+        if let Some(reason) = self.token_path_decline {
+            if dbg {
+                eprintln!("tokenbuf declined: {reason}");
+            }
+            return Ok(None);
+        }
         let mut layers = Vec::with_capacity(self.layers.len());
         for (li, layer) in self.layers.iter().enumerate() {
-            if layer.attn_norm_raw.is_empty() || layer.ffn_norm_raw.is_empty() {
-                if dbg {
-                    eprintln!("tokenbuf declined: layer {li} norm not raw F32");
-                }
-                return Ok(None);
-            }
             let (k_off, v_off) = s.kv.layer_offsets(li);
             let ffn = match &layer.ffn {
                 Ffn::Dense {
@@ -275,15 +275,9 @@ impl<'a> Model<'a> {
                     let (gt, gb) = gate_exps.raw();
                     let (ut, ub) = up_exps.raw();
                     let (dt, db) = down_exps.raw();
+                    // Sigmoid gating with a norm/scale the GPU top-k kernels do
+                    // not implement was ruled out at load (token_path_decline).
                     let sigmoid = matches!(gating, Gating::Sigmoid);
-                    // The GPU top-k kernels only implement renormalized
-                    // weights with scale 1; anything else stays on the CPU.
-                    if sigmoid && (!*weights_norm || *weights_scale != 1.0) {
-                        if dbg {
-                            eprintln!("tokenbuf declined: sigmoid gating with norm/scale");
-                        }
-                        return Ok(None);
-                    }
                     // qwen35moe: the shared expert's sigmoid gate
                     // (ffn_gate_inp_shexp), F32 [hidden] in the mmap.
                     let shared_gate =
@@ -736,4 +730,29 @@ fn ffn_residual(
     let _s = profile::span(profile::Phase::FfnCombine);
     ops::add_assign_slice(x, &down);
     Ok(())
+}
+
+/// Why the whole-token GPU decode can never take these layers, decided once
+/// at load from the weights alone. Per-session conditions (KV and SSM
+/// regions) are still checked per call in `token_layers`.
+pub(crate) fn token_path_decline(layers: &[super::Layer<'_>]) -> Option<&'static str> {
+    for layer in layers {
+        if layer.attn_norm_raw.is_empty() || layer.ffn_norm_raw.is_empty() {
+            return Some("a layer norm is not raw F32");
+        }
+        if let Ffn::Moe {
+            gating,
+            weights_norm,
+            weights_scale,
+            ..
+        } = &layer.ffn
+        {
+            // The GPU top-k kernels only implement renormalized weights with
+            // scale 1; anything else stays on the CPU.
+            if matches!(gating, Gating::Sigmoid) && (!*weights_norm || *weights_scale != 1.0) {
+                return Some("sigmoid gating with norm/scale");
+            }
+        }
+    }
+    None
 }

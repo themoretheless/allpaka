@@ -80,6 +80,8 @@ pub struct Model<'a> {
     pub(crate) rope_inv_freq: Vec<f32>,
     /// File mappings this model handed to `gpu::attach`; released on drop.
     pub(crate) attached: Vec<&'a [u8]>,
+    /// Set when the weights rule out the whole-token GPU decode.
+    pub(crate) token_path_decline: Option<&'static str>,
     /// Owned F32 buffers converted from BF16 router/gate tensors at load time.
     /// Placed last so it is dropped after all `QuantMat<'a>` fields borrowing from it.
     pub(crate) _owned_weights: Vec<Box<[f32]>>,
