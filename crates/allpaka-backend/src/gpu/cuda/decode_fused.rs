@@ -687,6 +687,7 @@ impl FusedCtx<'_> {
             gpu.ensure_q8(n, rows)?;
             let f = gpu.func_owned("rmsnorm_into_f32_q8")?;
             // 1024 threads: the row stays in registers (up to 16 per thread).
+            // Measured back to back on RTX 5090 / Qwen3-32B: 1024 > 512 > 256.
             let cfg = LaunchConfig {
                 block_dim: (1024, 1, 1),
                 ..cfg
@@ -2111,7 +2112,7 @@ impl FusedCtx<'_> {
         let n_u = vocab as u32;
         let cfg = LaunchConfig {
             grid_dim: (1, 1, 1),
-            block_dim: (256, 1, 1),
+            block_dim: (1024, 1, 1),
             shared_mem_bytes: 0,
         };
         let xp = ybase + (out_logits_at * 4) as u64;

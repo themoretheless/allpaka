@@ -624,33 +624,56 @@ extern "C" __global__ void rope_neox_freq_dpos(
     }
 }
 
+// Single-block argmax for vocab-sized vectors. blockDim is a multiple of 32
+// (1024 on decode); float4 loads when the row is 16-byte aligned and n % 4 == 0.
+// Ties resolve to the lowest index.
+__device__ __forceinline__ void argmax_take(float& best, unsigned& bi, float v, unsigned i)
+{
+    if (v > best || (v == best && i < bi)) { best = v; bi = i; }
+}
 extern "C" __global__ void argmax_f32(
     const float* __restrict__ x,
     unsigned n,
     unsigned* __restrict__ out_idx)
 {
-    // Single-block argmax for vocab-sized vectors.
-    __shared__ float smax[256];
-    __shared__ unsigned sidx[256];
     float best = (-1.0f/0.0f);
-    unsigned bi = 0;
-    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
-        float v = x[i];
-        if (v > best) { best = v; bi = i; }
-    }
-    smax[threadIdx.x] = best;
-    sidx[threadIdx.x] = bi;
-    __syncthreads();
-    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (threadIdx.x < s) {
-            if (smax[threadIdx.x + s] > smax[threadIdx.x]) {
-                smax[threadIdx.x] = smax[threadIdx.x + s];
-                sidx[threadIdx.x] = sidx[threadIdx.x + s];
-            }
+    unsigned bi = 0xffffffffu;
+    const unsigned T = blockDim.x;
+    if ((n & 3u) == 0 && (((unsigned long long)x) & 15ull) == 0) {
+        const float4* x4 = (const float4*)x;
+        for (unsigned q = threadIdx.x; q < n / 4u; q += T) {
+            float4 v = x4[q];
+            unsigned i = q * 4u;
+            argmax_take(best, bi, v.x, i);
+            argmax_take(best, bi, v.y, i + 1u);
+            argmax_take(best, bi, v.z, i + 2u);
+            argmax_take(best, bi, v.w, i + 3u);
         }
-        __syncthreads();
+    } else {
+        for (unsigned i = threadIdx.x; i < n; i += T) argmax_take(best, bi, x[i], i);
     }
-    if (threadIdx.x == 0) out_idx[0] = sidx[0];
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        float ov = __shfl_xor_sync(0xffffffffu, best, off);
+        unsigned oi = __shfl_xor_sync(0xffffffffu, bi, off);
+        argmax_take(best, bi, ov, oi);
+    }
+    __shared__ float wbest[32];
+    __shared__ unsigned widx[32];
+    unsigned lane = threadIdx.x & 31u, warp = threadIdx.x >> 5;
+    if (lane == 0) { wbest[warp] = best; widx[warp] = bi; }
+    __syncthreads();
+    if (warp == 0) {
+        best = lane < (T >> 5) ? wbest[lane] : (-1.0f/0.0f);
+        bi = lane < (T >> 5) ? widx[lane] : 0xffffffffu;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            float ov = __shfl_xor_sync(0xffffffffu, best, off);
+            unsigned oi = __shfl_xor_sync(0xffffffffu, bi, off);
+            argmax_take(best, bi, ov, oi);
+        }
+        if (lane == 0) out_idx[0] = bi == 0xffffffffu ? 0u : bi;
+    }
 }
 
 // Store one K or V row (kv_dim floats) into the f16 cache at element offset.
