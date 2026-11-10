@@ -2,6 +2,7 @@
 //! checked before each model call that sees new input, and the reply
 //! checked before it is kept.
 
+use super::last_user_text;
 use crate::*;
 
 pub(crate) struct TurnGuardrails {
@@ -30,15 +31,9 @@ impl TurnGuardrails {
             .map(|prepared| Arc::new(prepared.clone()));
         let mut guarded_input = None;
         if let Some(prepared) = &guardrails {
-            let text = s
-                .lock()
-                .unwrap()
-                .messages
-                .iter()
-                .rev()
-                .find(|message| message.role == "user")
-                .map(|message| message.content.clone())
-                .unwrap_or_default();
+            let text = last_user_text(&s.lock().unwrap())
+                .unwrap_or_default()
+                .to_string();
             enforce_guardrail(prepared.input(&text)?, trace, parent_span)?;
             guarded_input = Some(text);
         }

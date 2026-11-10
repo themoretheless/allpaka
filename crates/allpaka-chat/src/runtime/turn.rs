@@ -130,10 +130,9 @@ pub(crate) async fn turn_traced(
         guardrails.check_input(&history, trace, parent_span)?;
         let buffer_output = guardrails.buffers_output();
         let (mut message, usage) = turn.call_model(&history, index, buffer_output).await?;
-        let result = guardrails.check_output(&message.content, trace, parent_span)?;
-        if result.is_err() {
+        if let Err(blocked) = guardrails.check_output(&message.content, trace, parent_span)? {
             turn.discard_reply(index, &usage);
-            result?;
+            return Err(blocked);
         }
         message.provider = Some(settings.provider.clone());
         message.model = Some(settings.model.clone());
@@ -177,47 +176,50 @@ impl Turn<'_> {
     /// another step (steering arrived, Goal mode's one continuation, or the
     /// stop hooks' one pre-completion check).
     async fn finish(&self, state: &mut StepState, rag_answer: Option<&str>) -> Option<TurnOutcome> {
-        let (app, s, settings, ctx) = (self.app, self.s, self.settings, self.ctx);
-        if s.lock().unwrap().steering.is_empty() {
-            if settings.mode == Mode::Goal {
-                let mut session = s.lock().unwrap();
-                if !plan::reported_ready(&session) {
-                    if state.goal_continuation_revision == Some(session.plan_revision) {
-                        return Some(TurnOutcome::GoalIncomplete);
-                    }
-                    state.goal_continuation_revision = Some(session.plan_revision);
-                    session.messages.push(Message::text("user", "Goal continuation: the persisted milestone plan is incomplete. Continue the remaining work with available tools and update set_plan using the current revision. Do not repeat completed actions. If blocked, explain the blocker; do not claim the goal is complete. Completion evidence is reported, not independently verified."));
-                    drop(session);
-                    persist(app, s);
-                    return None;
-                }
-            }
-            if !state.stop_check_done && !ctx.harness_hooks.stop.is_empty() {
-                state.stop_check_done = true;
-                let notes =
-                    hook_notes(&ctx.project, &ctx.harness_hooks.stop, None, ctx.cmd_enabled).await;
-                if !notes.is_empty() {
-                    self.push_message(Message::text("user", format!("Pre-completion check from the harness:\n{notes}\nIf the result already satisfies it, restate the final answer; otherwise fix what is missing first. Do not repeat completed side effects.")));
-                    return None;
-                }
-            }
-            if let (Some(rag_id), Some(answer)) = (&ctx.rag_plugin_id, rag_answer) {
-                let title = {
-                    let state = s.lock().unwrap();
-                    state
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|m| m.role == "user")
-                        .map(|m| m.content.chars().take(80).collect::<String>())
-                        .unwrap_or_else(|| "allpaka answer".into())
-                };
-                rag::auto_file_answer(app, rag_id, &title, answer).await;
-            }
-            return Some(TurnOutcome::Complete);
+        let (app, s, ctx) = (self.app, self.s, self.ctx);
+        if !s.lock().unwrap().steering.is_empty() {
+            return None;
         }
-        None
+        if self.settings.mode == Mode::Goal {
+            let mut session = s.lock().unwrap();
+            if !plan::reported_ready(&session) {
+                if state.goal_continuation_revision == Some(session.plan_revision) {
+                    return Some(TurnOutcome::GoalIncomplete);
+                }
+                state.goal_continuation_revision = Some(session.plan_revision);
+                session.messages.push(Message::text("user", "Goal continuation: the persisted milestone plan is incomplete. Continue the remaining work with available tools and update set_plan using the current revision. Do not repeat completed actions. If blocked, explain the blocker; do not claim the goal is complete. Completion evidence is reported, not independently verified."));
+                drop(session);
+                persist(app, s);
+                return None;
+            }
+        }
+        if !state.stop_check_done && !ctx.harness_hooks.stop.is_empty() {
+            state.stop_check_done = true;
+            let notes =
+                hook_notes(&ctx.project, &ctx.harness_hooks.stop, None, ctx.cmd_enabled).await;
+            if !notes.is_empty() {
+                self.push_message(Message::text("user", format!("Pre-completion check from the harness:\n{notes}\nIf the result already satisfies it, restate the final answer; otherwise fix what is missing first. Do not repeat completed side effects.")));
+                return None;
+            }
+        }
+        if let (Some(rag_id), Some(answer)) = (&ctx.rag_plugin_id, rag_answer) {
+            let title = last_user_text(&s.lock().unwrap())
+                .map(|text| text.chars().take(80).collect::<String>())
+                .unwrap_or_else(|| "allpaka answer".into());
+            rag::auto_file_answer(app, rag_id, &title, answer).await;
+        }
+        Some(TurnOutcome::Complete)
     }
+}
+
+/// The text of the latest user message, if there is one.
+fn last_user_text(session: &Session) -> Option<&str> {
+    session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .map(|message| message.content.as_str())
 }
 
 /// Run a post_tool `transform`: the tool result goes to stdin and stdout

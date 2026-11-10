@@ -1,6 +1,7 @@
 //! What a turn resolves once, before its first step: provider, project,
 //! harness, the tools on offer and the system prompt.
 
+use super::last_user_text;
 use crate::*;
 
 pub(crate) struct TurnContext {
@@ -126,16 +127,9 @@ impl TurnContext {
             system
         };
         let rag_context = if let Some(rag_id) = &rag_plugin_id {
-            let query = {
-                let state = s.lock().unwrap();
-                state
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == "user")
-                    .map(|m| m.content.clone())
-                    .unwrap_or_default()
-            };
+            let query = last_user_text(&s.lock().unwrap())
+                .unwrap_or_default()
+                .to_string();
             if query.is_empty() {
                 None
             } else {
