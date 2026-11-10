@@ -149,18 +149,10 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
         let n_in_u = hidden as u32;
         let fmt_u = fmt;
         let rb_u = rb as u32;
-        let embed_cfg = if matches!(fmt, 0 | 1 | 2) && hidden % 256 == 0 {
-            LaunchConfig {
-                grid_dim: (1, n_in_u / 256, 1),
-                block_dim: (32, 1, 1),
-                shared_mem_bytes: 0,
-            }
-        } else {
-            LaunchConfig {
-                grid_dim: (1, 1, 1),
-                block_dim: (32, 1, 1),
-                shared_mem_bytes: 0,
-            }
+        let embed_cfg = LaunchConfig {
+            grid_dim: (1, crate::gpu::common::embed_row_groups(fmt, hidden), 1),
+            block_dim: (32, 1, 1),
+            shared_mem_bytes: 0,
         };
         let one_cfg = LaunchConfig {
             grid_dim: (1, 1, 1),

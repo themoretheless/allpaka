@@ -3498,17 +3498,16 @@ __device__ __forceinline__ float scale_min_k4(int j, const uint8_t* packed, floa
     return sc;
 }
 
-extern "C" __global__ void embed_row_f32(
-    const uint8_t* __restrict__ w,
+__device__ __forceinline__ void embed_row_impl(
+    const uint8_t* __restrict__ row,
     float* __restrict__ out,
     unsigned n_in,
-    unsigned long long w_off,
     unsigned fmt)
 {
+    unsigned b = blockIdx.y;
     unsigned lane = threadIdx.x;
-    const uint8_t* row = w + w_off;
     if (fmt <= 2u) {
-        unsigned b = blockIdx.y;
+        if (b * 256u >= n_in) return;
         float* o256 = out + b * 256u;
         if (fmt == 0u) {
             const uint8_t* blk = row + b * 144u;
@@ -3576,27 +3575,103 @@ extern "C" __global__ void embed_row_f32(
             return;
         }
     }
-    if (lane != 0 || blockIdx.x != 0) return;
     if (fmt == 3u) {
-        unsigned nb = n_in / 32u;
-        for (unsigned b = 0; b < nb; b++) {
-            const uint8_t* blk = row + b * 34u;
+        for (unsigned ib = 0; ib < 8u; ib++) {
+            unsigned blk_idx = b * 8u + ib;
+            if (blk_idx * 32u >= n_in) break;
+            const uint8_t* blk = row + blk_idx * 34u;
             float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
-            for (unsigned i = 0; i < 32u; i++) {
-                out[b * 32u + i] = d * (float)((int8_t)blk[2 + i]);
+            const int8_t* qs = (const int8_t*)(blk + 2);
+            out[blk_idx * 32u + lane] = d * (float)qs[lane];
+        }
+        return;
+    }
+    if (fmt == 4u) {
+        if (b * 256u >= n_in) return;
+        float* o256 = out + b * 256u;
+        const uint8_t* blk = row + b * 84u;
+        const uint8_t* scales = blk;
+        const uint8_t* qs = blk + 16;
+        float d = half_bits_to_f32((uint16_t)blk[80] | ((uint16_t)blk[81] << 8));
+        float dmin = half_bits_to_f32((uint16_t)blk[82] | ((uint16_t)blk[83] << 8));
+        unsigned group = lane / 16u;
+        for (unsigned half_i = 0; half_i < 2u; half_i++) {
+            uint8_t q = qs[half_i * 32u + lane];
+            for (unsigned si = 0; si < 4u; si++) {
+                unsigned sub = half_i * 8u + si * 2u + group;
+                uint8_t sc = scales[sub];
+                float dl = d * (float)(sc & 0xFu);
+                float ml = dmin * (float)(sc >> 4u);
+                o256[half_i * 128u + si * 32u + lane] =
+                    dl * (float)((q >> (si * 2u)) & 3u) - ml;
             }
         }
         return;
     }
+    if (fmt == 5u) {
+        if (b * 256u >= n_in) return;
+        float* o256 = out + b * 256u;
+        const uint8_t* blk = row + b * 110u;
+        const uint8_t* hmask = blk;
+        const uint8_t* qs = blk + 32;
+        const uint8_t* packed = blk + 96;
+        float d_all = half_bits_to_f32((uint16_t)blk[108] | ((uint16_t)blk[109] << 8));
+        unsigned group = lane / 16u;
+        uint8_t hm = hmask[lane];
+        for (unsigned half_i = 0; half_i < 2u; half_i++) {
+            uint8_t q = qs[half_i * 32u + lane];
+            for (unsigned si = 0; si < 4u; si++) {
+                unsigned is = half_i * 8u + si * 2u + group;
+                unsigned lo = (is < 8u) ? (packed[is] & 0xFu) : (packed[is - 8u] >> 4u);
+                unsigned hi = (packed[8u + (is % 4u)] >> (2u * (is / 4u))) & 3u;
+                float dl = d_all * (float)((int)(lo | (hi << 4u)) - 32);
+                uint8_t bit = (uint8_t)(1u << (half_i * 4u + si));
+                int qv = (int)((q >> (2u * si)) & 3u) - ((hm & bit) ? 0 : 4);
+                o256[half_i * 128u + si * 32u + lane] = dl * (float)qv;
+            }
+        }
+        return;
+    }
+    if (fmt == 6u) {
+        if (b * 32u >= n_in) return;
+        const uint8_t* blk = row + b * 22u;
+        float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+        uint32_t qh = (uint32_t)blk[2] | ((uint32_t)blk[3] << 8)
+            | ((uint32_t)blk[4] << 16) | ((uint32_t)blk[5] << 24);
+        const uint8_t* qs = blk + 6;
+        unsigned nib = (lane < 16u) ? (qs[lane] & 0x0Fu) : (qs[lane - 16u] >> 4u);
+        unsigned hb = (qh >> lane) & 1u;
+        int x = (int)(nib | (hb << 4u)) - 16;
+        out[b * 32u + lane] = d * (float)x;
+        return;
+    }
     if (fmt == 7u) {
         const uint16_t* src = (const uint16_t*)row;
-        for (unsigned i = 0; i < n_in; i++) out[i] = half_bits_to_f32(src[i]);
+        unsigned idx = b * 32u + lane;
+        if (idx < n_in) out[idx] = half_bits_to_f32(src[idx]);
         return;
     }
     if (fmt == 8u) {
         const float* src = (const float*)row;
-        for (unsigned i = 0; i < n_in; i++) out[i] = src[i];
+        unsigned idx = b * 32u + lane;
+        if (idx < n_in) out[idx] = src[idx];
+        return;
     }
+    if (fmt == 9u) {
+        const uint16_t* src = (const uint16_t*)row;
+        unsigned idx = b * 32u + lane;
+        if (idx < n_in) out[idx] = __uint_as_float(((uint32_t)src[idx]) << 16);
+    }
+}
+
+extern "C" __global__ void embed_row_f32(
+    const uint8_t* __restrict__ w,
+    float* __restrict__ out,
+    unsigned n_in,
+    unsigned long long w_off,
+    unsigned fmt)
+{
+    embed_row_impl(w + w_off, out, n_in, fmt);
 }
 
 // Like embed_row_f32 but token id lives on device (greedy chain after argmax).
@@ -3609,99 +3684,8 @@ extern "C" __global__ void embed_row_f32_dtoken(
     unsigned fmt,
     const unsigned* __restrict__ d_token)
 {
-    unsigned lane = threadIdx.x;
     unsigned long long w_off = w_base + (unsigned long long)d_token[0] * (unsigned long long)row_bytes;
-    const uint8_t* row = w + w_off;
-    if (fmt <= 2u) {
-        unsigned b = blockIdx.y;
-        float* o256 = out + b * 256u;
-        if (fmt == 0u) {
-            const uint8_t* blk = row + b * 144u;
-            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
-            float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
-            const uint8_t* packed = blk + 4;
-            const uint8_t* qs = blk + 16;
-            #pragma unroll
-            for (unsigned pair = 0; pair < 4u; pair++) {
-                float mn1, mn2;
-                float sc1 = scale_min_k4((int)pair * 2, packed, &mn1);
-                float sc2 = scale_min_k4((int)pair * 2 + 1, packed, &mn2);
-                uint8_t qq = qs[pair * 32u + lane];
-                o256[pair * 64u + lane] = d * sc1 * (float)(qq & 0xf) - dmin * mn1;
-                o256[pair * 64u + 32u + lane] = d * sc2 * (float)(qq >> 4) - dmin * mn2;
-            }
-            return;
-        }
-        if (fmt == 1u) {
-            const uint8_t* blk = row + b * 176u;
-            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
-            float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
-            const uint8_t* packed = blk + 4;
-            const uint8_t* qh = blk + 16;
-            const uint8_t* qs = blk + 48;
-            #pragma unroll
-            for (unsigned pair = 0; pair < 4u; pair++) {
-                float mn1, mn2;
-                float sc1 = scale_min_k4((int)pair * 2, packed, &mn1);
-                float sc2 = scale_min_k4((int)pair * 2 + 1, packed, &mn2);
-                uint8_t bit1 = (uint8_t)(1u << (pair * 2));
-                uint8_t bit2 = (uint8_t)(1u << (pair * 2 + 1));
-                uint8_t qq = qs[pair * 32u + lane];
-                int hi1 = (qh[lane] & bit1) ? 16 : 0;
-                int hi2 = (qh[lane] & bit2) ? 16 : 0;
-                o256[pair * 64u + lane] =
-                    d * sc1 * (float)((qq & 0xf) + hi1) - dmin * mn1;
-                o256[pair * 64u + 32u + lane] =
-                    d * sc2 * (float)((qq >> 4) + hi2) - dmin * mn2;
-            }
-            return;
-        }
-        {
-            const uint8_t* blk = row + b * 210u;
-            const uint8_t* ql = blk;
-            const uint8_t* qh = blk + 128;
-            const int8_t* scales = (const int8_t*)(blk + 192);
-            float d = half_bits_to_f32((uint16_t)blk[208] | ((uint16_t)blk[209] << 8));
-            #pragma unroll
-            for (unsigned hi = 0; hi < 2u; hi++) {
-                const uint8_t* ql_h = ql + hi * 64u;
-                const uint8_t* qh_h = qh + hi * 32u;
-                const int8_t* sc = scales + hi * 8;
-                float* oh = o256 + hi * 128u;
-                unsigned is = lane / 16u;
-                int q1 = (int)((ql_h[lane] & 0xf) | ((qh_h[lane] & 3) << 4)) - 32;
-                int q2 = (int)((ql_h[lane + 32] & 0xf) | (((qh_h[lane] >> 2) & 3) << 4)) - 32;
-                int q3 = (int)((ql_h[lane] >> 4) | (((qh_h[lane] >> 4) & 3) << 4)) - 32;
-                int q4 = (int)((ql_h[lane + 32] >> 4) | (((qh_h[lane] >> 6) & 3) << 4)) - 32;
-                oh[lane] = d * (float)sc[is] * (float)q1;
-                oh[32u + lane] = d * (float)sc[is + 2] * (float)q2;
-                oh[64u + lane] = d * (float)sc[is + 4] * (float)q3;
-                oh[96u + lane] = d * (float)sc[is + 6] * (float)q4;
-            }
-            return;
-        }
-    }
-    if (lane != 0 || blockIdx.x != 0) return;
-    if (fmt == 3u) {
-        unsigned nb = n_in / 32u;
-        for (unsigned b = 0; b < nb; b++) {
-            const uint8_t* blk = row + b * 34u;
-            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
-            for (unsigned i = 0; i < 32u; i++) {
-                out[b * 32u + i] = d * (float)((int8_t)blk[2 + i]);
-            }
-        }
-        return;
-    }
-    if (fmt == 7u) {
-        const uint16_t* src = (const uint16_t*)row;
-        for (unsigned i = 0; i < n_in; i++) out[i] = half_bits_to_f32(src[i]);
-        return;
-    }
-    if (fmt == 8u) {
-        const float* src = (const float*)row;
-        for (unsigned i = 0; i < n_in; i++) out[i] = src[i];
-    }
+    embed_row_impl(w + w_off, out, n_in, fmt);
 }
 
 extern "C" __global__ void inc_u32(unsigned* __restrict__ p) {

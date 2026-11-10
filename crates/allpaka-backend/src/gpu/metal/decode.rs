@@ -1154,11 +1154,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             enc.set_buffer(6, Some(y), e(tok_at));
             let tok_idx = 0u32;
             enc.set_bytes(7, 4, &tok_idx as *const u32 as *const _);
-            let n_tg = if fmt <= 5 {
-                (hidden as u64).div_ceil(256)
-            } else {
-                (hidden as u64).div_ceil(32)
-            };
+            let n_tg = crate::gpu::common::embed_row_groups(fmt, hidden) as u64;
             enc.dispatch_thread_groups(MTLSize::new(n_tg, 1, 1), MTLSize::new(32, 1, 1));
             bar(&enc);
             dispatched += 1;
@@ -2345,29 +2341,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     Some(out)
 }
 
-pub(super) fn dq_fmt(ty: GgmlType) -> Option<u32> {
-    Some(match ty {
-        GgmlType::Q4K => 0,
-        GgmlType::Q5K => 1,
-        GgmlType::Q6K => 2,
-        GgmlType::Q8_0 => 3,
-        GgmlType::Q2K => 4,
-        GgmlType::Q3K => 5,
-        GgmlType::BF16 => 6,
-        GgmlType::F16 => 7,
-        GgmlType::F32 => 8,
-        _ => return None,
-    })
-}
-
-pub(super) fn row_bytes(ty: GgmlType, n_in: usize) -> Option<usize> {
-    let be = ty.block_elements()? as usize;
-    let bb = ty.block_bytes()? as usize;
-    if n_in % be != 0 {
-        return None;
-    }
-    Some(n_in / be * bb)
-}
+pub(super) use crate::gpu::common::{dq_fmt, row_bytes};
 
 /// After a successful greedy decode, run `n_more` further tokens on-device:
 /// embed(hist[step]) -> layers 0..N -> output_head -> argmax -> hist[step+1],
@@ -2671,11 +2645,7 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
             enc.set_buffer(6, Some(&hist_buf), 0);
             let tok_idx = step as u32;
             enc.set_bytes(7, 4, &tok_idx as *const u32 as *const _);
-            let n_tg = if fmt <= 5 {
-                (hidden as u64).div_ceil(256)
-            } else {
-                (hidden as u64).div_ceil(32)
-            };
+            let n_tg = crate::gpu::common::embed_row_groups(fmt, hidden) as u64;
             enc.dispatch_thread_groups(MTLSize::new(n_tg, 1, 1), MTLSize::new(32, 1, 1));
 
             enc.set_compute_pipeline_state(&zero_state);

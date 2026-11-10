@@ -26,18 +26,10 @@ pub fn launch_embed_row(
     let f = gpu.func_owned("embed_row_f32")?;
     let n_in_u = n_in as u32;
     let fmt_u = fmt;
-    let cfg = if matches!(fmt, 0 | 1 | 2) && n_in % 256 == 0 {
-        LaunchConfig {
-            grid_dim: (1, n_in_u / 256, 1),
-            block_dim: (32, 1, 1),
-            shared_mem_bytes: 0,
-        }
-    } else {
-        LaunchConfig {
-            grid_dim: (1, 1, 1),
-            block_dim: (32, 1, 1),
-            shared_mem_bytes: 0,
-        }
+    let cfg = LaunchConfig {
+        grid_dim: (1, embed_row_groups(fmt, n_in), 1),
+        block_dim: (32, 1, 1),
+        shared_mem_bytes: 0,
     };
     let stream = Arc::clone(&gpu.stream);
     let wbuf = &gpu.chunks[chunk].buf;
@@ -77,18 +69,10 @@ pub fn launch_embed_row_dtoken_ptr(
     let fmt_u = fmt;
     let rb_u = rb as u32;
     let w_base = base;
-    let cfg = if matches!(fmt, 0 | 1 | 2) && n_in % 256 == 0 {
-        LaunchConfig {
-            grid_dim: (1, n_in_u / 256, 1),
-            block_dim: (32, 1, 1),
-            shared_mem_bytes: 0,
-        }
-    } else {
-        LaunchConfig {
-            grid_dim: (1, 1, 1),
-            block_dim: (32, 1, 1),
-            shared_mem_bytes: 0,
-        }
+    let cfg = LaunchConfig {
+        grid_dim: (1, embed_row_groups(fmt, n_in), 1),
+        block_dim: (32, 1, 1),
+        shared_mem_bytes: 0,
     };
     let stream = Arc::clone(&gpu.stream);
     let wbuf = &gpu.chunks[chunk].buf;

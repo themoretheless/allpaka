@@ -1,7 +1,8 @@
-//! Per-format kernel names, launch geometry and dequant format codes.
-//! The codes are the CUDA kernel ABI and differ from the Metal ones.
+//! Per-format kernel names, launch geometry and shared dequant format codes.
 
 use super::*;
+
+pub use crate::gpu::common::{dq_fmt, embed_row_groups, row_bytes};
 
 pub fn matvec_kernel(ty: GgmlType) -> Option<&'static str> {
     Some(match ty {
@@ -51,31 +52,6 @@ pub fn matvec_launch_cfg(ty: GgmlType, n_out: u32, m: u32) -> LaunchConfig {
             }
         }
     }
-}
-
-pub fn row_bytes(ty: GgmlType, n_in: usize) -> Option<usize> {
-    let be = ty.block_elements()? as usize;
-    let bb = ty.block_bytes()? as usize;
-    if n_in % be != 0 {
-        return None;
-    }
-    Some(n_in / be * bb)
-}
-
-pub fn dq_fmt(ty: GgmlType) -> Option<u32> {
-    Some(match ty {
-        GgmlType::Q4K => 0,
-        GgmlType::Q5K => 1,
-        GgmlType::Q6K => 2,
-        GgmlType::Q8_0 => 3,
-        GgmlType::Q2K => 4,
-        GgmlType::Q3K => 5,
-        GgmlType::Q5_0 => 6,
-        GgmlType::F16 => 7,
-        GgmlType::F32 => 8,
-        GgmlType::BF16 => 9,
-        GgmlType::MlxQ4 | GgmlType::MlxQ8 | GgmlType::Other(_) => return None,
-    })
 }
 
 pub fn resolve_w(gpu: &CudaGpu, w: &[u8]) -> Option<(usize, u64)> {

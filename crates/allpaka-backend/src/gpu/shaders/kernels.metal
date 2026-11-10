@@ -3938,9 +3938,16 @@ kernel void embed_row_f32_dtoken(
         return;
     }
     if (fmt == 6u) {
-        device const ushort* src = (device const ushort*)row;
-        uint idx = b * 32u + lane;
-        if (idx < n_in) out[idx] = as_type<float>((uint)src[idx] << 16u);
+        if (b * 32u >= n_in) return;
+        device const uchar* blk = row + b * 22u;
+        float d = half_at(blk);
+        uint qh = (uint)blk[2] | ((uint)blk[3] << 8u)
+            | ((uint)blk[4] << 16u) | ((uint)blk[5] << 24u);
+        device const uchar* qs = blk + 6;
+        uint nib = (lane < 16u) ? (qs[lane] & 0x0Fu) : (qs[lane - 16u] >> 4u);
+        uint hb = (qh >> lane) & 1u;
+        int x = (int)(nib | (hb << 4u)) - 16;
+        out[b * 32u + lane] = d * (float)x;
         return;
     }
     if (fmt == 7u) {
@@ -3953,6 +3960,12 @@ kernel void embed_row_f32_dtoken(
         device const float* src = (device const float*)row;
         uint idx = b * 32u + lane;
         if (idx < n_in) out[idx] = src[idx];
+        return;
+    }
+    if (fmt == 9u) {
+        device const ushort* src = (device const ushort*)row;
+        uint idx = b * 32u + lane;
+        if (idx < n_in) out[idx] = as_type<float>((uint)src[idx] << 16u);
         return;
     }
 }

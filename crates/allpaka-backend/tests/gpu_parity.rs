@@ -22,7 +22,7 @@ fn attached_region() -> Option<&'static [u8]> {
     static REGION: OnceLock<Option<&'static [u8]>> = OnceLock::new();
     REGION
         .get_or_init(|| {
-            let len = 64 << 20;
+            let len = 72 << 20;
             let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
             let ptr = unsafe { std::alloc::alloc(layout) };
             assert!(!ptr.is_null());
@@ -804,4 +804,132 @@ fn rope_norm_end_to_end_gpu_paths_match_cpu() {
 
     drop(gpu_kv);
     unsafe { std::alloc::dealloc(kv_ptr, kv_layout) };
+}
+
+#[test]
+fn gpu_embed_decode_token_matches_cpu_for_all_ten_formats() {
+    let Some(region) = attached_region() else {
+        return;
+    };
+    let region_mut =
+        unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
+
+    // Use offsets [58 MiB .. 63 MiB] disjoint from all other parity tests.
+    let hidden = 512usize;
+    let vocab = 64usize;
+    let n_tokens = 6usize;
+    let norm_off = 58 << 20;
+    let out_off = 59 << 20;
+    let embd_base_off = 60 << 20;
+
+    // Output norm = finite positive F32 weights.
+    for (i, c) in region_mut[norm_off..norm_off + hidden * 4]
+        .chunks_exact_mut(4)
+        .enumerate()
+    {
+        c.copy_from_slice(&(0.75f32 + (i % 7) as f32 * 0.05).to_le_bytes());
+    }
+    tame_scales(region_mut, GgmlType::Q4K, out_off, vocab, hidden);
+    let out_bytes = vocab * hidden / 256 * 144;
+
+    let cache = gpu::wrap_region(&region[0..PAGE]).expect("wrap_region");
+    let rope = vec![[0.0f32, 1.0f32]; 64];
+
+    let formats = [
+        GgmlType::Q4K,
+        GgmlType::Q5K,
+        GgmlType::Q6K,
+        GgmlType::Q8_0,
+        GgmlType::Q2K,
+        GgmlType::Q3K,
+        GgmlType::Q5_0,
+        GgmlType::F16,
+        GgmlType::F32,
+        GgmlType::BF16,
+    ];
+
+    for (idx, ty) in formats.into_iter().enumerate() {
+        let off = embd_base_off + idx * (256 << 10);
+        let rb = ty.expected_bytes(hidden).unwrap();
+        let total = n_tokens * rb;
+
+        match ty {
+            GgmlType::F32 => {
+                tame_scales(region_mut, ty, off, n_tokens, hidden);
+            }
+            GgmlType::F16 => {
+                for (i, c) in region_mut[off..off + total].chunks_exact_mut(2).enumerate() {
+                    let h = allpaka_dtype::f32_to_f16(((i % 31) as f32 - 15.0) * 0.04);
+                    c.copy_from_slice(&h.to_le_bytes());
+                }
+            }
+            GgmlType::BF16 => {
+                for (i, c) in region_mut[off..off + total].chunks_exact_mut(2).enumerate() {
+                    let b = allpaka_dtype::f32_to_bf16(((i % 29) as f32 - 14.0) * 0.05);
+                    c.copy_from_slice(&b.to_le_bytes());
+                }
+            }
+            GgmlType::Q5_0 => {
+                let half = 0x211Fu16.to_le_bytes();
+                for r in 0..n_tokens {
+                    for blk in 0..hidden / 32 {
+                        let at = off + r * rb + blk * 22;
+                        region_mut[at] = half[0];
+                        region_mut[at + 1] = half[1];
+                    }
+                }
+            }
+            other => tame_scales(region_mut, other, off, n_tokens, hidden),
+        }
+
+        let embd_slice = &region[off..off + total];
+        let embd_cpu = QuantMat::new(embd_slice, ty, n_tokens, hidden).unwrap();
+        let tok_id = 3u32;
+        let x_ref = embd_cpu.row(tok_id as usize).unwrap();
+
+        let run_decode =
+            |embd: Option<(GgmlType, &[u8], usize)>, token_id: Option<u32>, x: &[f32]| {
+                gpu::decode_token(&gpu::TokenReq {
+                    layers: &[],
+                    output_norm: &region[norm_off..norm_off + hidden * 4],
+                    output: (GgmlType::Q4K, &region[out_off..out_off + out_bytes], vocab),
+                    embd,
+                    token_id,
+                    x,
+                    m: 1,
+                    rope: &rope,
+                    rot_dim: 128,
+                    rope_norm: false,
+                    eps: 1e-5,
+                    cache: &cache,
+                    cache_capacity: 8,
+                    ssm: None,
+                    ssm_slots: None,
+                    kv_dim: 256,
+                    head_dim: 128,
+                    n_heads: 4,
+                    n_kv_heads: 2,
+                    pos: 0,
+                    scale: 1.0 / 128.0f32.sqrt(),
+                    argmax: false,
+                })
+            };
+
+        let Some(gpu::TokenOut::Logits(got)) =
+            run_decode(Some((ty, embd_slice, hidden)), Some(tok_id), &[])
+        else {
+            panic!("GPU decode_token declined gpu embed for {ty:?}");
+        };
+        let Some(gpu::TokenOut::Logits(want)) = run_decode(None, None, &x_ref) else {
+            panic!("GPU decode_token declined cpu-staged x for {ty:?}");
+        };
+
+        assert_eq!(got.len(), want.len());
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).abs() < 1e-4 + 1e-4 * w.abs(),
+                "gpu embed {ty:?} logit {i}: {g} vs {w}"
+            );
+        }
+    }
 }
