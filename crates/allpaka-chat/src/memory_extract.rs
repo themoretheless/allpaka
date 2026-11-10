@@ -402,38 +402,41 @@ pub(crate) async fn read(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        if id.is_empty()
-            || id.len() > 100
-            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        {
-            bail!("Invalid proposal ID");
-        }
-        let path = app
-            .data
-            .join("memory/proposals")
-            .join(format!("{id}.json"))
-            .canonicalize()?;
-        if !path.starts_with(app.data.as_ref()) || !path.is_file() {
-            bail!("Invalid proposal path");
-        }
-        use std::io::Read;
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(128001)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > 128000 {
-            bail!("Proposal exceeds read limit");
-        }
-        let receipt: Value = serde_json::from_slice(&bytes)?;
-        if receipt.get("id").and_then(Value::as_str) != Some(id.as_str()) {
-            bail!("Proposal identity mismatch");
-        }
-        Ok(receipt)
-    })();
-    result
-        .map(Json)
-        .map_err(|_| crate::error(StatusCode::NOT_FOUND, "Memory proposal unavailable"))
+    crate::blocking(move || {
+        let result = (|| -> Result<Value> {
+            if id.is_empty()
+                || id.len() > 100
+                || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                bail!("Invalid proposal ID");
+            }
+            let path = app
+                .data
+                .join("memory/proposals")
+                .join(format!("{id}.json"))
+                .canonicalize()?;
+            if !path.starts_with(app.data.as_ref()) || !path.is_file() {
+                bail!("Invalid proposal path");
+            }
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)?
+                .take(128001)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 128000 {
+                bail!("Proposal exceeds read limit");
+            }
+            let receipt: Value = serde_json::from_slice(&bytes)?;
+            if receipt.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+                bail!("Proposal identity mismatch");
+            }
+            Ok(receipt)
+        })();
+        result
+            .map(Json)
+            .map_err(|_| crate::error(StatusCode::NOT_FOUND, "Memory proposal unavailable"))
+    })
+    .await
 }
 /// Compare the exact extraction prefix; later appended messages do not invalidate it.
 pub(crate) async fn source_status(
@@ -495,92 +498,17 @@ pub(crate) async fn list(
     State(app): State<App>,
     Path(session_id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        let directory = app.data.join("memory/proposals");
-        if !directory.exists() {
-            return Ok(json!({"proposals":[]}));
-        }
-        let directory = directory.canonicalize()?;
-        if !directory.starts_with(app.data.as_ref()) {
-            bail!("Invalid proposal directory");
-        }
-        let mut proposals = Vec::new();
-        let mut count = 0usize;
-        let mut total_bytes = 0usize;
-        for entry in std::fs::read_dir(directory)? {
-            let entry = entry?;
-            if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
+    crate::blocking(move || {
+        let result = (|| -> Result<Value> {
+            let directory = app.data.join("memory/proposals");
+            if !directory.exists() {
+                return Ok(json!({"proposals":[]}));
             }
-            count += 1;
-            if count > 1000 {
-                bail!("Proposal catalog exceeds scan limit");
-            }
-            if !entry.file_type()?.is_file() {
-                bail!("Invalid proposal file");
-            }
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            std::fs::File::open(entry.path())?
-                .take(128001)
-                .read_to_end(&mut bytes)?;
-            total_bytes += bytes.len();
-            if bytes.len() > 128000 || total_bytes > 16 * 1024 * 1024 {
-                bail!("Proposal catalog exceeds byte limit");
-            }
-            let receipt: Value = serde_json::from_slice(&bytes)?;
-            let id = entry
-                .path()
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .context("Invalid proposal filename")?
-                .to_owned();
-            if receipt.get("id").and_then(Value::as_str) != Some(id.as_str()) {
-                bail!("Proposal identity mismatch");
-            }
-            if receipt.get("session_id").and_then(Value::as_str) != Some(session_id.as_str()) {
-                continue;
-            }
-            proposals.push(json!({"id":id,"project_id":receipt["project_id"],"session_id":session_id,"message_count":receipt["message_count"],"source_sha256":receipt["source_sha256"],"trace_id":receipt["trace_id"],"note_count":receipt["notes"].as_array().context("Invalid proposal notes")?.len()}));
-        }
-        proposals.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
-        Ok(json!({"proposals":proposals}))
-    })();
-    result.map(Json).map_err(|_| {
-        crate::error(
-            StatusCode::BAD_REQUEST,
-            "Memory proposal catalog unavailable",
-        )
-    })
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ConsolidationCatalog {
-    project_id: String,
-    #[serde(default)]
-    offset: usize,
-    #[serde(default = "catalog_limit")]
-    limit: usize,
-}
-fn catalog_limit() -> usize {
-    20
-}
-pub(crate) async fn list_consolidations(
-    State(app): State<App>,
-    Query(query): Query<ConsolidationCatalog>,
-) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        crate::memory::project_exists(&app, &query.project_id)?;
-        if query.offset > 1000 || query.limit == 0 || query.limit > 100 {
-            bail!("Invalid consolidation proposal page");
-        }
-        let directory = app.data.join("memory/proposals");
-        let mut rows = Vec::new();
-        if directory.exists() {
             let directory = directory.canonicalize()?;
             if !directory.starts_with(app.data.as_ref()) {
                 bail!("Invalid proposal directory");
             }
+            let mut proposals = Vec::new();
             let mut count = 0usize;
             let mut total_bytes = 0usize;
             for entry in std::fs::read_dir(directory)? {
@@ -589,8 +517,11 @@ pub(crate) async fn list_consolidations(
                     continue;
                 }
                 count += 1;
-                if count > 1000 || !entry.file_type()?.is_file() {
+                if count > 1000 {
                     bail!("Proposal catalog exceeds scan limit");
+                }
+                if !entry.file_type()?.is_file() {
+                    bail!("Invalid proposal file");
                 }
                 use std::io::Read;
                 let mut bytes = Vec::new();
@@ -608,37 +539,115 @@ pub(crate) async fn list_consolidations(
                     .and_then(|s| s.to_str())
                     .context("Invalid proposal filename")?
                     .to_owned();
-                if receipt["id"].as_str() != Some(id.as_str()) {
+                if receipt.get("id").and_then(Value::as_str) != Some(id.as_str()) {
                     bail!("Proposal identity mismatch");
                 }
-                if receipt["kind"] != "memory_consolidation_proposal"
-                    || receipt["project_id"].as_str() != Some(query.project_id.as_str())
-                {
+                if receipt.get("session_id").and_then(Value::as_str) != Some(session_id.as_str()) {
                     continue;
                 }
-                let sources = receipt["consolidation_sources"]
-                    .as_array()
-                    .context("Invalid consolidation sources")?;
-                if !(2..=20).contains(&sources.len())
-                    || receipt["notes"].as_array().map(Vec::len) != Some(1)
-                {
-                    bail!("Invalid consolidation proposal");
-                }
-                rows.push(json!({"id":id,"project_id":query.project_id,"source_count":sources.len(),"source_sha256":receipt["source_sha256"],"trace_id":receipt["trace_id"],"note_count":1}));
+                proposals.push(json!({"id":id,"project_id":receipt["project_id"],"session_id":session_id,"message_count":receipt["message_count"],"source_sha256":receipt["source_sha256"],"trace_id":receipt["trace_id"],"note_count":receipt["notes"].as_array().context("Invalid proposal notes")?.len()}));
             }
-        }
-        rows.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
-        let total = rows.len();
-        let proposals = rows
-            .into_iter()
-            .skip(query.offset)
-            .take(query.limit)
-            .collect::<Vec<_>>();
-        Ok(
-            json!({"kind":"memory_consolidation_catalog","project_id":query.project_id,"offset":query.offset,"limit":query.limit,"total":total,"has_more":query.offset+proposals.len()<total,"proposals":proposals,"provider_calls":0}),
-        )
-    })();
-    result.map(Json).map_err(crate::bad_request)
+            proposals.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
+            Ok(json!({"proposals":proposals}))
+        })();
+        result.map(Json).map_err(|_| {
+            crate::error(
+                StatusCode::BAD_REQUEST,
+                "Memory proposal catalog unavailable",
+            )
+        })
+    })
+    .await
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConsolidationCatalog {
+    project_id: String,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "catalog_limit")]
+    limit: usize,
+}
+fn catalog_limit() -> usize {
+    20
+}
+pub(crate) async fn list_consolidations(
+    State(app): State<App>,
+    Query(query): Query<ConsolidationCatalog>,
+) -> crate::ApiResult<Value> {
+    crate::blocking(move || {
+        let result = (|| -> Result<Value> {
+            crate::memory::project_exists(&app, &query.project_id)?;
+            if query.offset > 1000 || query.limit == 0 || query.limit > 100 {
+                bail!("Invalid consolidation proposal page");
+            }
+            let directory = app.data.join("memory/proposals");
+            let mut rows = Vec::new();
+            if directory.exists() {
+                let directory = directory.canonicalize()?;
+                if !directory.starts_with(app.data.as_ref()) {
+                    bail!("Invalid proposal directory");
+                }
+                let mut count = 0usize;
+                let mut total_bytes = 0usize;
+                for entry in std::fs::read_dir(directory)? {
+                    let entry = entry?;
+                    if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
+                        continue;
+                    }
+                    count += 1;
+                    if count > 1000 || !entry.file_type()?.is_file() {
+                        bail!("Proposal catalog exceeds scan limit");
+                    }
+                    use std::io::Read;
+                    let mut bytes = Vec::new();
+                    std::fs::File::open(entry.path())?
+                        .take(128001)
+                        .read_to_end(&mut bytes)?;
+                    total_bytes += bytes.len();
+                    if bytes.len() > 128000 || total_bytes > 16 * 1024 * 1024 {
+                        bail!("Proposal catalog exceeds byte limit");
+                    }
+                    let receipt: Value = serde_json::from_slice(&bytes)?;
+                    let id = entry
+                        .path()
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .context("Invalid proposal filename")?
+                        .to_owned();
+                    if receipt["id"].as_str() != Some(id.as_str()) {
+                        bail!("Proposal identity mismatch");
+                    }
+                    if receipt["kind"] != "memory_consolidation_proposal"
+                        || receipt["project_id"].as_str() != Some(query.project_id.as_str())
+                    {
+                        continue;
+                    }
+                    let sources = receipt["consolidation_sources"]
+                        .as_array()
+                        .context("Invalid consolidation sources")?;
+                    if !(2..=20).contains(&sources.len())
+                        || receipt["notes"].as_array().map(Vec::len) != Some(1)
+                    {
+                        bail!("Invalid consolidation proposal");
+                    }
+                    rows.push(json!({"id":id,"project_id":query.project_id,"source_count":sources.len(),"source_sha256":receipt["source_sha256"],"trace_id":receipt["trace_id"],"note_count":1}));
+                }
+            }
+            rows.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
+            let total = rows.len();
+            let proposals = rows
+                .into_iter()
+                .skip(query.offset)
+                .take(query.limit)
+                .collect::<Vec<_>>();
+            Ok(
+                json!({"kind":"memory_consolidation_catalog","project_id":query.project_id,"offset":query.offset,"limit":query.limit,"total":total,"has_more":query.offset+proposals.len()<total,"proposals":proposals,"provider_calls":0}),
+            )
+        })();
+        result.map(Json).map_err(crate::bad_request)
+    })
+    .await
 }
 #[cfg(test)]
 mod tests {

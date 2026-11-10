@@ -46,10 +46,13 @@ pub(crate) async fn time_series(
     State(app): State<crate::App>,
     Query(query): Query<TimeSearch>,
 ) -> crate::ApiResult<Value> {
-    app.observability
-        .time_series(&query)
-        .map(Json)
-        .map_err(|error| crate::error(StatusCode::BAD_REQUEST, error))
+    crate::blocking(move || {
+        app.observability
+            .time_series(&query)
+            .map(Json)
+            .map_err(|error| crate::error(StatusCode::BAD_REQUEST, error))
+    })
+    .await
 }
 #[derive(Default, Deserialize)]
 pub(crate) struct SummarySearch {
@@ -65,10 +68,13 @@ pub(crate) async fn summary(
     State(app): State<crate::App>,
     Query(query): Query<SummarySearch>,
 ) -> crate::ApiResult<Value> {
-    app.observability
-        .summary(&query)
-        .map(Json)
-        .map_err(|error| crate::error(StatusCode::BAD_REQUEST, error))
+    crate::blocking(move || {
+        app.observability
+            .summary(&query)
+            .map(Json)
+            .map_err(|error| crate::error(StatusCode::BAD_REQUEST, error))
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -182,29 +188,38 @@ pub(crate) async fn evaluation_summary(
     State(app): State<crate::App>,
     Query(query): Query<EvaluationSearch>,
 ) -> crate::ApiResult<Value> {
-    app.observability
-        .evaluation_summary(&query)
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        app.observability
+            .evaluation_summary(&query)
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 pub(crate) async fn list(
     State(app): State<crate::App>,
     Query(query): Query<Search>,
 ) -> crate::ApiResult<Value> {
-    app.observability
-        .list(&query)
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        app.observability
+            .list(&query)
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 pub(crate) async fn get(
     State(app): State<crate::App>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> crate::ApiResult<Value> {
-    app.observability
-        .read_validated_record(&id, None, None)
-        .and_then(|record| Ok(serde_json::to_value(record)?))
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        app.observability
+            .read_validated_record(&id, None, None)
+            .and_then(|record| Ok(serde_json::to_value(record)?))
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,9 +248,12 @@ pub(crate) async fn export(
     axum::extract::Path(id): axum::extract::Path<String>,
     Query(options): Query<ExportOptions>,
 ) -> crate::ApiResult<Value> {
-    export_packet(&app, &id, options.include_feedback.unwrap_or(false))
-        .map(Json)
-        .map_err(|error| crate::error(StatusCode::BAD_REQUEST, error))
+    crate::blocking(move || {
+        export_packet(&app, &id, options.include_feedback.unwrap_or(false))
+            .map(Json)
+            .map_err(|error| crate::error(StatusCode::BAD_REQUEST, error))
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -249,61 +267,70 @@ pub(crate) async fn bulk_export(
     State(app): State<crate::App>,
     Json(request): Json<BulkExportRequest>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        if request.project_id.is_empty()
-            || request.project_id.len() > 80
-            || request.trace_ids.is_empty()
-            || request.trace_ids.len() > 100
-        {
-            bail!("Choose a project and 1-100 unique traces");
-        }
-        let mut seen = std::collections::HashSet::new();
-        for id in &request.trace_ids {
-            if !seen.insert(id) {
-                bail!("Duplicate export trace ID");
+    crate::blocking(move || {
+        let result = (|| -> Result<Value> {
+            if request.project_id.is_empty()
+                || request.project_id.len() > 80
+                || request.trace_ids.is_empty()
+                || request.trace_ids.len() > 100
+            {
+                bail!("Choose a project and 1-100 unique traces");
             }
-        }
-        let mut packets = Vec::new();
-        let mut bytes = 0usize;
-        for id in &request.trace_ids {
-            let packet = export_packet(&app, id, request.include_feedback)?;
-            if packet["trace"]["project_id"] != request.project_id {
-                bail!("Trace export project mismatch");
+            let mut seen = std::collections::HashSet::new();
+            for id in &request.trace_ids {
+                if !seen.insert(id) {
+                    bail!("Duplicate export trace ID");
+                }
             }
-            bytes = bytes
-                .checked_add(serde_json::to_vec(&packet)?.len())
-                .context("Export size overflow")?;
-            if bytes > 16 * 1024 * 1024 {
+            let mut packets = Vec::new();
+            let mut bytes = 0usize;
+            for id in &request.trace_ids {
+                let packet = export_packet(&app, id, request.include_feedback)?;
+                if packet["trace"]["project_id"] != request.project_id {
+                    bail!("Trace export project mismatch");
+                }
+                bytes = bytes
+                    .checked_add(serde_json::to_vec(&packet)?.len())
+                    .context("Export size overflow")?;
+                if bytes > 16 * 1024 * 1024 {
+                    bail!("Bulk trace export exceeds 16 MiB");
+                }
+                packets.push(packet);
+            }
+            let packet = json!({"kind":"trace_export_batch","schema_version":1,"project_id":request.project_id,"exported_ms":now(),
+                "trace_count":packets.len(),"traces":packets,"privacy":{"runtime_content_capture":false,"feedback_included":request.include_feedback},"provider_calls":0});
+            if serde_json::to_vec(&packet)?.len() > 16 * 1024 * 1024 {
                 bail!("Bulk trace export exceeds 16 MiB");
             }
-            packets.push(packet);
-        }
-        let packet = json!({"kind":"trace_export_batch","schema_version":1,"project_id":request.project_id,"exported_ms":now(),
-            "trace_count":packets.len(),"traces":packets,"privacy":{"runtime_content_capture":false,"feedback_included":request.include_feedback},"provider_calls":0});
-        if serde_json::to_vec(&packet)?.len() > 16 * 1024 * 1024 {
-            bail!("Bulk trace export exceeds 16 MiB");
-        }
-        Ok(packet)
-    })();
-    result
-        .map(Json)
-        .map_err(|error| crate::error(StatusCode::BAD_REQUEST, error))
+            Ok(packet)
+        })();
+        result
+            .map(Json)
+            .map_err(|error| crate::error(StatusCode::BAD_REQUEST, error))
+    })
+    .await
 }
 pub(crate) async fn remove(
     State(app): State<crate::App>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> crate::ApiResult<Value> {
-    app.observability
-        .change_visibility(&id, true)
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        app.observability
+            .change_visibility(&id, true)
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 pub(crate) async fn restore(
     State(app): State<crate::App>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> crate::ApiResult<Value> {
-    app.observability
-        .change_visibility(&id, false)
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        app.observability
+            .change_visibility(&id, false)
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }

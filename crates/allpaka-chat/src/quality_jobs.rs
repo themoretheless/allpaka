@@ -245,13 +245,16 @@ pub(crate) async fn list_api(
     axum::extract::State(app): axum::extract::State<App>,
     axum::extract::Query(page): axum::extract::Query<Page>,
 ) -> crate::ApiResult<Value> {
-    let outcome = (|| -> Result<_> {
-        crate::memory::project_exists(&app, &page.project_id)?;
-        catalog(&app.data, &page.project_id, page.offset, page.limit)
-    })();
-    outcome
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    crate::blocking(move || {
+        let outcome = (|| -> Result<_> {
+            crate::memory::project_exists(&app, &page.project_id)?;
+            catalog(&app.data, &page.project_id, page.offset, page.limit)
+        })();
+        outcome
+            .map(axum::Json)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
 }
 fn get_inner(app: &App, id: &str) -> Result<Value> {
     let (packet, _) = plan(&app.data, id)?;
@@ -264,25 +267,31 @@ pub(crate) async fn get_api(
     axum::extract::State(app): axum::extract::State<App>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> crate::ApiResult<Value> {
-    get_inner(&app, &id).map(axum::Json).map_err(|_| {
-        crate::error(
-            axum::http::StatusCode::NOT_FOUND,
-            "Quality job unavailable or invalid",
-        )
+    crate::blocking(move || {
+        get_inner(&app, &id).map(axum::Json).map_err(|_| {
+            crate::error(
+                axum::http::StatusCode::NOT_FOUND,
+                "Quality job unavailable or invalid",
+            )
+        })
     })
+    .await
 }
 pub(crate) async fn submit_api(
     axum::extract::State(app): axum::extract::State<App>,
     axum::Json(input): axum::Json<Input>,
 ) -> crate::ApiResult<Value> {
-    let outcome =
-        enqueue(&app, input).map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))?;
-    get_inner(&app, &outcome).map(axum::Json).map_err(|_| {
-        crate::error(
-            axum::http::StatusCode::NOT_FOUND,
-            "Quality job unavailable or invalid",
-        )
+    crate::blocking(move || {
+        let outcome = enqueue(&app, input)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))?;
+        get_inner(&app, &outcome).map(axum::Json).map_err(|_| {
+            crate::error(
+                axum::http::StatusCode::NOT_FOUND,
+                "Quality job unavailable or invalid",
+            )
+        })
     })
+    .await
 }
 pub(crate) fn enqueue(app: &App, input: Input) -> Result<String> {
     crate::validate_settings(&input.settings, app)?;

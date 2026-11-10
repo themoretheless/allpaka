@@ -355,37 +355,46 @@ pub(crate) async fn list(
     State(app): State<crate::App>,
     Query(query): Query<ListQuery>,
 ) -> crate::ApiResult<Value> {
-    project_exists(&app, &query.project_id)
-        .and_then(|_| app.prompts.list(&query.project_id))
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        project_exists(&app, &query.project_id)
+            .and_then(|_| app.prompts.list(&query.project_id))
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 pub(crate) async fn save(
     State(app): State<crate::App>,
     Json(input): Json<SavePrompt>,
 ) -> crate::ApiResult<Value> {
-    project_exists(&app, &input.project_id)
-        .and_then(|_| app.prompts.save(input))
-        .and_then(|s| Ok(serde_json::to_value(s)?))
-        .map(Json)
-        .map_err(|e| {
-            let code = if e.to_string().starts_with("Prompt version conflict") {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            crate::error(code, e)
-        })
+    crate::blocking(move || {
+        project_exists(&app, &input.project_id)
+            .and_then(|_| app.prompts.save(input))
+            .and_then(|s| Ok(serde_json::to_value(s)?))
+            .map(Json)
+            .map_err(|e| {
+                let code = if e.to_string().starts_with("Prompt version conflict") {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                crate::error(code, e)
+            })
+    })
+    .await
 }
 pub(crate) async fn snapshot(
     State(app): State<crate::App>,
     Path((id, version)): Path<(String, u64)>,
 ) -> crate::ApiResult<Value> {
-    app.prompts
-        .load(&id, Some(version))
-        .and_then(|s| Ok(serde_json::to_value(s)?))
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        app.prompts
+            .load(&id, Some(version))
+            .and_then(|s| Ok(serde_json::to_value(s)?))
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -403,10 +412,13 @@ pub(crate) async fn history(
     Path(id): Path<String>,
     Query(query): Query<HistoryQuery>,
 ) -> crate::ApiResult<Value> {
-    app.prompts
-        .history(&id, query.offset, query.limit)
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        app.prompts
+            .history(&id, query.offset, query.limit)
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -491,11 +503,14 @@ pub(crate) async fn preview(
     Path((id, version)): Path<(String, u64)>,
     Json(input): Json<PreviewInput>,
 ) -> crate::ApiResult<Value> {
-    project_exists(&app, &input.project_id)
-        .and_then(|_| app.prompts.load(&id, Some(version)))
-        .and_then(|prompt| preview_receipt(&prompt, &input))
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        project_exists(&app, &input.project_id)
+            .and_then(|_| app.prompts.load(&id, Some(version)))
+            .and_then(|prompt| preview_receipt(&prompt, &input))
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 #[cfg(test)]
 mod tests {

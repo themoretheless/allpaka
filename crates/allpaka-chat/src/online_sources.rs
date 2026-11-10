@@ -170,27 +170,30 @@ pub(crate) async fn save_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     body: axum::body::Bytes,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
-        if body.len() > MAX {
-            bail!("Quality source request exceeds bound");
-        }
-        let source: Source =
-            serde_json::from_value(crate::strict_json::parse(std::str::from_utf8(&body)?)?)?;
-        crate::memory::project_exists(&app, &source.project_id)?;
-        Ok(serde_json::to_value(
-            Store::open(&app.data)?.save(&app.data, source)?,
-        )?)
-    })();
-    if let Ok(packet) = &result {
-        if let Some(hash) = packet["source_sha256"].as_str() {
-            if let Err(error) = crate::model_evaluators::admit_source(&app, hash) {
-                eprintln!("Model rule source admission failed: {error}");
+    crate::blocking(move || {
+        let result = (|| -> Result<_> {
+            if body.len() > MAX {
+                bail!("Quality source request exceeds bound");
+            }
+            let source: Source =
+                serde_json::from_value(crate::strict_json::parse(std::str::from_utf8(&body)?)?)?;
+            crate::memory::project_exists(&app, &source.project_id)?;
+            Ok(serde_json::to_value(
+                Store::open(&app.data)?.save(&app.data, source)?,
+            )?)
+        })();
+        if let Ok(packet) = &result {
+            if let Some(hash) = packet["source_sha256"].as_str() {
+                if let Err(error) = crate::model_evaluators::admit_source(&app, hash) {
+                    eprintln!("Model rule source admission failed: {error}");
+                }
             }
         }
-    }
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+        result
+            .map(axum::Json)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -202,20 +205,23 @@ pub(crate) async fn read_api(
     axum::extract::Path(hash): axum::extract::Path<String>,
     axum::extract::Query(scope): axum::extract::Query<Scope>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
-        crate::memory::project_exists(&app, &scope.project_id)?;
-        let packet = Store::open(&app.data)?.read(&hash)?;
-        if packet.source.project_id != scope.project_id {
-            bail!("Quality source unavailable");
-        }
-        Ok(serde_json::to_value(packet)?)
-    })();
-    result.map(axum::Json).map_err(|_| {
-        crate::error(
-            axum::http::StatusCode::NOT_FOUND,
-            "Quality source unavailable or invalid",
-        )
+    crate::blocking(move || {
+        let result = (|| -> Result<_> {
+            crate::memory::project_exists(&app, &scope.project_id)?;
+            let packet = Store::open(&app.data)?.read(&hash)?;
+            if packet.source.project_id != scope.project_id {
+                bail!("Quality source unavailable");
+            }
+            Ok(serde_json::to_value(packet)?)
+        })();
+        result.map(axum::Json).map_err(|_| {
+            crate::error(
+                axum::http::StatusCode::NOT_FOUND,
+                "Quality source unavailable or invalid",
+            )
+        })
     })
+    .await
 }
 #[cfg(test)]
 mod tests {
