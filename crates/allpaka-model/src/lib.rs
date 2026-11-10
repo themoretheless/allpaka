@@ -11,6 +11,7 @@
 //! real model, which is the acceptance test for the whole engine milestone.
 
 pub mod config;
+pub mod error;
 pub mod kv;
 pub mod model;
 pub mod pipeline;
@@ -20,7 +21,8 @@ pub mod requirements;
 pub mod speculate;
 pub mod tokenizer;
 
-pub use config::{Config, ModelCapability, ModelSupport, RopeStyle};
+pub use config::{Architecture, Config, ModelCapability, ModelSupport, RopeStyle};
+pub use error::ModelError;
 pub use kv::KvCache;
 pub use model::{set_trace_hook, Model, Session};
 pub use tokenizer::Tokenizer;

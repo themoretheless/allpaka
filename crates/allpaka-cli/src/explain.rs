@@ -62,7 +62,7 @@ impl ExecutionPlan {
         }
         let tensors_supported = tensors.iter().all(|tensor| tensor.kernel.is_some());
         Self {
-            architecture: requirements.architecture.clone(),
+            architecture: requirements.architecture.as_str().to_string(),
             runtime_profile: runtime.profile.name().to_string(),
             supported: coverage.is_supported() && tensors_supported,
             steps,
