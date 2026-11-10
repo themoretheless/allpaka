@@ -208,28 +208,13 @@ pub(super) fn decode_token_one_fused(
     let plan = FusedPlan::new(req, x_in, rope_in, pos)?;
     let FusedPlan {
         hidden,
-        hd,
         q_dim,
-        kv,
         rope_pairs,
         ffn_dim,
         vocab,
-        x_at,
         h_at,
-        q_at,
-        k_at,
-        v_at,
-        attn_at,
-        gate_at,
-        up_at,
         out_logits_at,
         y_elems,
-        has_attn_bias,
-        rope_q_at,
-        rope_k_at,
-        out_norm_at,
-        norms_base,
-        per_layer_norms,
         x_elems,
         graph_key,
         fa_inline,
@@ -321,7 +306,9 @@ pub(super) fn decode_token_one_fused(
             rope_freq_ptr,
             q8_on,
             capturing_whole,
+            capturing_hybrid,
             use_qk_rope_table,
+            graph_flags,
         };
 
         if capturing_whole {
@@ -485,43 +472,14 @@ pub(super) fn decode_token_one_fused(
 
         // RMSNorm + NeoX RoPE + store K into f16 cache (skips a separate store launch).
 
-        let mut fa_pre: Vec<cudarc::driver::CudaGraph> = Vec::new();
-        let mut fa_post: Vec<cudarc::driver::CudaGraph> = Vec::new();
-        let mut fa_attn: Vec<cudarc::driver::CudaGraph> = Vec::new();
-        let mut fa_attn_ok = capturing_hybrid && !crate::runtime::get().cuda_no_fa_graph;
-        let mut fa_warmed = false;
-        if capturing_hybrid {
-            fa_pre.reserve(n_layers);
-            fa_post.reserve(n_layers);
-            fa_attn.reserve(n_layers);
-        }
+        let mut hybrid = HybridCapture::new(capturing_hybrid, n_layers);
 
         if use_qk_rope_table {
-            let f = gpu.func_owned("build_rope_freq_dpos")?;
-            let ropep = xbase + (rope_q_at * 4) as u64;
-            let fp = rope_freq_ptr?;
-            let pairs_u = rope_pairs as u32;
-            let cfg = CudaGpu::cfg_1d(pairs_u, 64);
-            unsafe {
-                stream
-                    .launch_builder_pdl(&f)
-                    .arg(&ropep)
-                    .arg(&fp)
-                    .arg(&gpu.d_pos)
-                    .arg(&pairs_u)
-                    .launch_pdl(cfg)
-            }
-            .ok()?;
+            ctx.launch_rope_table(gpu)?;
             launches += 1;
         }
 
-        for (_li, layer) in req.layers.iter().enumerate() {
-            let layer_base = norms_base + _li * per_layer_norms;
-            let attn_norm_at = layer_base;
-            let ffn_norm_at = layer_base + hidden;
-            let q_norm_at = layer_base + 2 * hidden;
-            let k_norm_at = q_norm_at + hd;
-
+        for (li, layer) in req.layers.iter().enumerate() {
             if capturing_hybrid {
                 stream
                     .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
@@ -531,333 +489,9 @@ pub(super) fn decode_token_one_fused(
                     .ok()?;
             }
 
-            ctx.launch_rms_into(gpu, h_at, x_at, attn_norm_at, hidden, 1)?;
-            launches += 1;
+            let wo = ctx.layer_attn_in(gpu, li, layer, &mut launches)?;
 
-            let (wq_c, wq_o) = resolve_w(gpu, layer.wq.1)?;
-            let (wk_c, wk_o) = resolve_w(gpu, layer.wk.1)?;
-            let (wv_c, wv_o) = resolve_w(gpu, layer.wv.1)?;
-            let (wo_c, wo_o) = resolve_w(gpu, layer.wo.1)?;
-            let ggml_decode =
-                crate::gpu::cuda::ggml::enabled() && crate::runtime::get().cuda_ggml_decode;
-            // Fused QKV: Q4/Q4/Q4 or Q4_K_M Q4/Q4/Q6 (V often Q6_K).
-            // Decode: write V straight into f16 KV cache when V has no bias
-            // (bias must land in arena first, then store_kv).
-            let write_v_cache = layer.v_bias.is_none();
-            let qkv_fused = !ggml_decode
-                && matches!(
-                    (layer.wq.0, layer.wk.0, layer.wv.0),
-                    (GgmlType::Q4K, GgmlType::Q4K, GgmlType::Q4K)
-                        | (GgmlType::Q4K, GgmlType::Q4K, GgmlType::Q6K)
-                )
-                && launch_matvec_q4k_qkv(
-                    gpu,
-                    &QkvReq {
-                        q: WeightLoc {
-                            chunk: wq_c,
-                            off: wq_o,
-                        },
-                        k: WeightLoc {
-                            chunk: wk_c,
-                            off: wk_o,
-                        },
-                        v: WeightLoc {
-                            chunk: wv_c,
-                            off: wv_o,
-                        },
-                        v_ty: layer.wv.0,
-                        n_in: hidden,
-                        n_q: q_dim,
-                        n_kv: kv,
-                        y_base: ybase,
-                        x_off: h_at,
-                        q_off: q_at,
-                        k_off: k_at,
-                        v_off: v_at,
-                        m: 1,
-                        v_cache: if write_v_cache {
-                            Some(VCacheDst {
-                                buf: &req.cache.buf,
-                                off: layer.v_off as u64,
-                                kv_dim: req.kv_dim as u32,
-                            })
-                        } else {
-                            None
-                        },
-                    },
-                )
-                .is_some();
-            if _li == 0 && crate::runtime::get().cuda_fuse_log {
-                eprintln!(
-                    "cuda: layer0 qkv_fused={qkv_fused} ggml_decode={ggml_decode} chunks=({wq_c},{wk_c},{wv_c}) types=({:?},{:?},{:?}) q8={} bias={}",
-                    layer.wq.0,
-                    layer.wk.0,
-                    layer.wv.0,
-                    crate::gpu::cuda::runtime::q8_decode_enabled(),
-                    has_attn_bias
-                );
-            }
-            if !qkv_fused {
-                launch_matvec_y_ptr(
-                    gpu,
-                    DevWeight {
-                        ty: layer.wq.0,
-                        loc: WeightLoc {
-                            chunk: wq_c,
-                            off: wq_o,
-                        },
-                        n_in: hidden,
-                        n_out: q_dim,
-                    },
-                    ArenaMatvec {
-                        y_base: ybase,
-                        x_off: h_at,
-                        y_off: q_at,
-                        m: 1,
-                        add: false,
-                    },
-                )?;
-                launch_matvec_y_ptr(
-                    gpu,
-                    DevWeight {
-                        ty: layer.wk.0,
-                        loc: WeightLoc {
-                            chunk: wk_c,
-                            off: wk_o,
-                        },
-                        n_in: hidden,
-                        n_out: kv,
-                    },
-                    ArenaMatvec {
-                        y_base: ybase,
-                        x_off: h_at,
-                        y_off: k_at,
-                        m: 1,
-                        add: false,
-                    },
-                )?;
-                launch_matvec_y_ptr(
-                    gpu,
-                    DevWeight {
-                        ty: layer.wv.0,
-                        loc: WeightLoc {
-                            chunk: wv_c,
-                            off: wv_o,
-                        },
-                        n_in: hidden,
-                        n_out: kv,
-                    },
-                    ArenaMatvec {
-                        y_base: ybase,
-                        x_off: h_at,
-                        y_off: v_at,
-                        m: 1,
-                        add: false,
-                    },
-                )?;
-                launches += 3;
-                if ggml_decode {
-                    crate::gpu::cuda::ggml::prepare_for_cudarc();
-                }
-            } else {
-                launches += 1;
-            }
-
-            // Attn bias after QKV projections (qwen2), before RoPE / KV store.
-            if has_attn_bias {
-                let qb_at = layer_base + 2 * hidden + 2 * hd;
-                let kb_at = qb_at + q_dim;
-                let vb_at = kb_at + kv;
-                if layer.q_bias.is_some() {
-                    ctx.launch_add_bias(gpu, q_at, qb_at, q_dim)?;
-                    launches += 1;
-                }
-                if layer.k_bias.is_some() {
-                    ctx.launch_add_bias(gpu, k_at, kb_at, kv)?;
-                    launches += 1;
-                }
-                if layer.v_bias.is_some() {
-                    ctx.launch_add_bias(gpu, v_at, vb_at, kv)?;
-                    launches += 1;
-                }
-            }
-
-            let can_fuse_qk_post =
-                qkv_fused && layer.q_norm.is_some() && layer.k_norm.is_some() && use_qk_rope_table;
-            let qk_post_fused = if can_fuse_qk_post {
-                ctx.launch_rms_rope_qk_store(gpu, q_at, k_at, q_norm_at, k_norm_at, layer.k_off)?;
-                true
-            } else {
-                false
-            };
-            if qk_post_fused {
-                launches += 1;
-            } else if layer.q_norm.is_some() && gpu.fns.contains_key("rmsnorm_rope_neox") {
-                ctx.launch_rms_rope(gpu, q_at, q_norm_at, rope_q_at, req.n_heads)?;
-                launches += 1;
-            } else {
-                if layer.q_norm.is_some() {
-                    ctx.launch_rms_inplace(gpu, q_at, q_norm_at, hd, req.n_heads)?;
-                    launches += 1;
-                }
-                ctx.launch_rope(gpu, q_at, rope_q_at, req.n_heads)?;
-                launches += 1;
-            }
-
-            // When QKV wrote V to cache, fuse K norm+rope+store and skip V store.
-            let k_stored = if qk_post_fused {
-                true
-            } else if qkv_fused
-                && layer.k_norm.is_some()
-                && gpu.fns.contains_key("rmsnorm_rope_store_dpos")
-            {
-                ctx.launch_rms_rope_store(
-                    gpu,
-                    k_at,
-                    k_norm_at,
-                    rope_k_at,
-                    layer.k_off,
-                    req.n_kv_heads,
-                )?;
-                launches += 1;
-                true
-            } else {
-                if layer.k_norm.is_some() && gpu.fns.contains_key("rmsnorm_rope_neox") {
-                    ctx.launch_rms_rope(gpu, k_at, k_norm_at, rope_k_at, req.n_kv_heads)?;
-                    launches += 1;
-                } else {
-                    if layer.k_norm.is_some() {
-                        ctx.launch_rms_inplace(gpu, k_at, k_norm_at, hd, req.n_kv_heads)?;
-                        launches += 1;
-                    }
-                    ctx.launch_rope(gpu, k_at, rope_k_at, req.n_kv_heads)?;
-                    launches += 1;
-                }
-                false
-            };
-
-            if qkv_fused && k_stored && write_v_cache {
-                // V already in cache from QKV; K stored by rmsnorm_rope_store_dpos.
-            } else if qkv_fused && write_v_cache {
-                ctx.launch_store(gpu, k_at, layer.k_off, kv)?;
-                launches += 1;
-            } else if qkv_fused && k_stored {
-                // K fused into cache; V stayed in arena (bias) — store V only.
-                ctx.launch_store(gpu, v_at, layer.v_off, kv)?;
-                launches += 1;
-            } else {
-                ctx.launch_store_pair(gpu, k_at, v_at, layer.k_off, layer.v_off, kv)?;
-                launches += 1;
-            }
-
-            if capturing_hybrid {
-                match stream.end_capture(graph_flags) {
-                    Ok(Some(g)) => {
-                        g.launch().ok()?;
-                        fa_pre.push(g);
-                    }
-                    Ok(None) => {
-                        eprintln!("cuda: hybrid pre graph empty");
-                        return None;
-                    }
-                    Err(e) => {
-                        eprintln!("cuda: hybrid pre end_capture failed: {e}");
-                        return None;
-                    }
-                }
-                // Try capturing FA (mask + fattn + permute) into its own graph.
-                let mut captured_fa = false;
-                if fa_attn_ok {
-                    if !fa_warmed {
-                        // First FA outside capture so ggml/fattn cudaMalloc is done.
-                        ctx.launch_attend(
-                            gpu,
-                            q_at,
-                            attn_at,
-                            layer.k_off,
-                            layer.v_off,
-                            matches!(layer.wo.0, GgmlType::Q4K | GgmlType::Q6K)
-                                && crate::gpu::cuda::runtime::q8_decode_enabled(),
-                        )?;
-                        launches += 3;
-                        fa_warmed = true;
-                        crate::gpu::cuda::ggml::reset_mask_lim();
-                    }
-                    if stream
-                        .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
-                        .is_ok()
-                    {
-                        crate::gpu::cuda::ggml::prepare_from_cudarc(&stream);
-                        let (cache_p, cg) = DevicePtr::device_ptr(&req.cache.buf, &stream);
-                        drop(cg);
-                        let qp = ybase + (q_at * 4) as u64;
-                        let op = ybase + (attn_at * 4) as u64;
-                        let d_pos_p = {
-                            let (p, g) = DevicePtr::device_ptr(&gpu.d_pos, &stream);
-                            drop(g);
-                            p
-                        };
-                        let fa_ok = crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
-                            q: qp,
-                            k: cache_p + (layer.k_off as u64) * 2,
-                            v: cache_p + (layer.v_off as u64) * 2,
-                            out: op,
-                            m: 1,
-                            shape: FaShape {
-                                head_dim: hd,
-                                n_q_heads: req.n_heads,
-                                n_kv_heads: req.n_kv_heads.max(1),
-                                base: pos,
-                                kv_dim: req.kv_dim,
-                                scale: req.scale,
-                            },
-                            d_pos: Some(d_pos_p),
-                        });
-                        match (fa_ok, stream.end_capture(graph_flags)) {
-                            (true, Ok(Some(g))) => {
-                                g.launch().ok()?;
-                                fa_attn.push(g);
-                                captured_fa = true;
-                            }
-                            (_, Ok(None)) | (false, Ok(Some(_))) => {
-                                fa_attn_ok = false;
-                                fa_attn.clear();
-                            }
-                            (_, Err(e)) => {
-                                eprintln!("cuda: FA graph capture failed ({e}); eager FA fallback");
-                                fa_attn_ok = false;
-                                fa_attn.clear();
-                            }
-                        }
-                    } else {
-                        fa_attn_ok = false;
-                        fa_attn.clear();
-                    }
-                }
-                if !captured_fa {
-                    ctx.launch_attend(
-                        gpu,
-                        q_at,
-                        attn_at,
-                        layer.k_off,
-                        layer.v_off,
-                        matches!(layer.wo.0, GgmlType::Q4K | GgmlType::Q6K)
-                            && crate::gpu::cuda::runtime::q8_decode_enabled(),
-                    )?;
-                    launches += 3;
-                }
-            } else {
-                ctx.launch_attend(
-                    gpu,
-                    q_at,
-                    attn_at,
-                    layer.k_off,
-                    layer.v_off,
-                    matches!(layer.wo.0, GgmlType::Q4K | GgmlType::Q6K)
-                        && crate::gpu::cuda::runtime::q8_decode_enabled(),
-                )?;
-                launches += 3;
-            }
+            ctx.layer_attend(gpu, layer, &mut hybrid, &mut launches)?;
 
             if capturing_hybrid {
                 stream
@@ -868,158 +502,13 @@ pub(super) fn decode_token_one_fused(
                     .ok()?;
             }
 
-            launch_matvec_y_ptr(
-                gpu,
-                DevWeight {
-                    ty: layer.wo.0,
-                    loc: WeightLoc {
-                        chunk: wo_c,
-                        off: wo_o,
-                    },
-                    n_in: q_dim,
-                    n_out: hidden,
-                },
-                ArenaMatvec {
-                    y_base: ybase,
-                    x_off: attn_at,
-                    y_off: x_at,
-                    m: 1,
-                    add: true,
-                },
-            )?;
-            launches += 1;
-
-            ctx.launch_rms_into(gpu, h_at, x_at, ffn_norm_at, hidden, 1)?;
-            launches += 1;
-
-            let TokenFfn::Dense { gate, up, down } = &layer.ffn else {
-                return None;
-            };
-            let (g_c, g_o) = resolve_w(gpu, gate.1)?;
-            let (u_c, u_o) = resolve_w(gpu, up.1)?;
-            let (d_c, d_o) = resolve_w(gpu, down.1)?;
-            // Fused gate+up: Q8 dual-mmvq (SwiGLU in epilogue).
-            // Skip when measuring llama MMVQ via ALLPAKA_GGML_DECODE.
-            let gu_fused = !ggml_decode
-                && matches!((gate.0, up.0), (GgmlType::Q4K, GgmlType::Q4K))
-                && gate.2 == up.2
-                && launch_matvec_q4k_2(
-                    gpu,
-                    &GateUpReq {
-                        gate: WeightLoc {
-                            chunk: g_c,
-                            off: g_o,
-                        },
-                        up: WeightLoc {
-                            chunk: u_c,
-                            off: u_o,
-                        },
-                        n_in: hidden,
-                        n_out: gate.2,
-                        y_base: ybase,
-                        x_off: h_at,
-                        gate_off: gate_at,
-                        up_off: up_at,
-                        m: 1,
-                    },
-                )
-                .is_some();
-            if !gu_fused {
-                launch_matvec_y_ptr(
-                    gpu,
-                    DevWeight {
-                        ty: gate.0,
-                        loc: WeightLoc {
-                            chunk: g_c,
-                            off: g_o,
-                        },
-                        n_in: hidden,
-                        n_out: gate.2,
-                    },
-                    ArenaMatvec {
-                        y_base: ybase,
-                        x_off: h_at,
-                        y_off: gate_at,
-                        m: 1,
-                        add: false,
-                    },
-                )?;
-                launch_matvec_y_ptr(
-                    gpu,
-                    DevWeight {
-                        ty: up.0,
-                        loc: WeightLoc {
-                            chunk: u_c,
-                            off: u_o,
-                        },
-                        n_in: hidden,
-                        n_out: up.2,
-                    },
-                    ArenaMatvec {
-                        y_base: ybase,
-                        x_off: h_at,
-                        y_off: up_at,
-                        m: 1,
-                        add: false,
-                    },
-                )?;
-                launches += 2;
-                if ggml_decode {
-                    crate::gpu::cuda::ggml::prepare_for_cudarc();
-                }
-                let q8_primed = ctx.launch_swiglu(gpu, gate_at, up_at, gate.2)?;
-                if !q8_primed {
-                    gpu.invalidate_q8();
-                }
-                launches += 1;
-            } else {
-                // Dual mmvq wrote silu(gate)*up (+ Q8 when matvec_q4_k_q8_2_q8).
-                launches += 1;
-                let q8_ready = crate::gpu::cuda::runtime::q8_decode_enabled()
-                    && gate.2 % 32 == 0
-                    && gpu.q8_src_n == gate.2
-                    && gpu.q8_src_m == 1
-                    && gpu.q8_src == ybase + (gate_at * 4) as u64;
-                if q8_ready {
-                    // In-kernel Q8 epilogue already primed the down-proj cache.
-                } else if crate::gpu::cuda::runtime::q8_decode_enabled() && gate.2 % 32 == 0 {
-                    let gp = ybase + (gate_at * 4) as u64;
-                    if down.0 == GgmlType::Q6K {
-                        crate::gpu::cuda::runtime::launch_quantize_q8_q6(gpu, gp, gate.2, 1)?;
-                    } else {
-                        crate::gpu::cuda::runtime::launch_quantize_q8(gpu, gp, gate.2, 1)?;
-                    }
-                    launches += 1;
-                } else {
-                    gpu.invalidate_q8();
-                }
-            }
-            launch_matvec_y_ptr(
-                gpu,
-                DevWeight {
-                    ty: down.0,
-                    loc: WeightLoc {
-                        chunk: d_c,
-                        off: d_o,
-                    },
-                    n_in: gate.2,
-                    n_out: hidden,
-                },
-                ArenaMatvec {
-                    y_base: ybase,
-                    x_off: gate_at,
-                    y_off: x_at,
-                    m: 1,
-                    add: true,
-                },
-            )?;
-            launches += 1;
+            ctx.layer_ffn(gpu, li, layer, wo, &mut launches)?;
 
             if capturing_hybrid {
                 match stream.end_capture(graph_flags) {
                     Ok(Some(g)) => {
                         g.launch().ok()?;
-                        fa_post.push(g);
+                        hybrid.post.push(g);
                     }
                     Ok(None) => {
                         eprintln!("cuda: hybrid post graph empty");
@@ -1033,6 +522,14 @@ pub(super) fn decode_token_one_fused(
             }
         }
 
+        let HybridCapture {
+            pre: fa_pre,
+            post: fa_post,
+            attn: fa_attn,
+            attn_ok: fa_attn_ok,
+            ..
+        } = hybrid;
+
         if capturing_hybrid {
             stream
                 .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
@@ -1044,31 +541,7 @@ pub(super) fn decode_token_one_fused(
         }
 
         // Final norm + LM head.
-        ctx.launch_rms_into(gpu, h_at, x_at, out_norm_at, hidden, 1)?;
-        let (o_c, o_o) = resolve_w(gpu, req.output.1)?;
-        launch_matvec_y_ptr(
-            gpu,
-            DevWeight {
-                ty: req.output.0,
-                loc: WeightLoc {
-                    chunk: o_c,
-                    off: o_o,
-                },
-                n_in: hidden,
-                n_out: vocab,
-            },
-            ArenaMatvec {
-                y_base: ybase,
-                x_off: h_at,
-                y_off: out_logits_at,
-                m: 1,
-                add: false,
-            },
-        )?;
-        launches += 2;
-        if crate::gpu::cuda::ggml::enabled() && crate::runtime::get().cuda_ggml_decode {
-            crate::gpu::cuda::ggml::prepare_for_cudarc();
-        }
+        ctx.launch_output_head(gpu, &mut launches)?;
 
         let out = if req.argmax || req.m > 1 {
             let f = gpu.func_owned("argmax_f32")?;
@@ -1541,7 +1014,9 @@ struct FusedCtx<'a> {
     rope_freq_ptr: Option<u64>,
     q8_on: bool,
     capturing_whole: bool,
+    capturing_hybrid: bool,
     use_qk_rope_table: bool,
+    graph_flags: CUgraphInstantiate_flags,
 }
 
 impl FusedCtx<'_> {
@@ -2368,6 +1843,686 @@ impl FusedCtx<'_> {
             }
         } else {
             false
+        }
+    }
+
+    /// Fill the shared sin/cos table for this position from the device frequencies.
+    fn launch_rope_table(&self, gpu: &mut CudaGpu) -> Option<()> {
+        let FusedCtx {
+            stream,
+            xbase,
+            rope_freq_ptr,
+            plan:
+                FusedPlan {
+                    rope_pairs,
+                    rope_q_at,
+                    ..
+                },
+            ..
+        } = *self;
+        let f = gpu.func_owned("build_rope_freq_dpos")?;
+        let ropep = xbase + (rope_q_at * 4) as u64;
+        let fp = rope_freq_ptr?;
+        let pairs_u = rope_pairs as u32;
+        let cfg = CudaGpu::cfg_1d(pairs_u, 64);
+        unsafe {
+            stream
+                .launch_builder_pdl(&f)
+                .arg(&ropep)
+                .arg(&fp)
+                .arg(&gpu.d_pos)
+                .arg(&pairs_u)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        Some(())
+    }
+
+    /// Attention input half of one layer: norm, Q/K/V projections, bias,
+    /// QK norm + RoPE and the KV-cache store. Returns the resolved WO weight.
+    fn layer_attn_in(
+        &self,
+        gpu: &mut CudaGpu,
+        li: usize,
+        layer: &TokenLayer<'_>,
+        launches: &mut u64,
+    ) -> Option<(usize, u64)> {
+        let FusedCtx {
+            req,
+            ybase,
+            use_qk_rope_table,
+            plan:
+                FusedPlan {
+                    hidden,
+                    hd,
+                    q_dim,
+                    kv,
+                    x_at,
+                    h_at,
+                    q_at,
+                    k_at,
+                    v_at,
+                    has_attn_bias,
+                    rope_q_at,
+                    rope_k_at,
+                    norms_base,
+                    per_layer_norms,
+                    ..
+                },
+            ..
+        } = *self;
+        let layer_base = norms_base + li * per_layer_norms;
+        let attn_norm_at = layer_base;
+        let q_norm_at = layer_base + 2 * hidden;
+        let k_norm_at = q_norm_at + hd;
+        self.launch_rms_into(gpu, h_at, x_at, attn_norm_at, hidden, 1)?;
+        *launches += 1;
+
+        let (wq_c, wq_o) = resolve_w(gpu, layer.wq.1)?;
+        let (wk_c, wk_o) = resolve_w(gpu, layer.wk.1)?;
+        let (wv_c, wv_o) = resolve_w(gpu, layer.wv.1)?;
+        let (wo_c, wo_o) = resolve_w(gpu, layer.wo.1)?;
+        let ggml_decode =
+            crate::gpu::cuda::ggml::enabled() && crate::runtime::get().cuda_ggml_decode;
+        // Fused QKV: Q4/Q4/Q4 or Q4_K_M Q4/Q4/Q6 (V often Q6_K).
+        // Decode: write V straight into f16 KV cache when V has no bias
+        // (bias must land in arena first, then store_kv).
+        let write_v_cache = layer.v_bias.is_none();
+        let qkv_fused = !ggml_decode
+            && matches!(
+                (layer.wq.0, layer.wk.0, layer.wv.0),
+                (GgmlType::Q4K, GgmlType::Q4K, GgmlType::Q4K)
+                    | (GgmlType::Q4K, GgmlType::Q4K, GgmlType::Q6K)
+            )
+            && launch_matvec_q4k_qkv(
+                gpu,
+                &QkvReq {
+                    q: WeightLoc {
+                        chunk: wq_c,
+                        off: wq_o,
+                    },
+                    k: WeightLoc {
+                        chunk: wk_c,
+                        off: wk_o,
+                    },
+                    v: WeightLoc {
+                        chunk: wv_c,
+                        off: wv_o,
+                    },
+                    v_ty: layer.wv.0,
+                    n_in: hidden,
+                    n_q: q_dim,
+                    n_kv: kv,
+                    y_base: ybase,
+                    x_off: h_at,
+                    q_off: q_at,
+                    k_off: k_at,
+                    v_off: v_at,
+                    m: 1,
+                    v_cache: if write_v_cache {
+                        Some(VCacheDst {
+                            buf: &req.cache.buf,
+                            off: layer.v_off as u64,
+                            kv_dim: req.kv_dim as u32,
+                        })
+                    } else {
+                        None
+                    },
+                },
+            )
+            .is_some();
+        if li == 0 && crate::runtime::get().cuda_fuse_log {
+            eprintln!(
+                "cuda: layer0 qkv_fused={qkv_fused} ggml_decode={ggml_decode} chunks=({wq_c},{wk_c},{wv_c}) types=({:?},{:?},{:?}) q8={} bias={}",
+                layer.wq.0,
+                layer.wk.0,
+                layer.wv.0,
+                crate::gpu::cuda::runtime::q8_decode_enabled(),
+                has_attn_bias
+            );
+        }
+        if !qkv_fused {
+            launch_matvec_y_ptr(
+                gpu,
+                DevWeight {
+                    ty: layer.wq.0,
+                    loc: WeightLoc {
+                        chunk: wq_c,
+                        off: wq_o,
+                    },
+                    n_in: hidden,
+                    n_out: q_dim,
+                },
+                ArenaMatvec {
+                    y_base: ybase,
+                    x_off: h_at,
+                    y_off: q_at,
+                    m: 1,
+                    add: false,
+                },
+            )?;
+            launch_matvec_y_ptr(
+                gpu,
+                DevWeight {
+                    ty: layer.wk.0,
+                    loc: WeightLoc {
+                        chunk: wk_c,
+                        off: wk_o,
+                    },
+                    n_in: hidden,
+                    n_out: kv,
+                },
+                ArenaMatvec {
+                    y_base: ybase,
+                    x_off: h_at,
+                    y_off: k_at,
+                    m: 1,
+                    add: false,
+                },
+            )?;
+            launch_matvec_y_ptr(
+                gpu,
+                DevWeight {
+                    ty: layer.wv.0,
+                    loc: WeightLoc {
+                        chunk: wv_c,
+                        off: wv_o,
+                    },
+                    n_in: hidden,
+                    n_out: kv,
+                },
+                ArenaMatvec {
+                    y_base: ybase,
+                    x_off: h_at,
+                    y_off: v_at,
+                    m: 1,
+                    add: false,
+                },
+            )?;
+            *launches += 3;
+            if ggml_decode {
+                crate::gpu::cuda::ggml::prepare_for_cudarc();
+            }
+        } else {
+            *launches += 1;
+        }
+
+        // Attn bias after QKV projections (qwen2), before RoPE / KV store.
+        if has_attn_bias {
+            let qb_at = layer_base + 2 * hidden + 2 * hd;
+            let kb_at = qb_at + q_dim;
+            let vb_at = kb_at + kv;
+            if layer.q_bias.is_some() {
+                self.launch_add_bias(gpu, q_at, qb_at, q_dim)?;
+                *launches += 1;
+            }
+            if layer.k_bias.is_some() {
+                self.launch_add_bias(gpu, k_at, kb_at, kv)?;
+                *launches += 1;
+            }
+            if layer.v_bias.is_some() {
+                self.launch_add_bias(gpu, v_at, vb_at, kv)?;
+                *launches += 1;
+            }
+        }
+
+        let can_fuse_qk_post =
+            qkv_fused && layer.q_norm.is_some() && layer.k_norm.is_some() && use_qk_rope_table;
+        let qk_post_fused = if can_fuse_qk_post {
+            self.launch_rms_rope_qk_store(gpu, q_at, k_at, q_norm_at, k_norm_at, layer.k_off)?;
+            true
+        } else {
+            false
+        };
+        if qk_post_fused {
+            *launches += 1;
+        } else if layer.q_norm.is_some() && gpu.fns.contains_key("rmsnorm_rope_neox") {
+            self.launch_rms_rope(gpu, q_at, q_norm_at, rope_q_at, req.n_heads)?;
+            *launches += 1;
+        } else {
+            if layer.q_norm.is_some() {
+                self.launch_rms_inplace(gpu, q_at, q_norm_at, hd, req.n_heads)?;
+                *launches += 1;
+            }
+            self.launch_rope(gpu, q_at, rope_q_at, req.n_heads)?;
+            *launches += 1;
+        }
+
+        // When QKV wrote V to cache, fuse K norm+rope+store and skip V store.
+        let k_stored = if qk_post_fused {
+            true
+        } else if qkv_fused
+            && layer.k_norm.is_some()
+            && gpu.fns.contains_key("rmsnorm_rope_store_dpos")
+        {
+            self.launch_rms_rope_store(
+                gpu,
+                k_at,
+                k_norm_at,
+                rope_k_at,
+                layer.k_off,
+                req.n_kv_heads,
+            )?;
+            *launches += 1;
+            true
+        } else {
+            if layer.k_norm.is_some() && gpu.fns.contains_key("rmsnorm_rope_neox") {
+                self.launch_rms_rope(gpu, k_at, k_norm_at, rope_k_at, req.n_kv_heads)?;
+                *launches += 1;
+            } else {
+                if layer.k_norm.is_some() {
+                    self.launch_rms_inplace(gpu, k_at, k_norm_at, hd, req.n_kv_heads)?;
+                    *launches += 1;
+                }
+                self.launch_rope(gpu, k_at, rope_k_at, req.n_kv_heads)?;
+                *launches += 1;
+            }
+            false
+        };
+
+        if qkv_fused && k_stored && write_v_cache {
+            // V already in cache from QKV; K stored by rmsnorm_rope_store_dpos.
+        } else if qkv_fused && write_v_cache {
+            self.launch_store(gpu, k_at, layer.k_off, kv)?;
+            *launches += 1;
+        } else if qkv_fused && k_stored {
+            // K fused into cache; V stayed in arena (bias) — store V only.
+            self.launch_store(gpu, v_at, layer.v_off, kv)?;
+            *launches += 1;
+        } else {
+            self.launch_store_pair(gpu, k_at, v_at, layer.k_off, layer.v_off, kv)?;
+            *launches += 1;
+        }
+        Some((wo_c, wo_o))
+    }
+
+    /// Attention of one layer. While capturing hybrid segments this closes the
+    /// layer's `pre` graph and tries to record FA into its own graph first.
+    fn layer_attend(
+        &self,
+        gpu: &mut CudaGpu,
+        layer: &TokenLayer<'_>,
+        hybrid: &mut HybridCapture,
+        launches: &mut u64,
+    ) -> Option<()> {
+        let FusedCtx {
+            req,
+            stream,
+            pos,
+            ybase,
+            capturing_hybrid,
+            graph_flags,
+            plan: FusedPlan {
+                hd, q_at, attn_at, ..
+            },
+            ..
+        } = *self;
+        if capturing_hybrid {
+            match stream.end_capture(graph_flags) {
+                Ok(Some(g)) => {
+                    g.launch().ok()?;
+                    hybrid.pre.push(g);
+                }
+                Ok(None) => {
+                    eprintln!("cuda: hybrid pre graph empty");
+                    return None;
+                }
+                Err(e) => {
+                    eprintln!("cuda: hybrid pre end_capture failed: {e}");
+                    return None;
+                }
+            }
+            // Try capturing FA (mask + fattn + permute) into its own graph.
+            let mut captured_fa = false;
+            if hybrid.attn_ok {
+                if !hybrid.warmed {
+                    // First FA outside capture so ggml/fattn cudaMalloc is done.
+                    self.launch_attend(
+                        gpu,
+                        q_at,
+                        attn_at,
+                        layer.k_off,
+                        layer.v_off,
+                        matches!(layer.wo.0, GgmlType::Q4K | GgmlType::Q6K)
+                            && crate::gpu::cuda::runtime::q8_decode_enabled(),
+                    )?;
+                    *launches += 3;
+                    hybrid.warmed = true;
+                    crate::gpu::cuda::ggml::reset_mask_lim();
+                }
+                if stream
+                    .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
+                    .is_ok()
+                {
+                    crate::gpu::cuda::ggml::prepare_from_cudarc(stream);
+                    let (cache_p, cg) = DevicePtr::device_ptr(&req.cache.buf, stream);
+                    drop(cg);
+                    let qp = ybase + (q_at * 4) as u64;
+                    let op = ybase + (attn_at * 4) as u64;
+                    let d_pos_p = {
+                        let (p, g) = DevicePtr::device_ptr(&gpu.d_pos, stream);
+                        drop(g);
+                        p
+                    };
+                    let fa_ok = crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
+                        q: qp,
+                        k: cache_p + (layer.k_off as u64) * 2,
+                        v: cache_p + (layer.v_off as u64) * 2,
+                        out: op,
+                        m: 1,
+                        shape: FaShape {
+                            head_dim: hd,
+                            n_q_heads: req.n_heads,
+                            n_kv_heads: req.n_kv_heads.max(1),
+                            base: pos,
+                            kv_dim: req.kv_dim,
+                            scale: req.scale,
+                        },
+                        d_pos: Some(d_pos_p),
+                    });
+                    match (fa_ok, stream.end_capture(graph_flags)) {
+                        (true, Ok(Some(g))) => {
+                            g.launch().ok()?;
+                            hybrid.attn.push(g);
+                            captured_fa = true;
+                        }
+                        (_, Ok(None)) | (false, Ok(Some(_))) => {
+                            hybrid.attn_ok = false;
+                            hybrid.attn.clear();
+                        }
+                        (_, Err(e)) => {
+                            eprintln!("cuda: FA graph capture failed ({e}); eager FA fallback");
+                            hybrid.attn_ok = false;
+                            hybrid.attn.clear();
+                        }
+                    }
+                } else {
+                    hybrid.attn_ok = false;
+                    hybrid.attn.clear();
+                }
+            }
+            if !captured_fa {
+                self.launch_attend(
+                    gpu,
+                    q_at,
+                    attn_at,
+                    layer.k_off,
+                    layer.v_off,
+                    matches!(layer.wo.0, GgmlType::Q4K | GgmlType::Q6K)
+                        && crate::gpu::cuda::runtime::q8_decode_enabled(),
+                )?;
+                *launches += 3;
+            }
+        } else {
+            self.launch_attend(
+                gpu,
+                q_at,
+                attn_at,
+                layer.k_off,
+                layer.v_off,
+                matches!(layer.wo.0, GgmlType::Q4K | GgmlType::Q6K)
+                    && crate::gpu::cuda::runtime::q8_decode_enabled(),
+            )?;
+            *launches += 3;
+        }
+        Some(())
+    }
+
+    /// Output projection (residual add) and the dense SwiGLU FFN of one layer.
+    fn layer_ffn(
+        &self,
+        gpu: &mut CudaGpu,
+        li: usize,
+        layer: &TokenLayer<'_>,
+        (wo_c, wo_o): (usize, u64),
+        launches: &mut u64,
+    ) -> Option<()> {
+        let FusedCtx {
+            ybase,
+            plan:
+                FusedPlan {
+                    hidden,
+                    q_dim,
+                    x_at,
+                    h_at,
+                    attn_at,
+                    gate_at,
+                    up_at,
+                    norms_base,
+                    per_layer_norms,
+                    ..
+                },
+            ..
+        } = *self;
+        let layer_base = norms_base + li * per_layer_norms;
+        let ffn_norm_at = layer_base + hidden;
+        let ggml_decode =
+            crate::gpu::cuda::ggml::enabled() && crate::runtime::get().cuda_ggml_decode;
+        launch_matvec_y_ptr(
+            gpu,
+            DevWeight {
+                ty: layer.wo.0,
+                loc: WeightLoc {
+                    chunk: wo_c,
+                    off: wo_o,
+                },
+                n_in: q_dim,
+                n_out: hidden,
+            },
+            ArenaMatvec {
+                y_base: ybase,
+                x_off: attn_at,
+                y_off: x_at,
+                m: 1,
+                add: true,
+            },
+        )?;
+        *launches += 1;
+
+        self.launch_rms_into(gpu, h_at, x_at, ffn_norm_at, hidden, 1)?;
+        *launches += 1;
+
+        let TokenFfn::Dense { gate, up, down } = &layer.ffn else {
+            return None;
+        };
+        let (g_c, g_o) = resolve_w(gpu, gate.1)?;
+        let (u_c, u_o) = resolve_w(gpu, up.1)?;
+        let (d_c, d_o) = resolve_w(gpu, down.1)?;
+        // Fused gate+up: Q8 dual-mmvq (SwiGLU in epilogue).
+        // Skip when measuring llama MMVQ via ALLPAKA_GGML_DECODE.
+        let gu_fused = !ggml_decode
+            && matches!((gate.0, up.0), (GgmlType::Q4K, GgmlType::Q4K))
+            && gate.2 == up.2
+            && launch_matvec_q4k_2(
+                gpu,
+                &GateUpReq {
+                    gate: WeightLoc {
+                        chunk: g_c,
+                        off: g_o,
+                    },
+                    up: WeightLoc {
+                        chunk: u_c,
+                        off: u_o,
+                    },
+                    n_in: hidden,
+                    n_out: gate.2,
+                    y_base: ybase,
+                    x_off: h_at,
+                    gate_off: gate_at,
+                    up_off: up_at,
+                    m: 1,
+                },
+            )
+            .is_some();
+        if !gu_fused {
+            launch_matvec_y_ptr(
+                gpu,
+                DevWeight {
+                    ty: gate.0,
+                    loc: WeightLoc {
+                        chunk: g_c,
+                        off: g_o,
+                    },
+                    n_in: hidden,
+                    n_out: gate.2,
+                },
+                ArenaMatvec {
+                    y_base: ybase,
+                    x_off: h_at,
+                    y_off: gate_at,
+                    m: 1,
+                    add: false,
+                },
+            )?;
+            launch_matvec_y_ptr(
+                gpu,
+                DevWeight {
+                    ty: up.0,
+                    loc: WeightLoc {
+                        chunk: u_c,
+                        off: u_o,
+                    },
+                    n_in: hidden,
+                    n_out: up.2,
+                },
+                ArenaMatvec {
+                    y_base: ybase,
+                    x_off: h_at,
+                    y_off: up_at,
+                    m: 1,
+                    add: false,
+                },
+            )?;
+            *launches += 2;
+            if ggml_decode {
+                crate::gpu::cuda::ggml::prepare_for_cudarc();
+            }
+            let q8_primed = self.launch_swiglu(gpu, gate_at, up_at, gate.2)?;
+            if !q8_primed {
+                gpu.invalidate_q8();
+            }
+            *launches += 1;
+        } else {
+            // Dual mmvq wrote silu(gate)*up (+ Q8 when matvec_q4_k_q8_2_q8).
+            *launches += 1;
+            let q8_ready = crate::gpu::cuda::runtime::q8_decode_enabled()
+                && gate.2 % 32 == 0
+                && gpu.q8_src_n == gate.2
+                && gpu.q8_src_m == 1
+                && gpu.q8_src == ybase + (gate_at * 4) as u64;
+            if q8_ready {
+                // In-kernel Q8 epilogue already primed the down-proj cache.
+            } else if crate::gpu::cuda::runtime::q8_decode_enabled() && gate.2 % 32 == 0 {
+                let gp = ybase + (gate_at * 4) as u64;
+                if down.0 == GgmlType::Q6K {
+                    crate::gpu::cuda::runtime::launch_quantize_q8_q6(gpu, gp, gate.2, 1)?;
+                } else {
+                    crate::gpu::cuda::runtime::launch_quantize_q8(gpu, gp, gate.2, 1)?;
+                }
+                *launches += 1;
+            } else {
+                gpu.invalidate_q8();
+            }
+        }
+        launch_matvec_y_ptr(
+            gpu,
+            DevWeight {
+                ty: down.0,
+                loc: WeightLoc {
+                    chunk: d_c,
+                    off: d_o,
+                },
+                n_in: gate.2,
+                n_out: hidden,
+            },
+            ArenaMatvec {
+                y_base: ybase,
+                x_off: gate_at,
+                y_off: x_at,
+                m: 1,
+                add: true,
+            },
+        )?;
+        *launches += 1;
+        Some(())
+    }
+
+    /// Final RMSNorm and the LM-head matvec into the logits slot.
+    fn launch_output_head(&self, gpu: &mut CudaGpu, launches: &mut u64) -> Option<()> {
+        let FusedCtx {
+            req,
+            ybase,
+            plan:
+                FusedPlan {
+                    hidden,
+                    vocab,
+                    x_at,
+                    h_at,
+                    out_logits_at,
+                    out_norm_at,
+                    ..
+                },
+            ..
+        } = *self;
+        self.launch_rms_into(gpu, h_at, x_at, out_norm_at, hidden, 1)?;
+        let (o_c, o_o) = resolve_w(gpu, req.output.1)?;
+        launch_matvec_y_ptr(
+            gpu,
+            DevWeight {
+                ty: req.output.0,
+                loc: WeightLoc {
+                    chunk: o_c,
+                    off: o_o,
+                },
+                n_in: hidden,
+                n_out: vocab,
+            },
+            ArenaMatvec {
+                y_base: ybase,
+                x_off: h_at,
+                y_off: out_logits_at,
+                m: 1,
+                add: false,
+            },
+        )?;
+        *launches += 2;
+        if crate::gpu::cuda::ggml::enabled() && crate::runtime::get().cuda_ggml_decode {
+            crate::gpu::cuda::ggml::prepare_for_cudarc();
+        }
+        Some(())
+    }
+}
+
+/// Segment graphs recorded while capturing the hybrid FA decode: per layer a
+/// `pre` (norm..KV store), an optional `attn` (FA) and a `post` (WO..FFN).
+struct HybridCapture {
+    pre: Vec<cudarc::driver::CudaGraph>,
+    post: Vec<cudarc::driver::CudaGraph>,
+    attn: Vec<cudarc::driver::CudaGraph>,
+    /// FA still captures into its own graph; cleared on the first failure.
+    attn_ok: bool,
+    /// FA already ran once outside capture (ggml allocates on first use).
+    warmed: bool,
+}
+
+impl HybridCapture {
+    fn new(capturing_hybrid: bool, n_layers: usize) -> Self {
+        let mut fa_pre: Vec<cudarc::driver::CudaGraph> = Vec::new();
+        let mut fa_post: Vec<cudarc::driver::CudaGraph> = Vec::new();
+        let mut fa_attn: Vec<cudarc::driver::CudaGraph> = Vec::new();
+        let fa_attn_ok = capturing_hybrid && !crate::runtime::get().cuda_no_fa_graph;
+        let fa_warmed = false;
+        if capturing_hybrid {
+            fa_pre.reserve(n_layers);
+            fa_post.reserve(n_layers);
+            fa_attn.reserve(n_layers);
+        }
+        Self {
+            pre: fa_pre,
+            post: fa_post,
+            attn: fa_attn,
+            attn_ok: fa_attn_ok,
+            warmed: fa_warmed,
         }
     }
 }
