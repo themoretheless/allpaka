@@ -85,6 +85,11 @@ macro_rules! flags {
             }
         }
 
+        /// Every boolean switch: (variable, policy field, default, parse rule).
+        pub const ENV_FLAGS: &[(&str, &str, bool, &str)] = &[
+            $(($env, stringify!($field), $def, stringify!($parse)),)*
+        ];
+
         impl RuntimePolicy {
             pub fn from_env() -> Self {
                 Self {
@@ -205,6 +210,78 @@ flags! {
     moe_zero: bool = false, env "ALLPAKA_MOE_ZERO", present;
 }
 
+/// Switches that are not plain booleans: (variable, policy field, meaning).
+pub const ENV_VALUES: &[(&str, &str, &str)] = &[
+    (
+        "ALLPAKA_ATTN_SPLIT",
+        "attention_split",
+        "split attention at n rows; unset = no split",
+    ),
+    (
+        "ALLPAKA_MV_TG",
+        "mv_tg",
+        "matvec threadgroup size, one of 64/128/256; default 128",
+    ),
+    (
+        "ALLPAKA_Q8_NR0",
+        "q8_nr0",
+        "Q8 matvec rows per SIMD group, one of 1/2/4; default 2",
+    ),
+    (
+        "ALLPAKA_NWARPS",
+        "cuda_nwarps",
+        "force CUDA MMVQ warps to 2, 4 or 8; anything else = auto",
+    ),
+    (
+        "ALLPAKA_MMQ",
+        "cuda_mmq",
+        "CUDA int8 MMQ prefill: 1 (NVRTC mma), tile, nvcc; default off",
+    ),
+    (
+        "ALLPAKA_MMID_RTILES",
+        "metal_mmid_rtiles",
+        "pin the Metal grouped-FFN grid to n tiles",
+    ),
+];
+
+fn parse_rule(rule: &str) -> &'static str {
+    match rule {
+        "on" => "on unless `=0`",
+        "off" => "off unless `=1`",
+        "set" => "on for any value except `0`",
+        "present" => "on when set to anything",
+        "yes" => "off unless `=1` or `=true`",
+        "not_no" => "on unless `=0` or `=false`",
+        _ => "custom, see `runtime.rs`",
+    }
+}
+
+/// The reference table in docs/env-reference.md, generated from the policy.
+pub fn env_reference_markdown() -> String {
+    let mut out = String::from(
+        "# ALLPAKA_* runtime switches\n\n\
+         Generated from `crates/allpaka-backend/src/runtime.rs` by the\n\
+         `env_reference_is_current` test; run it with `UPDATE_ENV_REFERENCE=1`\n\
+         to rewrite this file. Every switch is read once per process.\n\n\
+         | Variable | Policy field | Default | How it is read |\n\
+         |---|---|---|---|\n",
+    );
+    let mut flags: Vec<_> = ENV_FLAGS.to_vec();
+    flags.sort_by_key(|f| f.0);
+    for (env, field, def, rule) in flags {
+        out.push_str(&format!(
+            "| `{env}` | `{field}` | {} | {} |\n",
+            if def { "on" } else { "off" },
+            parse_rule(rule)
+        ));
+    }
+    out.push_str("\n| Variable | Policy field | Meaning |\n|---|---|---|\n");
+    for (env, field, meaning) in ENV_VALUES {
+        out.push_str(&format!("| `{env}` | `{field}` | {meaning} |\n"));
+    }
+    out
+}
+
 static POLICY: OnceLock<RuntimePolicy> = OnceLock::new();
 
 #[inline]
@@ -225,6 +302,24 @@ pub fn install(policy: RuntimePolicy) -> Result<(), RuntimePolicy> {
 #[cfg(test)]
 mod tests {
     use super::RuntimePolicy;
+
+    /// docs/env-reference.md is generated from the policy; adding a switch
+    /// without regenerating it fails here.
+    #[test]
+    fn env_reference_is_current() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/env-reference.md");
+        let want = super::env_reference_markdown();
+        if std::env::var_os("UPDATE_ENV_REFERENCE").is_some() {
+            std::fs::write(path, &want).unwrap();
+        }
+        let have = std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        assert_eq!(
+            have, want,
+            "docs/env-reference.md is stale; rerun with UPDATE_ENV_REFERENCE=1"
+        );
+    }
 
     /// `yes` and `not_no` keep the spellings the CUDA paths accepted when
     /// they read the environment themselves.
