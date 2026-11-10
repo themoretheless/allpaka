@@ -145,6 +145,15 @@ pub const LAYERS: u64 = 2;
 
 /// A complete 2-layer llama-shaped model with deterministic weights.
 pub fn tiny_model(arch: &str, qk_norm: bool) -> Vec<u8> {
+    tiny_model_with(arch, qk_norm, |b| b)
+}
+
+/// [`tiny_model`] with extra tensors appended by `extra` before building.
+pub fn tiny_model_with(
+    arch: &str,
+    qk_norm: bool,
+    extra: impl FnOnce(FileBuilder) -> FileBuilder,
+) -> Vec<u8> {
     let mut rng = Rng(42);
     let mut mat =
         |rows: u64, cols: u64| -> Vec<f32> { (0..rows * cols).map(|_| rng.next_f32()).collect() };
@@ -183,7 +192,29 @@ pub fn tiny_model(arch: &str, qk_norm: bool) -> Vec<u8> {
                 .tensor(&n("attn_k_norm"), &[HEAD_DIM], vec![1.0; HEAD_DIM as usize]);
         }
     }
-    b.build()
+    extra(b).build()
+}
+
+/// [`tiny_model`] as `qwen2` (Qwen2.5): no QK norms, plus q/k/v projection
+/// biases, scaled per projection as `[q, k, v]`; 0.0 writes zeros.
+#[allow(dead_code)]
+pub fn tiny_qwen2_with_bias(scale: [f32; 3]) -> Vec<u8> {
+    // Same deterministic weights as tiny_model("qwen2"), plus the biases.
+    let mut rng = Rng(7);
+    let mut vec = |n: u64, k: f32| -> Vec<f32> { (0..n).map(|_| rng.next_f32() * k).collect() };
+    let q_dim = HEADS * HEAD_DIM;
+    let kv_dim = KV_HEADS * HEAD_DIM;
+    let mut biases = Vec::new();
+    for i in 0..LAYERS {
+        biases.push((format!("blk.{i}.attn_q.bias"), q_dim, vec(q_dim, scale[0])));
+        biases.push((format!("blk.{i}.attn_k.bias"), kv_dim, vec(kv_dim, scale[1])));
+        biases.push((format!("blk.{i}.attn_v.bias"), kv_dim, vec(kv_dim, scale[2])));
+    }
+    tiny_model_with(
+        "qwen2",
+        false,
+        |b| biases.into_iter().fold(b, |b, (n, len, data)| b.tensor(&n, &[len], data)),
+    )
 }
 
 /// Write `bytes` to a fresh temp file. The name carries the process id and a

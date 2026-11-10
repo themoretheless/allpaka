@@ -46,6 +46,9 @@ pub fn launch_gemm_dequant(gpu: &mut CudaGpu, req: &GemmReq<'_>) -> Option<()> {
         gpu.stream
             .memcpy_htod(x_elems, &mut gpu.x_arena.slice_mut(0..m * n_in))
             .ok()?;
+        // New values at the same address: the (pointer, n_in, m)-keyed Q8
+        // cache must not serve the previous upload (see run_matvec).
+        gpu.invalidate_q8();
     }
 
     // llama.cpp ggml-cuda MMQ (fast on 5090 vs dequant+cuBLASLt).
