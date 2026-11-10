@@ -399,11 +399,13 @@ mod tests {
             .unwrap();
         let mut turn = trace.span("turn", "remote-wave", None);
         swarm::run(
-            &coordinator,
-            &shared,
-            &swarm_settings,
-            &project,
-            "inspect",
+            swarm::SwarmTurn {
+                app: &coordinator,
+                shared: &shared,
+                settings: &swarm_settings,
+                project: &project,
+                system: "inspect",
+            },
             &trace,
             turn.id(),
         )
@@ -423,11 +425,13 @@ mod tests {
         let mut changed = swarm_settings.clone();
         changed.swarm.members.clear();
         swarm::retry(
-            &coordinator,
-            &shared,
-            &changed,
-            &project,
-            "inspect",
+            swarm::SwarmTurn {
+                app: &coordinator,
+                shared: &shared,
+                settings: &changed,
+                project: &project,
+                system: "inspect",
+            },
             "one",
             &trace,
             turn.id(),

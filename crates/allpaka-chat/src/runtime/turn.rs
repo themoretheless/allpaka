@@ -231,21 +231,16 @@ pub(crate) async fn turn_traced(
     // Swarm is a different executor: it runs its own wave, merge and optional
     // critic pass, and never touches the single-model step loop below.
     if settings.mode == Mode::Swarm {
+        let swarm_turn = swarm::SwarmTurn {
+            app: &app,
+            shared: &s,
+            settings: &settings,
+            project: &project,
+            system: &system,
+        };
         return match retry_member {
-            Some(label) => {
-                swarm::retry(
-                    &app,
-                    &s,
-                    &settings,
-                    &project,
-                    &system,
-                    &label,
-                    trace,
-                    parent_span,
-                )
-                .await
-            }
-            None => swarm::run(&app, &s, &settings, &project, &system, trace, parent_span).await,
+            Some(label) => swarm::retry(swarm_turn, &label, trace, parent_span).await,
+            None => swarm::run(swarm_turn, trace, parent_span).await,
         };
     }
     let mut failure_loop = progress::FailureLoop::default();

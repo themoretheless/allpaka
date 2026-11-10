@@ -87,16 +87,29 @@ pub fn validate(config: &SwarmConfig) -> Result<()> {
     Ok(())
 }
 
+/// What a Swarm turn runs against: the session, its settings and project, and
+/// the system prompt the turn already assembled.
+pub struct SwarmTurn<'a> {
+    pub app: &'a App,
+    pub shared: &'a SharedSession,
+    pub settings: &'a Settings,
+    pub project: &'a context::Project,
+    pub system: &'a str,
+}
+
 /// Run one swarm turn for the session's queued user message.
 pub async fn run(
-    app: &App,
-    shared: &SharedSession,
-    settings: &Settings,
-    project: &context::Project,
-    system: &str,
+    turn: SwarmTurn<'_>,
     trace: &observability::Trace,
     parent: usize,
 ) -> Result<TurnOutcome> {
+    let SwarmTurn {
+        app,
+        shared,
+        settings,
+        project,
+        system,
+    } = turn;
     let config = settings.swarm.clone();
     validate(&config)?;
     let (members, synth) = resolve(app, settings, &config)?;
@@ -188,7 +201,12 @@ pub async fn run(
     }
 
     let (synth_usage, notice, truncated) = synthesize(
-        app, shared, index, settings, &config, &synth, &brief, &reports, trace, parent,
+        MergeTarget { app, shared, index },
+        &Synthesizer::new(settings, &config, &synth),
+        &brief,
+        &reports,
+        trace,
+        parent,
     )
     .await?;
     total_usage = merge_usage(total_usage, synth_usage);
@@ -205,17 +223,19 @@ pub async fn run(
 /// from the current roster, so editing the roster between turns does not hide the
 /// retry; only its persona is re-read from the roster, and a member that is no
 /// longer there gets the generic role.
-#[allow(clippy::too_many_arguments)]
 pub async fn retry(
-    app: &App,
-    shared: &SharedSession,
-    settings: &Settings,
-    project: &context::Project,
-    system: &str,
+    turn: SwarmTurn<'_>,
     label: &str,
     trace: &observability::Trace,
     parent: usize,
 ) -> Result<TurnOutcome> {
+    let SwarmTurn {
+        app,
+        shared,
+        settings,
+        project,
+        system,
+    } = turn;
     let config = settings.swarm.clone();
     let target = take_report(shared, label, &config)?;
     let provider = resolve_member_provider(app, &target.member)?;
@@ -272,13 +292,14 @@ pub async fn retry(
     // The synthesis streams into the message, so the previous MASTER has to go
     // first; otherwise the rebuild would read as an appended second answer.
     set_content(shared, target.index, "");
+    let synth = synth_provider(app, settings, &config)?;
     let (synth_usage, notice, truncated) = synthesize(
-        app,
-        shared,
-        target.index,
-        settings,
-        &config,
-        &synth_provider(app, settings, &config)?,
+        MergeTarget {
+            app,
+            shared,
+            index: target.index,
+        },
+        &Synthesizer::new(settings, &config, &synth),
         &target.brief,
         &reports,
         trace,
@@ -311,29 +332,24 @@ fn synth_provider(app: &App, settings: &Settings, config: &SwarmConfig) -> Resul
 /// Merge the reports that exist right now into the Swarm message, then run the
 /// critic pass over that draft when it is enabled. Returns the usage of these
 /// requests, the notice for the caller and whether the merge hit a token limit.
-#[allow(clippy::too_many_arguments)]
 async fn synthesize(
-    app: &App,
-    shared: &SharedSession,
-    index: usize,
-    settings: &Settings,
-    config: &SwarmConfig,
-    synth: &Provider,
+    target: MergeTarget<'_>,
+    synth: &Synthesizer<'_>,
     brief: &str,
     reports: &[ReportView],
     trace: &observability::Trace,
     parent: usize,
 ) -> Result<(Value, Option<String>, bool)> {
-    let merge_cfg = merge_settings(settings, config);
+    let MergeTarget { shared, index, .. } = target;
+    let config = synth.config;
     let (merged, mut usage) = merge_pass(
-        app,
-        shared,
-        index,
+        target,
         synth,
-        &merge_cfg,
-        "You are the synthesizer of a swarm. Merge peer reports into one answer. Never invent findings nobody reported.",
-        merge_prompt(brief, reports, config),
-        MergeOutput::Stream,
+        MergePass {
+            system: "You are the synthesizer of a swarm. Merge peer reports into one answer. Never invent findings nobody reported.",
+            prompt: merge_prompt(brief, reports, config),
+            output: MergeOutput::Stream,
+        },
         trace,
         parent,
     )
@@ -345,14 +361,13 @@ async fn synthesize(
     if config.critic {
         let draft = message_content(shared, index);
         let (critic, critic_usage) = merge_pass(
-            app,
-            shared,
-            index,
+            target,
             synth,
-            &merge_cfg,
-            "You are an adversarial reviewer of a merged swarm result. Return only the corrected final text.",
-            critic_prompt(brief, reports, &draft, config),
-            MergeOutput::Buffered,
+            MergePass {
+                system: "You are an adversarial reviewer of a merged swarm result. Return only the corrected final text.",
+                prompt: critic_prompt(brief, reports, &draft, config),
+                output: MergeOutput::Buffered,
+            },
             trace,
             parent,
         )
@@ -485,6 +500,40 @@ enum MergeOutput {
     Stream,
     /// Keep the provider output local; the caller decides whether to apply it.
     Buffered,
+}
+
+/// The Swarm message a merge pass writes into.
+#[derive(Clone, Copy)]
+struct MergeTarget<'a> {
+    app: &'a App,
+    shared: &'a SharedSession,
+    index: usize,
+}
+
+/// The synthesizer of one Swarm turn: its connection, the settings its
+/// requests run with, and the Swarm configuration that shapes its prompts.
+struct Synthesizer<'a> {
+    provider: &'a Provider,
+    settings: Settings,
+    config: &'a SwarmConfig,
+}
+
+impl<'a> Synthesizer<'a> {
+    fn new(settings: &Settings, config: &'a SwarmConfig, provider: &'a Provider) -> Self {
+        Self {
+            provider,
+            settings: merge_settings(settings, config),
+            config,
+        }
+    }
+}
+
+/// One request of the synthesizer: its system prompt, its prompt, and whether
+/// the reply streams into the message or is kept for the caller.
+struct MergePass<'a> {
+    system: &'a str,
+    prompt: String,
+    output: MergeOutput,
 }
 
 /// Resolve member and synthesizer connections from the live provider list.
@@ -1036,19 +1085,20 @@ pub(crate) fn run_tool(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn merge_pass(
-    app: &App,
-    shared: &SharedSession,
-    index: usize,
-    provider: &Provider,
-    settings: &Settings,
-    system: &str,
-    prompt: String,
-    output: MergeOutput,
+    target: MergeTarget<'_>,
+    synth: &Synthesizer<'_>,
+    pass: MergePass<'_>,
     trace: &observability::Trace,
     parent: usize,
 ) -> Result<(Message, Value)> {
+    let MergeTarget { app, shared, index } = target;
+    let (provider, settings) = (synth.provider, &synth.settings);
+    let MergePass {
+        system,
+        prompt,
+        output,
+    } = pass;
     let guards = settings.prepared_guardrails.clone();
     if let Some(prepared) = &guards {
         crate::enforce_guardrail(prepared.input(&prompt)?, trace, parent)?;

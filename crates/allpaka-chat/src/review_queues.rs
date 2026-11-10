@@ -907,8 +907,14 @@ mod tests {
             serde_json::to_value(&current.targets).unwrap()
         );
         assert_eq!(restored.assignments, current.assignments);
-        assert_eq!(restored.history.first().unwrap().action, ChangeAction::Create);
-        assert_eq!(restored.history.last().unwrap().action, ChangeAction::Restore);
+        assert_eq!(
+            restored.history.first().unwrap().action,
+            ChangeAction::Create
+        );
+        assert_eq!(
+            restored.history.last().unwrap().action,
+            ChangeAction::Restore
+        );
         assert_eq!(restored.history.last().unwrap().version, restored.version);
         assert!(restored
             .history
