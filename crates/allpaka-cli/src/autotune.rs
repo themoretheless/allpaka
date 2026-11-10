@@ -322,7 +322,11 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "allpaka-autotune-{}-{}.json",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            // Thread names hold `::`, which Windows rejects in file names.
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(':', "_")
         ));
         let mut cache = AutotuneCache::empty();
         cache.insert(key("model-a"), entry());
