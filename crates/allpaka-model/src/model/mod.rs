@@ -78,9 +78,29 @@ pub struct Model<'a> {
     pub(crate) output: Option<QuantMat<'a>>,
     /// `base^(-2i/d)` per rotary pair, hoisted out of the per-head loops.
     pub(crate) rope_inv_freq: Vec<f32>,
+    /// File mappings this model handed to `gpu::attach`; released on drop.
+    pub(crate) attached: Vec<&'a [u8]>,
     /// Owned F32 buffers converted from BF16 router/gate tensors at load time.
     /// Placed last so it is dropped after all `QuantMat<'a>` fields borrowing from it.
     pub(crate) _owned_weights: Vec<Box<[f32]>>,
+}
+
+impl Drop for Model<'_> {
+    /// Give back every `gpu::attach` this model made. A backend that copies
+    /// weights (CUDA) frees them, so a later model loaded at the same host
+    /// address cannot run on stale device copies.
+    fn drop(&mut self) {
+        for mapping in &self.attached {
+            allpaka_backend::gpu::detach(mapping);
+        }
+        for owned in &self._owned_weights {
+            // SAFETY: the box is alive until this struct's fields drop, which
+            // happens after `drop` returns; f32 has no invalid byte patterns.
+            let bytes =
+                unsafe { std::slice::from_raw_parts(owned.as_ptr() as *const u8, owned.len() * 4) };
+            allpaka_backend::gpu::detach(bytes);
+        }
+    }
 }
 
 static TRACE_HOOK: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();

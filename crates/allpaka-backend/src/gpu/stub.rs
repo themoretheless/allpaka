@@ -32,6 +32,8 @@ pub fn attach(_mapping: &[u8]) -> bool {
     false
 }
 
+pub fn detach(_mapping: &[u8]) {}
+
 pub fn is_attached() -> bool {
     false
 }

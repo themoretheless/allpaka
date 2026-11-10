@@ -44,13 +44,21 @@ pub fn attach(mapping: &[u8]) -> bool {
     if try_init().is_none() {
         return false;
     }
-    with_gpu(|gpu| {
-        if gpu.covers(mapping.as_ptr() as usize, mapping.len()) {
-            return Some(true);
-        }
-        Some(gpu.add_mapping(mapping))
-    })
-    .unwrap_or(false)
+    with_gpu(|gpu| Some(gpu.attach_mapping(mapping))).unwrap_or(false)
+}
+
+/// Release one [`attach`] of `mapping`. CUDA copies weights into VRAM keyed
+/// by host address, so once the last owner lets go the copy must be dropped:
+/// a later model whose mmap or heap buffer lands at the same address would
+/// otherwise run on the old weights.
+pub fn detach(mapping: &[u8]) {
+    if GPU.get().map_or(true, Option::is_none) {
+        return;
+    }
+    let _ = with_gpu(|gpu| {
+        gpu.detach_mapping(mapping);
+        Some(())
+    });
 }
 
 /// Upload NeoX RoPE inv_freq once so decode can skip per-token rope H2D.

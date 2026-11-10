@@ -100,6 +100,8 @@ pub struct CudaGpu {
     pub embed_module: Option<Arc<CudaModule>>,
     pub fns: HashMap<&'static str, CudaFunction>,
     pub chunks: Vec<WeightChunk>,
+    /// Mappings uploaded by `attach_mapping`: (host base, length, owners).
+    pub attached: Vec<(usize, usize, usize)>,
     pub blaslt: Option<CudaBlasLT>,
     pub x_arena: CudaSlice<f32>,
     pub x_cap: usize,
@@ -381,6 +383,7 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         embed_module,
         fns,
         chunks: Vec::new(),
+        attached: Vec::new(),
         blaslt,
         x_arena,
         x_cap: 1 << 20,
@@ -446,6 +449,57 @@ impl CudaGpu {
         self.chunks
             .iter()
             .position(|c| addr >= c.start && addr + len <= c.start + c.len)
+    }
+
+    /// Upload `mapping` once and count its owners. A sub-range of an already
+    /// uploaded mapping needs no copy and is not counted.
+    pub fn attach_mapping(&mut self, mapping: &[u8]) -> bool {
+        let key = (mapping.as_ptr() as usize, mapping.len());
+        if let Some(entry) = self.attached.iter_mut().find(|e| (e.0, e.1) == key) {
+            entry.2 += 1;
+            return true;
+        }
+        if self.covers(key.0, key.1) {
+            return true;
+        }
+        if !self.add_mapping(mapping) {
+            return false;
+        }
+        self.attached.push((key.0, key.1, 1));
+        true
+    }
+
+    /// Drop one owner of `mapping`; the last one frees its windows and every
+    /// captured graph, since graphs bake in the windows' device pointers.
+    pub fn detach_mapping(&mut self, mapping: &[u8]) {
+        let key = (mapping.as_ptr() as usize, mapping.len());
+        let Some(at) = self.attached.iter().position(|e| (e.0, e.1) == key) else {
+            return;
+        };
+        self.attached[at].2 -= 1;
+        if self.attached[at].2 > 0 {
+            return;
+        }
+        self.attached.swap_remove(at);
+        let _ = self.stream.synchronize();
+        let _ = self.dq_stream.synchronize();
+        let end = key.0 + key.1.div_ceil(16384) * 16384;
+        self.chunks.retain(|c| c.start < key.0 || c.start >= end);
+        self.drop_graphs();
+        self.pf_graph = None;
+        self.pf_graph_len = 0;
+        self.pf_graph_seen = 0;
+    }
+
+    /// Forget captured decode graphs and the keys that select them.
+    pub fn drop_graphs(&mut self) {
+        self.decode_graph = None;
+        self.decode_fa_graphs = None;
+        self.decode_fa_attn = None;
+        self.decode_fa_execs = None;
+        self.decode_fa_kv_offs = None;
+        self.decode_graph_key = 0;
+        self.decode_norms_key = 0;
     }
 
     pub fn add_mapping(&mut self, mapping: &[u8]) -> bool {
@@ -526,13 +580,7 @@ impl CudaGpu {
             grew = true;
         }
         if grew {
-            self.decode_graph = None;
-            self.decode_fa_graphs = None;
-            self.decode_fa_attn = None;
-            self.decode_fa_execs = None;
-            self.decode_fa_kv_offs = None;
-            self.decode_graph_key = 0;
-            self.decode_norms_key = 0;
+            self.drop_graphs();
             self.pf_rope_n = 0;
             self.x_f16_n = 0;
         }

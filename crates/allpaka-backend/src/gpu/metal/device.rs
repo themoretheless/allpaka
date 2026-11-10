@@ -183,6 +183,11 @@ pub fn attach(mapping: &[u8]) -> bool {
     gpu.add_mapping(mapping)
 }
 
+/// Release a mapping handed to [`attach`]. Metal windows are no-copy views of
+/// host memory, so a later mapping at the same address is read live and
+/// nothing can go stale; the windows stay until the process exits.
+pub fn detach(_mapping: &[u8]) {}
+
 pub fn is_attached() -> bool {
     GPU.get().is_some_and(Option::is_some)
 }

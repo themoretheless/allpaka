@@ -54,9 +54,12 @@ impl<'a> Model<'a> {
         // Offer the weights to the GPU; on a machine without Metal this is a
         // no-op and every matmul stays on the CPU reference. Split files get
         // one GPU window set per part.
+        let mut attached: Vec<&[u8]> = Vec::new();
         if !stage {
             for m in f.mappings() {
-                allpaka_backend::gpu::attach(m);
+                if allpaka_backend::gpu::attach(m) {
+                    attached.push(m);
+                }
             }
         } else {
             let selected = f.selected_mappings(|tensor| {
@@ -75,7 +78,9 @@ impl<'a> Model<'a> {
                                 && f.tensor("output.weight").is_none())))
             })?;
             for mapping in selected {
-                allpaka_backend::gpu::attach(mapping);
+                if allpaka_backend::gpu::attach(mapping) {
+                    attached.push(mapping);
+                }
             }
         }
         let hidden = config.hidden as usize;
@@ -283,6 +288,7 @@ impl<'a> Model<'a> {
             output,
             rope_inv_freq: ops::rope_inv_freq(config.rope_dim as usize, config.rope_freq_base),
             config,
+            attached,
             _owned_weights: owned_weights,
         };
         // Device-side RoPE freqs: decode skips per-token sin/cos H2D.
