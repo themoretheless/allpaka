@@ -394,7 +394,12 @@ fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     airbug::install();
-    match cli.command {
+    dispatch(cli.command)
+}
+
+/// One function per subcommand; the arms only unpack clap's fields.
+fn dispatch(command: Command) -> Result<()> {
+    match command {
         Command::Studio {
             bind,
             workspace,
@@ -410,10 +415,7 @@ fn main() -> Result<()> {
             cache,
             force,
         } => autotune::run(&engine, cache.as_deref(), force),
-        Command::Init => {
-            print!("{}", config::EXAMPLE);
-            Ok(())
-        }
+        Command::Init => run_init(),
         Command::PipelinePlan {
             model,
             config,
@@ -442,20 +444,8 @@ fn main() -> Result<()> {
             context,
             generate,
         } => pipeline::generate(&stages, &tokens, context, generate),
-        Command::Presets => {
-            report::presets(presets::PRESETS);
-            Ok(())
-        }
-        Command::Inspect { model, mmproj } => {
-            if mmproj {
-                report::vision_census(&model, &gguf::vision::VisionCensus::read(&model)?);
-                Ok(())
-            } else {
-                let info = gguf::read(&model)?;
-                report::gguf(&model, &info);
-                Ok(())
-            }
-        }
+        Command::Presets => run_presets(),
+        Command::Inspect { model, mmproj } => run_inspect(&model, mmproj),
         Command::Bench {
             serve,
             bind,
@@ -464,55 +454,8 @@ fn main() -> Result<()> {
             engine,
             draft,
             config,
-        } => match (engine, mem, serve, connect) {
-            (Some(model), _, _, _) => {
-                if config.is_none() {
-                    autotune::apply_cached(&model, None)?;
-                }
-                let runtime = config.as_deref().map(config::Config::load).transpose()?;
-                runtime
-                    .as_ref()
-                    .map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone())
-                    .apply();
-                bench::measure_engine(&model, draft.as_deref())
-            }
-            (None, true, _, _) => bench::measure_memory(),
-            (None, false, true, _) => bench::serve(&bind),
-            (None, false, false, Some(addr)) => {
-                println!("measuring path to {addr} ...");
-                let link = bench::measure(&addr)?;
-                report::link(&link);
-                Ok(())
-            }
-            (None, false, false, None) => {
-                bail!("pass --serve, --connect <host:port>, --mem, or --engine <model>")
-            }
-        },
-        Command::Airbug(AirbugArgs {
-            model,
-            pp,
-            tg,
-            repeats,
-            warmup,
-            cooldown_ms,
-            threshold,
-            allpaka,
-            llama_bench,
-            check,
-            out,
-        }) => airbug_llama::run(airbug_llama::Options {
-            model,
-            pp,
-            tg,
-            repeats,
-            warmup,
-            cooldown_ms,
-            threshold_percent: threshold,
-            check,
-            allpaka_bin: airbug_llama::resolve_allpaka_bin(allpaka)?,
-            llama_bench: airbug_llama::resolve_llama_bench(llama_bench),
-            out: out.unwrap_or_else(airbug_llama::default_out_dir),
-        }),
+        } => run_bench(serve, bind, connect, mem, engine, draft, config),
+        Command::Airbug(args) => run_airbug(args),
         Command::Plan {
             model,
             config: config_path,
@@ -521,23 +464,7 @@ fn main() -> Result<()> {
             draft,
             draft_len,
             accept,
-        } => {
-            let spec = match draft {
-                None => None,
-                Some(path) => {
-                    if !(0.0..=1.0).contains(&accept) {
-                        bail!("--accept must be between 0 and 1, got {accept}");
-                    }
-                    let d = gguf::read(&path)?;
-                    Some(Speculation {
-                        draft_weight_bytes: d.file_bytes,
-                        draft_tokens: draft_len,
-                        acceptance_rate: accept,
-                    })
-                }
-            };
-            run_plan(&model, &config_path, ctx, prompt, spec)
-        }
+        } => run_plan_command(&model, &config_path, ctx, prompt, draft, draft_len, accept),
         Command::Fleet {
             config: config_path,
             models,
@@ -554,50 +481,7 @@ fn main() -> Result<()> {
             tol,
             decode,
         } => verify::run(&model, &addr, &prompt, top, tol, decode),
-        Command::Serve(ServeArgs {
-            model,
-            bind,
-            config,
-            max_queued,
-            max_batch,
-            batch_context_tokens,
-            model_budget_gib,
-            memory_budget_mib,
-            prefix_cache_mib,
-        }) => {
-            if config.is_none() {
-                if let Some(primary) = model.first() {
-                    autotune::apply_cached(primary, None)?;
-                }
-            }
-            let runtime = config.as_deref().map(config::Config::load).transpose()?;
-            runtime
-                .as_ref()
-                .map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone())
-                .apply();
-            serve::run(
-                &model,
-                &bind,
-                serving_runtime::ServingLimits {
-                    max_queued,
-                    max_batch,
-                    max_batch_context_tokens: batch_context_tokens,
-                    model_budget_bytes: if model_budget_gib == 0 {
-                        u64::MAX
-                    } else {
-                        model_budget_gib.saturating_mul(1 << 30)
-                    },
-                    prefix_budget_bytes: prefix_cache_mib.saturating_mul(1 << 20),
-                    memory_budget_bytes: if memory_budget_mib == 0 {
-                        u64::MAX
-                    } else {
-                        memory_budget_mib
-                            .checked_mul(1 << 20)
-                            .context("memory budget overflow")?
-                    },
-                },
-            )
-        }
+        Command::Serve(args) => run_serve(args),
         Command::Status { addr } => client::status(&addr),
         Command::Watch {
             addr,
@@ -621,6 +505,164 @@ fn main() -> Result<()> {
         ),
         Command::RagTest { model_name, addr } => client::rag_test(&addr, &model_name),
     }
+}
+
+fn run_init() -> Result<()> {
+    print!("{}", config::EXAMPLE);
+    Ok(())
+}
+
+fn run_presets() -> Result<()> {
+    report::presets(presets::PRESETS);
+    Ok(())
+}
+
+fn run_inspect(model: &std::path::Path, mmproj: bool) -> Result<()> {
+    if mmproj {
+        report::vision_census(model, &gguf::vision::VisionCensus::read(model)?);
+        Ok(())
+    } else {
+        let info = gguf::read(model)?;
+        report::gguf(model, &info);
+        Ok(())
+    }
+}
+
+fn run_bench(
+    serve: bool,
+    bind: String,
+    connect: Option<String>,
+    mem: bool,
+    engine: Option<PathBuf>,
+    draft: Option<PathBuf>,
+    config: Option<PathBuf>,
+) -> Result<()> {
+    match (engine, mem, serve, connect) {
+        (Some(model), _, _, _) => {
+            if config.is_none() {
+                autotune::apply_cached(&model, None)?;
+            }
+            let runtime = config.as_deref().map(config::Config::load).transpose()?;
+            runtime
+                .as_ref()
+                .map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone())
+                .apply();
+            bench::measure_engine(&model, draft.as_deref())
+        }
+        (None, true, _, _) => bench::measure_memory(),
+        (None, false, true, _) => bench::serve(&bind),
+        (None, false, false, Some(addr)) => {
+            println!("measuring path to {addr} ...");
+            let link = bench::measure(&addr)?;
+            report::link(&link);
+            Ok(())
+        }
+        (None, false, false, None) => {
+            bail!("pass --serve, --connect <host:port>, --mem, or --engine <model>")
+        }
+    }
+}
+
+fn run_airbug(args: AirbugArgs) -> Result<()> {
+    let AirbugArgs {
+        model,
+        pp,
+        tg,
+        repeats,
+        warmup,
+        cooldown_ms,
+        threshold,
+        allpaka,
+        llama_bench,
+        check,
+        out,
+    } = args;
+    airbug_llama::run(airbug_llama::Options {
+        model,
+        pp,
+        tg,
+        repeats,
+        warmup,
+        cooldown_ms,
+        threshold_percent: threshold,
+        check,
+        allpaka_bin: airbug_llama::resolve_allpaka_bin(allpaka)?,
+        llama_bench: airbug_llama::resolve_llama_bench(llama_bench),
+        out: out.unwrap_or_else(airbug_llama::default_out_dir),
+    })
+}
+
+/// `allpaka plan`: reads the draft model, when there is one, before planning.
+fn run_plan_command(
+    model: &std::path::Path,
+    config_path: &std::path::Path,
+    ctx: Option<u32>,
+    prompt: Option<u32>,
+    draft: Option<PathBuf>,
+    draft_len: u32,
+    accept: f64,
+) -> Result<()> {
+    let spec = match draft {
+        None => None,
+        Some(path) => {
+            if !(0.0..=1.0).contains(&accept) {
+                bail!("--accept must be between 0 and 1, got {accept}");
+            }
+            let d = gguf::read(&path)?;
+            Some(Speculation {
+                draft_weight_bytes: d.file_bytes,
+                draft_tokens: draft_len,
+                acceptance_rate: accept,
+            })
+        }
+    };
+    run_plan(model, config_path, ctx, prompt, spec)
+}
+
+fn run_serve(args: ServeArgs) -> Result<()> {
+    let ServeArgs {
+        model,
+        bind,
+        config,
+        max_queued,
+        max_batch,
+        batch_context_tokens,
+        model_budget_gib,
+        memory_budget_mib,
+        prefix_cache_mib,
+    } = args;
+    if config.is_none() {
+        if let Some(primary) = model.first() {
+            autotune::apply_cached(primary, None)?;
+        }
+    }
+    let runtime = config.as_deref().map(config::Config::load).transpose()?;
+    runtime
+        .as_ref()
+        .map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone())
+        .apply();
+    serve::run(
+        &model,
+        &bind,
+        serving_runtime::ServingLimits {
+            max_queued,
+            max_batch,
+            max_batch_context_tokens: batch_context_tokens,
+            model_budget_bytes: if model_budget_gib == 0 {
+                u64::MAX
+            } else {
+                model_budget_gib.saturating_mul(1 << 30)
+            },
+            prefix_budget_bytes: prefix_cache_mib.saturating_mul(1 << 20),
+            memory_budget_bytes: if memory_budget_mib == 0 {
+                u64::MAX
+            } else {
+                memory_budget_mib
+                    .checked_mul(1 << 20)
+                    .context("memory budget overflow")?
+            },
+        },
+    )
 }
 
 /// Build the planner's view of a model from a GGUF file on disk.
