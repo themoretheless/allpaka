@@ -39,10 +39,8 @@ pub(super) fn prefill_complete(gpu: &mut Gpu) {
         CALLS.fetch_add(1, Ordering::Relaxed);
     }
     gpu.prefill_drain();
-    if let (Some((tab, n_ex)), true) = (
-        gpu.dbg_route.get(),
-        std::env::var_os("ALLPAKA_ROWS_DEBUG").is_some(),
-    ) {
+    if let (Some((tab, n_ex)), true) = (gpu.dbg_route.get(), crate::runtime::get().metal_rows_debug)
+    {
         let rb = gpu.route_buf.contents() as *const u32;
         let mut rows: Vec<u32> = (0..n_ex)
             .map(|i| unsafe { *rb.add(tab + i * 3 + 2) })
@@ -342,13 +340,13 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
         let mut cmd = queue.new_command_buffer();
         // ALLPAKA_PF_SPLIT=1: commit after every stage and print its GPU
         // time. Debug-only; serialises the stages, so wall time degrades.
-        let split = std::env::var_os("ALLPAKA_PF_SPLIT").is_some();
+        let split = crate::runtime::get().metal_pf_split;
         // ALLPAKA_PF_CHAIN=1: a commit per stage like PF_SPLIT, but the
         // stage buffers are only queued, never waited - the in-order queue
         // runs them back-to-back at full clock, so the per-stage
         // GPUStart/EndTime deltas (printed at the end of the layer) are
         // free of the DVFS sag that makes PF_SPLIT numbers unusable.
-        let chain = !split && std::env::var_os("ALLPAKA_PF_CHAIN").is_some();
+        let chain = !split && crate::runtime::get().metal_pf_chain;
         // One-buffer chunk (ALLPAKA_PF_ONEBUF=1, default): encode into the
         // chunk's shared command buffer - a sequential encoder per stage,
         // the commit happens once in prefill_end. The segment arms lazily
@@ -891,7 +889,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             note_gpu_times(cmd);
         }
         WAIT_NS.fetch_add(t_wait.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        if !defer && !onebuf && std::env::var_os("ALLPAKA_FFN_TIME").is_some() {
+        if !defer && !onebuf && crate::runtime::get().metal_ffn_time {
             use objc::{msg_send, sel, sel_impl};
             let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
             let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
@@ -1043,7 +1041,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
         let t_encode = std::time::Instant::now();
         let queue = gpu.queue.clone();
         let mut cmd = queue.new_command_buffer();
-        let split = std::env::var_os("ALLPAKA_PF_SPLIT").is_some();
+        let split = crate::runtime::get().metal_pf_split;
         // One-buffer segment: lazily armed on the first eligible layer,
         // sealed by a layer that stays off it (see prefill_attn_block).
         let onebuf = fusion.is_some() && gpu_route() && pf_onebuf() && !split;

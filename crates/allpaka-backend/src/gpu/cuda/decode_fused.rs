@@ -119,19 +119,11 @@ pub(super) fn decode_token_one_fused(
     // (direct fattn is stream-capturable). Without FA, one whole-token graph.
     // Drain ggml *before* capture — sync during capture corrupts the graph.
     let use_graph = crate::runtime::get().cuda_graph;
-    let use_fa = crate::gpu::cuda::ggml::enabled()
-        && std::env::var("ALLPAKA_NO_FA")
-            .map(|v| !(v == "1" || v.eq_ignore_ascii_case("true")))
-            .unwrap_or(true);
-    let fa_inline = use_fa
-        && std::env::var("ALLPAKA_FA_INLINE")
-            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-            .unwrap_or(true); // default on with ggml FA + graphs
-                              // Shallow-ctx whole graph: skip FA (pads to ≥256) and use native dpos attend.
-                              // Opt-in only — default FA wins tg on 5090 (native-auto regressed ~66.4→64.4).
-    let native_shallow = std::env::var("ALLPAKA_NATIVE_ATTEND")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let use_fa = crate::gpu::cuda::ggml::enabled() && !crate::runtime::get().cuda_no_fa;
+    let fa_inline = use_fa && crate::runtime::get().cuda_fa_inline; // default on with ggml FA + graphs
+                                                                    // Shallow-ctx whole graph: skip FA (pads to ≥256) and use native dpos attend.
+                                                                    // Opt-in only — default FA wins tg on 5090 (native-auto regressed ~66.4→64.4).
+    let native_shallow = crate::runtime::get().cuda_native_attend;
     let fa_inline = fa_inline && !native_shallow;
     let hybrid_fa = use_graph && use_fa && !fa_inline && !native_shallow;
     let whole_graph = use_graph && (!use_fa || fa_inline || native_shallow);
@@ -414,9 +406,7 @@ pub(super) fn decode_token_one_fused(
                     gpu.decode_fa_kv_offs.as_ref(),
                 ) {
                     if pre.len() == n_layers && post.len() == n_layers && k_offs.len() == n_layers {
-                        let use_cpp = std::env::var("ALLPAKA_HYBRID_REPLAY")
-                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                            .unwrap_or(false);
+                        let use_cpp = crate::runtime::get().cuda_hybrid_replay;
                         if use_cpp {
                             let (cache_p, cg) = DevicePtr::device_ptr(&req.cache.buf, &stream);
                             drop(cg);
@@ -1088,11 +1078,8 @@ pub(super) fn decode_token_one_fused(
                 ) {
                     if fuse_q8 && crate::gpu::cuda::ggml::fa_q8_consumed() {
                         if let Some(fa) = crate::gpu::cuda::ggml::fa_last_src() {
-                            let wo_fa_q8 = q8_only
-                                && std::env::var("ALLPAKA_WO_FA_Q8")
-                                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                                    .unwrap_or(false)
-                                && q_n == 8192;
+                            let wo_fa_q8 =
+                                q8_only && crate::runtime::get().cuda_wo_fa_q8 && q_n == 8192;
                             if wo_fa_q8 {
                                 // Skip permute_q8_m1_qonly; WO mmvq packs from FA buffer.
                                 gpu.wo_fa_x = fa;
@@ -1168,10 +1155,7 @@ pub(super) fn decode_token_one_fused(
         let mut fa_pre: Vec<cudarc::driver::CudaGraph> = Vec::new();
         let mut fa_post: Vec<cudarc::driver::CudaGraph> = Vec::new();
         let mut fa_attn: Vec<cudarc::driver::CudaGraph> = Vec::new();
-        let mut fa_attn_ok = capturing_hybrid
-            && std::env::var("ALLPAKA_NO_FA_GRAPH")
-                .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
-                .unwrap_or(true);
+        let mut fa_attn_ok = capturing_hybrid && !crate::runtime::get().cuda_no_fa_graph;
         let mut fa_warmed = false;
         if capturing_hybrid {
             fa_pre.reserve(n_layers);
@@ -1222,10 +1206,8 @@ pub(super) fn decode_token_one_fused(
             let (wk_c, wk_o) = resolve_w(gpu, layer.wk.1)?;
             let (wv_c, wv_o) = resolve_w(gpu, layer.wv.1)?;
             let (wo_c, wo_o) = resolve_w(gpu, layer.wo.1)?;
-            let ggml_decode = crate::gpu::cuda::ggml::enabled()
-                && std::env::var("ALLPAKA_GGML_DECODE")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
+            let ggml_decode =
+                crate::gpu::cuda::ggml::enabled() && crate::runtime::get().cuda_ggml_decode;
             // Fused QKV: Q4/Q4/Q4 or Q4_K_M Q4/Q4/Q6 (V often Q6_K).
             // Decode: write V straight into f16 KV cache when V has no bias
             // (bias must land in arena first, then store_kv).
@@ -1261,11 +1243,7 @@ pub(super) fn decode_token_one_fused(
                     },
                 )
                 .is_some();
-            if _li == 0
-                && std::env::var("ALLPAKA_FUSE_LOG")
-                    .map(|v| v == "1")
-                    .unwrap_or(false)
-            {
+            if _li == 0 && crate::runtime::get().cuda_fuse_log {
                 eprintln!(
                     "cuda: layer0 qkv_fused={qkv_fused} ggml_decode={ggml_decode} chunks=({wq_c},{wk_c},{wv_c}) types=({:?},{:?},{:?}) q8={} bias={}",
                     layer.wq.0,
@@ -1609,11 +1587,7 @@ pub(super) fn decode_token_one_fused(
             false,
         )?;
         launches += 2;
-        if crate::gpu::cuda::ggml::enabled()
-            && std::env::var("ALLPAKA_GGML_DECODE")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-        {
+        if crate::gpu::cuda::ggml::enabled() && crate::runtime::get().cuda_ggml_decode {
             crate::gpu::cuda::ggml::prepare_for_cudarc();
         }
 

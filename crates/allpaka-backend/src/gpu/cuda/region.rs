@@ -90,9 +90,7 @@ pub fn download_region_range(region: &SharedRegion, offset: usize, dst: &mut [u8
 }
 
 pub fn decode_attention_capacity_safe(capacity: usize) -> bool {
-    let native = std::env::var("ALLPAKA_NATIVE_ATTEND")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let native = crate::runtime::get().cuda_native_attend;
     !crate::gpu::cuda::ggml::enabled()
         || native
         || capacity >= crate::gpu::cuda::ggml::fa_kv_floor()

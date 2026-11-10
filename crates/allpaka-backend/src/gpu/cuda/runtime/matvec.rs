@@ -23,26 +23,19 @@ pub(super) fn launch_qk_q8_matvec_on(
     // Huge n_out (LM head ~152k) prefers nwarps=4: more CTAs on short K.
     let long_q6 = matches!(ty, GgmlType::Q6K) && n_in >= 4096;
     let huge_out = n_out >= 65536;
-    let nwarps_env = std::env::var("ALLPAKA_NWARPS").ok();
-    let force2 = nwarps_env.as_deref() == Some("2");
-    let force8 = nwarps_env.as_deref() == Some("8");
-    let force4 = nwarps_env.as_deref() == Some("4");
-    let rows2 = std::env::var("ALLPAKA_MMVQ_ROWS")
-        .map(|v| v == "2")
-        .unwrap_or(false);
-    let out4 = huge_out
-        && std::env::var("ALLPAKA_OUT_N4")
-            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-            .unwrap_or(true); // nwarps=4 on LM head (~152k rows) beats n8 on 5090
+    let policy = crate::runtime::get();
+    let force2 = policy.cuda_nwarps == Some(2);
+    let force8 = policy.cuda_nwarps == Some(8);
+    let force4 = policy.cuda_nwarps == Some(4);
+    let rows2 = policy.cuda_mmvq_rows2;
+    let out4 = huge_out && policy.cuda_out_n4; // nwarps=4 on LM head (~152k rows) beats n8 on 5090
     let auto8 = long_q6 && !force2 && !force4 && !rows2 && !(out4 && !force8);
     // Q6 + f32 X: pack Q8 in smem inside the matvec (skip separate quantize_q8_1).
     // Opt-in only: measured slower than quantize+q8 on 5090 (~43 vs ~64 tg).
     let q6_f32 = matches!(ty, GgmlType::Q6K)
         && auto8
         && gpu.fns.contains_key("matvec_q6_k_f32_n8")
-        && std::env::var("ALLPAKA_Q6_F32")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        && policy.cuda_q6_f32;
     // FA→WO: consume pending FA f32 ptr with fused pack-in-mmvq (skips permute_q8).
     let wo_fa = matches!(ty, GgmlType::Q4K)
         && m == 1
@@ -121,10 +114,7 @@ pub(super) fn launch_qk_q8_matvec_on(
         (GgmlType::Q4K, true, _, _) => ("matvec_q4_k_q8_n8", 8u32, n_out as u32),
         (GgmlType::Q4K, false, true, _) => ("matvec_q4_k_q8_n2", 2u32, n_out as u32),
         (GgmlType::Q4K, false, false, false)
-            if n_in == 8192
-                && std::env::var("ALLPAKA_K8192")
-                    .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                    .unwrap_or(true) =>
+            if n_in == 8192 && crate::runtime::get().cuda_k8192 =>
         {
             ("matvec_q4_k_q8_k8192", 4u32, n_out as u32)
         }
@@ -132,9 +122,7 @@ pub(super) fn launch_qk_q8_matvec_on(
         (GgmlType::Q4K, false, false, false)
             if n_in == 5120
                 && gpu.fns.contains_key("matvec_q4_k_q8_k5120")
-                && std::env::var("ALLPAKA_K5120")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false) =>
+                && crate::runtime::get().cuda_k5120 =>
         {
             ("matvec_q4_k_q8_k5120", 4u32, n_out as u32)
         }
@@ -143,9 +131,7 @@ pub(super) fn launch_qk_q8_matvec_on(
         (GgmlType::Q6K, true, _, _)
             if n_in == 25600
                 && gpu.fns.contains_key("matvec_q6_k_q8_n8_k25600")
-                && std::env::var("ALLPAKA_Q6_K25600")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false) =>
+                && crate::runtime::get().cuda_q6_k25600 =>
         {
             ("matvec_q6_k_q8_n8_k25600", 8u32, n_out as u32)
         }
@@ -357,13 +343,8 @@ pub fn launch_matvec_y_ptr_on(
     // ALLPAKA_GGML_MMVQ=1: llama MMVQ for all m=1 including add, keep our QKV/gate fusion.
     // Opt-in: native MMVQ measured ~70 tg vs ~66 ggml on 32B/5090 (hot window).
     let ggml_mmvq = crate::gpu::cuda::ggml::enabled()
-        && (std::env::var("ALLPAKA_GGML_MMVQ")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-            || (std::env::var("ALLPAKA_GGML_DECODE")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-                && !add));
+        && (crate::runtime::get().cuda_ggml_mmvq
+            || (crate::runtime::get().cuda_ggml_decode && !add));
     if m == 1 && ggml_mmvq && matches!(ty, GgmlType::Q4K | GgmlType::Q6K) && n_in % 256 == 0 {
         if let Some(wty) = crate::gpu::cuda::ggml::ggml_type_code(ty) {
             // Prefill clears shared stream; force rebind so MMVQ and residual share one queue.
@@ -497,9 +478,7 @@ pub fn launch_matvec_q4k_2(
         // matvec_q4_k_q8_2 + separate quantize (faster on 5090 than serial-32 pack).
         if n_out % 32 == 0
             && gpu.fns.contains_key("matvec_q4_k_q8_2_q8")
-            && std::env::var("ALLPAKA_GU_Q8")
-                .map(|v| v == "1")
-                .unwrap_or(false)
+            && crate::runtime::get().cuda_gu_q8
         {
             let pack_in = q8_packed_elems(n_in, m);
             let pack_out = q8_packed_elems(n_out, m);
@@ -562,24 +541,18 @@ pub fn launch_matvec_q4k_2(
         // nwarps=4 wins for gate+up on 5090; n8 dual kernel kept for A/B (ALLPAKA_GU_N8=1).
         let use_n8 = n_in >= 4096
             && gpu.fns.contains_key("matvec_q4_k_q8_2_n8")
-            && std::env::var("ALLPAKA_GU_N8")
-                .map(|v| v == "1")
-                .unwrap_or(false);
+            && crate::runtime::get().cuda_gu_n8;
         // Balanced nb=20 GU dual (5 warps, 2 blocks each). Opt-in; do not enable single-row k5120.
         let use_k5120_gu = !use_n8
             && n_in == 5120
             && gpu.fns.contains_key("matvec_q4_k_q8_2_k5120_bal")
-            && std::env::var("ALLPAKA_K5120_GU")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+            && crate::runtime::get().cuda_k5120_gu;
         // Opt-in only; imbalanced 4-warp k5120 regressed on 5090.
         let use_k5120 = !use_n8
             && !use_k5120_gu
             && n_in == 5120
             && gpu.fns.contains_key("matvec_q4_k_q8_2_k5120")
-            && std::env::var("ALLPAKA_K5120")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+            && crate::runtime::get().cuda_k5120;
         let f = gpu.func_owned(if use_n8 {
             "matvec_q4_k_q8_2_n8"
         } else if use_k5120_gu {
@@ -680,10 +653,7 @@ pub fn launch_matvec_q4k_qkv(
     v_cache: Option<(&cudarc::driver::CudaSlice<u8>, u64, u32)>,
 ) -> Option<()> {
     if chunk_q != chunk_k || chunk_q != chunk_v || n_in % 256 != 0 {
-        if std::env::var("ALLPAKA_FUSE_LOG")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
+        if crate::runtime::get().cuda_fuse_log {
             eprintln!("cuda: qkv fuse skip chunks=({chunk_q},{chunk_k},{chunk_v}) n_in={n_in}");
         }
         return None;
@@ -733,9 +703,7 @@ pub fn launch_matvec_q4k_qkv(
     let split = matches!(v_ty, GgmlType::Q6K)
         && m == 1
         && n_q > n_kv
-        && std::env::var("ALLPAKA_QKV_SPLIT")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        && crate::runtime::get().cuda_qkv_split;
     let grid_x = if split { n_kv_u } else { n_q_u.max(n_kv_u) };
     let cfg = LaunchConfig {
         grid_dim: (grid_x, m_u, 1),
@@ -816,10 +784,7 @@ pub fn launch_matvec_q4k_qkv(
             m,
             false,
         )?;
-        if std::env::var("ALLPAKA_FUSE_LOG")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
+        if crate::runtime::get().cuda_fuse_log {
             eprintln!("cuda: qkv_split n_kv={n_kv} q_tail={q_tail}");
         }
     }

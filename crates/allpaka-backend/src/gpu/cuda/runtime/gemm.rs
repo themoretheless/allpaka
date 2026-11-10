@@ -33,8 +33,7 @@ pub fn launch_gemm_dequant(
 
     // llama.cpp ggml-cuda MMQ (fast on 5090 vs dequant+cuBLASLt).
     // Opt out with ALLPAKA_GGML_GEMM=0.
-    let ggml_gemm = std::env::var("ALLPAKA_GGML_GEMM")
-        .map_or(true, |v| !(v == "0" || v.eq_ignore_ascii_case("false")));
+    let ggml_gemm = crate::runtime::get().cuda_ggml_gemm;
     if ggml_gemm && crate::gpu::cuda::ggml::enabled() {
         if let Some(wty) = crate::gpu::cuda::ggml::ggml_type_code(ty) {
             if matches!(ty, GgmlType::Q4K | GgmlType::Q6K) && n_in % 256 == 0 {
@@ -72,11 +71,11 @@ pub fn launch_gemm_dequant(
     // Int8 TC MMQ: ALLPAKA_MMQ=1 (NVRTC), =tile (float smem), =nvcc (standalone PTX).
     // Neither beats dequant+cuBLAS yet; all stay opt-in.
     if matches!(ty, GgmlType::Q4K) && n_in % 256 == 0 {
-        let mmq = std::env::var("ALLPAKA_MMQ").unwrap_or_default();
-        if mmq == "1" || mmq == "tile" || mmq == "nvcc" {
+        let mmq = crate::runtime::get().cuda_mmq;
+        if mmq != crate::runtime::CudaMmq::Off {
             let stream = Arc::clone(&gpu.stream);
-            let use_tile = mmq == "tile";
-            let use_nvcc = mmq == "nvcc";
+            let use_tile = mmq == crate::runtime::CudaMmq::Tile;
+            let use_nvcc = mmq == crate::runtime::CudaMmq::Nvcc;
             if !use_tile {
                 let x_ptr = if x_from_pf_hs {
                     let (p, g) = DevicePtr::device_ptr(&gpu.pf_hs, &stream);

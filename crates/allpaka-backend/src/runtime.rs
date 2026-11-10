@@ -9,6 +9,8 @@
 //! - `off`   — default false, enabled by `=1`
 //! - `set`   — default false, enabled by any value other than `=0`
 //! - `present` — default false, enabled by mere presence
+//! - `yes`   — default false, enabled by `=1` or `=true` (any case)
+//! - `not_no` — default true, disabled by `=0` or `=false` (any case)
 
 use std::sync::OnceLock;
 
@@ -28,6 +30,26 @@ fn set(_def: bool, name: &str) -> bool {
 fn present(_def: bool, name: &str) -> bool {
     std::env::var_os(name).is_some()
 }
+#[inline]
+fn yes(_def: bool, name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+#[inline]
+fn not_no(_def: bool, name: &str) -> bool {
+    std::env::var(name).map_or(true, |v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+}
+
+/// `ALLPAKA_MMQ`: opt-in int8 tensor-core MMQ variants for CUDA prefill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CudaMmq {
+    Off,
+    /// `=1`: NVRTC mma kernel.
+    Mma,
+    /// `=tile`: float shared-memory tile kernel.
+    Tile,
+    /// `=nvcc`: standalone PTX kernel.
+    Nvcc,
+}
 
 macro_rules! flags {
     ($($field:ident : bool = $def:expr, env $env:literal, $parse:expr;)*) => {
@@ -40,6 +62,12 @@ macro_rules! flags {
             pub mv_tg: u64,
             /// `ALLPAKA_Q8_NR0` ∈ {1,2,4}, default 2.
             pub q8_nr0: usize,
+            /// `ALLPAKA_NWARPS` ∈ {2,4,8}: force the CUDA MMVQ warp count.
+            pub cuda_nwarps: Option<u8>,
+            /// `ALLPAKA_MMQ`.
+            pub cuda_mmq: CudaMmq,
+            /// `ALLPAKA_MMID_RTILES=<n>`: pin the Metal grouped-FFN grid.
+            pub metal_mmid_rtiles: Option<u64>,
         }
 
         impl Default for RuntimePolicy {
@@ -50,6 +78,9 @@ macro_rules! flags {
                     attention_split: None,
                     mv_tg: 128,
                     q8_nr0: 2,
+                    cuda_nwarps: None,
+                    cuda_mmq: CudaMmq::Off,
+                    metal_mmid_rtiles: None,
                 }
             }
         }
@@ -71,6 +102,21 @@ macro_rules! flags {
                         .and_then(|v| v.parse().ok())
                         .filter(|n: &usize| [1, 2, 4].contains(n))
                         .unwrap_or(2),
+                    cuda_nwarps: match std::env::var("ALLPAKA_NWARPS").as_deref() {
+                        Ok("2") => Some(2),
+                        Ok("4") => Some(4),
+                        Ok("8") => Some(8),
+                        _ => None,
+                    },
+                    cuda_mmq: match std::env::var("ALLPAKA_MMQ").as_deref() {
+                        Ok("1") => CudaMmq::Mma,
+                        Ok("tile") => CudaMmq::Tile,
+                        Ok("nvcc") => CudaMmq::Nvcc,
+                        _ => CudaMmq::Off,
+                    },
+                    metal_mmid_rtiles: std::env::var("ALLPAKA_MMID_RTILES")
+                        .ok()
+                        .and_then(|v| v.parse::<u64>().ok()),
                 }
             }
         }
@@ -116,6 +162,47 @@ flags! {
     decode_split: bool = false, env "ALLPAKA_DECODE_SPLIT", present;
     cuda_graph: bool = false, env "ALLPAKA_CUDA_GRAPH", off;
     cuda_no_fuse: bool = false, env "ALLPAKA_CUDA_NO_FUSE", present;
+    // CUDA decode/prefill switches, formerly read from the environment on
+    // every launch.
+    cuda_q8: bool = true, env "ALLPAKA_Q8", not_no;
+    cuda_mmvq_rows2: bool = false, env "ALLPAKA_MMVQ_ROWS", |_d, e| std::env::var(e).is_ok_and(|v: String| v == "2");
+    cuda_out_n4: bool = true, env "ALLPAKA_OUT_N4", not_no;
+    cuda_q6_f32: bool = false, env "ALLPAKA_Q6_F32", yes;
+    cuda_k8192: bool = true, env "ALLPAKA_K8192", not_no;
+    cuda_k5120: bool = false, env "ALLPAKA_K5120", yes;
+    cuda_q6_k25600: bool = false, env "ALLPAKA_Q6_K25600", yes;
+    cuda_ggml_mmvq: bool = false, env "ALLPAKA_GGML_MMVQ", yes;
+    cuda_ggml_decode: bool = false, env "ALLPAKA_GGML_DECODE", yes;
+    cuda_gu_q8: bool = false, env "ALLPAKA_GU_Q8", off;
+    cuda_gu_n8: bool = false, env "ALLPAKA_GU_N8", off;
+    cuda_k5120_gu: bool = false, env "ALLPAKA_K5120_GU", yes;
+    cuda_fuse_log: bool = false, env "ALLPAKA_FUSE_LOG", off;
+    cuda_qkv_split: bool = false, env "ALLPAKA_QKV_SPLIT", yes;
+    cuda_no_fa: bool = false, env "ALLPAKA_NO_FA", yes;
+    cuda_fa_inline: bool = true, env "ALLPAKA_FA_INLINE", not_no;
+    cuda_native_attend: bool = false, env "ALLPAKA_NATIVE_ATTEND", yes;
+    cuda_hybrid_replay: bool = false, env "ALLPAKA_HYBRID_REPLAY", yes;
+    cuda_wo_fa_q8: bool = false, env "ALLPAKA_WO_FA_Q8", yes;
+    cuda_no_fa_graph: bool = false, env "ALLPAKA_NO_FA_GRAPH", yes;
+    cuda_ggml_gemm: bool = true, env "ALLPAKA_GGML_GEMM", not_no;
+    cuda_prefill_dual: bool = true, env "ALLPAKA_PREFILL_DUAL", not_no;
+    cuda_pf_graph: bool = true, env "ALLPAKA_PF_GRAPH", not_no;
+    cuda_gpu_embed: bool = false, env "ALLPAKA_GPU_EMBED", yes;
+    gdn_zero: bool = false, env "ALLPAKA_GDN_ZERO", present;
+    // Metal switches, formerly read from the environment on every call.
+    // On Metal the GPU embed is on unless ALLPAKA_GPU_EMBED is 0/false.
+    metal_gpu_embed_off: bool = false, env "ALLPAKA_GPU_EMBED", |_d, e| std::env::var(e).is_ok_and(|v: String| v == "0" || v.eq_ignore_ascii_case("false"));
+    metal_dual: bool = false, env "ALLPAKA_DUAL", present;
+    metal_no_route_fused: bool = false, env "ALLPAKA_NO_ROUTE_FUSED", present;
+    metal_ffn_split: bool = false, env "ALLPAKA_FFN_SPLIT", present;
+    metal_pf_split: bool = false, env "ALLPAKA_PF_SPLIT", present;
+    metal_pf_chain: bool = false, env "ALLPAKA_PF_CHAIN", present;
+    metal_ffn_time: bool = false, env "ALLPAKA_FFN_TIME", present;
+    metal_q2_ilv: bool = false, env "ALLPAKA_Q2_ILV", present;
+    metal_rows_debug: bool = false, env "ALLPAKA_ROWS_DEBUG", present;
+    metal_verify_debug: bool = false, env "ALLPAKA_VERIFY_DEBUG", present;
+    attn_zero: bool = false, env "ALLPAKA_ATTN_ZERO", present;
+    moe_zero: bool = false, env "ALLPAKA_MOE_ZERO", present;
 }
 
 static POLICY: OnceLock<RuntimePolicy> = OnceLock::new();
@@ -138,6 +225,29 @@ pub fn install(policy: RuntimePolicy) -> Result<(), RuntimePolicy> {
 #[cfg(test)]
 mod tests {
     use super::RuntimePolicy;
+
+    /// `yes` and `not_no` keep the spellings the CUDA paths accepted when
+    /// they read the environment themselves.
+    #[test]
+    fn yes_and_not_no_accept_the_old_spellings() {
+        let name = "ALLPAKA_TEST_POLICY_PARSE";
+        for (value, yes, not_no) in [
+            (None, false, true),
+            (Some("1"), true, true),
+            (Some("TRUE"), true, true),
+            (Some("0"), false, false),
+            (Some("False"), false, false),
+            (Some("2"), false, true),
+        ] {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+            assert_eq!(super::yes(false, name), yes, "{value:?}");
+            assert_eq!(super::not_no(true, name), not_no, "{value:?}");
+        }
+        std::env::remove_var(name);
+    }
 
     #[test]
     fn production_defaults_are_explicit() {

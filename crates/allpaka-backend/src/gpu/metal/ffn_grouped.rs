@@ -111,7 +111,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         && fused_swiglu
         && strides[0] == strides[1]
         && req.ffn % 64 == 0
-        && std::env::var_os("ALLPAKA_DUAL").is_some()
+        && crate::runtime::get().metal_dual
     {
         gpu.pipeline("mmllgd_id_q4_k", 1, 1).map(|p| p.to_owned())
     } else {
@@ -120,7 +120,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
     let dual = dual_state.is_some();
 
     let use_route_fused =
-        route_mode && req.n_expert <= 256 && std::env::var_os("ALLPAKA_NO_ROUTE_FUSED").is_none();
+        route_mode && req.n_expert <= 256 && !crate::runtime::get().metal_no_route_fused;
     // Tile-descriptor grid (llama-style): route_fused emits one MmGroup per
     // non-empty tile_w-row chunk (32, or 16 for bn16), so the grid covers
     // real work exactly - at pp480/128exp this is ~250 z-slices instead of
@@ -137,9 +137,8 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         // hot experts through the striding loop. ALLPAKA_MMID_RTILES pins
         // the grid for A/B tests.
         let auto = (m_fused as u64).div_ceil(bn as u64).max(1);
-        let rt = std::env::var("ALLPAKA_MMID_RTILES")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
+        let rt = crate::runtime::get()
+            .metal_mmid_rtiles
             .map_or(auto, |n| n.max(1));
         (rt, req.n_expert as u64)
     } else {
@@ -283,11 +282,11 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         let t_encode = std::time::Instant::now();
         // ALLPAKA_FFN_SPLIT=1: commit after every stage and print its GPU
         // time. Debug-only; serialises the stages, so wall time degrades.
-        let split = std::env::var_os("ALLPAKA_FFN_SPLIT").is_some();
+        let split = crate::runtime::get().metal_ffn_split;
         // ALLPAKA_PF_CHAIN=1 (shared with the attention block): per-stage
         // commits queued back-to-back without waits - per-stage GPU times
         // without the DVFS sag of the serialising FFN_SPLIT.
-        let chain = !split && std::env::var_os("ALLPAKA_PF_CHAIN").is_some();
+        let chain = !split && crate::runtime::get().metal_pf_chain;
         // One-buffer chunk (ALLPAKA_PF_ONEBUF=1, default): encode into the
         // chunk's shared command buffer, lazily armed by the first
         // eligible layer; the commit happens once in prefill_end. A layer
@@ -820,7 +819,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             note_gpu_times(cmd);
         }
         WAIT_NS.fetch_add(t_wait.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        if !defer && !onebuf && std::env::var_os("ALLPAKA_FFN_TIME").is_some() {
+        if !defer && !onebuf && crate::runtime::get().metal_ffn_time {
             use objc::{msg_send, sel, sel_impl};
             let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
             let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };

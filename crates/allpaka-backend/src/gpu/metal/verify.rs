@@ -344,7 +344,7 @@ pub(super) fn encode_verify_tokens(
         };
 
         let mut dispatched = 0u64;
-        let vdbg = std::env::var_os("ALLPAKA_VERIFY_DEBUG").is_some();
+        let vdbg = crate::runtime::get().metal_verify_debug;
         for (li, (l, refs)) in req.layers.iter().zip(layers).enumerate() {
             if vdbg {
                 enc.end_encoding();
@@ -415,7 +415,7 @@ pub(super) fn encode_verify_tokens(
             if let Some(g) = &refs.gdn {
                 // Debug kill switch, mirrors the CPU path's gdn_forward:
                 // zero the branch output (into delta) to isolate bugs.
-                if std::env::var_os("ALLPAKA_GDN_ZERO").is_some() {
+                if crate::runtime::get().gdn_zero {
                     unsafe {
                         std::ptr::write_bytes(
                             (gpu.y_arena.contents() as *mut f32).add(delta_at),
@@ -802,7 +802,7 @@ pub(super) fn encode_verify_tokens(
                 }
                 // Debug kill switch, mirrors the CPU path: zero the
                 // attention branch output (into delta).
-                if std::env::var_os("ALLPAKA_ATTN_ZERO").is_some() {
+                if crate::runtime::get().attn_zero {
                     unsafe {
                         std::ptr::write_bytes(
                             (gpu.y_arena.contents() as *mut f32).add(delta_at),
@@ -831,7 +831,7 @@ pub(super) fn encode_verify_tokens(
             }
             // Debug kill switch, mirrors the CPU path's MOE_ZERO: zero the
             // FFN output (into delta), skipping the whole stage.
-            if std::env::var_os("ALLPAKA_MOE_ZERO").is_some() {
+            if crate::runtime::get().moe_zero {
                 unsafe {
                     std::ptr::write_bytes(
                         (gpu.y_arena.contents() as *mut f32).add(delta_at),
@@ -984,7 +984,7 @@ pub(super) fn encode_verify_tokens(
                     }
                     let a = hidden as u32;
                     let b = *expert_ffn as u32;
-                    if std::env::var_os("ALLPAKA_ROWS_DEBUG").is_some() && li == 0 {
+                    if crate::runtime::get().metal_rows_debug && li == 0 {
                         eprintln!("verify rows pipelines: {}", t_moe_rows[li].is_some());
                     }
                     if let Some(rs) = &t_moe_rows[li] {

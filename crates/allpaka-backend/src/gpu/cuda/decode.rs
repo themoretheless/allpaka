@@ -465,7 +465,7 @@ pub(super) fn decode_token_one(
         crate::ops::rmsnorm(&mut h, &attn_w, req.eps);
 
         if let Some(g) = &layer.gdn {
-            if std::env::var_os("ALLPAKA_GDN_ZERO").is_none() {
+            if !crate::runtime::get().gdn_zero {
                 let ssm = req.ssm?;
                 let delta = gdn_decode_layer(g, &h, hidden, req.eps, ssm)?;
                 for (a, b) in x.iter_mut().zip(&delta) {

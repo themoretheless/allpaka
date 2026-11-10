@@ -13,7 +13,7 @@ pub(super) fn lanes_per_row(ty: GgmlType, n_in: usize) -> usize {
     // output row (one 32-lane SIMD group per 4 rows), independent of the
     // block count. The old kernel also runs correctly at LPR 8, so the tile
     // fallbacks in pipeline_ex need no geometry special-casing.
-    if ty == GgmlType::Q2K && q2_mv() && std::env::var_os("ALLPAKA_Q2_ILV").is_none() {
+    if ty == GgmlType::Q2K && q2_mv() && !crate::runtime::get().metal_q2_ilv {
         // 32 / NR0 threads per row; NR0 sweepable (occupancy vs activation
         // reuse). ffnbench picked 2 rows per SIMD group on M4 Max.
         static NR0: OnceLock<usize> = OnceLock::new();

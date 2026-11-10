@@ -8,8 +8,7 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
         gpu.ensure_prefill(xs.len())?;
         // Dual-queue: ggml MMQ/FA on private stream, cudarc on peer.
         // Opt out with ALLPAKA_PREFILL_DUAL=0 (shared stream, no overlap).
-        let dual = std::env::var("ALLPAKA_PREFILL_DUAL")
-            .map_or(true, |v| !(v == "0" || v.eq_ignore_ascii_case("false")));
+        let dual = crate::runtime::get().cuda_prefill_dual;
         if dual {
             crate::gpu::cuda::ggml::clear_shared_for_prefill();
         }
@@ -67,8 +66,7 @@ pub fn prefill_replay(xs: &[f32]) -> Option<Vec<f32>> {
 }
 
 pub(super) fn pf_graph_on() -> bool {
-    std::env::var("ALLPAKA_PF_GRAPH")
-        .map_or(true, |v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+    crate::runtime::get().cuda_pf_graph
 }
 
 pub fn prefill_end_output(len: usize) -> Option<crate::activation::Activation> {
@@ -932,7 +930,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
     if !is_attached() {
         return None;
     }
-    if std::env::var_os("ALLPAKA_GDN_ZERO").is_some() {
+    if crate::runtime::get().gdn_zero {
         // Mirror CPU/Metal kill switch: zero branch, still honor fusion residual path.
         if let Some(f) = &req.fusion {
             return with_gpu(|gpu| {
