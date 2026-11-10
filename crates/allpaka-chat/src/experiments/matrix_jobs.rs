@@ -96,7 +96,6 @@ impl Manager {
         Ok(self.root.join(format!("{id}.json")))
     }
     fn save(&self, job: &Job) -> Result<()> {
-        use std::io::Write;
         let bytes = serde_json::to_vec(job)?;
         if bytes.len() > MAX_BYTES {
             bail!("Matrix job exceeds 2 MiB");
@@ -121,24 +120,7 @@ impl Manager {
                 bail!("Matrix job storage capacity reached; new job was not started");
             }
         }
-        let temp = path.with_extension(format!("{}.tmp", crate::evaluation::new_id()));
-        let result = (|| -> Result<()> {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temp)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            std::fs::rename(&temp, &path)?;
-            std::fs::File::open(self.root.as_ref())?.sync_all()?;
-            Ok(())
-        })();
-        let _ = std::fs::remove_file(temp);
-        result
+        crate::storage::atomic_write_bytes_with_sync(&path, &bytes, true)
     }
     fn load(&self, id: &str) -> Result<Job> {
         let path = self.path(id)?;

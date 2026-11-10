@@ -413,25 +413,7 @@ impl Store {
         };
         let directory = self.directory(id)?;
         let path = directory.join("_state");
-        let temp = directory.join(format!("{}.tmp", new_id()));
-        let result = (|| -> Result<()> {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temp)?;
-            file.write_all(&serde_json::to_vec(&state)?)?;
-            file.sync_all()?;
-            std::fs::rename(&temp, &path)?;
-            #[cfg(unix)]
-            std::fs::File::open(&directory)?.sync_all()?;
-            Ok(())
-        })();
-        let _ = std::fs::remove_file(&temp);
-        result?;
+        crate::storage::atomic_write_bytes_with_sync(&path, &serde_json::to_vec(&state)?, true)?;
         Ok(
             json!({"id":id,"project_id":snapshot.project_id,"version":snapshot.version,"sha256":snapshot.sha256,"lifecycle_revision":state.revision,"archived":state.archived,"snapshots_retained":true}),
         )

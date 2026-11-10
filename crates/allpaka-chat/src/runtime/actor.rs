@@ -8,21 +8,7 @@ pub(crate) fn save(app: &App, s: &Session) -> Result<()> {
         return Ok(());
     }
     let file = app.data.join(format!("{}.json", s.id));
-    let temp = app.data.join(format!("{}.tmp", s.id));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    use std::io::Write;
-    let mut f = options.open(&temp)?;
-    f.write_all(&serde_json::to_vec(s)?)?;
-    f.sync_all()?;
-    std::fs::rename(temp, file)?;
-    #[cfg(unix)]
-    std::fs::File::open(app.data.as_ref())?.sync_all()?;
+    crate::storage::atomic_write_bytes_with_sync(&file, &serde_json::to_vec(s)?, true)?;
     Ok(())
 }
 pub(crate) fn persist(app: &App, s: &SharedSession) {

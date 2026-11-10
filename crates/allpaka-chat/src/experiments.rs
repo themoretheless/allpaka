@@ -744,7 +744,6 @@ impl Manager {
         self.save_with(run, || Ok(()))
     }
     fn save_with(&self, run: &Run, before_write: impl FnOnce() -> Result<()>) -> Result<()> {
-        use std::io::Write;
         let bytes = serde_json::to_vec(run)?;
         if bytes.len() > MAX_RUN_BYTES {
             bail!("Experiment artifact exceeds 32 MiB");
@@ -806,23 +805,7 @@ impl Manager {
             }
         }
         before_write()?;
-        let temp = path.with_extension(format!("{}.tmp", crate::evaluation::new_id()));
-        let result = (|| -> Result<()> {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temp)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            std::fs::rename(&temp, &path)?;
-            std::fs::File::open(self.root.as_ref())?.sync_all()?;
-            Ok(())
-        })();
-        let _ = std::fs::remove_file(temp);
+        let result = crate::storage::atomic_write_bytes_with_sync(&path, &bytes, true);
         if result.is_ok() {
             if let Ok(meta) = std::fs::symlink_metadata(&path) {
                 let weight = if run.status == "running" {

@@ -713,9 +713,7 @@ pub fn materialize_script(
     let path = directory.join(script);
     if !path.exists() {
         std::fs::create_dir_all(path.parent().unwrap())?;
-        let temp = path.with_extension(format!("{}.tmp", crate::evaluation::new_id()));
-        std::fs::write(&temp, text)?;
-        std::fs::rename(temp, &path)?;
+        crate::storage::atomic_write_bytes(&path, text.as_bytes())?;
     }
     Ok(path)
 }

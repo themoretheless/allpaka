@@ -8,7 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    io::{Read, Write},
+    io::Read,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -141,27 +141,7 @@ impl Store {
     }
     fn write_locked(&self, queue: &Queue, bytes: &[u8]) -> Result<()> {
         let final_path = self.root.join(format!("{}.json", queue.id));
-        let temp = self.root.join(format!("{}.tmp", queue.id));
-        let _ = std::fs::remove_file(&temp);
-        let result = (|| -> Result<()> {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temp)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            std::fs::rename(&temp, final_path)?;
-            std::fs::File::open(self.root.as_ref())?.sync_all()?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(temp);
-        }
-        result?;
+        crate::storage::atomic_write_bytes_with_sync(&final_path, bytes, true)?;
         Ok(())
     }
     fn create(&self, input: Create) -> Result<Queue> {
