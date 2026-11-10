@@ -14,7 +14,7 @@ pub(crate) fn q8_decode_enabled() -> bool {
 pub(super) fn quantize_q8_cfg(n: u32, rows: u32) -> LaunchConfig {
     let nblk = n / 32;
     let (grid_x, block_y) = if n >= 256 {
-        ((nblk + 7) / 8, 8u32)
+        (nblk.div_ceil(8), 8u32)
     } else {
         (nblk, 1u32)
     };

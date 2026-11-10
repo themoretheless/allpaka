@@ -51,6 +51,7 @@ pub fn launch_embed_row(
 }
 
 /// Embed from device token id pointer into `y_arena[y_off..]`.
+#[allow(dead_code)]
 pub fn launch_embed_row_dtoken_ptr(
     gpu: &mut CudaGpu,
     ty: GgmlType,
@@ -95,6 +96,7 @@ pub fn launch_embed_row_dtoken_ptr(
     Some(())
 }
 
+#[allow(dead_code)]
 pub fn launch_inc_u32_ptr(gpu: &mut CudaGpu, p: u64) -> Option<()> {
     let f = gpu.func_owned("inc_u32")?;
     let cfg = LaunchConfig {
@@ -106,6 +108,7 @@ pub fn launch_inc_u32_ptr(gpu: &mut CudaGpu, p: u64) -> Option<()> {
     Some(())
 }
 
+#[allow(dead_code)]
 pub fn launch_store_u32_at_ptr(gpu: &mut CudaGpu, dst_p: u64, src_p: u64, idx: u32) -> Option<()> {
     let f = gpu.func_owned("store_u32_at")?;
     let cfg = LaunchConfig {

@@ -48,9 +48,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     }
     let has_gdn = req.layers.iter().any(|l| l.gdn.is_some());
     if has_gdn {
-        if req.ssm.is_none() {
-            return None;
-        }
+        req.ssm?;
         if req
             .layers
             .iter()
@@ -184,9 +182,8 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
             gpu.decode_graph
                 .as_ref()?
                 .launch()
-                .map_err(|e| {
+                .inspect_err(|e| {
                     eprintln!("cuda: greedy chain graph launch failed: {e}");
-                    e
                 })
                 .ok()?;
             let idx = i as u32;
@@ -386,7 +383,7 @@ pub(super) fn gdn_decode_layer(
                 .ok()?;
             }
             gpu.sync()?;
-            return gpu.stream.clone_dtoh(&out_buf).ok();
+            gpu.stream.clone_dtoh(&out_buf).ok()
         }
     })?;
 

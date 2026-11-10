@@ -324,18 +324,16 @@ pub(super) fn decode_token_one_fused(
             }
             stream
                 .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
-                .map_err(|e| {
+                .inspect_err(|e| {
                     eprintln!("cuda: begin_capture failed: {e}");
-                    e
                 })
                 .ok()?;
         } else if whole_graph {
             if let Some(g) = gpu.decode_graph.as_ref() {
                 if gpu.decode_graph_key == graph_key {
                     g.launch()
-                        .map_err(|e| {
+                        .inspect_err(|e| {
                             eprintln!("cuda: decode graph launch failed: {e}");
-                            e
                         })
                         .ok()?;
                     launches = 1;
@@ -1092,34 +1090,31 @@ pub(super) fn decode_token_one_fused(
                     },
                 ) {
                     if fuse_q8 && crate::gpu::cuda::ggml::fa_q8_consumed() {
-                        if let Some(fa) = crate::gpu::cuda::ggml::fa_last_src() {
-                            let wo_fa_q8 = q8_only
-                                && std::env::var("ALLPAKA_WO_FA_Q8")
-                                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                                    .unwrap_or(false)
-                                && q_n == 8192;
-                            if wo_fa_q8 {
-                                // Skip permute_q8_m1_qonly; WO mmvq packs from FA buffer.
-                                gpu.wo_fa_x = fa;
-                            } else if q8_only {
-                                crate::gpu::cuda::runtime::launch_permute_q8_m1_qonly(
-                                    gpu,
-                                    fa,
-                                    op,
-                                    hd,
-                                    req.n_heads,
-                                )?;
-                            } else {
-                                crate::gpu::cuda::runtime::launch_permute_q8_m1(
-                                    gpu,
-                                    fa,
-                                    op,
-                                    hd,
-                                    req.n_heads,
-                                )?;
-                            }
+                        let fa = crate::gpu::cuda::ggml::fa_last_src()?;
+                        let wo_fa_q8 = q8_only
+                            && std::env::var("ALLPAKA_WO_FA_Q8")
+                                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                                .unwrap_or(false)
+                            && q_n == 8192;
+                        if wo_fa_q8 {
+                            // Skip permute_q8_m1_qonly; WO mmvq packs from FA buffer.
+                            gpu.wo_fa_x = fa;
+                        } else if q8_only {
+                            crate::gpu::cuda::runtime::launch_permute_q8_m1_qonly(
+                                gpu,
+                                fa,
+                                op,
+                                hd,
+                                req.n_heads,
+                            )?;
                         } else {
-                            return None;
+                            crate::gpu::cuda::runtime::launch_permute_q8_m1(
+                                gpu,
+                                fa,
+                                op,
+                                hd,
+                                req.n_heads,
+                            )?;
                         }
                     }
                     crate::gpu::cuda::ggml::mark_cudarc_dirty();
@@ -1213,9 +1208,8 @@ pub(super) fn decode_token_one_fused(
             if capturing_hybrid {
                 stream
                     .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
-                    .map_err(|e| {
+                    .inspect_err(|e| {
                         eprintln!("cuda: hybrid pre begin_capture failed: {e}");
-                        e
                     })
                     .ok()?;
             }
@@ -1452,7 +1446,7 @@ pub(super) fn decode_token_one_fused(
                                 fa_attn.push(g);
                                 captured_fa = true;
                             }
-                            (_, Ok(None)) | (false, Ok(Some(_))) | (false, Ok(None)) => {
+                            (_, Ok(None)) | (false, Ok(Some(_))) => {
                                 fa_attn_ok = false;
                                 fa_attn.clear();
                             }
@@ -1495,9 +1489,8 @@ pub(super) fn decode_token_one_fused(
             if capturing_hybrid {
                 stream
                     .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
-                    .map_err(|e| {
+                    .inspect_err(|e| {
                         eprintln!("cuda: hybrid post begin_capture failed: {e}");
-                        e
                     })
                     .ok()?;
             }
@@ -1589,9 +1582,8 @@ pub(super) fn decode_token_one_fused(
         if capturing_hybrid {
             stream
                 .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
-                .map_err(|e| {
+                .inspect_err(|e| {
                     eprintln!("cuda: hybrid tail begin_capture failed: {e}");
-                    e
                 })
                 .ok()?;
             capture_guard.active = true;

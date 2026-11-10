@@ -160,6 +160,7 @@ pub struct CudaGpu {
     pub q8_q: CudaSlice<i8>,
     pub q8_q_cap: usize,
     pub q8_d: CudaSlice<f32>,
+    #[allow(dead_code)]
     pub q8_d_cap: usize,
     /// Last quantized activation pointer (skip re-quantize for Q/K/V share).
     pub q8_src: u64,
@@ -197,8 +198,8 @@ pub(super) fn init_device() -> Option<CudaGpu> {
     let want_graph = crate::runtime::get().cuda_graph;
     let want_ggml = crate::gpu::cuda::ggml::enabled();
     let want_ggml_decode = std::env::var("ALLPAKA_GGML_DECODE")
-        .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"));
-    let force_default = std::env::var("ALLPAKA_CUDA_DEFAULT_STREAM").map_or(false, |v| v == "1");
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let force_default = std::env::var("ALLPAKA_CUDA_DEFAULT_STREAM").is_ok_and(|v| v == "1");
     let stream = if force_default && !want_ggml_decode {
         ctx.default_stream()
     } else if want_graph || want_ggml || want_ggml_decode {

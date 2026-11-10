@@ -82,6 +82,7 @@ struct Api {
     bind_peer: Option<BindPeerFn>,
     wait_peer: Option<PeerFn>,
     signal_peer: Option<PeerFn>,
+    #[allow(dead_code)]
     peer_is_shared: Option<PeerSharedFn>,
     clear_shared: Option<ClearSharedFn>,
 }
@@ -513,8 +514,8 @@ pub fn hybrid_replay(
     }
     let rc = unsafe {
         hr(
-            pre_execs.as_ptr() as *const *mut c_void,
-            post_execs.as_ptr() as *const *mut c_void,
+            pre_execs.as_ptr(),
+            post_execs.as_ptr(),
             tail_exec,
             pre_execs.len() as i32,
             stream.cu_stream() as *mut c_void,

@@ -3,6 +3,8 @@
 //! Public surface matches `stub.rs` / Metal exactly. Weights are copied into
 //! VRAM at attach time; KV and other shared regions are H2D-wrapped buffers.
 
+#![allow(clippy::too_many_arguments)]
+
 mod attn;
 mod decode;
 mod decode_fused;
@@ -19,10 +21,9 @@ use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 use cudarc::driver::{CudaSlice, DevicePtr, LaunchConfig, PushKernelArg};
 use pdl::{LaunchArgsPdl, StreamPdlExt};
 use runtime::{
-    dq_fmt, launch_embed_row, launch_embed_row_dtoken_ptr, launch_gemm_dequant, launch_inc_u32_ptr,
-    launch_matvec_q4k_2, launch_matvec_q4k_qkv, launch_matvec_y_ptr, launch_store_u32_at_ptr,
-    note_call, q8_decode_enabled, resolve_w, row_bytes, run_matvec, try_init, with_gpu, CudaGpu,
-    CALLS, DISPATCHES, ENCODE_NS, GPU, GPU_BUSY_NS, MM_MIN_M, SCHED_NS, WAIT_NS,
+    dq_fmt, launch_embed_row, launch_gemm_dequant, launch_matvec_q4k_2, launch_matvec_q4k_qkv,
+    launch_matvec_y_ptr, note_call, q8_decode_enabled, resolve_w, row_bytes, run_matvec, try_init,
+    with_gpu, CudaGpu, CALLS, DISPATCHES, ENCODE_NS, GPU, GPU_BUSY_NS, MM_MIN_M, SCHED_NS, WAIT_NS,
 };
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -100,7 +101,7 @@ pub fn can_embed_on_gpu(ty: GgmlType, bytes: &[u8], n_in: usize) -> bool {
 }
 
 pub fn is_attached() -> bool {
-    GPU.get().map_or(false, Option::is_some)
+    GPU.get().is_some_and(Option::is_some)
 }
 
 /// Active physical memory architecture for the CUDA backend.

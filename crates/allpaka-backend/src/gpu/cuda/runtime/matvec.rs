@@ -291,6 +291,7 @@ pub fn run_matvec(
 
 /// Device-resident matvec: `y_arena[y_off..]` ← W · `y_arena[x_off..]`.
 /// No H2D / D2H / synchronize — caller owns stream ordering.
+#[allow(dead_code)]
 pub fn launch_matvec_y(
     gpu: &mut CudaGpu,
     ty: GgmlType,

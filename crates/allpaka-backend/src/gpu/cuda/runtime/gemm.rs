@@ -198,7 +198,7 @@ pub fn launch_gemm_dequant(
         let rb_u = rb as u32;
         let w_off_u = w_off;
         const ROWS: u32 = 16;
-        let k_blocks = matches!(fmt, 0 | 1 | 2) && n_in % 256 == 0;
+        let k_blocks = matches!(fmt, 0..=2) && n_in % 256 == 0;
         let cfg = if k_blocks {
             LaunchConfig {
                 grid_dim: (n_out_u.div_ceil(ROWS), n_in_u / 256, 1),
@@ -266,30 +266,29 @@ pub fn launch_gemm_dequant(
         gpu.stream.wait(ev).ok()?;
     }
     let mut used_blas = false;
-    if gpu.blaslt.is_some() {
-        let (head, mut c16s) = gpu.f16_arena.split_at_mut(c16);
-        let a = head.slice(x16..x16 + m * n_in);
-        let b = head.slice(w16..w16 + w_elems);
-        let cfg = MatmulConfig {
-            transa: true,
-            transb: false,
-            transc: false,
-            m: n_out as u64,
-            n: m as u64,
-            k: n_in as u64,
-            alpha: 1.0,
-            lda: n_in as i64,
-            ldb: n_in as i64,
-            beta: 0.0,
-            ldc: n_out as i64,
-            stride_a: None,
-            stride_b: None,
-            stride_c: None,
-            stride_bias: None,
-            batch_size: None,
-        };
+    if let Some(blas) = gpu.blaslt.as_ref() {
         let blas_ok = {
-            let blas = gpu.blaslt.as_ref().unwrap();
+            let (head, mut c16s) = gpu.f16_arena.split_at_mut(c16);
+            let a = head.slice(x16..x16 + m * n_in);
+            let b = head.slice(w16..w16 + w_elems);
+            let cfg = MatmulConfig {
+                transa: true,
+                transb: false,
+                transc: false,
+                m: n_out as u64,
+                n: m as u64,
+                k: n_in as u64,
+                alpha: 1.0,
+                lda: n_in as i64,
+                ldb: n_in as i64,
+                beta: 0.0,
+                ldc: n_out as i64,
+                stride_a: None,
+                stride_b: None,
+                stride_c: None,
+                stride_bias: None,
+                batch_size: None,
+            };
             unsafe { Matmul::matmul(blas, cfg, &b, &a, &mut c16s, None, None) }.is_ok()
         };
         if blas_ok {

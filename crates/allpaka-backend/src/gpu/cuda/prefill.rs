@@ -25,14 +25,16 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
         gpu.pf_len = xs.len();
         gpu.pf_ffn_done = false;
         gpu.pf_rope_n = 0;
-        if pf_graph_on() && !dual && gpu.pf_graph.is_none() && gpu.pf_graph_seen == 1 {
-            if gpu
+        if pf_graph_on()
+            && !dual
+            && gpu.pf_graph.is_none()
+            && gpu.pf_graph_seen == 1
+            && gpu
                 .stream
                 .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
                 .is_ok()
-            {
-                gpu.pf_capturing = true;
-            }
+        {
+            gpu.pf_capturing = true;
         }
         Some(())
     })
@@ -119,7 +121,7 @@ pub fn prefill_abort() {
 
 /// Dense fused prefill attention: keep activations on device (Metal-style).
 /// No mid-layer D2H; Q/K RMSNorm + RoPE + store_kv + attend + WO + residual
-/// + FFN-norm all stream-ordered. Returns empty Vec for dense (`n_expert==0`)
+/// and FFN-norm all stream-ordered. Returns empty Vec for dense (`n_expert==0`)
 /// or router logits for MoE.
 pub(super) fn try_prefill_attn_fused_dev(
     req: &PrefillAttnReq,
