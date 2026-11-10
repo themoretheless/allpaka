@@ -65,7 +65,6 @@ pub(super) fn resolve_decode_layers(
     allow_normflag: bool,
     dbg: bool,
 ) -> Option<CachedDecodeLayers> {
-    use std::hash::{Hash, Hasher};
     macro_rules! why {
         ($cond:expr, $msg:expr) => {
             if $cond {
@@ -86,74 +85,82 @@ pub(super) fn resolve_decode_layers(
 
     let sw_fuse_env = std::env::var("ALLPAKA_SWFUSE").is_ok_and(|v| v == "1");
     let runtime_normflag = crate::runtime::get().normflag;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    hidden.hash(&mut hasher);
-    q_dim.hash(&mut hasher);
-    kv.hash(&mut hasher);
-    allow_normflag.hash(&mut hasher);
-    runtime_normflag.hash(&mut hasher);
-    sw_fuse_env.hash(&mut hasher);
-    mega_enabled().hash(&mut hasher);
-    gufuse().hash(&mut hasher);
-    shared_tail().hash(&mut hasher);
-    gpu.chunks.len().hash(&mut hasher);
-    req.layers.len().hash(&mut hasher);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    #[inline(always)]
+    fn mix(h: &mut u64, v: u64) {
+        *h ^= v;
+        *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    #[inline(always)]
+    fn ty_code(ty: GgmlType) -> u64 {
+        match ty {
+            GgmlType::F32 => 1,
+            GgmlType::F16 => 2,
+            GgmlType::BF16 => 3,
+            GgmlType::Q5_0 => 4,
+            GgmlType::Q8_0 => 5,
+            GgmlType::Q2K => 6,
+            GgmlType::Q3K => 7,
+            GgmlType::Q4K => 8,
+            GgmlType::Q5K => 9,
+            GgmlType::Q6K => 10,
+            GgmlType::MlxQ4 => 11,
+            GgmlType::MlxQ8 => 12,
+            GgmlType::Other(v) => 100 + v as u64,
+        }
+    }
+    mix(&mut h, hidden as u64);
+    mix(&mut h, q_dim as u64);
+    mix(&mut h, kv as u64);
+    let flags = (allow_normflag as u64)
+        | ((runtime_normflag as u64) << 1)
+        | ((sw_fuse_env as u64) << 2)
+        | ((mega_enabled() as u64) << 3)
+        | ((gufuse() as u64) << 4)
+        | ((shared_tail() as u64) << 5);
+    mix(&mut h, flags);
+    mix(&mut h, gpu.chunks.len() as u64);
+    mix(&mut h, req.layers.len() as u64);
     for l in req.layers {
-        (l.attn_norm.as_ptr() as usize, l.attn_norm.len()).hash(&mut hasher);
-        (l.ffn_norm.as_ptr() as usize, l.ffn_norm.len()).hash(&mut hasher);
-        (
-            std::mem::discriminant(&l.wq.0),
-            l.wq.1.as_ptr() as usize,
-            l.wq.2,
-        )
-            .hash(&mut hasher);
-        (
-            std::mem::discriminant(&l.wk.0),
-            l.wk.1.as_ptr() as usize,
-            l.wk.2,
-        )
-            .hash(&mut hasher);
-        (
-            std::mem::discriminant(&l.wv.0),
-            l.wv.1.as_ptr() as usize,
-            l.wv.2,
-        )
-            .hash(&mut hasher);
-        (
-            std::mem::discriminant(&l.wo.0),
-            l.wo.1.as_ptr() as usize,
-            l.wo.2,
-        )
-            .hash(&mut hasher);
-        l.gate_in_q.hash(&mut hasher);
-        l.q_bias.map(|b| b.as_ptr() as usize).hash(&mut hasher);
-        l.k_bias.map(|b| b.as_ptr() as usize).hash(&mut hasher);
-        l.v_bias.map(|b| b.as_ptr() as usize).hash(&mut hasher);
+        mix(&mut h, l.attn_norm.as_ptr() as u64);
+        mix(&mut h, l.attn_norm.len() as u64);
+        mix(&mut h, l.ffn_norm.as_ptr() as u64);
+        mix(&mut h, l.ffn_norm.len() as u64);
+        mix(&mut h, ty_code(l.wq.0));
+        mix(&mut h, l.wq.1.as_ptr() as u64);
+        mix(&mut h, l.wq.2 as u64);
+        mix(&mut h, ty_code(l.wk.0));
+        mix(&mut h, l.wk.1.as_ptr() as u64);
+        mix(&mut h, l.wk.2 as u64);
+        mix(&mut h, ty_code(l.wv.0));
+        mix(&mut h, l.wv.1.as_ptr() as u64);
+        mix(&mut h, l.wv.2 as u64);
+        mix(&mut h, ty_code(l.wo.0));
+        mix(&mut h, l.wo.1.as_ptr() as u64);
+        mix(&mut h, l.wo.2 as u64);
+        mix(&mut h, l.gate_in_q as u64);
+        mix(&mut h, l.q_bias.map_or(0, |b| b.as_ptr() as u64));
+        mix(&mut h, l.k_bias.map_or(0, |b| b.as_ptr() as u64));
+        mix(&mut h, l.v_bias.map_or(0, |b| b.as_ptr() as u64));
         if let Some(g) = &l.gdn {
-            (
-                std::mem::discriminant(&g.wqkv.0),
-                g.wqkv.1.as_ptr() as usize,
-                g.wqkv.2,
-            )
-                .hash(&mut hasher);
-            (g.conv_off, g.state_off).hash(&mut hasher);
+            mix(&mut h, ty_code(g.wqkv.0));
+            mix(&mut h, g.wqkv.1.as_ptr() as u64);
+            mix(&mut h, g.wqkv.2 as u64);
+            mix(&mut h, g.conv_off as u64);
+            mix(&mut h, g.state_off as u64);
         }
         match &l.ffn {
             TokenFfn::Dense { gate, up, down } => {
-                0u8.hash(&mut hasher);
-                (
-                    std::mem::discriminant(&gate.0),
-                    gate.1.as_ptr() as usize,
-                    gate.2,
-                )
-                    .hash(&mut hasher);
-                (std::mem::discriminant(&up.0), up.1.as_ptr() as usize, up.2).hash(&mut hasher);
-                (
-                    std::mem::discriminant(&down.0),
-                    down.1.as_ptr() as usize,
-                    down.2,
-                )
-                    .hash(&mut hasher);
+                mix(&mut h, 0);
+                mix(&mut h, ty_code(gate.0));
+                mix(&mut h, gate.1.as_ptr() as u64);
+                mix(&mut h, gate.2 as u64);
+                mix(&mut h, ty_code(up.0));
+                mix(&mut h, up.1.as_ptr() as u64);
+                mix(&mut h, up.2 as u64);
+                mix(&mut h, ty_code(down.0));
+                mix(&mut h, down.1.as_ptr() as u64);
+                mix(&mut h, down.2 as u64);
             }
             TokenFfn::Moe {
                 router,
@@ -165,31 +172,25 @@ pub(super) fn resolve_decode_layers(
                 sigmoid,
                 ..
             } => {
-                1u8.hash(&mut hasher);
-                (router.1.as_ptr() as usize, router.2).hash(&mut hasher);
-                (
-                    std::mem::discriminant(&gate.0),
-                    gate.1.as_ptr() as usize,
-                    gate.1.len(),
-                )
-                    .hash(&mut hasher);
-                (
-                    std::mem::discriminant(&up.0),
-                    up.1.as_ptr() as usize,
-                    up.1.len(),
-                )
-                    .hash(&mut hasher);
-                (
-                    std::mem::discriminant(&down.0),
-                    down.1.as_ptr() as usize,
-                    down.1.len(),
-                )
-                    .hash(&mut hasher);
-                (*expert_ffn, *n_used, *sigmoid).hash(&mut hasher);
+                mix(&mut h, 1);
+                mix(&mut h, router.1.as_ptr() as u64);
+                mix(&mut h, router.2 as u64);
+                mix(&mut h, ty_code(gate.0));
+                mix(&mut h, gate.1.as_ptr() as u64);
+                mix(&mut h, gate.1.len() as u64);
+                mix(&mut h, ty_code(up.0));
+                mix(&mut h, up.1.as_ptr() as u64);
+                mix(&mut h, up.1.len() as u64);
+                mix(&mut h, ty_code(down.0));
+                mix(&mut h, down.1.as_ptr() as u64);
+                mix(&mut h, down.1.len() as u64);
+                mix(&mut h, *expert_ffn as u64);
+                mix(&mut h, *n_used as u64);
+                mix(&mut h, *sigmoid as u64);
             }
         }
     }
-    let key = hasher.finish();
+    let key = h;
     if let Some(cached) = &gpu.decode_cache {
         if cached.key == key && cached.layers.len() == req.layers.len() {
             return Some(cached.clone());

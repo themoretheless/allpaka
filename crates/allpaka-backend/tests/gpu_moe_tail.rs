@@ -2321,3 +2321,153 @@ fn rope_norm_metal_kernels_match_cpu_reference() {
         }
     }
 }
+
+/// Characterization test for the unified `dq_fmt` ABI codes (`0..=9`) shared
+/// between Rust (`gpu/common.rs::dq_fmt`) and Metal (`embed_row_f32_dtoken` /
+/// `mmllp_qkv_mixed`) against CPU `QuantMat::row`.
+#[test]
+fn embed_row_f32_dtoken_all_formats_match_cpu_dequant() {
+    use allpaka_backend::{gpu, QuantMat};
+    use allpaka_dtype::GgmlType;
+
+    let Some(device) = Device::system_default() else {
+        return;
+    };
+    let queue = device.new_command_queue();
+    let lib = device
+        .new_library_with_source(gpu::KERNELS, &CompileOptions::new())
+        .unwrap();
+    let fun = lib.get_function("embed_row_f32_dtoken", None).unwrap();
+    let pipe = device
+        .new_compute_pipeline_state_with_function(&fun)
+        .unwrap();
+
+    let n_in = 512usize;
+    let vocab = 5usize;
+    let tok_hist: [u32; 4] = [0, 3, 1, 4];
+    let tok_idx: u32 = 1; // picks row 3
+    let picked_row = tok_hist[tok_idx as usize] as usize;
+    let w_base: u64 = 64; // non-zero offset to verify w_base pointer math
+
+    let formats: [(u32, GgmlType, &[usize]); 10] = [
+        (0, GgmlType::Q4K, &[0, 2]),
+        (1, GgmlType::Q5K, &[0, 2]),
+        (2, GgmlType::Q6K, &[208]),
+        (3, GgmlType::Q8_0, &[0]),
+        (4, GgmlType::Q2K, &[80, 82]),
+        (5, GgmlType::Q3K, &[108]),
+        (6, GgmlType::Q5_0, &[0]),
+        (7, GgmlType::F16, &[]),
+        (8, GgmlType::F32, &[]),
+        (9, GgmlType::BF16, &[]),
+    ];
+
+    let tok_buf = device.new_buffer_with_data(
+        tok_hist.as_ptr().cast(),
+        (tok_hist.len() * 4) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+
+    for (fmt, ty, scale_offs) in formats {
+        let be = ty.block_elements().unwrap() as usize;
+        let bb = ty.block_bytes().unwrap() as usize;
+        let row_bytes = (n_in / be) * bb;
+        let mut raw = vec![0u8; w_base as usize + vocab * row_bytes];
+        let payload = &mut raw[w_base as usize..];
+        match ty {
+            GgmlType::F32 => {
+                for (i, chunk) in payload.chunks_exact_mut(4).enumerate() {
+                    let v = ((i * 37 + 11) % 101) as f32 * 0.03125 - 1.5;
+                    chunk.copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            GgmlType::F16 => {
+                for (i, chunk) in payload.chunks_exact_mut(2).enumerate() {
+                    let v = ((i * 41 + 7) % 97) as f32 * 0.03125 - 1.5;
+                    let bits = allpaka_backend::ops::f16::scalar_from_f32(v);
+                    chunk.copy_from_slice(&bits.to_le_bytes());
+                }
+            }
+            GgmlType::BF16 => {
+                for (i, chunk) in payload.chunks_exact_mut(2).enumerate() {
+                    let v = ((i * 43 + 5) % 89) as f32 * 0.0625 - 2.5;
+                    let bits = (v.to_bits() >> 16) as u16;
+                    chunk.copy_from_slice(&bits.to_le_bytes());
+                }
+            }
+            _ => {
+                for (i, b) in payload.iter_mut().enumerate() {
+                    *b = (i.wrapping_mul(73).wrapping_add(19 + fmt as usize * 13)) as u8;
+                }
+                for blk in payload.chunks_exact_mut(bb) {
+                    for (si, &off) in scale_offs.iter().enumerate() {
+                        let code: u16 = if si == 0 { 0x211f } else { 0x191f };
+                        blk[off..off + 2].copy_from_slice(&code.to_le_bytes());
+                    }
+                }
+            }
+        }
+
+        let qm = QuantMat::new(&raw[w_base as usize..], ty, vocab, n_in).unwrap();
+        let want = qm.row(picked_row).unwrap();
+
+        let wb = device.new_buffer_with_data(
+            raw.as_ptr().cast(),
+            raw.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let out_buf = device.new_buffer(
+            ((n_in + 32) * 4) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        unsafe {
+            std::slice::from_raw_parts_mut(out_buf.contents().cast::<f32>(), n_in + 32)
+                .fill(-9999.0);
+        }
+
+        let n_in_u32 = n_in as u32;
+        let rb_u32 = row_bytes as u32;
+        let n_tg = if fmt <= 5 {
+            n_in.div_ceil(256) as u64
+        } else {
+            n_in.div_ceil(32) as u64
+        };
+
+        let cmd = queue.new_command_buffer();
+        let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+        enc.set_compute_pipeline_state(&pipe);
+        enc.set_buffer(0, Some(&wb), 0);
+        enc.set_buffer(1, Some(&out_buf), 0);
+        enc.set_bytes(2, 4, (&n_in_u32 as *const u32).cast());
+        enc.set_bytes(3, 8, (&w_base as *const u64).cast());
+        enc.set_bytes(4, 4, (&rb_u32 as *const u32).cast());
+        enc.set_bytes(5, 4, (&fmt as *const u32).cast());
+        enc.set_buffer(6, Some(&tok_buf), 0);
+        enc.set_bytes(7, 4, (&tok_idx as *const u32).cast());
+        enc.dispatch_thread_groups(MTLSize::new(n_tg, 1, 1), MTLSize::new(32, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+        let got =
+            unsafe { std::slice::from_raw_parts(out_buf.contents().cast::<f32>(), n_in + 32) };
+        for i in 0..n_in {
+            let diff = (got[i] - want[i]).abs();
+            assert!(
+                diff <= 1e-6,
+                "dq_fmt={fmt} ({ty:?}) col {i}: gpu {} vs cpu {} (diff {diff})",
+                got[i],
+                want[i]
+            );
+        }
+        for (i, &val) in got[n_in..n_in + 32].iter().enumerate() {
+            assert_eq!(
+                val,
+                -9999.0,
+                "dq_fmt={fmt} ({ty:?}) wrote past n_in at {}",
+                n_in + i
+            );
+        }
+    }
+}

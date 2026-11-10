@@ -173,13 +173,7 @@ pub(super) fn attend_mm256_kernel() -> &'static str {
 /// Prefill attention row tiling: `ALLPAKA_ATTN_T4=0` reverts to the
 /// row-per-threadgroup kernel.
 pub(super) fn attend_rows_kernel() -> &'static str {
-    static T4: OnceLock<usize> = OnceLock::new();
-    match *T4.get_or_init(|| {
-        std::env::var("ALLPAKA_ATTN_T4")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8)
-    }) {
+    match crate::runtime::get().attn_t4 {
         8 => "attend_rows_t8",
         0 => "attend_rows",
         _ => "attend_rows_t4",
@@ -190,17 +184,11 @@ pub(super) fn attend_rows_kernel() -> &'static str {
 /// flash-attn vec path. `ALLPAKA_ATTN_MV=0` reverts to the position-per-step
 /// kernel.
 pub(super) fn attend_kernel() -> &'static str {
-    static MV: OnceLock<bool> = OnceLock::new();
-    if *MV.get_or_init(|| std::env::var("ALLPAKA_ATTN_MV").map_or(true, |v| v != "0")) {
+    let p = crate::runtime::get();
+    if p.attn_mv {
         return "attend_mv";
     }
-    static SG: OnceLock<usize> = OnceLock::new();
-    match *SG.get_or_init(|| {
-        std::env::var("ALLPAKA_ATTN_S8")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(32)
-    }) {
+    match p.attn_s8 {
         32 => "attend_s32",
         16 => "attend_s16",
         4 | 0 => "attend",
@@ -234,8 +222,7 @@ pub(super) fn probe_skip(what: &str) -> bool {
 
 /// The decode q2_k kernel: the interleaved dual-block variant under its env.
 pub(super) fn q2_kernel() -> &'static str {
-    static ILV: OnceLock<bool> = OnceLock::new();
-    if *ILV.get_or_init(|| std::env::var_os("ALLPAKA_Q2_ILV").is_some()) {
+    if crate::runtime::get().q2_ilv {
         "matvec_q2_k_ilv"
     } else if q2_mv() {
         "matvec_q2_k_mv"
@@ -284,8 +271,7 @@ pub(super) fn qkv_mv_fuse() -> bool {
 
 /// ALLPAKA_DEBUG_QKV=1: log pipelined-Q6_K / mixed-QKV kernel selection.
 pub(super) fn debug_qkv() -> bool {
-    static D: OnceLock<bool> = OnceLock::new();
-    *D.get_or_init(|| std::env::var_os("ALLPAKA_DEBUG_QKV").is_some())
+    crate::runtime::get().debug_qkv
 }
 
 /// The fused single-threadgroup router_topk in decode. OFF by default: the
@@ -402,8 +388,7 @@ pub(super) fn serial_dispatch() -> metal::MTLDispatchType {
 /// Use specialized BN=16 grouped MoE tile when average rows per active expert
 /// <= 24 (or forced via `ALLPAKA_MMID_BN16=1`, disabled via `=0`).
 pub(super) fn mmid_use_bn16(avg_rows: usize) -> bool {
-    static FORCE: OnceLock<Option<bool>> = OnceLock::new();
-    match *FORCE.get_or_init(|| std::env::var("ALLPAKA_MMID_BN16").ok().map(|v| v != "0")) {
+    match crate::runtime::get().mmid_bn16 {
         Some(b) => b,
         None => mm_ll() && !(mm_k64() || mmid_k64()) && avg_rows <= 24,
     }

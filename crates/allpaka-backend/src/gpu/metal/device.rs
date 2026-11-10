@@ -260,9 +260,7 @@ pub fn has_device_rope_freq() -> bool {
 }
 
 pub fn prefer_gpu_embed() -> bool {
-    is_attached()
-        && !std::env::var("ALLPAKA_GPU_EMBED")
-            .is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+    is_attached() && crate::runtime::get().gpu_embed
 }
 
 pub fn can_embed_on_gpu(ty: GgmlType, bytes: &[u8], n_in: usize) -> bool {

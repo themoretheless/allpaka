@@ -9,24 +9,17 @@ use super::*;
 /// fine. Rounded up to a power of two so the shuffle reduction stays inside
 /// its lane group, and capped at the SIMD width.
 pub(super) fn lanes_per_row(ty: GgmlType, n_in: usize) -> usize {
+    let p = crate::runtime::get();
     // The llama-structure q2_k kernel has a fixed geometry: 8 threads per
     // output row (one 32-lane SIMD group per 4 rows), independent of the
     // block count. The old kernel also runs correctly at LPR 8, so the tile
     // fallbacks in pipeline_ex need no geometry special-casing.
-    if ty == GgmlType::Q2K && q2_mv() && std::env::var_os("ALLPAKA_Q2_ILV").is_none() {
+    if ty == GgmlType::Q2K && q2_mv() && !p.q2_ilv {
         // 32 / NR0 threads per row; NR0=4 (LPR=8, llama's default) wins across
         // 235B gate [1536x4096]x8 (+9%), down-sw [4096x1536]x8 (+108%), and
         // dense [4096x4096] (+180%) once float4 + packed_uint2 vector loads
         // land. Sweepable via ALLPAKA_Q2_NR0 ∈ {1,2,4}.
-        static NR0: OnceLock<usize> = OnceLock::new();
-        let nr0 = *NR0.get_or_init(|| {
-            std::env::var("ALLPAKA_Q2_NR0")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|n: &usize| [1, 2, 4].contains(n))
-                .unwrap_or(4)
-        });
-        return 32 / nr0;
+        return 32 / p.q2_nr0;
     }
     // The q3/q4/q5/q6/q8 llama-structure kernels use NR0 rows per SIMD
     // group via LPR (NR0 = 32/LPR). Q4/Q5 are sweepable for GLM 1408-wide
@@ -35,26 +28,10 @@ pub(super) fn lanes_per_row(ty: GgmlType, n_in: usize) -> usize {
         return 16;
     }
     if ty == GgmlType::Q4K && q4_mv() {
-        static NR0: OnceLock<usize> = OnceLock::new();
-        let nr0 = *NR0.get_or_init(|| {
-            std::env::var("ALLPAKA_Q4_NR0")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|n: &usize| [1, 2, 4].contains(n))
-                .unwrap_or(2)
-        });
-        return 32 / nr0;
+        return 32 / p.q4_nr0;
     }
     if ty == GgmlType::Q5K && q5_mv() {
-        static NR0: OnceLock<usize> = OnceLock::new();
-        let nr0 = *NR0.get_or_init(|| {
-            std::env::var("ALLPAKA_Q5_NR0")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|n: &usize| [1, 2, 4].contains(n))
-                .unwrap_or(2)
-        });
-        return 32 / nr0;
+        return 32 / p.q5_nr0;
     }
     if ty == GgmlType::Q6K && q6_mv() {
         return 16;
@@ -67,26 +44,14 @@ pub(super) fn lanes_per_row(ty: GgmlType, n_in: usize) -> usize {
     let mut base = blocks.next_power_of_two().min(32);
     // The interleaved q2_k variant owns TWO blocks per lane at half the
     // lanes; the pipeline swap happens in the kernel-name maps below.
-    static ILV: OnceLock<bool> = OnceLock::new();
-    if ty == GgmlType::Q2K
-        && *ILV.get_or_init(|| std::env::var_os("ALLPAKA_Q2_ILV").is_some())
-        && base >= 2
-    {
+    if ty == GgmlType::Q2K && p.q2_ilv && base >= 2 {
         base /= 2;
     }
     // Sweep knob: fewer lanes per row means more rows per SIMD group and
     // more quant blocks in flight per lane - the occupancy-vs-ILP tradeoff
     // the ffn microbench measures. Power of two, so the shuffle reduction
     // stays intact.
-    static DIV: OnceLock<usize> = OnceLock::new();
-    let div = *DIV.get_or_init(|| {
-        std::env::var("ALLPAKA_LPR_DIV")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|d: &usize| d.is_power_of_two())
-            .unwrap_or(1)
-    });
-    (base / div).max(1)
+    (base / p.lpr_div).max(1)
 }
 
 /// Threadgroup size for matvec dispatch. Default 128; sweep with
@@ -165,18 +130,16 @@ pub(super) fn mm_kernel_for(ty: GgmlType, m: usize) -> Option<(&'static str, usi
         Tall,
         Wide,
     }
-    static SHAPE: OnceLock<Option<Shape>> = OnceLock::new();
-    let forced = *SHAPE.get_or_init(|| {
-        if std::env::var_os("ALLPAKA_MM64").is_some() {
-            Some(Shape::Tall)
-        } else if std::env::var_os("ALLPAKA_MM_BN64").is_some() {
-            Some(Shape::Wide)
-        } else if std::env::var_os("ALLPAKA_MM_BN32").is_some() {
-            Some(Shape::Base)
-        } else {
-            None
-        }
-    });
+    let p = crate::runtime::get();
+    let forced = if p.mm64 {
+        Some(Shape::Tall)
+    } else if p.mm_bn64 {
+        Some(Shape::Wide)
+    } else if p.mm_bn32 {
+        Some(Shape::Base)
+    } else {
+        None
+    };
     // 32x32 unconditionally: both alternatives MEASURED WORSE on this GPU,
     // even where their theory was strongest. Tall (64x32) lost 9% outright;
     // wide (64 columns) lost 6% forced everywhere AND ~3% when selected
@@ -260,9 +223,7 @@ pub(super) fn mm_kernel_for(ty: GgmlType, m: usize) -> Option<(&'static str, usi
             // parity test and verify are the arbiters. Own kill switch for
             // clean A/B: ALLPAKA_MM_LL_F32=0.
             (GgmlType::F32, _) => {
-                static F32LL: OnceLock<bool> = OnceLock::new();
-                if *F32LL.get_or_init(|| std::env::var("ALLPAKA_MM_LL_F32").is_ok_and(|v| v == "1"))
-                {
+                if p.mm_ll_f32 {
                     "mmll_f32"
                 } else {
                     return Some(("matmul_f32", 32, 32));
@@ -324,11 +285,7 @@ pub(super) struct MmQkvArgs {
 /// Fused QKV (or dual wqkv + zgate) prefill kernel when projections share the
 /// same quantized format and their output widths are multiples of 64.
 pub(super) fn mm_qkv_kernel_for(ty: GgmlType) -> Option<&'static str> {
-    static NO_QKV: OnceLock<bool> = OnceLock::new();
-    if !mm_ll()
-        || mm_k64()
-        || *NO_QKV.get_or_init(|| std::env::var_os("ALLPAKA_NO_FUSED_QKV").is_some())
-    {
+    if !mm_ll() || mm_k64() || crate::runtime::get().no_fused_qkv {
         return None;
     }
     Some(match ty {
