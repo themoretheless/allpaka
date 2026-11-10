@@ -1,6 +1,7 @@
 //! Bounded, cancellable dataset runs using the native provider implementation.
 pub(crate) mod matrix_jobs;
 use crate::{
+    cancel::CancelToken,
     evaluation::{Sample, Snapshot},
     provider,
     types::{Message, Mode, Settings},
@@ -21,7 +22,6 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::sync::oneshot;
 const MAX_RUN_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RUNS: usize = 1000;
 const MAX_CATALOG_BYTES: u64 = 128 * 1024 * 1024;
@@ -87,7 +87,7 @@ type ReservationCache = Arc<Mutex<HashMap<String, (u64, Option<std::time::System
 pub(crate) struct Manager {
     root: Arc<PathBuf>,
     writes: Arc<Mutex<()>>,
-    active: Arc<Mutex<HashMap<String, Option<oneshot::Sender<()>>>>>,
+    active: Arc<Mutex<HashMap<String, CancelToken>>>,
     notify: Arc<tokio::sync::Notify>,
     reservations: ReservationCache,
 }
@@ -1003,8 +1003,8 @@ impl Manager {
             }
             Ok(())
         })?;
-        let (tx, rx) = oneshot::channel();
-        active.insert(run.id.clone(), Some(tx));
+        let cancel = CancelToken::new();
+        active.insert(run.id.clone(), cancel.clone());
         let response = run.clone();
         let manager = self.clone();
         let guard = RunGuard {
@@ -1012,7 +1012,7 @@ impl Manager {
             run,
         };
         tokio::spawn(async move {
-            execute(app, p, snapshot, guard, rx).await;
+            execute(app, p, snapshot, guard, cancel).await;
         });
         Ok(response)
     }
@@ -1022,9 +1022,8 @@ impl Manager {
             .active
             .lock()
             .unwrap()
-            .get_mut(id)
-            .and_then(Option::take)
-            .is_some_and(|tx| tx.send(()).is_ok());
+            .get(id)
+            .is_some_and(CancelToken::cancel);
         Ok(json!({"cancel_requested":requested}))
     }
 }
@@ -1045,7 +1044,9 @@ impl Drop for RunGuard {
         if let Err(e) = self.manager.save(&self.run) {
             eprintln!("Experiment persistence failed: {e}");
         }
-        self.manager.active.lock().unwrap().remove(&self.run.id);
+        if let Some(token) = self.manager.active.lock().unwrap().remove(&self.run.id) {
+            token.close();
+        }
         self.manager.notify.notify_waiters();
     }
 }
@@ -1054,7 +1055,7 @@ async fn execute(
     p: provider::Provider,
     snapshot: Snapshot,
     mut guard: RunGuard,
-    mut cancel: oneshot::Receiver<()>,
+    mut cancel: CancelToken,
 ) {
     let trace = match app.observability.begin(
         &format!("experiment-{}", guard.run.id),
@@ -1221,7 +1222,7 @@ async fn execute(
     loop {
         tokio::select! {
             biased;
-            _=&mut cancel=>{guard.run.status="cancelled".into();for item in &mut guard.run.items{if item.status=="pending"{item.status="cancelled".into();}}break;},
+            _=cancel.cancelled()=>{guard.run.status="cancelled".into();for item in &mut guard.run.items{if item.status=="pending"{item.status="cancelled".into();}}break;},
             next=stream.next()=>{
                 let Some((index,item))=next else {guard.run.status=if guard.run.items.iter().all(|i|i.status=="completed"){"completed"}else{"failed"}.into();break;};
                 guard.run.items[index]=item;

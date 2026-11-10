@@ -1,4 +1,5 @@
 //! Session-owned, bounded background processes with event-driven waiting.
+use crate::cancel::CancelToken;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -13,7 +14,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
-    sync::{oneshot, watch},
+    sync::watch,
 };
 
 const OUTPUT_LIMIT: usize = 128 * 1024;
@@ -34,7 +35,7 @@ struct Task {
     started: Instant,
     owner: String,
     state: Mutex<Snapshot>,
-    cancel: Mutex<Option<oneshot::Sender<()>>>,
+    cancel: CancelToken,
     events: watch::Sender<u64>,
 }
 /// Lifecycle of a background task. The words are the wire and on-disk form.
@@ -259,7 +260,7 @@ impl Manager {
                     started: Instant::now(),
                     owner: record.owner,
                     state: Mutex::new(record.snapshot),
-                    cancel: Mutex::new(None),
+                    cancel: CancelToken::closed(),
                     events,
                 }),
             );
@@ -277,9 +278,7 @@ impl Manager {
     }
     pub(crate) fn cancel_owned(&self, owner: &str) {
         for task in self.0.lock().unwrap().values().filter(|t| t.owner == owner) {
-            if let Some(sender) = task.cancel.lock().unwrap().take() {
-                let _ = sender.send(());
-            }
+            let _ = task.cancel.cancel();
         }
     }
     pub(crate) fn list(&self, owner: &str) -> Value {
@@ -347,12 +346,7 @@ impl Manager {
                     owner,
                     args["task_id"].as_str().context("task_id is required")?,
                 )?;
-                let requested = task
-                    .cancel
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .is_some_and(|tx| tx.send(()).is_ok());
+                let requested = task.cancel.cancel();
                 Ok(json!({"cancel_requested":requested,"task":task.snapshot()}))
             }
             "cleanup" => {
@@ -467,7 +461,8 @@ impl Manager {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
-        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let cancel = CancelToken::new();
+        let mut cancel_rx = cancel.clone();
         let (events, _) = watch::channel(0);
         let task = Arc::new(Task {
             storage: self.1.clone(),
@@ -488,7 +483,7 @@ impl Manager {
                 stderr_truncated: false,
                 error: None,
             }),
-            cancel: Mutex::new(Some(cancel_tx)),
+            cancel,
             events,
         });
         let stdout = child.stdout.take().context("Missing stdout pipe")?;
@@ -503,7 +498,7 @@ impl Manager {
             let err = tokio::spawn(drain(stderr, task.clone(), true));
             let (reason, result) = tokio::select! {
                 result=child.wait()=> (None,result),
-                _=cancel_rx => { terminate(&mut child,pid).await; (Some(TaskStatus::Cancelled),child.wait().await) },
+                _=cancel_rx.cancelled() => { terminate(&mut child,pid).await; (Some(TaskStatus::Cancelled),child.wait().await) },
                 _=tokio::time::sleep(Duration::from_secs(timeout)) => { terminate(&mut child,pid).await; (Some(TaskStatus::TimedOut),child.wait().await) },
             };
             // A shell can exit while descendants keep its output pipes open. Reap the group.
@@ -541,7 +536,7 @@ impl Manager {
                     Err(e) => state.error = Some(e.to_string()),
                 }
             }
-            task.cancel.lock().unwrap().take();
+            task.cancel.close();
             if task.persist("done").is_err() {
                 task.state.lock().unwrap().error = Some("receipt_storage_error".into());
             }
