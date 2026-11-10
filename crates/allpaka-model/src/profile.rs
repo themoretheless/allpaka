@@ -72,7 +72,10 @@ mod tests {
         drop(span(Phase::Router));
         drop(span(Phase::Router));
         let (ns, calls) = take_with_counts();
-        assert_eq!(calls[Phase::Router as usize], 2);
+        // The slots are process-wide and the end-to-end tests in this binary run
+        // MoE forwards in parallel, which add their own router spans. Nothing
+        // else resets the slots, so other tests can only raise the count.
+        assert!(calls[Phase::Router as usize] >= 2);
         assert!(ns[Phase::Router as usize] > 0);
     }
 }
