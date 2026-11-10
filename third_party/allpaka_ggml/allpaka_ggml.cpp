@@ -442,9 +442,17 @@ static FaSlot * get_or_create_fa(const FaKey & key, float scale) {
     s.V->nb[2] = (size_t)hd * sizeof(ggml_fp16_t);
     s.V->nb[3] = (size_t)n_kv * (size_t)kv_dim * sizeof(ggml_fp16_t);
 
-    s.mask = ggml_new_tensor_4d(s.ctx, GGML_TYPE_F16, n_kv, m, 1, 1);
+    // Prefill n_kv is exact (base + m), so it can be odd. The CUDA FA kernels
+    // read mask rows as half2 (and with 16-byte cp.async on aligned tiles) at
+    // stride mask->nb[1]; an odd row length misaligned every other row and
+    // crashed or hung the process (serve: a prefix-cache hit of 3 tokens
+    // then a 512-token chunk -> n_kv 515). Pad the mask width to 64 columns,
+    // all -inf past n_kv; K/V keep the exact length. Decode widths are
+    // already powers of two >= 16.
+    const int32_t mask_w = (m > 1) ? ((n_kv + 63) / 64) * 64 : n_kv;
+    s.mask = ggml_new_tensor_4d(s.ctx, GGML_TYPE_F16, mask_w, m, 1, 1);
 
-    s.mask_bytes = (size_t)n_kv * (size_t)m * sizeof(ggml_fp16_t);
+    s.mask_bytes = (size_t)mask_w * (size_t)m * sizeof(ggml_fp16_t);
     s.fa_bytes = (size_t)hd * (size_t)n_q * (size_t)m * sizeof(float);
     s.n_kv = n_kv;
     s.m = m;
@@ -457,7 +465,7 @@ static FaSlot * get_or_create_fa(const FaKey & key, float scale) {
 
     // Prefill: exact causal. Decode capacity slot: filled on first use.
     if (m > 1) {
-        fill_causal_mask(s.mask_dev, n_kv, m, /*base=*/n_kv - m);
+        fill_causal_mask(s.mask_dev, mask_w, m, /*base=*/n_kv - m);
         s.mask_lim = n_kv - 1;
     }
 
@@ -514,7 +522,13 @@ static FaSlot * get_or_create_fa(const FaKey & key, float scale) {
     s.out->buffer = s.buf_o; s.out->data = nullptr;
     ggml_backend_buffer_init_tensor(s.buf_perm, s.perm);
     ggml_backend_buffer_init_tensor(s.buf_o, s.out);
-    ggml_build_forward_expand(s.gf, s.out);
+    // The graph computes FA only. ggml_flash_attn_ext returns [hd, n_q, m]
+    // (ne order) = memory [m][n_q][hd], already the [m, q_dim] rows o_proj
+    // reads; callers copy fa_dev -> out with allpaka_fa_permute (an identity
+    // index map). The perm/cont nodes built above used to be the graph
+    // output, but permute(2,1,0,3) stored the result hd-major, so every
+    // prefill chunk of 32+ tokens fed o_proj scrambled attention.
+    ggml_build_forward_expand(s.gf, s.fa);
 
     auto [ins, ok] = g_fa.emplace(key, s);
     (void)ok;
@@ -823,7 +837,12 @@ extern "C" int allpaka_ggml_flash_attn(
         const bool want_gcomp = gcomp && (gcomp[0] == '1' || gcomp[0] == 't' || gcomp[0] == 'T');
         if (want_gcomp) {
             enum ggml_status stc = ggml_backend_graph_compute_async(g_be, slot->gf);
-            return stc == GGML_STATUS_SUCCESS ? 0 : -7;
+            if (stc != GGML_STATUS_SUCCESS) {
+                return -7;
+            }
+            fa_permute_out(static_cast<const float *>(slot->fa_dev), out_dev,
+                           head_dim, n_q_heads, 1, st);
+            return 0;
         }
         if (allpaka_fa_launch_direct(slot->fa) != 0) {
             return -7;
@@ -843,7 +862,12 @@ extern "C" int allpaka_ggml_flash_attn(
     slot->out->data = out_dev;
 
     enum ggml_status stc = ggml_backend_graph_compute_async(g_be, slot->gf);
-    return stc == GGML_STATUS_SUCCESS ? 0 : -7;
+    if (stc != GGML_STATUS_SUCCESS) {
+        return -7;
+    }
+    allpaka_fa_permute_launch(static_cast<const float *>(slot->fa_dev), out_dev,
+                              head_dim, n_q_heads, m, st);
+    return 0;
 }
 
 extern "C" int allpaka_hybrid_replay(

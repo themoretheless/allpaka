@@ -23,7 +23,7 @@ if errorlevel 1 exit /b 1
 
 nvcc.exe -O3 -std=c++17 -arch=sm_120a -Xcompiler "/MD /O2" ^
   -I "%LLAMA%\ggml\include" -I "%LLAMA%\ggml\src" -I "%CUDA_PATH%\include" ^
-  -c mmvq_bridge.cu -o "%OUT%\mmvq_bridge.obj"
+  -DGGML_CUDA_USE_GRAPHS -c mmvq_bridge.cu -o "%OUT%\mmvq_bridge.obj"
 if errorlevel 1 exit /b 1
 
 link.exe /nologo /DLL /OUT:"%OUT%\allpaka_ggml.dll" /IMPLIB:"%OUT%\allpaka_ggml.lib" ^

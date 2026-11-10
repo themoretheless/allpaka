@@ -1,5 +1,16 @@
 // Direct llama MMVQ entry (no ggml cgraph). Linked into allpaka_ggml.dll.
 
+// This file pokes ggml_backend_cuda_context fields (streams, cublas handles,
+// pools) by offset, so it must see the struct exactly as ggml-cuda.dll was
+// built. ggml-cuda builds with GGML_CUDA_GRAPHS=ON, which adds the
+// cuda_graphs map before `pools`; without the define here, `pools[d][0]`
+// aliased last_graph_eviction_sweep and reset_stream_helpers() called a
+// "destructor" through a timestamp - an intermittent access violation in
+// serve on the first prefill after a decode.
+#ifndef GGML_CUDA_USE_GRAPHS
+#error "build mmvq_bridge.cu with -DGGML_CUDA_USE_GRAPHS to match ggml-cuda (GGML_CUDA_GRAPHS=ON)"
+#endif
+
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
@@ -112,6 +123,14 @@ extern "C" void allpaka_peer_clear_shared(void) {
     }
     cudaStream_t & slot = g_ctx->streams[g_ctx->device][0];
     if (g_shared_stream && slot == g_peer) {
+        // reset_stream_helpers() destroys the cuBLAS handle and memory pool
+        // of stream slot 0; decode work queued on the shared stream may still
+        // be using them, so drain it first (once per prefill).
+        cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+        if (g_peer && cudaStreamIsCapturing(g_peer, &cap) == cudaSuccess
+            && cap == cudaStreamCaptureStatusNone) {
+            cudaStreamSynchronize(g_peer);
+        }
         // Prefer the parked private stream; else null -> create on demand.
         slot = g_ggml_private;
         g_ggml_private = nullptr;
