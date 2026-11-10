@@ -296,7 +296,7 @@ pub fn plan_manifest(
     use std::collections::HashMap;
     let config = crate::config::Config::load(config_path)?;
     let nodes = config.resolve_nodes()?;
-    let model = crate::load_model(model_path, 2)?;
+    let model = crate::dispatch::load_model(model_path, 2)?;
     let context = context.unwrap_or(config.defaults.context_tokens);
     let request = PlanRequest {
         context_tokens: context,
