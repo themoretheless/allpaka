@@ -89,86 +89,63 @@ pub fn set_trace_hook(hook: fn(&str)) {
     let _ = TRACE_HOOK.set(hook);
 }
 
-#[inline]
-pub(crate) fn trace_enabled() -> bool {
-    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *TRACE.get_or_init(|| std::env::var_os("ALLPAKA_TRACE").is_some())
+macro_rules! cached_env_flag {
+    ($fn_name:ident, $var:literal) => {
+        #[inline]
+        pub(crate) fn $fn_name() -> bool {
+            // Integration tests (`tests/*.rs`) compile `allpaka-model` without
+            // `cfg(test)` while toggling `ALLPAKA_*` inside the same process;
+            // keep `debug_assertions` uncached so parity tests see live env vars,
+            // and cache in `--release` so hot-path decode pays one `Relaxed` load.
+            if cfg!(debug_assertions) {
+                std::env::var_os($var).is_some()
+            } else {
+                static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                *V.get_or_init(|| std::env::var_os($var).is_some())
+            }
+        }
+    };
+    ($fn_name:ident, $var:literal, default_true) => {
+        #[inline]
+        pub(crate) fn $fn_name() -> bool {
+            let parse = || {
+                std::env::var($var)
+                    .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+                    .unwrap_or(true)
+            };
+            if cfg!(debug_assertions) {
+                parse()
+            } else {
+                static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                *V.get_or_init(parse)
+            }
+        }
+    };
 }
 
-#[inline]
-pub(crate) fn gdn_zero_enabled() -> bool {
-    static Z: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *Z.get_or_init(|| std::env::var_os("ALLPAKA_GDN_ZERO").is_some())
-}
-
-#[inline]
-pub(crate) fn cpu_attn_enabled() -> bool {
-    static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *C.get_or_init(|| std::env::var_os("ALLPAKA_CPU_ATTN").is_some())
-}
-
-#[inline]
-pub(crate) fn no_tokenbuf_enabled() -> bool {
-    static N: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *N.get_or_init(|| std::env::var_os("ALLPAKA_NO_TOKENBUF").is_some())
-}
-
-#[inline]
-pub(crate) fn no_argmax_enabled() -> bool {
-    static N: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *N.get_or_init(|| std::env::var_os("ALLPAKA_NO_ARGMAX").is_some())
-}
-
-#[inline]
-pub(crate) fn prefuse_enabled() -> bool {
-    static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *P.get_or_init(|| std::env::var("ALLPAKA_PREFUSE").map_or(true, |v| v != "0"))
-}
-
-#[inline]
-pub(crate) fn attn_zero_enabled() -> bool {
-    static Z: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *Z.get_or_init(|| std::env::var_os("ALLPAKA_ATTN_ZERO").is_some())
-}
-
-#[inline]
-pub(crate) fn moe_zero_enabled() -> bool {
-    static Z: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *Z.get_or_init(|| std::env::var_os("ALLPAKA_MOE_ZERO").is_some())
-}
-
-#[inline]
-pub(crate) fn tokenbuf_debug_enabled() -> bool {
-    static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *D.get_or_init(|| std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some())
-}
+cached_env_flag!(trace_enabled, "ALLPAKA_TRACE");
+cached_env_flag!(gdn_zero_enabled, "ALLPAKA_GDN_ZERO");
+cached_env_flag!(cpu_attn_enabled, "ALLPAKA_CPU_ATTN");
+cached_env_flag!(no_tokenbuf_enabled, "ALLPAKA_NO_TOKENBUF");
+cached_env_flag!(no_argmax_enabled, "ALLPAKA_NO_ARGMAX");
+cached_env_flag!(prefuse_enabled, "ALLPAKA_PREFUSE", default_true);
+cached_env_flag!(attn_zero_enabled, "ALLPAKA_ATTN_ZERO");
+cached_env_flag!(moe_zero_enabled, "ALLPAKA_MOE_ZERO");
+cached_env_flag!(tokenbuf_debug_enabled, "ALLPAKA_TOKENBUF_DEBUG");
+cached_env_flag!(greedy_chain_enabled, "ALLPAKA_GREEDY_CHAIN", default_true);
 
 #[inline]
 pub(crate) fn skip_host_rope_enabled() -> bool {
-    static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *S.get_or_init(|| {
+    let parse = || {
         std::env::var("ALLPAKA_SKIP_HOST_ROPE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
-    })
-}
-
-#[inline]
-pub(crate) fn greedy_chain_enabled() -> bool {
-    #[cfg(test)]
-    {
-        std::env::var("ALLPAKA_GREEDY_CHAIN")
-            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-            .unwrap_or(true)
-    }
-    #[cfg(not(test))]
-    {
-        static G: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *G.get_or_init(|| {
-            std::env::var("ALLPAKA_GREEDY_CHAIN")
-                .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-                .unwrap_or(true)
-        })
+    };
+    if cfg!(debug_assertions) {
+        parse()
+    } else {
+        static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *S.get_or_init(parse)
     }
 }
 

@@ -152,7 +152,8 @@ pub(super) fn encode_attend_from(
 
 pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
     let hd = req.head_dim;
-    if hd != ATTN_HEAD_DIM || req.rope.len() != hd / 2 {
+    let rot_dim = req.rope.len() * 2;
+    if hd != ATTN_HEAD_DIM || (rot_dim != hd && rot_dim * 2 != hd) {
         return None;
     }
     let hidden = req.x.len();
@@ -234,7 +235,7 @@ pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
             eps: req.eps,
             pos: req.pos as u32,
             has_qk_norm: req.q_norm.is_some() as u32,
-            rot_dim: hd as u32,
+            rot_dim: rot_dim as u32,
             k_base: req.k_off as u64,
             v_base: req.v_off as u64,
             has_bias: 0,
