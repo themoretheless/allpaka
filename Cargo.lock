@@ -107,9 +107,6 @@ dependencies = [
 [[package]]
 name = "allpaka-dtype"
 version = "0.1.0"
-dependencies = [
- "anyhow",
-]
 
 [[package]]
 name = "allpaka-gguf"
