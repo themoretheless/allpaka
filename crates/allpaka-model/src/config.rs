@@ -6,6 +6,7 @@
 //! norms), and both are decided here, once, from the file - not scattered
 //! through the forward pass as architecture ifs.
 
+use crate::arch::Architecture;
 use allpaka_gguf::GgufFile;
 use anyhow::{bail, Context, Result};
 
@@ -77,7 +78,7 @@ pub struct SsmConfig {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub architecture: String,
+    pub architecture: Architecture,
     pub n_layers: u32,
     /// An MTP (nextn) speculative block sits past the trunk layers
     /// (qwen35moe: blk.n_layers); the trunk is `n_layers` deep.
@@ -118,30 +119,31 @@ pub struct Config {
 
 impl Config {
     pub fn capability(&self) -> ModelCapability {
-        match self.architecture.as_str() {
+        use Architecture as A;
+        match self.architecture {
             // qwen2 (Qwen2.5 GGUF arch tag) shares the dense Neox+GQA graph with qwen3;
             // QK norms are detected from tensors, so absence on qwen2 is fine.
-            "qwen2" | "qwen3" | "qwen3moe" | "qwen35moe" => ModelCapability {
+            A::Qwen2 | A::Qwen3 | A::Qwen3Moe | A::Qwen35Moe => ModelCapability {
                 support: ModelSupport::Supported,
                 reason: "Qwen dense, MoE, and hybrid GDN kernels are implemented",
             },
-            "llama" | "mistral" => ModelCapability {
+            A::Llama | A::Mistral => ModelCapability {
                 support: ModelSupport::Supported,
                 reason: "Llama-like dense graph with adjacent-pair RoPE is implemented",
             },
-            "glm4moe" => ModelCapability {
+            A::Glm4Moe => ModelCapability {
                 support: ModelSupport::Experimental,
                 reason: "sigmoid MoE, shared experts, bias, and partial RoPE are implemented",
             },
-            "deepseek2" | "deepseek3" => ModelCapability {
+            A::DeepSeek2 | A::DeepSeek3 => ModelCapability {
                 support: ModelSupport::Unsupported,
                 reason: "MLA KV cache and attention kernels are not implemented",
             },
-            "gemma4" => ModelCapability {
+            A::Gemma4 => ModelCapability {
                 support: ModelSupport::Unsupported,
                 reason: "head_dim=512 attention kernels are not implemented",
             },
-            _ => ModelCapability {
+            A::Other(_) => ModelCapability {
                 support: ModelSupport::Unsupported,
                 reason: "architecture has no registered execution capability",
             },
@@ -205,10 +207,7 @@ impl Config {
             );
         }
 
-        let rope_style = match arch.as_str() {
-            "llama" | "mistral" => RopeStyle::Norm,
-            _ => RopeStyle::Neox,
-        };
+        let rope_style = Architecture::parse(&arch).rope_style();
 
         // GLM rotates only `rope.dimension_count` of the head_dim channels.
         let rope_dim = f
@@ -271,7 +270,7 @@ impl Config {
                 .any(|i| f.tensor(&format!("blk.{i}.attn_q_norm.weight")).is_some()),
             has_attn_bias: f.tensor("blk.0.attn_q.bias").is_some(),
             rope_dim,
-            architecture: arch,
+            architecture: Architecture::parse(&arch),
             n_heads,
             hidden,
             head_dim,
@@ -289,5 +288,68 @@ impl Config {
     /// How many query heads share one kv head under grouped-query attention.
     pub fn group_size(&self) -> usize {
         (self.n_heads / self.n_kv_heads.max(1)) as usize
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    fn config(arch: &str) -> Config {
+        Config {
+            architecture: arch.into(),
+            n_layers: 1,
+            nextn: false,
+            hidden: 8,
+            n_heads: 1,
+            n_kv_heads: 1,
+            head_dim: 8,
+            ffn_hidden: 8,
+            vocab: 8,
+            rms_eps: 1e-5,
+            rope_freq_base: 10000.0,
+            rope_style: RopeStyle::Neox,
+            rope_sections: [0; 4],
+            full_attention_interval: 0,
+            ssm: None,
+            has_qk_norm: false,
+            has_attn_bias: false,
+            rope_dim: 8,
+            moe: None,
+        }
+    }
+
+    #[test]
+    fn capability_follows_the_architecture() {
+        for arch in [
+            "qwen2",
+            "qwen3",
+            "qwen3moe",
+            "qwen35moe",
+            "llama",
+            "mistral",
+        ] {
+            assert_eq!(
+                config(arch).capability().support,
+                ModelSupport::Supported,
+                "{arch}"
+            );
+        }
+        assert_eq!(
+            config("glm4moe").capability().support,
+            ModelSupport::Experimental
+        );
+        for arch in ["deepseek2", "deepseek3", "gemma4", "phi3"] {
+            assert_eq!(
+                config(arch).capability().support,
+                ModelSupport::Unsupported,
+                "{arch}"
+            );
+        }
+        // Families the engine runs are exactly the ones with requirements.
+        for arch in ["qwen3", "qwen35moe", "llama", "glm4moe", "deepseek3"] {
+            assert!(crate::requirements::ModelRequirements::for_architecture(arch).is_some());
+        }
+        assert!(crate::requirements::ModelRequirements::for_architecture("phi3").is_none());
     }
 }

@@ -10,6 +10,7 @@
 //! cache-vs-recompute equality), then logit comparison against llama.cpp on a
 //! real model, which is the acceptance test for the whole engine milestone.
 
+pub mod arch;
 pub mod config;
 pub mod kv;
 pub mod model;
@@ -20,6 +21,7 @@ pub mod requirements;
 pub mod speculate;
 pub mod tokenizer;
 
+pub use arch::Architecture;
 pub use config::{Config, ModelCapability, ModelSupport, RopeStyle};
 pub use kv::KvCache;
 pub use model::{set_trace_hook, Model, Session};

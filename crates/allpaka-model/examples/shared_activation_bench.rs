@@ -139,7 +139,7 @@ fn main() -> Result<()> {
             "model": args[1], "pp": pp, "rounds": rounds, "warmup_rounds": 1,
             "decode_kind": if forced { "forced_full_logits" } else if greedy { "forward_greedy_n" } else { "forward" },
             "decode_context_tokens": 1, "decode_tokens": 32, "kv_format": "f16",
-            "hidden": model.config.hidden, "architecture": model.config.architecture,
+            "hidden": model.config.hidden, "architecture": model.config.architecture.as_str(),
             "decode_fast_path": fast_path,
             "phase_costs": phase_costs,
             "zero_copy": std::env::var("ALLPAKA_PREFILL_ZERO_COPY").unwrap_or_else(|_| "1".into()),

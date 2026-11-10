@@ -304,7 +304,7 @@ fn handle(
             200,
             &json!({
                 "model": model_name,
-                "architecture": context.inference.model.config.architecture,
+                "architecture": context.inference.model.config.architecture.as_str(),
                 "context_used": context.inference.chat.tokens.len(),
                 "context_capacity": context.inference.chat.session.capacity(),
                 "n_layers": context.inference.model.config.n_layers,
