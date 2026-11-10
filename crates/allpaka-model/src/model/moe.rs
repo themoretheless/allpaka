@@ -198,6 +198,10 @@ impl Ffn<'_> {
             let norm_val = *weights_norm;
             let scale_val = *weights_scale;
             allpaka_backend::thread_pool::par_for_chunks(m, threads, |_worker, start_t, end_t| {
+                // SAFETY: `routed_flat` has `m * k` entries and outlives the dispatch;
+                // par_for_chunks hands each worker a disjoint token range `[start_t, end_t)`
+                // with `end_t <= m`, so `[start_t * k, end_t * k)` is a unique, in-bounds
+                // sub-slice.
                 let dst = unsafe {
                     std::slice::from_raw_parts_mut(
                         (routed_addr as *mut (usize, f32)).add(start_t * k),
@@ -298,6 +302,9 @@ impl Ffn<'_> {
             let hits_ref = &hits_flat;
             let counts_ref = &hits_counts;
             allpaka_backend::thread_pool::par_for_chunks(m, threads, |_worker, start_t, end_t| {
+                // SAFETY: `out` has `m * hidden` floats (the only caller allocates exactly
+                // that) and outlives the dispatch; disjoint token ranges with `end_t <= m` give
+                // each worker a unique, in-bounds sub-slice.
                 let out_chunk = unsafe {
                     std::slice::from_raw_parts_mut(
                         (out_addr as *mut f32).add(start_t * hidden),

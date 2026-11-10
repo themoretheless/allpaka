@@ -39,9 +39,12 @@ struct Region {
     layout: std::alloc::Layout,
 }
 
-// The region is plain memory owned by this struct; the raw pointer is an
-// implementation detail of the alignment, not shared mutable state.
+// SAFETY: `Region` uniquely owns its allocation (freed only in Drop) and has
+// no interior mutability, so moving it to another thread moves that ownership
+// like a `Box<[u16]>` would; the raw pointer is only there for page alignment.
 unsafe impl Send for Region {}
+// SAFETY: shared access only yields `&[u16]` / `&[u8]` (the `_mut` accessors
+// take `&mut self`), so `&Region` across threads is like `&[u16]`.
 unsafe impl Sync for Region {}
 
 impl Region {
@@ -55,6 +58,8 @@ impl Region {
         let bytes = (elems * 2).div_ceil(Self::PAGE).max(1) * Self::PAGE;
         let layout =
             std::alloc::Layout::from_size_align(bytes, Self::PAGE).expect("kv cache layout");
+        // SAFETY: `layout` has a non-zero size (at least one page) and a valid
+        // power-of-two alignment, as `alloc_zeroed` requires; null is checked below.
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) } as *mut u16;
         assert!(!ptr.is_null(), "out of memory for a {bytes}-byte kv cache");
         Self {
@@ -65,24 +70,33 @@ impl Region {
     }
 
     fn as_slice(&self) -> &[u16] {
+        // SAFETY: `ptr` is a live, zero-initialised allocation of `elems * 2` bytes
+        // aligned to PAGE (so to u16) and owned by `self`, which the borrow keeps alive.
+        // The GPU may also write this memory through a wrapped SharedRegion; callers
+        // must not hold a CPU view across a backend call that writes it asynchronously.
         unsafe { std::slice::from_raw_parts(self.ptr, self.elems) }
     }
 
     fn as_mut_slice(&mut self) -> &mut [u16] {
+        // SAFETY: as `as_slice`, and `&mut self` makes this the only live view.
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.elems) }
     }
 
     fn as_bytes(&self) -> &[u8] {
+        // SAFETY: the same `elems * 2` initialised bytes viewed as u8 (align 1).
         unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.elems * 2) }
     }
 
     fn as_bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: as `as_bytes`, unique through `&mut self`.
         unsafe { std::slice::from_raw_parts_mut(self.ptr as *mut u8, self.elems * 2) }
     }
 }
 
 impl Drop for Region {
     fn drop(&mut self) {
+        // SAFETY: `ptr` came from `alloc_zeroed` with exactly this `layout` and is
+        // freed once, here; no view can outlive `self`.
         unsafe { std::alloc::dealloc(self.ptr as *mut u8, self.layout) }
     }
 }
@@ -231,6 +245,10 @@ impl SsmCache {
     pub fn slot(&self, i: usize) -> &[f32] {
         let store = self.slot_store.as_ref().expect("slots not allocated");
         let s = store.as_slice();
+        // SAFETY: the slot region is PAGE-aligned, so its u16 storage is f32-aligned,
+        // and `s.len() / 2` f32s cover exactly its `2 * s.len()` initialised bytes
+        // (zeroed at allocation, any bit pattern is a valid f32). The borrow of `self`
+        // keeps the region alive.
         let floats = unsafe { std::slice::from_raw_parts(s.as_ptr() as *const f32, s.len() / 2) };
         let n = self.total_elems();
         &floats[i * n..(i + 1) * n]
@@ -257,6 +275,10 @@ impl SsmCache {
                 allpaka_backend::gpu::download_region_range(slot_sh, slot_byte_off, dst);
             }
         }
+        // SAFETY: `slot(i)` is `n` floats inside `slot_store` and the destination is
+        // the first `n` floats of `store` (which holds `total_elems() == n` floats);
+        // the two are separate allocations, so they cannot overlap. `self.slot(i)` ends
+        // its shared borrow before `as_mut_slice` takes the unique one.
         unsafe {
             let sp = self.slot(i).as_ptr();
             let dp = self.store.as_mut_slice().as_mut_ptr() as *mut f32;
@@ -273,11 +295,14 @@ impl SsmCache {
 
     fn floats(&self) -> &[f32] {
         let s = self.store.as_slice();
+        // SAFETY: PAGE-aligned region, so f32-aligned; `s.len() / 2` f32s span its
+        // initialised bytes, and any bits are a valid f32.
         unsafe { std::slice::from_raw_parts(s.as_ptr() as *const f32, s.len() / 2) }
     }
 
     fn floats_mut(&mut self) -> &mut [f32] {
         let s = self.store.as_mut_slice();
+        // SAFETY: as `floats`, unique through `&mut self`.
         unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr() as *mut f32, s.len() / 2) }
     }
 
@@ -315,6 +340,8 @@ impl SsmCache {
         if let Some(sh) = self.shared.as_ref() {
             if sh.is_discrete() {
                 let mut out = vec![0.0f32; n];
+                // SAFETY: `out` is `n` initialised f32s, i.e. `n * 4` bytes, viewed as u8
+                // (align 1) for the download; `dst` is the only live view of `out`.
                 let dst =
                     unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, n * 4) };
                 if allpaka_backend::gpu::download_region_range(sh, 0, dst) {
@@ -353,6 +380,12 @@ impl SsmCache {
         let conv_off = slot * n_conv;
         let state_off = self.conv_elems + slot * n_state;
         let total = self.total_elems();
+        // SAFETY: `conv_off + n_conv <= conv_elems` and `state_off + n_state <=
+        // total` (the slot index is below the active-layer count the region was sized
+        // for), so both `add`s stay inside `store`; `dp` points at `slot_store`, a
+        // separate allocation. Callers may write through `dp` but must not read
+        // through the conv/state pointers after taking `&mut` views of the store
+        // (see the slot copy in `gdn.rs`).
         unsafe {
             let sp = self.store.as_slice().as_ptr() as *const f32;
             let dp = self
@@ -819,6 +852,9 @@ mod tests {
         if let Some((cp, sp, dp, conv_off, state_off, n_conv, n_state, stride)) =
             ssm.slot_write_ptrs(0)
         {
+            // SAFETY: `arm_slots(2)` sized `slot_store` for two whole-region copies,
+            // so `stride + conv_off + n_conv` and `state_off + n_state` are within it, and
+            // the sources are inside `store`; no reference to either region is live here.
             unsafe {
                 std::ptr::copy_nonoverlapping(cp, dp.add(conv_off), n_conv);
                 std::ptr::copy_nonoverlapping(sp, dp.add(state_off), n_state);

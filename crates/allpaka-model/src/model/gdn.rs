@@ -151,6 +151,12 @@ impl<'a> Model<'a> {
                 // writes via those slices is undefined behaviour under
                 // Rust's aliasing rules. Same addresses, same bytes.
                 debug_assert_eq!((conv.len(), state.len()), (ncv, nst));
+                // SAFETY: `slot_write_ptrs` returned `dp` for a slot buffer armed with one
+                // whole-region slot per chunk row (`total` floats each), so
+                // `i * total + conv_off + ncv` and `i * total + state_off + nst` are in bounds
+                // for `i < m`. `conv` / `state` are exactly `ncv` / `nst` long (asserted in debug
+                // above) and live in `store`, a different allocation, so the copies cannot
+                // overlap.
                 unsafe {
                     let slot = dp.add(i * total);
                     std::ptr::copy_nonoverlapping(conv.as_ptr(), slot.add(conv_off), ncv);

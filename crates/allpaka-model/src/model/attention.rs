@@ -446,8 +446,11 @@ mod attention_tests {
         *REGION.get_or_init(|| {
             const PAGE: usize = 16384;
             let layout = std::alloc::Layout::from_size_align(PAGE, PAGE).unwrap();
+            // SAFETY: non-zero size, power-of-two alignment; null is asserted below.
             let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
             assert!(!ptr.is_null());
+            // SAFETY: `ptr` is a zeroed PAGE-byte allocation that is never freed (it
+            // is leaked into the OnceLock on purpose), so a `'static` shared view is valid.
             let region: &'static [u8] = unsafe { std::slice::from_raw_parts(ptr, PAGE) };
             allpaka_backend::gpu::attach(region)
         })
