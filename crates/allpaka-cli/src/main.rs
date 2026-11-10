@@ -165,41 +165,7 @@ enum Command {
     },
 
     /// Paired allpaka vs llama.cpp throughput via airbug (AB/BA process pairs).
-    Airbug {
-        /// GGUF model path.
-        #[arg(value_name = "GGUF")]
-        model: PathBuf,
-        /// Prefill tokens (ALLPAKA_BENCH_PP / llama -p).
-        #[arg(long, default_value_t = 480)]
-        pp: u32,
-        /// Decode tokens (ALLPAKA_BENCH_TG / llama -n).
-        #[arg(long, default_value_t = 32)]
-        tg: u32,
-        /// Independent AB/BA process pairs.
-        #[arg(long, default_value_t = 5)]
-        repeats: u32,
-        /// Discarded warmup pairs before measurement (GPU clock settle).
-        #[arg(long, default_value_t = 1)]
-        warmup: u32,
-        /// Sleep between engines within a pair, milliseconds.
-        #[arg(long, default_value_t = 1500)]
-        cooldown_ms: u64,
-        /// Relative regression threshold percent for airbug compare.
-        #[arg(long, default_value_t = 5.0)]
-        threshold: f64,
-        /// allpaka binary (default: this executable / ALLPAKA_BIN).
-        #[arg(long)]
-        allpaka: Option<PathBuf>,
-        /// llama-bench binary (default: llama-bench / LLAMA_BENCH).
-        #[arg(long)]
-        llama_bench: Option<PathBuf>,
-        /// Fail with exit 1 if airbug reports a regression vs llama.
-        #[arg(long)]
-        check: bool,
-        /// Output directory for run.json / comparison.json / raw logs.
-        #[arg(long)]
-        out: Option<PathBuf>,
-    },
+    Airbug(AirbugArgs),
 
     /// Place several models one per memory pool, one endpoint each.
     ///
@@ -232,36 +198,7 @@ enum Command {
     },
 
     /// Serve a model over an OpenAI-compatible chat API, on our own engine.
-    Serve {
-        /// Path to a .gguf to serve; repeat --model for multi-model serving.
-        #[arg(long, required = true)]
-        model: Vec<PathBuf>,
-        /// Address to listen on.
-        #[arg(long, default_value = "127.0.0.1:8099")]
-        bind: String,
-        /// Typed runtime profile and overrides from allpaka.toml.
-        #[arg(long)]
-        config: Option<PathBuf>,
-        /// Maximum accepted connections waiting for inference.
-        #[arg(long, default_value_t = 256)]
-        max_queued: usize,
-        /// Maximum requests selected in one model-aware scheduling batch.
-        #[arg(long, default_value_t = 16)]
-        max_batch: usize,
-        /// Maximum aggregate prompt tokens in a scheduling batch.
-        #[arg(long, default_value_t = 32768)]
-        batch_context_tokens: usize,
-        /// Total resident model budget in GiB; zero means unlimited.
-        #[arg(long, default_value_t = 0)]
-        model_budget_gib: u64,
-        /// Shared weights, prefix capacity and KV/SSM admission budget; zero is unlimited.
-        /// GPU scratch and process overhead are not included yet.
-        #[arg(long, default_value_t = 0)]
-        memory_budget_mib: u64,
-        /// Prefix-cache budget in MiB.
-        #[arg(long, default_value_t = 512)]
-        prefix_cache_mib: usize,
-    },
+    Serve(ServeArgs),
 
     /// Probe a running `allpaka serve`: /health plus /stats.
     Status {
@@ -377,6 +314,78 @@ enum Command {
     },
 }
 
+// Arguments of `allpaka airbug`. No doc comment: clap would take it as the
+// subcommand's about text instead of the variant's.
+#[derive(clap::Args)]
+struct AirbugArgs {
+    /// GGUF model path.
+    #[arg(value_name = "GGUF")]
+    model: PathBuf,
+    /// Prefill tokens (ALLPAKA_BENCH_PP / llama -p).
+    #[arg(long, default_value_t = 480)]
+    pp: u32,
+    /// Decode tokens (ALLPAKA_BENCH_TG / llama -n).
+    #[arg(long, default_value_t = 32)]
+    tg: u32,
+    /// Independent AB/BA process pairs.
+    #[arg(long, default_value_t = 5)]
+    repeats: u32,
+    /// Discarded warmup pairs before measurement (GPU clock settle).
+    #[arg(long, default_value_t = 1)]
+    warmup: u32,
+    /// Sleep between engines within a pair, milliseconds.
+    #[arg(long, default_value_t = 1500)]
+    cooldown_ms: u64,
+    /// Relative regression threshold percent for airbug compare.
+    #[arg(long, default_value_t = 5.0)]
+    threshold: f64,
+    /// allpaka binary (default: this executable / ALLPAKA_BIN).
+    #[arg(long)]
+    allpaka: Option<PathBuf>,
+    /// llama-bench binary (default: llama-bench / LLAMA_BENCH).
+    #[arg(long)]
+    llama_bench: Option<PathBuf>,
+    /// Fail with exit 1 if airbug reports a regression vs llama.
+    #[arg(long)]
+    check: bool,
+    /// Output directory for run.json / comparison.json / raw logs.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+// Arguments of `allpaka serve`; see `AirbugArgs` for the missing doc comment.
+#[derive(clap::Args)]
+struct ServeArgs {
+    /// Path to a .gguf to serve; repeat --model for multi-model serving.
+    #[arg(long, required = true)]
+    model: Vec<PathBuf>,
+    /// Address to listen on.
+    #[arg(long, default_value = "127.0.0.1:8099")]
+    bind: String,
+    /// Typed runtime profile and overrides from allpaka.toml.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Maximum accepted connections waiting for inference.
+    #[arg(long, default_value_t = 256)]
+    max_queued: usize,
+    /// Maximum requests selected in one model-aware scheduling batch.
+    #[arg(long, default_value_t = 16)]
+    max_batch: usize,
+    /// Maximum aggregate prompt tokens in a scheduling batch.
+    #[arg(long, default_value_t = 32768)]
+    batch_context_tokens: usize,
+    /// Total resident model budget in GiB; zero means unlimited.
+    #[arg(long, default_value_t = 0)]
+    model_budget_gib: u64,
+    /// Shared weights, prefix capacity and KV/SSM admission budget; zero is unlimited.
+    /// GPU scratch and process overhead are not included yet.
+    #[arg(long, default_value_t = 0)]
+    memory_budget_mib: u64,
+    /// Prefix-cache budget in MiB.
+    #[arg(long, default_value_t = 512)]
+    prefix_cache_mib: usize,
+}
+
 fn main() -> Result<()> {
     if let Ok(profile) = std::env::var("ALLPAKA_PROFILE") {
         let profile: allpaka_backend::profile::RuntimeProfile = profile.parse()?;
@@ -479,7 +488,7 @@ fn main() -> Result<()> {
                 bail!("pass --serve, --connect <host:port>, --mem, or --engine <model>")
             }
         },
-        Command::Airbug {
+        Command::Airbug(AirbugArgs {
             model,
             pp,
             tg,
@@ -491,7 +500,7 @@ fn main() -> Result<()> {
             llama_bench,
             check,
             out,
-        } => airbug_llama::run(airbug_llama::Options {
+        }) => airbug_llama::run(airbug_llama::Options {
             model,
             pp,
             tg,
@@ -545,7 +554,7 @@ fn main() -> Result<()> {
             tol,
             decode,
         } => verify::run(&model, &addr, &prompt, top, tol, decode),
-        Command::Serve {
+        Command::Serve(ServeArgs {
             model,
             bind,
             config,
@@ -555,7 +564,7 @@ fn main() -> Result<()> {
             model_budget_gib,
             memory_budget_mib,
             prefix_cache_mib,
-        } => {
+        }) => {
             if config.is_none() {
                 if let Some(primary) = model.first() {
                     autotune::apply_cached(primary, None)?;
