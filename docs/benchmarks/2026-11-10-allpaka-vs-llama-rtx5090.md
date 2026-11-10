@@ -44,3 +44,27 @@ allpaka (`89f110d`, no environment variables set) and `llama-bench`
 |---|---|---|---|---|---|---|
 | Qwen2.5-7B Q4_K_M | 14 144 | 13 269 | 107% | 256.3 | 267.1 | 96% |
 | Qwen3-32B Q4_K_M | 3 391 | 3 362 | 101% | 66.9 | 69.8 | 96% |
+
+## Decode kernel work: RMSNorm, argmax, own decode attention
+
+allpaka `main` at `5c1921f`, includes:
+- the register-resident RMSNorm+Q8;
+- the 1024-thread argmax;
+- the multi-block RMSNorm;
+- the split-KV decode attention;
+- the unrolled 5120-input matvecs;
+- the qwen2 Q8-cache fix.
+
+allpaka and `llama-bench` (CUDA) took turns on the same model, 3 rounds, pp512/tg128, no environment variables set.
+
+| Round | allpaka pp | llama pp | allpaka tg | llama tg | tg ratio |
+|---|---|---|---|---|---|
+| 1 | 3 412 | 3 380 | 76.5 | 69.21 | 110.5% |
+| 2 | 3 400 | 3 369 | 76.4 | 69.66 | 109.7% |
+| 3 | 3 404 | 3 370 | 76.4 | 69.59 | 109.8% |
+
+Qwen3-32B Q4_K_M:
+- **Decode:** about 110% of llama.cpp (was 96%).
+- **Prefill:** about 101%.
+
+**Known problem:** prompts of about 1 200 tokens still give incoherent output through `serve`. This happens with `ALLPAKA_ATTN_G8=0` too, where the server crashed during prefill. Short prompts are coherent.
