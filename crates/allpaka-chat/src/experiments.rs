@@ -1,5 +1,6 @@
 //! Bounded, cancellable dataset runs using the native provider implementation.
 pub(crate) mod matrix_jobs;
+use crate::cancel::CancelToken;
 use crate::{
     evaluation::{Sample, Snapshot},
     provider,
@@ -21,7 +22,6 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::sync::oneshot;
 const MAX_RUN_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RUNS: usize = 1000;
 const MAX_CATALOG_BYTES: u64 = 128 * 1024 * 1024;
@@ -87,7 +87,7 @@ type ReservationCache = Arc<Mutex<HashMap<String, (u64, Option<std::time::System
 pub(crate) struct Manager {
     root: Arc<PathBuf>,
     writes: Arc<Mutex<()>>,
-    active: Arc<Mutex<HashMap<String, Option<oneshot::Sender<()>>>>>,
+    active: Arc<Mutex<HashMap<String, CancelToken>>>,
     notify: Arc<tokio::sync::Notify>,
     reservations: ReservationCache,
 }
@@ -998,8 +998,8 @@ impl Manager {
             }
             Ok(())
         })?;
-        let (tx, rx) = oneshot::channel();
-        active.insert(run.id.clone(), Some(tx));
+        let cancel = CancelToken::new();
+        active.insert(run.id.clone(), cancel.clone());
         let response = run.clone();
         let manager = self.clone();
         let guard = RunGuard {
@@ -1007,7 +1007,7 @@ impl Manager {
             run,
         };
         tokio::spawn(async move {
-            execute(app, p, snapshot, guard, rx).await;
+            execute(app, p, snapshot, guard, cancel).await;
         });
         Ok(response)
     }
@@ -1017,9 +1017,8 @@ impl Manager {
             .active
             .lock()
             .unwrap()
-            .get_mut(id)
-            .and_then(Option::take)
-            .is_some_and(|tx| tx.send(()).is_ok());
+            .get(id)
+            .is_some_and(CancelToken::cancel);
         Ok(json!({"cancel_requested":requested}))
     }
 }
@@ -1049,7 +1048,7 @@ async fn execute(
     p: provider::Provider,
     snapshot: Snapshot,
     mut guard: RunGuard,
-    mut cancel: oneshot::Receiver<()>,
+    cancel: CancelToken,
 ) {
     let trace = match app.observability.begin(
         &format!("experiment-{}", guard.run.id),
@@ -1216,7 +1215,7 @@ async fn execute(
     loop {
         tokio::select! {
             biased;
-            _=&mut cancel=>{guard.run.status="cancelled".into();for item in &mut guard.run.items{if item.status=="pending"{item.status="cancelled".into();}}break;},
+            _=cancel.cancelled()=>{guard.run.status="cancelled".into();for item in &mut guard.run.items{if item.status=="pending"{item.status="cancelled".into();}}break;},
             next=stream.next()=>{
                 let Some((index,item))=next else {guard.run.status=if guard.run.items.iter().all(|i|i.status=="completed"){"completed"}else{"failed"}.into();break;};
                 guard.run.items[index]=item;
@@ -1963,6 +1962,23 @@ mod tests {
         let (root, _manager, mut run) = capacity_fixture();
         run.items = vec![run.items[0].clone(); 200];
         assert!(run_reservation(&run).unwrap() < MAX_RUN_BYTES);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn cancel_is_reported_once_and_only_for_an_active_run() {
+        let (root, manager, run) = capacity_fixture();
+        manager.save(&run).unwrap();
+        assert_eq!(manager.cancel(&run.id).unwrap()["cancel_requested"], false);
+        let token = CancelToken::new();
+        manager
+            .active
+            .lock()
+            .unwrap()
+            .insert(run.id.clone(), token.clone());
+        assert_eq!(manager.cancel(&run.id).unwrap()["cancel_requested"], true);
+        assert!(token.is_cancelled());
+        assert_eq!(manager.cancel(&run.id).unwrap()["cancel_requested"], false);
+        assert!(manager.cancel("missing").is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

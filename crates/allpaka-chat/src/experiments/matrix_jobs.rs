@@ -1,6 +1,6 @@
 //! Server-owned matrix sequencing. Reservations are journalled before inference.
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::cancel::CancelToken;
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_JOBS: usize = 1000;
 const MAX_CATALOG_BYTES: usize = 16 * 1024 * 1024;
@@ -63,7 +63,7 @@ impl Job {
 #[derive(Clone)]
 pub(crate) struct Manager {
     root: Arc<PathBuf>,
-    active: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    active: Arc<Mutex<HashMap<String, CancelToken>>>,
     writes: Arc<Mutex<()>>,
 }
 fn valid_id(id: &str) -> bool {
@@ -220,14 +220,14 @@ impl Manager {
         job.status = "running".into();
         job.error = None;
         self.save(&job)?;
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = CancelToken::new();
         active.insert(job.id.clone(), stop.clone());
         let view = job.view();
         let manager = self.clone();
         tokio::spawn(async move {
             let mut guard = JobGuard { manager, job };
             if let Err(error) = execute_job(&app, &mut guard, &stop, prepared).await {
-                guard.job.status = if stop.load(Ordering::SeqCst) {
+                guard.job.status = if stop.is_cancelled() {
                     "cancelled"
                 } else {
                     "failed"
@@ -326,11 +326,11 @@ fn verify_variant_configuration(run: &Run, request: &Start, snapshot: &Snapshot)
 async fn execute_job(
     app: &crate::App,
     guard: &mut JobGuard,
-    stop: &AtomicBool,
+    stop: &CancelToken,
     prepared: Vec<(Start, Snapshot, provider::Provider)>,
 ) -> Result<()> {
     for (index, (request, snapshot, provider)) in prepared.into_iter().enumerate() {
-        if stop.load(Ordering::SeqCst) {
+        if stop.is_cancelled() {
             bail!("Matrix stopped");
         }
         let id = guard.job.run_ids[index]
@@ -377,7 +377,7 @@ async fn execute_job(
                 verify_variant(&final_run, &request, &snapshot)?;
                 break;
             }
-            if stop.load(Ordering::SeqCst) {
+            if stop.is_cancelled() {
                 app.experiments.cancel(&id)?;
             }
             tokio::select! {
@@ -385,7 +385,7 @@ async fn execute_job(
                 _ = tokio::time::sleep(Duration::from_millis(25)) => {}
             }
         }
-        if stop.load(Ordering::SeqCst) {
+        if stop.is_cancelled() {
             bail!("Matrix stopped");
         }
     }
@@ -505,7 +505,7 @@ pub(crate) async fn cancel(
             app.matrix_jobs.load(&id)?;
             let active = app.matrix_jobs.active.lock().unwrap();
             let requested = active.get(&id).is_some_and(|flag| {
-                flag.store(true, Ordering::SeqCst);
+                flag.cancel();
                 true
             });
             Ok(json!({"cancel_requested":requested}))
