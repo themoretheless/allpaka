@@ -5,5 +5,3 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Core tensor data types, quantization block geometry, and SIMD float conversions for allpaka"
 
-[dependencies]
-anyhow.workspace = true

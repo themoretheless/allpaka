@@ -5,8 +5,6 @@
 //! `allpaka-gguf`, `allpaka-mlx`, and `allpaka-backend` share a single
 //! zero-duplication foundation.
 
-use anyhow::{bail, Result};
-
 /// A tensor quantization or floating-point dtype, with block geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GgmlType {
@@ -83,17 +81,43 @@ impl GgmlType {
 
     /// Compute exact byte length required for `elements` of this dtype.
     #[inline]
-    pub fn expected_bytes(self, elements: usize) -> Result<usize> {
+    pub fn expected_bytes(self, elements: usize) -> Result<usize, DtypeError> {
         let (be, bb) = match (self.block_elements(), self.block_bytes()) {
             (Some(be), Some(bb)) => (be as usize, bb as usize),
-            _ => bail!("ggml type {self:?} is not supported"),
+            _ => return Err(DtypeError::Unsupported(self)),
         };
         if elements % be != 0 {
-            bail!("{elements} elements is not a whole number of {be}-element blocks");
+            return Err(DtypeError::PartialBlock {
+                elements,
+                block: be,
+            });
         }
         Ok(elements / be * bb)
     }
 }
+
+/// Why a tensor's element count has no byte length in its dtype.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DtypeError {
+    /// The type has no fixed block layout this crate knows.
+    Unsupported(GgmlType),
+    /// The element count does not fill whole blocks.
+    PartialBlock { elements: usize, block: usize },
+}
+
+impl std::fmt::Display for DtypeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DtypeError::Unsupported(ty) => write!(f, "ggml type {ty:?} is not supported"),
+            DtypeError::PartialBlock { elements, block } => write!(
+                f,
+                "{elements} elements is not a whole number of {block}-element blocks"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DtypeError {}
 
 /// IEEE 754 half (`f16`) to single (`f32`). Handles subnormals, infinities and NaN.
 #[inline]
@@ -404,6 +428,27 @@ pub fn dequant_mlx_q8_block_slice(block: &[u8], out: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_bytes_reports_typed_errors() {
+        assert_eq!(GgmlType::Q4K.expected_bytes(512), Ok(288));
+        assert_eq!(
+            GgmlType::Other(77).expected_bytes(256),
+            Err(DtypeError::Unsupported(GgmlType::Other(77)))
+        );
+        let partial = GgmlType::Q8_0.expected_bytes(40).unwrap_err();
+        assert_eq!(
+            partial,
+            DtypeError::PartialBlock {
+                elements: 40,
+                block: 32
+            }
+        );
+        assert_eq!(
+            partial.to_string(),
+            "40 elements is not a whole number of 32-element blocks"
+        );
+    }
 
     #[test]
     fn f16_and_bf16_simd_slices_match_scalar() {
