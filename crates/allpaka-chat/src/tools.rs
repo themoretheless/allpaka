@@ -7,42 +7,124 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-pub fn schemas(settings: &Settings, cmd_enabled: bool) -> Vec<Value> {
-    let mut list = vec![
-        schema(
-            "list_files",
-            "List one workspace directory (up to 200 entries).",
-            json!({"path":{"type":"string"}}),
-            json!(["path"]),
-        ),
-        schema(
-            "read_file",
-            "Read a UTF-8 file (up to 8 MiB) with optional inclusive 1-based start_line/end_line. Output at most 128 KiB.",
-            json!({"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}),
-            json!(["path"]),
-        ),
-        schema(
-            "set_plan",
-            "Publish/update the durable task plan. Retain milestone IDs. Goal requires current base_revision, acceptance criteria for each milestone and reported evidence for completion. Completed Goal milestones cannot be silently removed, changed or repeated.",
-            json!({"base_revision":{"type":"integer","minimum":0},"steps":{"type":"array","maxItems":30,"items":{"type":"object","properties":{"id":{"type":"string","maxLength":80},"title":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]},"acceptance":{"type":"array","maxItems":4,"items":{"type":"string"}},"evidence":{"type":"array","maxItems":4,"items":{"type":"string"}}},"required":["title","status"],"additionalProperties":false}}}),
-            json!(["steps"]),
-        ),
-    ];
-    if settings.mode == Mode::Chat {
-        list.truncate(2);
-    }
-    if matches!(settings.mode, Mode::Auto | Mode::Goal) && settings.allow_writes {
-        list.push(schema("edit_file", "Replace one exact, unique non-empty fragment in an existing UTF-8 file. Fails if absent or ambiguous. Returns the actual diff.", json!({"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}}),json!(["path","old_text","new_text"])));
-        list.push(schema("write_file", "Create or replace a UTF-8 file inside the workspace. Read existing content first. Cannot access hidden paths or leave the workspace.", json!({"path":{"type":"string"},"content":{"type":"string"}}),json!(["path","content"])));
-    }
-    if matches!(settings.mode, Mode::Auto | Mode::Goal) && cmd_enabled {
-        list.push(schema("run_command", "Run a shell command in the project root directory. Returns stdout, stderr and exit code. Timeout 30s by default (max 120s). Output truncated at 128 KiB.", json!({"command":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":120}}),json!(["command"])));
-    }
-    list.push(schema("agentgrep", "Search a context file or directory for literal text. Returns line numbers and preceding declaration hints (heuristic, not AST). Skips hidden files, symlinks and binary files. Bounded to 100 matches and 32 MiB scanned.", json!({"path":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":1000},"limit":{"type":"integer","minimum":1,"maximum":100}}),json!(["path","query"])));
-    list
+type Handler = fn(&ToolCall<'_>) -> Result<Value>;
+
+/// When a built-in tool is offered to the model.
+#[derive(Clone, Copy)]
+enum Offer {
+    /// In every mode.
+    Always,
+    /// In every mode except Chat.
+    BeyondChat,
+    /// In Auto and Goal with workspace writes enabled.
+    Writes,
+    /// In Auto and Goal with command execution unlocked.
+    Commands,
 }
-fn schema(name: &str, description: &str, properties: Value, required: Value) -> Value {
-    json!({"type":"function","function":{"name":name,"description":description,"parameters":{"type":"object","properties":properties,"required":required,"additionalProperties":false}}})
+impl Offer {
+    fn allows(self, settings: &Settings, cmd_enabled: bool) -> bool {
+        let acting = matches!(settings.mode, Mode::Auto | Mode::Goal);
+        match self {
+            Offer::Always => true,
+            Offer::BeyondChat => settings.mode != Mode::Chat,
+            Offer::Writes => acting && settings.allow_writes,
+            Offer::Commands => acting && cmd_enabled,
+        }
+    }
+}
+/// How a built-in tool is executed.
+#[derive(Clone, Copy)]
+enum Kind {
+    /// Only inspects the connected context; Swarm members get these.
+    Read(Handler),
+    /// Changes workspace files.
+    Write(Handler),
+    /// Executed by the turn runtime (plan, commands), never by execute_scoped.
+    Runtime,
+}
+/// One built-in tool: its schema, when it is offered and how it runs.
+struct Tool {
+    name: &'static str,
+    description: &'static str,
+    properties: fn() -> Value,
+    required: &'static [&'static str],
+    offer: Offer,
+    kind: Kind,
+}
+impl Tool {
+    fn schema(&self) -> Value {
+        json!({"type":"function","function":{"name":self.name,"description":self.description,"parameters":{"type":"object","properties":(self.properties)(),"required":self.required,"additionalProperties":false}}})
+    }
+}
+/// Every built-in tool, in the order its schema is offered. Adding a tool is
+/// one entry here.
+const TOOLS: &[Tool] = &[
+    Tool {
+        name: "list_files",
+        description: "List one workspace directory (up to 200 entries).",
+        properties: || json!({"path":{"type":"string"}}),
+        required: &["path"],
+        offer: Offer::Always,
+        kind: Kind::Read(list_files),
+    },
+    Tool {
+        name: "read_file",
+        description: "Read a UTF-8 file (up to 8 MiB) with optional inclusive 1-based start_line/end_line. Output at most 128 KiB.",
+        properties: || json!({"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}),
+        required: &["path"],
+        offer: Offer::Always,
+        kind: Kind::Read(read_file),
+    },
+    Tool {
+        name: "set_plan",
+        description: "Publish/update the durable task plan. Retain milestone IDs. Goal requires current base_revision, acceptance criteria for each milestone and reported evidence for completion. Completed Goal milestones cannot be silently removed, changed or repeated.",
+        properties: || json!({"base_revision":{"type":"integer","minimum":0},"steps":{"type":"array","maxItems":30,"items":{"type":"object","properties":{"id":{"type":"string","maxLength":80},"title":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]},"acceptance":{"type":"array","maxItems":4,"items":{"type":"string"}},"evidence":{"type":"array","maxItems":4,"items":{"type":"string"}}},"required":["title","status"],"additionalProperties":false}}}),
+        required: &["steps"],
+        offer: Offer::BeyondChat,
+        kind: Kind::Runtime,
+    },
+    Tool {
+        name: "edit_file",
+        description: "Replace one exact, unique non-empty fragment in an existing UTF-8 file. Fails if absent or ambiguous. Returns the actual diff.",
+        properties: || json!({"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}}),
+        required: &["path", "old_text", "new_text"],
+        offer: Offer::Writes,
+        kind: Kind::Write(edit_file),
+    },
+    Tool {
+        name: "write_file",
+        description: "Create or replace a UTF-8 file inside the workspace. Read existing content first. Cannot access hidden paths or leave the workspace.",
+        properties: || json!({"path":{"type":"string"},"content":{"type":"string"}}),
+        required: &["path", "content"],
+        offer: Offer::Writes,
+        kind: Kind::Write(write_file),
+    },
+    Tool {
+        name: "run_command",
+        description: "Run a shell command in the project root directory. Returns stdout, stderr and exit code. Timeout 30s by default (max 120s). Output truncated at 128 KiB.",
+        properties: || json!({"command":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":120}}),
+        required: &["command"],
+        offer: Offer::Commands,
+        kind: Kind::Runtime,
+    },
+    Tool {
+        name: "agentgrep",
+        description: "Search a context file or directory for literal text. Returns line numbers and preceding declaration hints (heuristic, not AST). Skips hidden files, symlinks and binary files. Bounded to 100 matches and 32 MiB scanned.",
+        properties: || json!({"path":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":1000},"limit":{"type":"integer","minimum":1,"maximum":100}}),
+        required: &["path", "query"],
+        offer: Offer::Always,
+        kind: Kind::Read(agentgrep),
+    },
+];
+fn tool(name: &str) -> Option<&'static Tool> {
+    TOOLS.iter().find(|tool| tool.name == name)
+}
+pub fn schemas(settings: &Settings, cmd_enabled: bool) -> Vec<Value> {
+    TOOLS
+        .iter()
+        .filter(|tool| tool.offer.allows(settings, cmd_enabled))
+        .map(Tool::schema)
+        .collect()
 }
 pub(crate) fn resolve(root: &Path, path: &str, write: bool) -> Result<PathBuf> {
     let relative = Path::new(path);
@@ -134,20 +216,16 @@ pub(crate) fn execute_scoped(
     args: &Value,
     excluded: Option<&Path>,
 ) -> Result<Value> {
-    let call = ToolCall {
+    let run = match tool(name).map(|tool| tool.kind) {
+        Some(Kind::Read(run) | Kind::Write(run)) => run,
+        Some(Kind::Runtime) | None => bail!("Unknown tool: {name}"),
+    };
+    run(&ToolCall {
         root,
         settings,
         args,
         excluded,
-    };
-    match name {
-        "agentgrep" => agentgrep(&call),
-        "list_files" => list_files(&call),
-        "read_file" => read_file(&call),
-        "edit_file" => edit_file(&call),
-        "write_file" => write_file(&call),
-        _ => bail!("Unknown tool: {name}"),
-    }
+    })
 }
 /// What a built-in tool runs against: the resolved workspace root, the
 /// turn's settings, the call's arguments and a directory hidden from search.
@@ -276,11 +354,11 @@ fn agentgrep(call: &ToolCall<'_>) -> Result<Value> {
     crate::code_search::search(call.root, call.args, call.excluded)
 }
 pub fn writes(name: &str) -> bool {
-    matches!(name, "write_file" | "edit_file")
+    tool(name).is_some_and(|tool| matches!(tool.kind, Kind::Write(_)))
 }
 /// Tools that only inspect the connected context. Swarm members get these.
 pub fn reads(name: &str) -> bool {
-    matches!(name, "list_files" | "read_file" | "agentgrep")
+    tool(name).is_some_and(|tool| matches!(tool.kind, Kind::Read(_)))
 }
 fn line_arg(args: &Value, key: &str) -> Result<Option<usize>> {
     match args.get(key) {
@@ -577,5 +655,70 @@ mod tests {
         }
         assert!(!root.join(".hidden").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+}
+#[cfg(test)]
+mod registry {
+    use super::*;
+    fn offered(mode: &str, allow_writes: bool, cmd_enabled: bool) -> Vec<String> {
+        let settings: Settings = serde_json::from_value(json!({"provider":"p","model":"m","project_id":"x","mode":mode,"allow_writes":allow_writes})).unwrap();
+        schemas(&settings, cmd_enabled)
+            .iter()
+            .map(|schema| schema["function"]["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    #[test]
+    fn offers_tools_by_mode_in_a_stable_order() {
+        let read_only = ["list_files", "read_file", "agentgrep"];
+        assert_eq!(offered("chat", true, true), read_only);
+        assert_eq!(
+            offered("plan", true, true),
+            ["list_files", "read_file", "set_plan", "agentgrep"]
+        );
+        assert_eq!(
+            offered("swarm", true, true),
+            ["list_files", "read_file", "set_plan", "agentgrep"]
+        );
+        assert_eq!(
+            offered("auto", false, false),
+            ["list_files", "read_file", "set_plan", "agentgrep"]
+        );
+        assert_eq!(
+            offered("goal", true, true),
+            [
+                "list_files",
+                "read_file",
+                "set_plan",
+                "edit_file",
+                "write_file",
+                "run_command",
+                "agentgrep"
+            ]
+        );
+    }
+    #[test]
+    fn runtime_tools_are_not_executed_here_and_access_follows_the_table() {
+        let mut names: Vec<_> = TOOLS.iter().map(|tool| tool.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), TOOLS.len(), "tool names must be unique");
+        let root = std::env::temp_dir();
+        let settings: Settings = serde_json::from_value(
+            json!({"provider":"p","model":"m","project_id":"x","mode":"goal","allow_writes":true}),
+        )
+        .unwrap();
+        for name in ["set_plan", "run_command", "missing"] {
+            let error = execute(&root, &settings, name, &json!({})).unwrap_err();
+            assert_eq!(error.to_string(), format!("Unknown tool: {name}"));
+        }
+        for name in ["list_files", "read_file", "agentgrep"] {
+            assert!(reads(name) && !writes(name), "{name}");
+        }
+        for name in ["edit_file", "write_file"] {
+            assert!(writes(name) && !reads(name), "{name}");
+        }
+        for name in ["set_plan", "run_command", "missing"] {
+            assert!(!reads(name) && !writes(name), "{name}");
+        }
     }
 }
