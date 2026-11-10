@@ -839,18 +839,19 @@ pub fn list_revisions(data: &std::path::Path, project_id: &str) -> Result<Vec<Re
     list.truncate(200);
     Ok(list)
 }
+fn validate_active(a: &Active) -> Result<()> {
+    if valid_hash(&a.revision) {
+        Ok(())
+    } else {
+        bail!("Invalid harness revision")
+    }
+}
 fn load_active(data: &std::path::Path) -> Result<Vec<Active>> {
     crate::state_file::load_list(
         data.join("harness").as_path(),
         "active",
         "harness",
-        |a: &Active| {
-            if valid_hash(&a.revision) {
-                Ok(())
-            } else {
-                bail!("Invalid harness revision")
-            }
-        },
+        validate_active,
     )
 }
 pub fn active_revision(data: &std::path::Path, project_id: &str) -> Result<Option<Revision>> {
@@ -875,15 +876,22 @@ pub fn activate(data: &std::path::Path, project_id: &str, revision: Option<&str>
         }
     }
     std::fs::create_dir_all(data.join("harness"))?;
-    let mut list = load_active(data)?;
-    list.retain(|a| a.project_id != project_id);
-    if let Some(id) = revision {
-        list.push(Active {
-            project_id: project_id.into(),
-            revision: id.into(),
-        });
-    }
-    crate::state_file::save_list(data.join("harness").as_path(), "active", &list)
+    crate::state_file::update_list(
+        data.join("harness").as_path(),
+        "active",
+        "harness",
+        validate_active,
+        |list| {
+            list.retain(|a| a.project_id != project_id);
+            if let Some(id) = revision {
+                list.push(Active {
+                    project_id: project_id.into(),
+                    revision: id.into(),
+                });
+            }
+            Ok(())
+        },
+    )
 }
 
 // ---- HTTP ------------------------------------------------------------------

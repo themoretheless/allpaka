@@ -1042,12 +1042,14 @@ pub(crate) async fn save_provider(
             "This provider ID is reserved",
         ));
     }
-    let mut list = load_custom_providers(app.data.as_path()).map_err(crate::internal)?;
-    match list.iter().position(|p| p.id == candidate.id) {
-        Some(i) => list[i] = candidate.clone(),
-        None => list.push(candidate.clone()),
-    }
-    save_custom_providers(app.data.as_path(), &list).map_err(crate::internal)?;
+    update_custom_providers(app.data.as_path(), |list| {
+        match list.iter().position(|p| p.id == candidate.id) {
+            Some(i) => list[i] = candidate.clone(),
+            None => list.push(candidate.clone()),
+        }
+        Ok(())
+    })
+    .map_err(crate::internal)?;
     let mut providers = app.providers.lock().unwrap();
     let old = providers
         .iter()
@@ -1074,12 +1076,15 @@ pub(crate) async fn delete_provider(
             "Built-in providers cannot be removed",
         ));
     }
-    let mut list = load_custom_providers(app.data.as_path()).map_err(crate::internal)?;
-    if !list.iter().any(|p| p.id == id) {
+    let found = update_custom_providers(app.data.as_path(), |list| {
+        let before = list.len();
+        list.retain(|p| p.id != id);
+        Ok(list.len() != before)
+    })
+    .map_err(crate::internal)?;
+    if !found {
         return Err(error(StatusCode::NOT_FOUND, "Custom provider not found"));
     }
-    list.retain(|p| p.id != id);
-    save_custom_providers(app.data.as_path(), &list).map_err(crate::internal)?;
     if credentials::AVAILABLE {
         // Remove any persisted system-credential secret for this provider id.
         let _ = credentials::Store::new(app.data.as_path()).update(
@@ -1148,8 +1153,17 @@ pub(crate) fn load_custom_providers(data: &std::path::Path) -> Result<Vec<Custom
         validate_custom_provider(p)
     })
 }
-pub(crate) fn save_custom_providers(data: &std::path::Path, list: &[CustomProvider]) -> Result<()> {
-    state_file::save_list(data, "custom-providers", list)
+fn update_custom_providers<R>(
+    data: &std::path::Path,
+    change: impl FnOnce(&mut Vec<CustomProvider>) -> Result<R>,
+) -> Result<R> {
+    state_file::update_list(
+        data,
+        "custom-providers",
+        "custom provider",
+        validate_custom_provider,
+        change,
+    )
 }
 pub(crate) fn custom_to_provider(p: &CustomProvider) -> Provider {
     Provider {
