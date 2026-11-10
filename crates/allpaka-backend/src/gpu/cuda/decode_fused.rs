@@ -305,15 +305,13 @@ pub(super) fn decode_token_one_fused(
             capturing_whole,
             capturing_hybrid,
             use_qk_rope_table,
+            ggml_decode: crate::gpu::cuda::ggml::enabled()
+                && crate::runtime::get().cuda_ggml_decode,
             graph_flags,
         };
 
         if capturing_whole {
-            gpu.decode_graph = None;
-            gpu.decode_fa_graphs = None;
-            gpu.decode_fa_attn = None;
-            gpu.decode_fa_kv_offs = None;
-            gpu.decode_fa_execs = None;
+            gpu.clear_decode_graphs();
             // Abort a stale capture left by a prior failed attempt.
             if let Ok(status) = stream.capture_status() {
                 use cudarc::driver::sys::CUstreamCaptureStatus::*;
@@ -366,11 +364,7 @@ pub(super) fn decode_token_one_fused(
                 return ctx.finish_token(gpu, t0, (n_layers * 2 + 1) as u64);
             }
             // Key mismatch or empty: fall through to segment capture.
-            gpu.decode_fa_graphs = None;
-            gpu.decode_fa_attn = None;
-            gpu.decode_fa_kv_offs = None;
-            gpu.decode_fa_execs = None;
-            gpu.decode_graph = None;
+            gpu.clear_decode_graphs();
         }
 
         // Always end_capture on exit if we began — leave the stream clean even
@@ -392,8 +386,6 @@ pub(super) fn decode_token_one_fused(
             active: capturing,
             flags: graph_flags,
         };
-
-        // RMSNorm + NeoX RoPE + store K into f16 cache (skips a separate store launch).
 
         let mut hybrid = HybridCapture::new(capturing_hybrid, n_layers);
 
@@ -620,11 +612,7 @@ fn refresh_layer_norms(
         }
     }
     gpu.decode_norms_key = graph_key;
-    gpu.decode_graph = None;
-    gpu.decode_fa_graphs = None;
-    gpu.decode_fa_attn = None;
-    gpu.decode_fa_kv_offs = None;
-    gpu.decode_fa_execs = None;
+    gpu.clear_decode_graphs();
     gpu.decode_graph_key = 0;
     Some(())
 }
@@ -647,10 +635,24 @@ struct FusedCtx<'a> {
     capturing_whole: bool,
     capturing_hybrid: bool,
     use_qk_rope_table: bool,
+    /// llama MMVQ for decode matvecs (`ALLPAKA_GGML_DECODE`); disables our fusions.
+    ggml_decode: bool,
     graph_flags: CUgraphInstantiate_flags,
 }
 
 impl FusedCtx<'_> {
+    /// Flash-attention geometry of this decode token (one query row at `pos`).
+    fn fa_shape(&self) -> FaShape {
+        FaShape {
+            head_dim: self.plan.hd,
+            n_q_heads: self.req.n_heads,
+            n_kv_heads: self.req.n_kv_heads.max(1),
+            base: self.pos,
+            kv_dim: self.req.kv_dim,
+            scale: self.req.scale,
+        }
+    }
+
     fn launch_rms_into(
         &self,
         gpu: &mut CudaGpu,
@@ -1188,7 +1190,6 @@ impl FusedCtx<'_> {
         let FusedCtx {
             req,
             stream,
-            pos,
             ybase,
             capturing_whole,
             plan:
@@ -1228,14 +1229,7 @@ impl FusedCtx<'_> {
                 v: v_dev,
                 out: op,
                 m: 1,
-                shape: FaShape {
-                    head_dim: hd,
-                    n_q_heads: req.n_heads,
-                    n_kv_heads: req.n_kv_heads.max(1),
-                    base: pos,
-                    kv_dim: req.kv_dim,
-                    scale: req.scale,
-                },
+                shape: self.fa_shape(),
                 d_pos: {
                     let (p, g) = DevicePtr::device_ptr(&gpu.d_pos, stream);
                     drop(g);
@@ -1323,12 +1317,10 @@ impl FusedCtx<'_> {
         let FusedCtx {
             req,
             stream,
-            pos,
             n_layers,
             ybase,
             plan:
                 FusedPlan {
-                    hd,
                     q_at,
                     attn_at,
                     graph_key,
@@ -1367,14 +1359,7 @@ impl FusedCtx<'_> {
                                 cache_base: cache_p,
                                 k_off: k_offs,
                                 v_off: v_offs,
-                                shape: FaShape {
-                                    head_dim: hd,
-                                    n_q_heads: req.n_heads,
-                                    n_kv_heads: req.n_kv_heads.max(1),
-                                    base: pos,
-                                    kv_dim: req.kv_dim,
-                                    scale: req.scale,
-                                },
+                                shape: self.fa_shape(),
                                 d_pos: d_pos_p,
                             },
                         )
@@ -1426,14 +1411,7 @@ impl FusedCtx<'_> {
                                     v: v_dev,
                                     out: op,
                                     m: 1,
-                                    shape: FaShape {
-                                        head_dim: hd,
-                                        n_q_heads: req.n_heads,
-                                        n_kv_heads: req.n_kv_heads.max(1),
-                                        base: pos,
-                                        kv_dim: req.kv_dim,
-                                        scale: req.scale,
-                                    },
+                                    shape: self.fa_shape(),
                                     d_pos: Some(d_pos_p),
                                 }) {
                                     ok = false;
@@ -1519,6 +1497,7 @@ impl FusedCtx<'_> {
         launches: &mut u64,
     ) -> Option<(usize, u64)> {
         let FusedCtx {
+            ggml_decode,
             req,
             ybase,
             use_qk_rope_table,
@@ -1553,8 +1532,6 @@ impl FusedCtx<'_> {
         let (wk_c, wk_o) = resolve_w(gpu, layer.wk.1)?;
         let (wv_c, wv_o) = resolve_w(gpu, layer.wv.1)?;
         let (wo_c, wo_o) = resolve_w(gpu, layer.wo.1)?;
-        let ggml_decode =
-            crate::gpu::cuda::ggml::enabled() && crate::runtime::get().cuda_ggml_decode;
         // Fused QKV: Q4/Q4/Q4 or Q4_K_M Q4/Q4/Q6 (V often Q6_K).
         // Decode: write V straight into f16 KV cache when V has no bias
         // (bias must land in arena first, then store_kv).
@@ -1779,13 +1756,10 @@ impl FusedCtx<'_> {
         let FusedCtx {
             req,
             stream,
-            pos,
             ybase,
             capturing_hybrid,
             graph_flags,
-            plan: FusedPlan {
-                hd, q_at, attn_at, ..
-            },
+            plan: FusedPlan { q_at, attn_at, .. },
             ..
         } = *self;
         if capturing_hybrid {
@@ -1841,14 +1815,7 @@ impl FusedCtx<'_> {
                         v: cache_p + (layer.v_off as u64) * 2,
                         out: op,
                         m: 1,
-                        shape: FaShape {
-                            head_dim: hd,
-                            n_q_heads: req.n_heads,
-                            n_kv_heads: req.n_kv_heads.max(1),
-                            base: pos,
-                            kv_dim: req.kv_dim,
-                            scale: req.scale,
-                        },
+                        shape: self.fa_shape(),
                         d_pos: Some(d_pos_p),
                     });
                     match (fa_ok, stream.end_capture(graph_flags)) {
@@ -1909,6 +1876,7 @@ impl FusedCtx<'_> {
         launches: &mut u64,
     ) -> Option<()> {
         let FusedCtx {
+            ggml_decode,
             ybase,
             plan:
                 FusedPlan {
@@ -1927,8 +1895,6 @@ impl FusedCtx<'_> {
         } = *self;
         let layer_base = norms_base + li * per_layer_norms;
         let ffn_norm_at = layer_base + hidden;
-        let ggml_decode =
-            crate::gpu::cuda::ggml::enabled() && crate::runtime::get().cuda_ggml_decode;
         launch_matvec_y_ptr(
             gpu,
             DevWeight {
@@ -2117,7 +2083,7 @@ impl FusedCtx<'_> {
             },
         )?;
         *launches += 2;
-        if crate::gpu::cuda::ggml::enabled() && crate::runtime::get().cuda_ggml_decode {
+        if self.ggml_decode {
             crate::gpu::cuda::ggml::prepare_for_cudarc();
         }
         Some(())

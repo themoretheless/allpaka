@@ -77,11 +77,7 @@ pub fn set_rope_inv_freq(inv_freq: &[f32]) -> bool {
             gpu.stream.memcpy_htod(inv_freq, buf).ok()?;
         }
         // Rope inputs changed — drop graphs.
-        gpu.decode_graph = None;
-        gpu.decode_fa_graphs = None;
-        gpu.decode_fa_attn = None;
-        gpu.decode_fa_kv_offs = None;
-        gpu.decode_fa_execs = None;
+        gpu.clear_decode_graphs();
         gpu.decode_graph_key = 0;
         Some(true)
     })

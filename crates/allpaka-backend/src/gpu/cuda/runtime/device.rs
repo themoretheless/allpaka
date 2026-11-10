@@ -500,13 +500,19 @@ impl CudaGpu {
 
     /// Forget captured decode graphs and the keys that select them.
     pub fn drop_graphs(&mut self) {
+        self.clear_decode_graphs();
+        self.decode_graph_key = 0;
+        self.decode_norms_key = 0;
+    }
+
+    /// Drop every captured decode graph (whole-token, hybrid segments, FA
+    /// graphs and their KV offsets); the selecting keys are left to the caller.
+    pub fn clear_decode_graphs(&mut self) {
         self.decode_graph = None;
         self.decode_fa_graphs = None;
         self.decode_fa_attn = None;
-        self.decode_fa_execs = None;
         self.decode_fa_kv_offs = None;
-        self.decode_graph_key = 0;
-        self.decode_norms_key = 0;
+        self.decode_fa_execs = None;
     }
 
     pub fn add_mapping(&mut self, mapping: &[u8]) -> bool {
