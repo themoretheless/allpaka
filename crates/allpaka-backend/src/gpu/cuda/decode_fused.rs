@@ -3,6 +3,201 @@
 
 use super::*;
 
+/// Shapes, arena layout and graph mode of one fused decode token, derived
+/// from the request alone before the GPU is touched.
+#[derive(Clone, Copy, Debug)]
+struct FusedPlan {
+    // Model shapes.
+    hidden: usize,
+    hd: usize,
+    q_dim: usize,
+    kv: usize,
+    group: usize,
+    rot_dim: usize,
+    rope_pairs: usize,
+    ffn_dim: usize,
+    vocab: usize,
+    // `y_arena` offsets (f32 elements): activations.
+    x_at: usize,
+    h_at: usize,
+    q_at: usize,
+    k_at: usize,
+    v_at: usize,
+    attn_at: usize,
+    gate_at: usize,
+    up_at: usize,
+    out_logits_at: usize,
+    y_elems: usize,
+    // `x_arena` offsets (f32 elements): rope tables, output norm, then
+    // per layer attn_norm[H], ffn_norm[H], q_norm[hd], k_norm[hd] and,
+    // when any layer has attn bias, q_bias[q_dim], k_bias[kv], v_bias[kv].
+    has_attn_bias: bool,
+    rope_q_at: usize,
+    rope_k_at: usize,
+    out_norm_at: usize,
+    norms_base: usize,
+    per_layer_norms: usize,
+    x_elems: usize,
+    /// Identity of everything a captured graph bakes in; a change re-captures.
+    graph_key: u64,
+    // Attention / graph mode, from the runtime policy.
+    use_fa: bool,
+    fa_inline: bool,
+    native_shallow: bool,
+    hybrid_fa: bool,
+    whole_graph: bool,
+}
+
+impl FusedPlan {
+    /// `None` when the request is not a uniformly shaped dense stack.
+    fn new(req: &TokenReq, x_in: &[f32], rope_in: &[[f32; 2]], pos: usize) -> Option<Self> {
+        let hidden = if x_in.is_empty() {
+            req.embd?.2
+        } else {
+            x_in.len()
+        };
+        let hd = req.head_dim;
+        let q_dim = req.n_heads * hd;
+        let kv = req.n_kv_heads * hd;
+        let group = req.n_heads / req.n_kv_heads.max(1);
+        let rot_dim = req.rot_dim.min(hd);
+        let rope_pairs = rot_dim / 2;
+        let use_freq_rope_host = rope_in.is_empty() && has_device_rope_freq();
+        if !use_freq_rope_host && rope_in.len() < rope_pairs {
+            return None;
+        }
+        let mut ffn_dim = 0usize;
+        let mut wq_max = q_dim;
+        for layer in req.layers {
+            if layer.wq.2 != q_dim || layer.wk.2 != kv || layer.wv.2 != kv || layer.wo.2 != hidden {
+                return None;
+            }
+            wq_max = wq_max.max(layer.wq.2);
+            if let TokenFfn::Dense { gate, up, down } = &layer.ffn {
+                if gate.2 != up.2 || down.2 != hidden {
+                    return None;
+                }
+                ffn_dim = ffn_dim.max(gate.2);
+            } else {
+                return None;
+            }
+        }
+        let vocab = req.output.2;
+
+        // Arena layout (f32 elems), Metal-style dense subset.
+        let x_at = 0usize;
+        let delta_at = x_at + align64(hidden);
+        let h_at = delta_at + align64(hidden);
+        let q_at = h_at + align64(hidden);
+        let k_at = q_at + align64(wq_max);
+        let v_at = k_at + align64(kv);
+        let attn_at = v_at + align64(kv);
+        let gate_at = attn_at + align64(q_dim);
+        let up_at = gate_at + align64(ffn_dim);
+        let out_logits_at = up_at + align64(ffn_dim);
+        let amax_at = out_logits_at + align64(vocab);
+        let y_elems = amax_at + align64(2);
+
+        // x_arena: rope + output norm + per-layer norms (stable for CUDA graph).
+        // Per layer: attn_norm[H], ffn_norm[H], q_norm[hd], k_norm[hd],
+        // and when any layer has attn bias: q_bias[q_dim], k_bias[kv], v_bias[kv].
+        let has_attn_bias = req.layers.iter().any(|l| l.q_bias.is_some());
+        let rope_q_at = 0usize;
+        let rope_k_at = rope_q_at + req.n_heads * rope_pairs * 2;
+        let out_norm_at = rope_k_at + req.n_kv_heads * rope_pairs * 2;
+        let norms_base = out_norm_at + hidden;
+        let bias_stride = if has_attn_bias { q_dim + 2 * kv } else { 0 };
+        let per_layer_norms = 2 * hidden + 2 * hd + bias_stride;
+        let x_elems = norms_base + req.layers.len() * per_layer_norms;
+
+        let graph_key = {
+            let mut h = 0xcbf29ce484222325u64;
+            // Include FA pow2 KV bucket so hybrid FA graphs invalidate on resize.
+            let mut fa_bucket = 256u64;
+            let need = (pos as u64).saturating_add(1);
+            while fa_bucket < need {
+                fa_bucket *= 2;
+            }
+            let cache_id = req.cache as *const SharedRegion as usize as u64;
+            let ssm_id = req
+                .ssm
+                .map_or(0u64, |s| s as *const SharedRegion as usize as u64);
+            let w0_id = req
+                .layers
+                .first()
+                .map_or(0u64, |l| l.wq.1.as_ptr() as usize as u64);
+            let out_id = req.output.1.as_ptr() as usize as u64;
+            for &v in &[
+                req.layers.len() as u64,
+                hidden as u64,
+                q_dim as u64,
+                kv as u64,
+                vocab as u64,
+                ffn_dim as u64,
+                req.kv_dim as u64,
+                hd as u64,
+                fa_bucket,
+                cache_id,
+                ssm_id,
+                w0_id,
+                out_id,
+            ] {
+                h ^= v;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h
+        };
+        // Opt-in: ALLPAKA_CUDA_GRAPH=1. With ggml FA, default is hybrid segments
+        // around attend. ALLPAKA_FA_INLINE=1 captures FA into one whole-token graph
+        // (direct fattn is stream-capturable). Without FA, one whole-token graph.
+        // Drain ggml *before* capture — sync during capture corrupts the graph.
+        let use_graph = crate::runtime::get().cuda_graph;
+        let use_fa = crate::gpu::cuda::ggml::enabled() && !crate::runtime::get().cuda_no_fa;
+        let fa_inline = use_fa && crate::runtime::get().cuda_fa_inline; // default on with ggml FA + graphs
+                                                                        // Shallow-ctx whole graph: skip FA (pads to ≥256) and use native dpos attend.
+                                                                        // Opt-in only — default FA wins tg on 5090 (native-auto regressed ~66.4→64.4).
+        let native_shallow = crate::runtime::get().cuda_native_attend;
+        let fa_inline = fa_inline && !native_shallow;
+        let hybrid_fa = use_graph && use_fa && !fa_inline && !native_shallow;
+        let whole_graph = use_graph && (!use_fa || fa_inline || native_shallow);
+
+        Some(Self {
+            hidden,
+            hd,
+            q_dim,
+            kv,
+            group,
+            rot_dim,
+            rope_pairs,
+            ffn_dim,
+            vocab,
+            x_at,
+            h_at,
+            q_at,
+            k_at,
+            v_at,
+            attn_at,
+            gate_at,
+            up_at,
+            out_logits_at,
+            y_elems,
+            has_attn_bias,
+            rope_q_at,
+            rope_k_at,
+            out_norm_at,
+            norms_base,
+            per_layer_norms,
+            x_elems,
+            graph_key,
+            use_fa,
+            fa_inline,
+            native_shallow,
+            hybrid_fa,
+            whole_graph,
+        })
+    }
+}
+
 /// Whole-token dense decode on one stream: activations stay in `y_arena`, one sync.
 pub(super) fn decode_token_one_fused(
     req: &TokenReq,
@@ -10,123 +205,48 @@ pub(super) fn decode_token_one_fused(
     rope_in: &[[f32; 2]],
     pos: usize,
 ) -> Option<TokenOut> {
-    let hidden = if x_in.is_empty() {
-        req.embd?.2
-    } else {
-        x_in.len()
-    };
-    let hd = req.head_dim;
-    let q_dim = req.n_heads * hd;
-    let kv = req.n_kv_heads * hd;
-    let group = req.n_heads / req.n_kv_heads.max(1);
-    let rot_dim = req.rot_dim.min(hd);
-    let rope_pairs = rot_dim / 2;
-    let use_freq_rope_host = rope_in.is_empty() && has_device_rope_freq();
-    if !use_freq_rope_host && rope_in.len() < rope_pairs {
-        return None;
-    }
+    let plan = FusedPlan::new(req, x_in, rope_in, pos)?;
+    let FusedPlan {
+        hidden,
+        hd,
+        q_dim,
+        kv,
+        group,
+        rot_dim,
+        rope_pairs,
+        ffn_dim,
+        vocab,
+        x_at,
+        h_at,
+        q_at,
+        k_at,
+        v_at,
+        attn_at,
+        gate_at,
+        up_at,
+        out_logits_at,
+        y_elems,
+        has_attn_bias,
+        rope_q_at,
+        rope_k_at,
+        out_norm_at,
+        norms_base,
+        per_layer_norms,
+        x_elems,
+        graph_key,
+        use_fa,
+        fa_inline,
+        native_shallow,
+        hybrid_fa,
+        whole_graph,
+    } = plan;
     let rope = if rope_in.len() >= rope_pairs {
         &rope_in[..rope_pairs]
     } else {
         &[][..]
     };
 
-    let mut ffn_dim = 0usize;
-    let mut wq_max = q_dim;
-    for layer in req.layers {
-        if layer.wq.2 != q_dim || layer.wk.2 != kv || layer.wv.2 != kv || layer.wo.2 != hidden {
-            return None;
-        }
-        wq_max = wq_max.max(layer.wq.2);
-        if let TokenFfn::Dense { gate, up, down } = &layer.ffn {
-            if gate.2 != up.2 || down.2 != hidden {
-                return None;
-            }
-            ffn_dim = ffn_dim.max(gate.2);
-        } else {
-            return None;
-        }
-    }
-    let vocab = req.output.2;
-
-    // Arena layout (f32 elems), Metal-style dense subset.
-    let x_at = 0usize;
-    let delta_at = x_at + align64(hidden);
-    let h_at = delta_at + align64(hidden);
-    let q_at = h_at + align64(hidden);
-    let k_at = q_at + align64(wq_max);
-    let v_at = k_at + align64(kv);
-    let attn_at = v_at + align64(kv);
-    let gate_at = attn_at + align64(q_dim);
-    let up_at = gate_at + align64(ffn_dim);
-    let out_logits_at = up_at + align64(ffn_dim);
-    let amax_at = out_logits_at + align64(vocab);
-    let y_elems = amax_at + align64(2);
-
-    // x_arena: rope + output norm + per-layer norms (stable for CUDA graph).
-    // Per layer: attn_norm[H], ffn_norm[H], q_norm[hd], k_norm[hd],
-    // and when any layer has attn bias: q_bias[q_dim], k_bias[kv], v_bias[kv].
-    let has_attn_bias = req.layers.iter().any(|l| l.q_bias.is_some());
-    let rope_q_at = 0usize;
-    let rope_k_at = rope_q_at + req.n_heads * rope_pairs * 2;
-    let out_norm_at = rope_k_at + req.n_kv_heads * rope_pairs * 2;
-    let norms_base = out_norm_at + hidden;
-    let bias_stride = if has_attn_bias { q_dim + 2 * kv } else { 0 };
-    let per_layer_norms = 2 * hidden + 2 * hd + bias_stride;
-    let x_elems = norms_base + req.layers.len() * per_layer_norms;
-
     let out_norm = norm_f32_bytes(req.output_norm, hidden)?;
-
-    let graph_key = {
-        let mut h = 0xcbf29ce484222325u64;
-        // Include FA pow2 KV bucket so hybrid FA graphs invalidate on resize.
-        let mut fa_bucket = 256u64;
-        let need = (pos as u64).saturating_add(1);
-        while fa_bucket < need {
-            fa_bucket *= 2;
-        }
-        let cache_id = req.cache as *const SharedRegion as usize as u64;
-        let ssm_id = req
-            .ssm
-            .map_or(0u64, |s| s as *const SharedRegion as usize as u64);
-        let w0_id = req
-            .layers
-            .first()
-            .map_or(0u64, |l| l.wq.1.as_ptr() as usize as u64);
-        let out_id = req.output.1.as_ptr() as usize as u64;
-        for &v in &[
-            req.layers.len() as u64,
-            hidden as u64,
-            q_dim as u64,
-            kv as u64,
-            vocab as u64,
-            ffn_dim as u64,
-            req.kv_dim as u64,
-            hd as u64,
-            fa_bucket,
-            cache_id,
-            ssm_id,
-            w0_id,
-            out_id,
-        ] {
-            h ^= v;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        h
-    };
-    // Opt-in: ALLPAKA_CUDA_GRAPH=1. With ggml FA, default is hybrid segments
-    // around attend. ALLPAKA_FA_INLINE=1 captures FA into one whole-token graph
-    // (direct fattn is stream-capturable). Without FA, one whole-token graph.
-    // Drain ggml *before* capture — sync during capture corrupts the graph.
-    let use_graph = crate::runtime::get().cuda_graph;
-    let use_fa = crate::gpu::cuda::ggml::enabled() && !crate::runtime::get().cuda_no_fa;
-    let fa_inline = use_fa && crate::runtime::get().cuda_fa_inline; // default on with ggml FA + graphs
-                                                                    // Shallow-ctx whole graph: skip FA (pads to ≥256) and use native dpos attend.
-                                                                    // Opt-in only — default FA wins tg on 5090 (native-auto regressed ~66.4→64.4).
-    let native_shallow = crate::runtime::get().cuda_native_attend;
-    let fa_inline = fa_inline && !native_shallow;
-    let hybrid_fa = use_graph && use_fa && !fa_inline && !native_shallow;
-    let whole_graph = use_graph && (!use_fa || fa_inline || native_shallow);
 
     with_gpu(|gpu| {
         gpu.ensure_arenas(x_elems * 4, y_elems * 4)?;
