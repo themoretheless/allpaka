@@ -3,40 +3,45 @@
 Связанные документы: [BASELINE](BASELINE.md), [INVENTORY](INVENTORY.md),
 [ARCHITECTURE](ARCHITECTURE.md). Размер: S (часы), M (день), L (несколько дней).
 
-## Что осталось (на `572e167`, 2026-11-10)
+## Что осталось (на 2026-11-10, после захода на Windows + RTX 5090)
 
-Короткая сводка для следующего захода; подробности и статусы в таблицах ниже.
+Заход шёл на Windows 11 с RTX 5090: CUDA-путь собирается, тестируется и
+меряется; Metal только проверяется компилятором (`--target aarch64-apple-darwin`).
+`cargo test --workspace` зелёный на Windows/CUDA, `clippy --workspace
+--all-targets` чист, кроме длинных лаунчеров CUDA (3.27).
 
-**Заблокировано свободным GPU** (на этой машине шум между одинаковыми
-конфигурациями до 12.5%, см. BASELINE):
-- 0.2: сравнение с llama.cpp на 8B и 30B и `verify --decode`.
-- Горячие правки 3.20–3.27 (model: `ffn_residual`, `AttnMode`, `QuantMat::desc`,
-  `GpuEligibility`, `enum Mixer`; backend: разбор `decode_token` и
-  `decode_token_one_fused`, request-структуры вместо 13–19 параметров).
-- Волна 4: кэш дескрипторов `token_layers`, быстрые GPU-пути для не-Neox RoPE,
-  повтор серии переключателей. Первая цель по записям: prefill 8B (0.946×).
+**Нужна Apple Silicon (Metal нельзя ни запустить, ни измерить отсюда):**
+- 0.2: сравнение с llama.cpp на 8B/30B, `verify --decode`, перемер BASELINE на
+  тихом Mac (порядок в `docs/bench-vs-llama-remote.md`).
+- 3.25: разбор Metal `decode_token` (1 657 строк) на стадии — горячий путь,
+  нужен A/B на Metal.
+- Прогон Metal-тестов на новых правках: `dq_fmt`-тест шейдера, общий
+  `gpu/common.rs`, `RuntimePolicy`-флаги Metal (только type-check здесь).
+- FIXME(soundness) в Metal: гонка рестейджинга GLM router bias в
+  `metal/ffn_grouped.rs:217` (вероятный баг GLM fused prefill), дамп
+  `ALLPAKA_VERIFY_DEBUG` в `metal/verify.rs`.
 
-**Можно делать без замеров:**
-- 3.5: строковые поля в `guardrail_policies` и `online_evaluation`; статусы
-  `experiments`/`matrix_jobs` после разбора байтового бюджета записи.
-- 3.6: `turn_traced` (577 строк) на стадии: вызов провайдера, цикл
-  инструментов, guardrails, сохранение. Риск высокий, нужен прогон
-  `scripts/test-studio.py`.
-- 3.8: блокирующий `std::fs` в async-обработчиках → `spawn_blocking`.
-- 3.9: реестр инструментов вместо `match name`; токены отмены в experiments,
-  judge_runs, memory_extract, swarm.
-- 3.10: таблица маршрутов вместо цепочки `starts_with` в `serve`.
-- 3.12, 3.13: один `Architecture` enum и `ModelError` в model; типизированные
-  ошибки в gguf, mlx, dtype.
-- 2.5: MLX-деквант из `allpaka-dtype` в `allpaka-mlx`, `anyhow` из dtype.
-- 2.10: общий harness для 58 UI-тестов Studio.
-- 1.4, 1.8: тест кодов `dq_fmt` против ядер; комментарии `// SAFETY:`.
-- Волна 5: справочник `ALLPAKA_*`, обновление `docs/roadmap.md` (D6 сделан),
-  тесты непокрытых модулей.
-- B7: гонка чтение-изменение-запись в `state_file`.
+**Ждёт вашего решения:**
+- 3.4 единое правило `valid_id` (текущие правила закреплены тестами, 0.4).
+- 5.1 судьба недостижимого megakernel-кода и проигравших вариантов ядер.
+- Новое: `memory_extract` теперь отменяется при удалении беседы и отвечает
+  409 вместо записи предложения об удалённой беседе (`2224af4`). Это
+  изменение поведения; откатить одним revert, если не нужно.
+- Новое: семантика маршрутов `serve` сохранена как была, включая широкие
+  префиксы (`/statsx`, `/v1/modelsx`) и отсутствие 405; сузить — отдельное
+  решение (3.10).
 
-**Ждёт вашего решения:** единое правило `valid_id` (3.4), судьба
-недостижимого megakernel-кода и проигравших вариантов ядер (5.1).
+**Открытые находки (не блокируют):**
+- `gpu/cuda/pdl.rs` читает приватные поля cudarc по угаданным смещениям
+  (FIXME(soundness)); исправление — собирать аргументы запуска самим.
+- `tests/gpu_parity.rs`: запись через `&mut` поверх общего `&'static` среза
+  при параллельных тестах (FIXME(soundness)).
+- `gpu/shaders/kernels.metal` — неиспользуемая копия `metal_kernels.rs`.
+- 4.3: не-Neox RoPE (Llama, Mistral) закрыта от быстрых путей пятью
+  проверками `RopeStyle::Neox` в model (whole-token decode, greedy,
+  greedy-chain, fused prefill, attn_block); GPU-ядра реализуют только Neox.
+  Путь без правки ядер: переставить строки Wq/Wk при загрузке (Norm-пары →
+  половины), ценой копии этих весов.
 
 ## Инварианты
 
@@ -53,38 +58,38 @@
 | # | Задача | Размер | Риск | Статус |
 |---|---|---|---|---|
 | 0.1 | `docs/refactor/*` | S | — | done |
-| 0.2 | Парный бенчмарк `bc82c0a` против `main` + `verify --decode` | S | — | частично: A/B сделан, регрессии нет (BASELINE); абсолютные числа и сравнение с llama.cpp непригодны из-за занятого GPU, `verify --decode` не запускался. Перемерить на свободной машине |
+| 0.2 | Парный бенчмарк `bc82c0a` против `main` + `verify --decode` | S | — | частично: Metal A/B без регрессии (BASELINE); на CUDA A/B горячих правок — логиты бит в бит, скорость в шуме (`docs/benchmarks/2026-11-10-refactor-ab-rtx5090.md`). Сравнение с llama.cpp и `verify --decode` на Mac — todo |
 | 0.3 | Проверка `gpu/stub.rs` против API бэкендов | S | низкий | done: `scripts/check-backends.sh` |
-| 0.4 | Характеризационные тесты: `route_gated_into_slice` (граница 256), `Config::from_gguf`, `dq_fmt`/`row_bytes`, `valid_id`, `state_file` | M | — | todo |
+| 0.4 | Характеризационные тесты: `route_gated_into_slice` (граница 256), `Config::from_gguf`, `dq_fmt`/`row_bytes`, `valid_id`, `state_file` | M | — | done: граница стек/куча (`a35e381`), `dq_fmt` (`ff0d2eb`), `row_bytes` (`1df5fc5`), `state_file` (`29d9570`), `valid_id` (`ca42438`), `Config` и capability (`7cab90f`) |
 
 ## Волна 1. Дефекты и фундамент
 
 | # | Задача | Размер | Риск | Статус |
 |---|---|---|---|---|
-| 1.1 | B1: стаб приведён к API; проверка — `scripts/check-backends.sh` (stub и CUDA) | S | низкий | done (`4b12e1a`, `523c5e9`) |
-| 1.2 | B2: >256 экспертов | S | низкий | не дефект: буфер по `n_used` (top-k), а не по числу экспертов; `moe.rs` при >256 уходит в кучу. Осталась только именованная константа |
-| 1.3 | B3: `total_cmp` вместо `partial_cmp().unwrap()` | S | низкий | done (`704972c`) |
-| 1.4 | B4: именованные таблицы `dq_fmt` и тест | S | низкий | todo |
-| 1.5 | B5 и все некэшированные чтения env → `RuntimePolicy` / `DebugFlags` | M | низкий | wip: B5 done (`9e538b5`); B6 не дефект (аргумент `_def` дублирует соглашение о флаге, таблица согласована); CUDA и Metal — todo |
-| 1.6 | Оставшиеся предупреждения clippy | S | низкий | done (`9bd193d`): 0 предупреждений |
-| 1.7 | `cargo fmt --all` отдельным коммитом | S | — | done: `fmt --check` проходит |
-| 1.8 | `// SAFETY:` для `unsafe impl` и срезов из сырых указателей | M | — | todo |
+| 1.1 | B1: стаб приведён к API | S | низкий | done (`4b12e1a`, `523c5e9`) |
+| 1.2 | B2: >256 экспертов | S | низкий | не дефект; константа `STACK_EXPERTS` и тесты границы (`a35e381`) |
+| 1.3 | B3: `total_cmp` вместо `partial_cmp().unwrap()` | S | низкий | done (`704972c`); CUDA-путь догнан (`a86bfb4`) |
+| 1.4 | B4: именованные таблицы `dq_fmt` и тест | S | низкий | done (`ff0d2eb`): CUDA сверяется с `// fmt:` ядра и GEMM-прогоном по всем форматам; Metal — с ветками `embed_row_f32_dtoken` |
+| 1.5 | B5 и некэшированные чтения env → `RuntimePolicy` | M | низкий | done (`1038c57`): CUDA и Metal читают флаги один раз; оставлены только init-время, уже кэшированные `OnceLock` и `SWFUSE`/`GPU_WINDOW_GIB`, которые тесты меняют на лету |
+| 1.6 | Предупреждения clippy | S | низкий | done для Metal (`9bd193d`) и CUDA (`eaa7dd4`, `b6304eb`), кроме 3.27 |
+| 1.7 | `cargo fmt --all` | S | — | done |
+| 1.8 | `// SAFETY:` для `unsafe impl` и срезов из сырых указателей | M | — | done: 173 комментария (`d1954b8`, `192f2e5`, `b3bccc3`); по дороге исправлены длины в `ops` (`493d764`), неинициализированные регионы KV (`6f8dc0b`), алиасинг в откате GDN (`aea0245`); оставшееся — FIXME(soundness), см. «Открытые находки» |
 
 ## Волна 2. Структурные перемещения (без изменения логики)
 
 | # | Задача | Размер | Риск | Статус |
 |---|---|---|---|---|
-| 2.1 | `gpu/metal.rs` → `metal/{device,region,pipelines,select,telemetry,matvec,attn,args,ffn_grouped,decode,verify,prefill,mega}` | L | низкий–средний | done (`4b8ccc9` и следующий): чистый перенос, проверен сравнением строк; `mod.rs` 527 строк. Pipelines остались внутри `impl Gpu` в `device.rs` |
-| 2.2 | `gpu/cuda/mod.rs` → `{region,attn,decode,decode_fused,prefill,ffn_grouped}` | M | низкий | done (`bd55b83`): 4 914 → 254 строки в `mod.rs`; проверено только type-check'ом |
-| 2.3 | `gpu/cuda/runtime.rs` → `runtime/{device,select,embed,gemm,q8,l2,matvec}` | M | низкий | done (`bd55b83`) |
-| 2.4 | `gpu/common.rs`: общие `row_bytes`, окна весов, телеметрия, `attn_shape_ok` | M | низкий | todo |
-| 2.5 | backend импортирует `GgmlType` из dtype; MLX-деквант → mlx; `anyhow` из dtype | S | низкий | wip: импорт done; перенос MLX-декванта и `anyhow` — todo |
-| 2.6 | `core`: поиск из `plan.rs` и `fleet.rs` → `plan/search.rs`, `fleet/search.rs` | M | низкий | done (`ce57524`). Длина `search_tree` (190 строк) — задача 3.11 |
-| 2.7 | `cli`: `serve.rs` → `serve/{inference,router}`; диспетчер из `main.rs` | S | низкий | wip: inference и router вынесены (`576cd8b`), `serve.rs` 1 402 → 589; `handle` (300 строк) и `main.rs` требуют правки логики → волна 3 |
-| 2.8 | `chat`: `lib.rs` → `api/{router,handlers}`, `runtime/{actor,turn,subagent,exec}` | M | низкий | done (`8c5bb55`): `lib.rs` 2 350 → 348 |
-| 2.9 | `chat`: `observability.rs` → `observability/{model,trace,ingest,store,receipts,guardrails,api,tests}` | M | средний | done (`cb9a9ec`): `mod.rs` 63 строки кода |
-| 2.10 | `scripts/`: UI-тесты Studio в `studio-ui-tests/` с раннером | S | низкий | done (`d6fe2db`): 58 тестов, `run.sh`. Остальные скрипты оставлены на месте: на них ~130 ссылок в документах и внешней автоматизации, перенос не окупается. Общий harness для 58 тестов — todo |
-| 2.11 | `model/lib.rs`: сквозные тесты → `tests/` | S | — | todo |
+| 2.1 | `gpu/metal.rs` → модули | L | низкий–средний | done (`4b8ccc9`) |
+| 2.2 | `gpu/cuda/mod.rs` → модули | M | низкий | done (`bd55b83`) |
+| 2.3 | `gpu/cuda/runtime.rs` → `runtime/*` | M | низкий | done (`bd55b83`) |
+| 2.4 | `gpu/common.rs`: `row_bytes`, телеметрия, `attn_shape_ok` | M | низкий | done (`1df5fc5`): общие счётчики, `row_bytes`, проверка границ KV; окна весов остаются в бэкендах (CUDA копирует, Metal no-copy) |
+| 2.5 | backend → `GgmlType` из dtype; MLX-деквант → mlx; `anyhow` из dtype | S | низкий | done (`a6b751f`): `DtypeError`; MLX-деквант оставлен в dtype — его вызывает `gguf::dequant`, перенос дал бы ребро gguf→mlx между соседями |
+| 2.6 | `core`: поиск в `search`-подмодули | M | низкий | done (`ce57524`) |
+| 2.7 | `cli`: `serve` и диспетчер `main.rs` | S | низкий | done: `576cd8b`; `main` → `dispatch` + функция на подкоманду (`dcfe2fe`, `ccfb049`), вывод ~70 запусков сверен побайтно |
+| 2.8 | `chat`: `lib.rs` → `api`, `runtime` | M | низкий | done (`8c5bb55`) |
+| 2.9 | `chat`: `observability` → модули | M | средний | done (`cb9a9ec`) |
+| 2.10 | `scripts/studio-ui-tests` и общий harness | S | низкий | done (`d6fe2db`, `4c720d8`): `harness.js` с `between()`, падающим на пропавшем маркере |
+| 2.11 | `model/lib.rs`: сквозные тесты → `tests/` | S | — | done (`e3511ee`, уникальные имена файлов `89d51db`) |
 
 ## Волна 3. Логические рефакторинги
 
@@ -92,41 +97,41 @@
 
 | # | Задача | Размер | Риск | Статус |
 |---|---|---|---|---|
-| 3.1 | chat: `ApiError: IntoResponse` вместо ручного кортежа | M | низкий | done (`2189358`): тип введён, формат ответа прежний; `bad_request`/`not_found`/`internal` заменили частые замыкания. Остальные вызовы `error(StatusCode::…)` оставлены: они уже возвращают `ApiError` |
-| 3.2 | chat: запись через `storage::atomic_write*` | M | средний | done в реальном объёме (`e3e5dce`): индекс учётных данных и JSON harness-refine. Аудит завысил масштаб: почти все прямые `fs::write` находятся в тестах, а `state_file` уже атомарен. Осталось: `harness.rs:717` (temp+rename без fsync), собственный писатель `observability` (намеренно без fsync для бегущих трасс) |
-| 3.3 | chat: убрать дубли времени и идентичных `valid_id` | S | низкий | done (`98cfdd8`). Функции `digest` дублями не являются: у каждой свой набор полей |
-| 3.4 | chat: `valid_id` — одно правило (B9) | S | **требует решения** | todo |
-| 3.5 | chat: строковые status/kind/action → enum с прежними словами на проводе | M | средний | частично: `background` и история `review_queues` done. Статусы спанов observability **не переводятся**: их пишут 40+ мест в 15 файлах, набор открытый (`token_limit`, `step_limit`, выражения), записи лежат на диске, и значение вне enum сделало бы старую трассу нечитаемой. `experiments`/`matrix_jobs` отложены из-за байтового бюджета записи. guardrail_policies, online_evaluation — todo |
-| 3.6 | chat: `turn_traced` → стадии хода | L | высокий | todo |
-| 3.7 | chat: контекстные структуры вместо 8–14 параметров | S | низкий | done: `run_subagent`, `MemberRun`, `SwarmTurn`, `MergeTarget`/`Synthesizer`/`MergePass` (`b71ef9a`); в `swarm.rs` не осталось `too_many_arguments` |
-| 3.8 | chat: блокирующий fs из async → `spawn_blocking` | M | средний | todo |
-| 3.9 | chat: реестр инструментов вместо `match name`; токены отмены в experiments, judge_runs, memory_extract, swarm | M | средний | todo |
-| 3.10 | cli: таблица маршрутов вместо `starts_with` | M | средний | todo |
-| 3.11 | core: общий co-residency, типизированные ошибки | M | низкий | done: `FleetError` (`e3159c0`), `cost::charge_co_residency` через трейт `PoolLoad` (`fcb018e`). Общий тип для `Placement`/`Replica` не вводился: у них разные поля отчёта, общий хелпер снял единственное дублирование логики |
-| 3.12 | model: один `Architecture` enum; `ModelError`; дедупликация `loader.rs` | M | низкий | todo |
-| 3.13 | gguf/mlx/dtype: типизированные ошибки | M | низкий | todo |
+| 3.1 | chat: `ApiError: IntoResponse` | M | низкий | done (`2189358`) |
+| 3.2 | chat: запись через `storage::atomic_write*` | M | средний | done: `e3e5dce`; оставшиеся ручные писатели сведены к storage (`c553792`), `harness.rs` больше без fsync-дыры |
+| 3.3 | chat: дубли времени и `valid_id` | S | низкий | done (`98cfdd8`) |
+| 3.4 | chat: `valid_id` — одно правило (B9) | S | **требует решения** | правила закреплены тестами (`ca42438`) |
+| 3.5 | chat: строковые status/kind/action → enum | M | средний | done: guardrail kind/stage/action (`1c5b6a5`), online_evaluation outcome/error code (`a2d442c`), matrix_jobs и experiments со сохранением байтового бюджета (`7a15d9b`, `252cb38`). Статусы спанов observability намеренно строки (открытый набор, записи на диске) |
+| 3.6 | chat: `turn_traced` → стадии хода | L | высокий | done: 9 тестов хода до переноса (`b411ca1`), стадии `setup`/`guard`/`model`/`tool_loop`/`persist` (`c0c1c1d`, `554edcc`, `0ed1caa`) |
+| 3.7 | chat: контекстные структуры | S | низкий | done (`b71ef9a`) |
+| 3.8 | chat: блокирующий fs из async → `spawn_blocking` | M | средний | done (`807271a`, `d66e746`, `329eb85`, `1d2617f`, `b13af6a`); фоновые исполнители с select на отмену оставлены |
+| 3.9 | chat: реестр инструментов; токены отмены | M | средний | done: таблица `TOOLS` (`e49f5c4`), `CancelToken` в judge_runs, experiments, matrix_jobs, memory_extract (`3679e8b`, `454343e`, `2224af4`); swarm уже останавливается абортом хода |
+| 3.10 | cli: таблица маршрутов | M | средний | done (`99b3037`, `8976d4f`, `f402cda`): ответы сверены побайтно через сокет |
+| 3.11 | core: co-residency, типизированные ошибки | M | низкий | done (`e3159c0`, `fcb018e`) |
+| 3.12 | model: `Architecture`; `ModelError`; дедупликация `loader.rs` | M | низкий | done (`7cab90f`, `2e3dcd8`) |
+| 3.13 | gguf/mlx/dtype: типизированные ошибки | M | низкий | done (`966f2bc`, `a6b751f`) |
 
-Горячий код (каждый пункт — отдельный A/B, заблокировано до 0.2):
+Горячий код (A/B и паритет на CUDA — `docs/benchmarks/2026-11-10-refactor-ab-rtx5090.md`):
 
 | # | Задача | Размер | Риск | Статус |
 |---|---|---|---|---|
-| 3.20 | model: `ffn_residual()` вместо 4 копий | S | низкий | todo |
-| 3.21 | model: `AttnMode` + `AttnInputs` | S | низкий | todo |
-| 3.22 | model: `QuantMat::desc()` | S | низкий | todo |
-| 3.23 | model: `GpuEligibility` при загрузке | M | средний | todo |
-| 3.24 | model: `enum Mixer`, `Norm`, общий `Block`, `RoutingPolicy` | L | средний | todo |
-| 3.25 | backend: `decode_token` → функции кодирования стадий | L | средний | todo |
-| 3.26 | backend: `decode_token_one_fused` → контекстная структура | L | средний | todo |
-| 3.27 | backend: request-структуры вместо 13–19 параметров | M | низкий | todo |
+| 3.20 | model: `ffn_residual()` | S | низкий | done (`2b5c3e0`); копия в MTP оставлена — без профильных спанов |
+| 3.21 | model: `AttnMode` + `AttnInputs` | S | низкий | done (`2b5c3e0`) |
+| 3.22 | model: `QuantMat::desc()` | S | низкий | done (`2b5c3e0`) |
+| 3.23 | model: `GpuEligibility` при загрузке | M | средний | done (`90a0f5e`): `token_path_decline` |
+| 3.24 | model: `enum Mixer`, `RoutingPolicy` | L | средний | done (`2356388`); `Norm`/общий `Block` с MTP не вводились: у MTP нет raw-норм и bias, общий тип дал бы пустые поля |
+| 3.25 | backend: Metal `decode_token` → стадии | L | средний | todo, нужен Mac |
+| 3.26 | backend: CUDA `decode_token_one_fused` → контекстная структура | L | средний | wip |
+| 3.27 | backend: request-структуры вместо 13–19 параметров | M | низкий | wip (CUDA-лаунчеры) |
 
 ## Волна 4. Оптимизация по замерам
 
 | # | Гипотеза | Размер | Статус |
 |---|---|---|---|
-| 4.1 | Кэш дескрипторов `token_layers` на сессию/модель | M | todo |
-| 4.2 | Эффект от снятия некэшированных чтений env на CUDA-путях | S | todo |
-| 4.3 | Что мешает не-Neox RoPE (Llama, Mistral) идти быстрыми GPU-путями | M | todo |
-| 4.4 | Studio: блокирующий I/O и contention на блокировках — по профилю | M | todo |
+| 4.1 | Кэш дескрипторов `token_layers` | M | частично: статические проверки вынесены в загрузку (3.23); сам `Vec<TokenLayer>` ссылается на модель и пересобирается за O(слоёв) без выделений весов — эффект ниже шума машины (±10%), кэш не вводился |
+| 4.2 | Эффект снятия некэшированных env на CUDA | S | done: в шуме, регрессии нет (A/B 2026-11-10) |
+| 4.3 | Что мешает не-Neox RoPE | M | done: анализ, см. «Открытые находки» |
+| 4.4 | Studio: блокирующий I/O — по профилю | M | done через 3.8 (обработчики на blocking pool); отдельного профиля не снималось |
 
 Отрицательные результаты записываются в реестр проекта.
 
@@ -135,25 +140,29 @@
 | # | Задача | Размер | Статус |
 |---|---|---|---|
 | 5.1 | Megakernel и проигравшие варианты ядер → `experimental` | M | **требует решения** |
-| 5.2 | Справочник `ALLPAKA_*`, генерируемый из `RuntimePolicy` | M | todo |
-| 5.3 | `docs/roadmap.md`: закрыть D6, обновить D3/D4 | S | todo |
-| 5.4 | Тесты для непокрытых модулей; общие фикстуры Rust ↔ Python SDK | M | todo |
-| 5.5 | Таблица до/после в BASELINE, остаточный бэклог | S | todo |
+| 5.2 | Справочник `ALLPAKA_*` из `RuntimePolicy` | M | done (`5e81cfb`): `docs/env-reference.md`, тест свежести |
+| 5.3 | `docs/roadmap.md`: D3, D4, D6 | S | done (`94a1982`) |
+| 5.4 | Тесты непокрытых модулей; фикстуры Rust ↔ Python SDK | M | частично: CPU dot-ядра (`f07fb4c`), state_file, ход Studio; общие фикстуры с Python SDK — todo |
+| 5.5 | Таблица до/после в BASELINE, остаточный бэклог | S | done: BASELINE, раздел CUDA |
 
 ## Заметки по ходу работ
 
-- Распил `2140b62..4fbe7ab` не был чистым переносом: вместе с ним приехал новый
-  код (пул потоков, AVX2-пути, бинарный протокол pipeline, trie в prefix-кэше) и
-  две регрессии сборки под cfg, невидимые на macOS (B1, B10). Поэтому перед
-  каждым push теперь запускается `scripts/check-backends.sh`.
-- Перенос кода проверяется сравнением мультимножеств строк старого файла и новых
-  модулей (с точностью до `pub(super)`): отличаться должны только заголовки
-  модулей и объявления `mod`/`use`.
-- Два пункта аудита оказались не дефектами (B2, B6), см. INVENTORY.
+- Распил `2140b62..4fbe7ab` не был чистым переносом (B1, B10); перед каждым
+  push запускается `scripts/check-backends.sh`.
+- Перенос кода проверяется сравнением мультимножеств строк.
+- Два пункта аудита оказались не дефектами (B2, B6).
+- Windows не собирался и не проходил тесты: F16C immediate (`79acb93`),
+  rename при открытом дескрипторе (`9567a49`), fsync каталога, `/bin/sh`
+  (`4ace0c1`), `::` в именах файлов тестов (`66ab5e7`).
+- CUDA держал копии весов в VRAM по адресу хоста и никогда их не отпускал:
+  модель, загруженная по тому же адресу, считала на старых весах. Теперь
+  счётчик владельцев и `gpu::detach` из `Drop` модели (`77605a7`).
+- Тест паритета CUDA GEMM сравнивал f16-путь с Q8-эталоном (`806aa58`).
 
 ## Требует решения
 
-1. **3.4** `valid_id`: какое правило эталонное (лимит длины, набор символов).
+1. **3.4** `valid_id`: какое правило эталонное.
 2. **5.1** удалять ли недостижимый megakernel-код или держать за feature.
-3. **3.1** если в ответах об ошибках найдётся несогласованность формата.
-4. Любой шаг, замедляющий горячий путь больше шума (±3%).
+3. `memory_extract` 409 при удалении беседы (`2224af4`): оставить или откатить.
+4. Сужение префиксных маршрутов `serve` и 405.
+5. Любой шаг, замедляющий горячий путь больше шума (±3% на тихой машине).
