@@ -79,6 +79,27 @@ pub(crate) fn co_residency_scale(
         .collect()
 }
 
+/// A model instance placed on a pool, as co-residency charging sees it.
+pub(crate) trait PoolLoad {
+    fn host(&self) -> &str;
+    fn node_index(&self) -> usize;
+    /// Mark the instance as sharing its machine and slow it by `scale`.
+    fn charge_contention(&mut self, scale: f64);
+}
+
+/// Instances sharing a machine also share it under load: scale each one that
+/// has a neighbour on the same host by its pool's measured contention.
+pub(crate) fn charge_co_residency<T: PoolLoad>(loads: &mut [T], nodes: &[Node]) {
+    let hosts: Vec<&str> = loads.iter().map(PoolLoad::host).collect();
+    let node_indices: Vec<usize> = loads.iter().map(PoolLoad::node_index).collect();
+    let scales = co_residency_scale(&hosts, &node_indices, nodes);
+    for (load, scale) in loads.iter_mut().zip(scales) {
+        if let Some(s) = scale {
+            load.charge_contention(s);
+        }
+    }
+}
+
 /// Apply a co-residency scale to a latency.
 pub(crate) fn contended(secs_per_token: f64, scale: f64) -> f64 {
     if scale > 0.0 {

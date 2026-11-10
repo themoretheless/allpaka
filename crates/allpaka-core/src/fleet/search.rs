@@ -53,7 +53,7 @@ pub(super) fn search(
                         .clone()
                 })
                 .collect();
-            charge_co_residency(&mut placements, nodes);
+            crate::cost::charge_co_residency(&mut placements, nodes);
             *best_count = current_len;
             *best_tps = placements.iter().map(Placement::tokens_per_sec).sum();
             *best = FleetPlan {
@@ -110,23 +110,16 @@ pub(super) fn search(
     );
 }
 
-/// Mark agents that share a machine and slow them by that pool's measured
-/// contention.
-///
-/// Scaling `secs_per_token` is exact rather than an approximation: contention
-/// scales the pool's bandwidth, every term in the cost is bytes over that
-/// bandwidth, and the acceptance rate of a draft model does not depend on how
-/// fast it ran. So one division reproduces what recomputing from
-/// [`Node::contended_stream_time`] would give.
-pub(super) fn charge_co_residency(placements: &mut [Placement], nodes: &[Node]) {
-    let hosts: Vec<&str> = placements.iter().map(|p| p.host.as_str()).collect();
-    let node_indices: Vec<usize> = placements.iter().map(|p| p.node_index).collect();
-    let scales = crate::cost::co_residency_scale(&hosts, &node_indices, nodes);
-    for (p, scale) in placements.iter_mut().zip(scales) {
-        if let Some(s) = scale {
-            p.co_resident = true;
-            p.secs_per_token = crate::cost::contended(p.secs_per_token, s);
-        }
+impl crate::cost::PoolLoad for Placement {
+    fn host(&self) -> &str {
+        &self.host
+    }
+    fn node_index(&self) -> usize {
+        self.node_index
+    }
+    fn charge_contention(&mut self, scale: f64) {
+        self.co_resident = true;
+        self.secs_per_token = crate::cost::contended(self.secs_per_token, scale);
     }
 }
 

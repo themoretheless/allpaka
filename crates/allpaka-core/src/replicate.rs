@@ -182,21 +182,20 @@ pub fn replicate(nodes: &[Node], model: &Model, req: &PlanRequest) -> Option<Rep
         return None;
     }
     let mut plan = ReplicaPlan { replicas };
-    charge_co_residency(&mut plan.replicas, nodes);
+    crate::cost::charge_co_residency(&mut plan.replicas, nodes);
     Some(plan)
 }
 
-/// Instances sharing a machine also share it under load; scale each one by its
-/// pool's measured contention.
-fn charge_co_residency(replicas: &mut [Replica], nodes: &[Node]) {
-    let hosts: Vec<&str> = replicas.iter().map(|r| r.host.as_str()).collect();
-    let indices: Vec<usize> = replicas.iter().map(|r| r.node_index).collect();
-    let scales = crate::cost::co_residency_scale(&hosts, &indices, nodes);
-    for (r, scale) in replicas.iter_mut().zip(scales) {
-        if let Some(s) = scale {
-            r.co_resident = true;
-            r.secs_per_token = crate::cost::contended(r.secs_per_token, s);
-        }
+impl crate::cost::PoolLoad for Replica {
+    fn host(&self) -> &str {
+        &self.host
+    }
+    fn node_index(&self) -> usize {
+        self.node_index
+    }
+    fn charge_contention(&mut self, scale: f64) {
+        self.co_resident = true;
+        self.secs_per_token = crate::cost::contended(self.secs_per_token, scale);
     }
 }
 
