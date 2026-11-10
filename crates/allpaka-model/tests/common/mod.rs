@@ -186,8 +186,15 @@ pub fn tiny_model(arch: &str, qk_norm: bool) -> Vec<u8> {
     b.build()
 }
 
+/// Write `bytes` to a fresh temp file. The name carries the process id and a
+/// per-process counter: test binaries of other worktrees, or of this one run
+/// concurrently, would otherwise overwrite a file another process still has
+/// mapped (on Windows: os error 1224, "user-mapped section open").
 pub fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("allpaka-model-{name}.gguf"));
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    let path = std::env::temp_dir().join(format!("allpaka-model-{name}-{pid}-{n}.gguf"));
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(bytes).unwrap();
     path
