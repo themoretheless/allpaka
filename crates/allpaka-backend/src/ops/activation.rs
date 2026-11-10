@@ -46,6 +46,10 @@ pub fn sigmoid(x: &mut [f32]) {
 pub fn swiglu(gate: &mut [f32], up: &[f32]) {
     assert_eq!(gate.len(), up.len());
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `gate.len() == up.len()` (asserted above); the vector loop reads and
+    // writes 4 f32 at `i` only while `i + 4 <= n`, and the scalar tail stops at
+    // `n`, so every access through `gp`/`up_p` is inside its slice. `gate` is a
+    // unique borrow, so writing through `gp` cannot alias `up`.
     unsafe {
         use std::arch::aarch64::*;
         let n = gate.len();

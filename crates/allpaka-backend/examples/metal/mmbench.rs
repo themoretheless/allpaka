@@ -657,6 +657,10 @@ fn main() {
             MTLResourceOptions::StorageModeShared,
         );
         let v_buf = device.new_buffer_with_data(
+            // SAFETY: `kv` holds `2 * n_pos * kv_dim` u16s (K then V), so offsetting by `n_pos *
+            // kv_dim` lands on the start of the V half, still inside the allocation, and the buffer
+            // copies exactly `n_pos * kv_dim` u16s from there. `kv` outlives the call, which copies
+            // the data.
             unsafe { kv.as_ptr().add(n_pos * kv_dim) } as *const _,
             (n_pos * kv_dim * 2) as u64,
             MTLResourceOptions::StorageModeShared,
@@ -721,6 +725,11 @@ fn main() {
             for t in 0..valid {
                 let mut s = 0f32;
                 for d in 0..hd {
+                    // SAFETY: `cpu_at` is only called with row/head/dim decoded from an index
+                    // into `a` (`m * q_dim` long), so `row < m == n_pos` and `head < n_heads`.
+                    // Then `t <= row`, `kvh < n_kv` and `d < hd` with
+                    // `kv_dim == n_kv * hd`, so the index is below `n_pos * kv_dim` and inside the
+                    // K half of `kv` (length `2 * n_pos * kv_dim`).
                     let kb = unsafe { *kv.as_ptr().add(t * kv_dim + kvh * hd + d) };
                     s += q[row * q_dim + head * hd + d] * f32_of(kb);
                 }
@@ -731,14 +740,20 @@ fn main() {
             let mut den = 0f32;
             for (t, s) in scores.iter().enumerate() {
                 let p = ((s - mx) * scale).exp();
+                // SAFETY: `t <= row < n_pos`, `kvh < n_kv`, `dim < hd` and `kv_dim == n_kv * hd`,
+                // so `(n_pos + t) * kv_dim + kvh * hd + dim < 2 * n_pos * kv_dim == kv.len()`.
                 let vb = unsafe { *kv.as_ptr().add((n_pos + t) * kv_dim + kvh * hd + dim) };
                 num += p * f32_of(vb);
                 den += p;
             }
             num / den
         };
+        // SAFETY: `out_a` and `out_b` are StorageModeShared buffers of `m * q_dim * 4` bytes (page-
+        // aligned `contents()`), and both `run` calls waited for their command buffer, so the host
+        // reads `m * q_dim` settled f32s from buffers that outlive the slices.
         let a: &[f32] =
             unsafe { std::slice::from_raw_parts(out_a.contents() as *const f32, m * q_dim) };
+        // SAFETY: as for `a` above.
         let b: &[f32] =
             unsafe { std::slice::from_raw_parts(out_b.contents() as *const f32, m * q_dim) };
         let mut max_abs = 0f32;

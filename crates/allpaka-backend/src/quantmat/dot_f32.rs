@@ -6,6 +6,8 @@ use allpaka_gguf::dequant;
 pub(super) fn dot_f16(row: &[u8], x: &[f32]) -> f32 {
     #[cfg(target_endian = "little")]
     {
+        // SAFETY: every bit pattern is a valid `u16`, and `align_to` only puts
+        // correctly aligned whole elements in `mid`.
         let (head, mid, tail) = unsafe { row.align_to::<u16>() };
         if head.is_empty() && tail.is_empty() {
             return crate::ops::f16::dot(x, mid);
@@ -20,6 +22,9 @@ pub(super) fn dot_f16(row: &[u8], x: &[f32]) -> f32 {
 #[inline(always)]
 pub(super) fn dot_bf16(row: &[u8], x: &[f32]) -> f32 {
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: the kernel reads `2 * x.len()` bytes of `row`. Callers are the
+    // `row_dot` dispatch, where a BF16 row is `n_in * 2` bytes and `x` is the
+    // `n_in`-long activation row (matmul checks `x.len() == m * n_in`).
     unsafe {
         super::dot_neon::dot_bf16_neon(row, x)
     }
@@ -138,6 +143,8 @@ pub(super) fn dot_q8_0(row: &[u8], x: &[f32]) -> f32 {
         let d = dequant::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
         let xs = &x[bi * 32..bi * 32 + 32];
         #[cfg(target_arch = "aarch64")]
+        // SAFETY: `block` is a 34-byte chunk and `xs` 32 floats, exactly the two
+        // 16-byte loads at `block[2..34]` and the 32-float reads the kernel does.
         let s = unsafe { super::dot_neon::dot_q8_0_block_neon(block, xs) };
         #[cfg(not(target_arch = "aarch64"))]
         let s = {
@@ -287,6 +294,8 @@ pub(super) fn dot_q6_k(row: &[u8], x: &[f32]) -> f32 {
 /// answer.
 #[inline(always)]
 pub(super) fn as_f32(bytes: &[u8]) -> Option<&[f32]> {
+    // SAFETY: every bit pattern is a valid `f32`, and `align_to` only returns
+    // aligned whole elements in `mid`; the caller falls back when it is not exact.
     let (head, mid, tail) = unsafe { bytes.align_to::<f32>() };
     (head.is_empty() && tail.is_empty()).then_some(mid)
 }

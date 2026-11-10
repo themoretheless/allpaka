@@ -26,6 +26,10 @@ fn attached_region() -> Option<&'static [u8]> {
             let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
             let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
             assert!(!ptr.is_null());
+            // SAFETY: `ptr` is from `alloc_zeroed`, so every byte is initialised. `ptr` is non-null
+            // (asserted), owns `len` bytes at `PAGE` alignment and is leaked, so the `'static`
+            // slice stored in `REGION` is valid for the rest of the process; `OnceLock` runs this
+            // once.
             let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
             // Deterministic pseudo-random bytes: valid quant blocks for every
             // format under test (any bit pattern decodes; f16 scales are tamed
@@ -94,6 +98,13 @@ fn check_parity(ty: GgmlType, n_out: usize, n_in: usize, m: usize, off: usize) {
         return;
     };
     // Redo the taming through a raw pointer: the region is logically ours.
+    // FIXME(soundness): this builds a `&mut [u8]` from the `&'static [u8]` that `attached_region`
+    // hands out. Writing through a pointer derived from a shared reference is UB, the shared
+    // `region` stays live and is read later while `region_mut` exists, and cargo runs the tests of
+    // this file on parallel threads, so two tests can hold overlapping `&mut` views and race on the
+    // same bytes. Fix: keep the region as a raw pointer + length behind a `Mutex`, do all
+    // `tame_scales` writes under the lock (or once, inside `attached_region`), and only then hand
+    // out shared slices.
     let region_mut =
         unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
     tame_scales(region_mut, ty, off, n_out, n_in);
@@ -166,6 +177,13 @@ fn fused_ffn_matches_cpu_reference() {
     let Some(region) = attached_region() else {
         return;
     };
+    // FIXME(soundness): this builds a `&mut [u8]` from the `&'static [u8]` that `attached_region`
+    // hands out. Writing through a pointer derived from a shared reference is UB, the shared
+    // `region` stays live and is read later while `region_mut` exists, and cargo runs the tests of
+    // this file on parallel threads, so two tests can hold overlapping `&mut` views and race on the
+    // same bytes. Fix: keep the region as a raw pointer + length behind a `Mutex`, do all
+    // `tame_scales` writes under the lock (or once, inside `attached_region`), and only then hand
+    // out shared slices.
     let region_mut =
         unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
     let (hidden, ffn) = (512usize, 256usize);

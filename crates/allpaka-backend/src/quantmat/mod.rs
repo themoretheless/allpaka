@@ -173,6 +173,9 @@ impl<'a> QuantMat<'a> {
             let n_out = self.n_out;
             let n_in = self.n_in;
             crate::thread_pool::par_for_chunks(m, threads, |_worker, start_i, end_i| {
+                // SAFETY: `y` has `m * n_out` floats and outlives the dispatch;
+                // par_for_chunks gives each worker a disjoint row range `[start_i, end_i)` with
+                // `end_i <= m`, so this is a unique, in-bounds sub-slice of `y`.
                 let y_slice = unsafe {
                     std::slice::from_raw_parts_mut(
                         (y_addr as *mut f32).add(start_i * n_out),
@@ -192,6 +195,8 @@ impl<'a> QuantMat<'a> {
             let n_out = self.n_out;
             let n_in = self.n_in;
             crate::thread_pool::par_for_chunks(total_outputs, threads, |_worker, start, end| {
+                // SAFETY: disjoint element ranges `[start, end)` with
+                // `end <= total_outputs = y.len()`; `y` outlives the dispatch.
                 let y_slice = unsafe {
                     std::slice::from_raw_parts_mut((y_addr as *mut f32).add(start), end - start)
                 };
@@ -245,6 +250,8 @@ impl<'a> QuantMat<'a> {
         let mut y = vec![0f32; self.n_out];
         let y_addr = y.as_mut_ptr() as usize;
         crate::thread_pool::par_for_chunks(self.n_out, threads, |_worker, start_row, end_row| {
+            // SAFETY: `y` has `n_out` floats and outlives the dispatch; the row ranges
+            // `[start_row, end_row)` are disjoint and end at `n_out`.
             let y_chunk = unsafe {
                 std::slice::from_raw_parts_mut(
                     (y_addr as *mut f32).add(start_row),
@@ -315,6 +322,7 @@ impl<'a> QuantMat<'a> {
         }
         if crate::gpu::is_attached() {
             if items.len() <= 4 {
+                // SAFETY: an array of `MaybeUninit` needs no initialisation.
                 let mut stack_reqs: [std::mem::MaybeUninit<crate::gpu::MatvecReq>; 4] =
                     unsafe { std::mem::MaybeUninit::uninit().assume_init() };
                 for (i, (m, x)) in items.iter().enumerate() {
@@ -327,6 +335,9 @@ impl<'a> QuantMat<'a> {
                         m: x.len() / m.n_in,
                     });
                 }
+                // SAFETY: `items.len() <= 4` and the loop above wrote `stack_reqs[i]` for every
+                // `i < items.len()`, so the first `items.len()` elements are initialised;
+                // `MaybeUninit<T>` has the layout of `T`, and the array outlives `reqs`.
                 let reqs = unsafe {
                     std::slice::from_raw_parts(
                         stack_reqs.as_ptr() as *const crate::gpu::MatvecReq,
@@ -380,6 +391,10 @@ impl<'a> QuantMat<'a> {
         let out_addr = out.as_mut_ptr() as usize;
         let threads = crate::thread_pool::cpu_threads().min(items.len().max(1));
         crate::thread_pool::par_for_chunks(items.len(), threads, |_worker, start, end| {
+            // SAFETY: `out` has `items.len()` initialised (empty) Vecs and outlives the
+            // dispatch; item ranges `[start, end)` are disjoint and end at `items.len()`,
+            // so each worker overwrites only its own slots (the old empty Vec is dropped by
+            // the assignment, which is fine since it is initialised).
             let slots = unsafe {
                 std::slice::from_raw_parts_mut((out_addr as *mut Vec<f32>).add(start), end - start)
             };

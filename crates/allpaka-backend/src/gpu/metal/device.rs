@@ -30,6 +30,19 @@ pub struct Gpu {
     pub(super) residency: Option<usize>,
     /// Reusable staging for activations in and outputs back: bump-allocated
     /// slices bound by buffer offset, so a dispatch creates no buffer objects.
+    ///
+    /// Arena rule, relied on by the `SAFETY` comments that copy into or out
+    /// of `x_arena` / `y_arena` through `contents()`: both are shared,
+    /// page-aligned allocations of exactly `x_cap` / `y_cap` bytes, grown only
+    /// by `ensure_arenas` (which drains deferred prefill buffers first and
+    /// never shrinks). Every synchronous entry point commits and waits its own
+    /// command buffer before returning, all under the `GPU` mutex, and the only
+    /// buffers left in flight - the fused prefill's deferred or one-buffer
+    /// chain - exist only between `prefill_begin` and `prefill_end*` /
+    /// `prefill_abort`, which drain them; the model calls the plain
+    /// attention/matvec entry points outside that window. So outside the
+    /// fused prefill, a CPU copy after `ensure_arenas` and before `commit`, or
+    /// after `wait_until_completed`, never overlaps GPU access.
     pub(super) x_arena: Buffer,
     pub(super) x_cap: usize,
     pub(super) y_arena: Buffer,
@@ -156,6 +169,13 @@ pub(super) fn route_layout(
 
 // Metal objects are reference-counted ObjC objects; the global below is
 // guarded by a Mutex, so cross-thread use is serialised.
+// SAFETY: the only instance lives in `GPU` behind a `Mutex`, so the
+// device, queue, buffers, pipelines and pending command buffers it holds are
+// touched by one thread at a time; Apple documents MTLDevice, MTLCommandQueue,
+// MTLBuffer and pipeline states as usable from any thread, and command
+// buffers only need non-concurrent use, not a fixed thread. The `Cell` and
+// `RefCell` fields stay `!Sync` (no `Sync` impl), and `residency` is a raw
+// ObjC pointer stored as `usize` that is likewise only messaged under the lock.
 unsafe impl Send for Gpu {}
 
 pub(super) static GPU: OnceLock<Option<Mutex<Gpu>>> = OnceLock::new();
@@ -392,6 +412,9 @@ pub(super) fn init_device() -> Option<Gpu> {
     let pf_hs = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
     let route_buf = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
     let pf_attn_sync = device.new_buffer(256, MTLResourceOptions::StorageModeShared);
+    // SAFETY: `pf_attn_sync` was just allocated with 256 bytes of shared
+    // storage and no command buffer has referenced it yet, so the CPU is the
+    // only writer of those 256 bytes.
     unsafe { std::ptr::write_bytes(pf_attn_sync.contents() as *mut u8, 0, 256) };
     let pf_ev = device.new_shared_event();
 
@@ -1102,6 +1125,10 @@ impl Gpu {
         be.end_encoding();
         cmd.commit();
         cmd.wait_until_completed();
+        // SAFETY: `dst` is the shared buffer of `CSTAMP_CAP * 8` bytes made with
+        // `cstamps`, and `n <= CSTAMP_CAP`, so `n` u64s fit; buffer contents are
+        // page-aligned. The resolve blit wrote them and `wait_until_completed`
+        // returned, so the GPU no longer writes while the slice is copied out.
         let ts = unsafe { std::slice::from_raw_parts(dst.contents() as *const u64, n).to_vec() };
         let labels = self.cstamp_labels.borrow();
         let scale = match cal {

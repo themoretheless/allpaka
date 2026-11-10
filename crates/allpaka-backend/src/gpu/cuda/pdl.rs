@@ -49,6 +49,15 @@ fn cu_ok(r: CUresult) -> Result<(), DriverError> {
 
 unsafe fn cu_function_of(f: &CudaFunction) -> sys::CUfunction {
     // cudarc 0.19: Arc<Module> then CUfunction (or reverse). Prefer offset 8.
+    // FIXME(soundness): `CudaFunction` is a default-repr (`repr(Rust)`) struct with
+    // private fields `{ cu_function, module: Arc<CudaModule> }`; Rust guarantees neither
+    // field order nor offsets, so reading a `CUfunction` at byte 0 or 8 relies on what the
+    // current rustc happens to emit. Both reads stay in bounds (the struct is 16 bytes)
+    // and both fields are non-null pointers, so the "non-null" heuristic always picks
+    // offset 8: if the compiler (or `-Z randomize-layout`) ever puts `cu_function` first,
+    // we pass the `Arc`'s heap pointer to `cuLaunchKernelEx` as a function handle. Fix:
+    // obtain the handle without layout punning, e.g. look it up ourselves with
+    // `cuModuleGetFunction` next to cudarc's `load_function`, or upstream an accessor.
     let p = f as *const CudaFunction as *const u8;
     let a = std::ptr::read(p as *const sys::CUfunction);
     let b = std::ptr::read(p.add(8) as *const sys::CUfunction);
@@ -65,6 +74,13 @@ unsafe fn args_vec<'a, 'b>(
     off: usize,
 ) -> Option<&'a mut Vec<*mut std::ffi::c_void>> {
     let base = launch as *mut LaunchArgs<'b> as *mut u8;
+    // FIXME(soundness): `LaunchArgs` is `repr(Rust)` with private fields (stream, func,
+    // waits, records, args, flags); offset 64 for `args` is what current rustc emits, not
+    // a guarantee. If the layout moves, this reinterprets another field (e.g. `waits`, a
+    // `Vec<&CudaEvent>`) as the argument vector; the length/capacity sanity check below
+    // cannot tell two `Vec`s apart, so the kernel would get wrong arguments. Fix: collect
+    // the kernel argument pointers ourselves (a small builder that mirrors `.arg()`) and
+    // call `cuLaunchKernelEx` with them, instead of reading cudarc's private `args`.
     let v = &mut *(base.add(off) as *mut Vec<*mut std::ffi::c_void>);
     let n = v.len();
     if n == 0 || n > 64 || v.capacity() < n {
@@ -123,6 +139,7 @@ impl StreamPdlExt for CudaStream {
     #[inline(always)]
     fn launch_builder_pdl<'a>(&'a self, func: &'a CudaFunction) -> LaunchArgs<'a> {
         TLS_STREAM.with(|c| c.set(self as *const CudaStream));
+        // FIXME(soundness): relies on the layout guess in `cu_function_of`; see there.
         let cu = unsafe { cu_function_of(func) };
         TLS_CU.with(|c| c.set(cu));
         self.launch_builder(func)
@@ -142,6 +159,12 @@ pub unsafe fn launch_pdl_inner(
     if stream_ptr.is_null() || f.is_null() {
         return launch.launch(cfg);
     }
+    // SAFETY: `stream_ptr` was stored by `launch_builder_pdl` on this thread from the
+    // `&'a CudaStream` that the `LaunchArgs<'a>` being launched also borrows, so the
+    // stream is alive here. Pairing holds because every `launch_builder_pdl(..)` call in
+    // this backend is followed by its own `.launch_pdl(..)` before any other
+    // `launch_builder_pdl`, and the TLS slots are cleared (`replace(null)`) on each launch;
+    // a builder from plain `launch_builder` finds null and takes the cudarc path.
     let stream = &*stream_ptr;
     let off = ARGS_OFF.load(Ordering::Relaxed);
 

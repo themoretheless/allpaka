@@ -61,6 +61,9 @@ fn main() {
     cmd.commit();
     cmd.wait_until_completed();
 
+    // SAFETY: `c_buf` is a StorageModeShared buffer of `n * n * 4` bytes with page-aligned
+    // `contents()`, and `wait_until_completed` above means the kernel is done with it, so the host
+    // reads `n * n` settled f32s while `c_buf` is still alive.
     let c = unsafe { std::slice::from_raw_parts(c_buf.contents() as *const f32, n * n) };
     // A = identity, so C should equal B
     let ok = (0..n * n).all(|i| (c[i] - ((i % 7) as f32)).abs() < 1e-3);

@@ -139,6 +139,10 @@ pub(super) fn try_prefill_attn_fused_dev(
         return None;
     }
     // Flatten [[sin,cos]; ...] without copy when layout matches.
+    // SAFETY: `[f32; 2]` has the size and alignment of two consecutive `f32`s with no
+    // padding, so `req.ropes` is a valid `[f32]` of twice its length. We read
+    // `m * pairs * 2` floats, and `req.ropes.len() >= m * pairs` was checked just above.
+    // The slice borrows from `req`, which outlives this function, and is read-only.
     let rope_host: &[f32] =
         unsafe { std::slice::from_raw_parts(req.ropes.as_ptr() as *const f32, m * pairs * 2) };
 

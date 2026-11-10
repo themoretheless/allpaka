@@ -123,8 +123,15 @@ fn load() -> Option<&'static Api> {
                 let mut new_path = abs.as_os_str().to_owned();
                 new_path.push(";");
                 new_path.push(&path);
+                // SAFETY: Windows-only path (a `.dll`, a `;`-joined PATH). There the OS
+                // guards the environment block with its own lock and std serialises its own
+                // env access, so a concurrent reader sees the old or the new value, not a torn
+                // one. This runs once, inside `API.get_or_init`.
                 unsafe { std::env::set_var("PATH", new_path) };
             }
+            // SAFETY: loading runs the DLL's static initialisers. allpaka_ggml.dll is our
+            // own build of third_party/allpaka_ggml (no DllMain of its own, only CRT and
+            // ggml-cuda static setup), loaded at most once per candidate inside `get_or_init`.
             let lib = match unsafe { libloading::Library::new(&dll) } {
                 Ok(l) => l,
                 Err(e) => {
@@ -132,6 +139,12 @@ fn load() -> Option<&'static Api> {
                     continue;
                 }
             };
+            // SAFETY (every `lib.get` below): each symbol is read as the fn-pointer type
+            // declared at the top of this file, which mirrors the `extern "C"` prototype in
+            // third_party/allpaka_ggml/allpaka_ggml.h; the two must be kept in sync. The
+            // copied pointers stay valid because `lib` moves into the same `Api`, which lives
+            // in the `API` static until exit; on `continue`, `lib` and every pointer copied
+            // out of it are dropped together and never called.
             let init: InitFn = match unsafe { lib.get(b"allpaka_ggml_init\0") } {
                 Ok(s) => *s,
                 Err(e) => {
@@ -337,6 +350,11 @@ pub fn mul_mat(
     let Some(api) = load() else {
         return false;
     };
+    // SAFETY: the pointers are CUDA device addresses passed through to the DLL and never
+    // dereferenced on the host. Its kernel reads `w` and `x` and writes `y`, so they must
+    // be live device allocations covering the sizes implied by the shape arguments. This
+    // safe fn cannot check that; callers pass offsets into buffers they own (weight
+    // windows, the x/y arenas) sized from the same shape.
     let rc = unsafe {
         (api.mul_mat)(
             w_dev as *const c_void,
@@ -371,6 +389,11 @@ pub fn mul_mat_vec(
     let Some(mmv) = api.mul_mat_vec else {
         return mul_mat(w_dev, x_dev, y_dev, n_in, n_out, 1, w_type);
     };
+    // SAFETY: the pointers are CUDA device addresses passed through to the DLL and never
+    // dereferenced on the host. Its kernel reads `w` and `x` and writes `y`, so they must
+    // be live device allocations covering the sizes implied by the shape arguments. This
+    // safe fn cannot check that; callers pass offsets into buffers they own (weight
+    // windows, the x/y arenas) sized from the same shape.
     let rc = unsafe {
         mmv(
             w_dev as *const c_void,
@@ -407,6 +430,9 @@ pub fn fa_set_q8(q8_dev: u64) {
     let Some(f) = api.set_q8 else {
         return;
     };
+    // SAFETY: `q8_dev` is a device address the DLL records and writes into during the
+    // next m=1 flash_attn; the host never dereferences it. Callers pass `gpu.q8_q`'s
+    // base, which `ensure_q8` sized for the activation before the call.
     unsafe { f(q8_dev as *mut c_void) };
 }
 
@@ -453,6 +479,10 @@ pub fn flash_attn(
     let Some(fa) = api.flash_attn else {
         return false;
     };
+    // SAFETY: q/k/v/out/d_pos are device addresses only the DLL's kernels dereference:
+    // q and out cover `m * n_q_heads * head_dim` floats, k/v the f16 KV rows up to
+    // `base + m` at stride `kv_dim`, d_pos one u32 or null. Callers derive them from the
+    // y arena and the attached KV `SharedRegion`; this safe fn cannot check them.
     let rc = unsafe {
         fa(
             q_dev as *const f32,
@@ -511,6 +541,11 @@ pub fn hybrid_replay(
     {
         return false;
     }
+    // SAFETY: on the host the DLL reads `pre_execs.len()` entries from `pre_execs`,
+    // `post_execs`, `k_off` and `v_off`; the four lengths were checked equal and nonzero
+    // above, and the slices stay borrowed for the whole call. The exec handles belong to
+    // `CudaGraph`s the caller holds across the call, and the stream is `stream`'s own.
+    // q/out/cache/d_pos are device addresses that only the kernels dereference.
     let rc = unsafe {
         hr(
             pre_execs.as_ptr() as *const *mut c_void,

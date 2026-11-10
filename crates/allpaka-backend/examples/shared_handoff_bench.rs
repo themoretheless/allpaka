@@ -9,6 +9,10 @@ fn main() {
     let layout = std::alloc::Layout::from_size_align(16384, 16384).unwrap();
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is a non-null (asserted) `alloc_zeroed` allocation of exactly 16384 bytes at
+    // 16384-byte alignment, so all bytes are initialised and nothing else refers to them. It is
+    // deliberately leaked, like a production mmap that the GPU keeps wrapping until exit, so the
+    // slice may live for the rest of the process.
     let mapping = unsafe { std::slice::from_raw_parts(ptr, 16384) };
     assert!(
         gpu::attach(mapping),

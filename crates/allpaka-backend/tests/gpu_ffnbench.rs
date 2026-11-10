@@ -25,6 +25,9 @@ fn ffn_shaped_matvecs_report_effective_bandwidth() {
     let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is from `alloc_zeroed`, so every byte is initialised. `ptr` is non-null
+    // (asserted), owns `len` bytes at `PAGE` alignment, and is never freed, so the slice is unique
+    // and may live for the whole test.
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     for b in region.iter_mut() {
@@ -156,6 +159,9 @@ fn down_shaped_q3k_vs_q4k_bandwidth() {
     let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is from `alloc_zeroed`, so every byte is initialised. `ptr` is non-null
+    // (asserted), owns `len` bytes at `PAGE` alignment, and is never freed, so the slice is unique
+    // and may live for the whole test.
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0x2545_F491_4F6C_DD1Du64;
     for b in region.iter_mut() {
@@ -251,6 +257,9 @@ fn mm_shaped_matmuls_report_effective_bandwidth() {
     let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is from `alloc_zeroed`, so every byte is initialised. `ptr` is non-null
+    // (asserted), owns `len` bytes at `PAGE` alignment, and is never freed, so the slice is unique
+    // and may live for the whole test.
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0xB5AD_4ECE_DA1C_E2A9u64;
     for b in region.iter_mut() {

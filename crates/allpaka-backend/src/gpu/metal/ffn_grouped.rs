@@ -213,6 +213,17 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             .and_then(|r| r.bias)
             .map_or(0, |b| b.as_ptr() as usize);
         if gpu.route_staged != Some(bptr) {
+            // FIXME(soundness): bounds and alignment hold (`ensure_route(rl.total)` sized
+            // route_buf; counts and counters are the first `rl.table` words, the bias
+            // region holds `n_expert` floats at `rl.bias`), but the hazard argument does
+            // not: the bias pointer differs per layer on GLM (each layer owns its
+            // `router_bias` Vec), so this restages on every layer while earlier layers of
+            // the chunk are still in flight (deferred chain) or not yet committed (one
+            // buffer). Those layers then read this layer's bias, and an in-flight
+            // route_scan can see its counts zeroed under it. Address equality also cannot
+            // tell a freed bias from a new one at the same address. Fix: give each layer
+            // its own bias slot in route_buf (or stage biases once per model), or drain
+            // before restaging.
             unsafe {
                 let rb = gpu.route_buf.contents() as *mut f32;
                 std::ptr::write_bytes(rb, 0, rl.table); // counts + counters
@@ -233,6 +244,12 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 // The logits leave y_arena before it can grow; with deferred
                 // commits the buffer that wrote them may still be in flight.
                 gpu.prefill_drain();
+                // SAFETY: `prefill_drain` just waited the buffer that wrote the logits
+                // (this branch is not one-buffer mode, which rescues on the GPU instead).
+                // The attention or GDN block that published `r_at` reserved
+                // `r_at + m * n_expert` floats of the current y_arena, which has not been
+                // reallocated yet; `rl.logits` is the `n_logits`-float logits region of the
+                // route layout, inside the `rl.total` words `ensure_route` reserved.
                 unsafe {
                     let rb = gpu.route_buf.contents() as *mut f32;
                     let src = (gpu.y_arena.contents() as *const f32).add(r_at);
@@ -246,6 +263,18 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         }
     }
     gpu.ensure_arenas(x_total * 4, y_total * 4);
+    // SAFETY: `ensure_arenas(x_total * 4, ..)` covers every region written here
+    // (x rows, then the `[u32; 3]` group table, token list, offsets and hit
+    // rows/weights, each `align`ed and laid out to end by `x_total`); arena
+    // contents are page-aligned and every element is 4 bytes. Hazards: the
+    // synchronous path finds the GPU idle. One-buffer and deferred layers
+    // either upload nothing (route mode: fused, no tables) or are dense and
+    // upload the same single identity group every layer, so an earlier layer
+    // still in flight or uncommitted reads equal bytes; or they are
+    // CPU-routed, and then the attention/GDN block that handed back CPU
+    // logits committed and waited, retiring the previous FFN's buffer before
+    // these tables are overwritten. Those blocks' own x uploads (rope tables
+    // at `align(m * hidden)`) lie past these small tables.
     unsafe {
         let xp = gpu.x_arena.contents() as *mut f32;
         if req.fused.is_none() {
@@ -837,6 +866,11 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             req.total_rows
         };
         let mut out = vec![0f32; out_rows * req.hidden];
+        // SAFETY: a non-empty copy only happens when `req.fused` is None, and
+        // onebuf/defer both require the fused path, so this buffer was committed and
+        // waited above. `out_at + total_rows * hidden <= y_total`, which
+        // `ensure_arenas` reserved; with zero rows the pointer is in bounds and
+        // nothing is read.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 (gpu.y_arena.contents() as *const f32).add(out_at),

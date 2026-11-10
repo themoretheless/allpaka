@@ -14,6 +14,10 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
     gpu.pf_obuf_cmd = None;
     gpu.pf_hs_normed.set(false);
     gpu.ensure_prefill(xs.len() * 4);
+    // SAFETY: `ensure_prefill(xs.len() * 4)` left `pf_x` at least that many bytes of
+    // shared storage (page-aligned, so f32-aligned). `prefill_drain` above waited
+    // every deferred buffer and the open one-buffer segment was dropped, so no
+    // command buffer can be reading `pf_x` while the CPU writes it.
     unsafe {
         std::ptr::copy_nonoverlapping(xs.as_ptr(), gpu.pf_x.contents() as *mut f32, xs.len());
     }
@@ -41,6 +45,11 @@ pub(super) fn prefill_complete(gpu: &mut Gpu) {
     gpu.prefill_drain();
     if let (Some((tab, n_ex)), true) = (gpu.dbg_route.get(), crate::runtime::get().metal_rows_debug)
     {
+        // SAFETY: (for the deref below) `prefill_drain` and the one-buffer wait above
+        // mean no GPU work is writing `route_buf`. `dbg_route` holds the word offset
+        // of a route table of `n_ex * 3` words laid out by `route_layout` inside a
+        // buffer sized by `ensure_route`, which only ever grows, so every
+        // `tab + i * 3 + 2` read stays in bounds and u32-aligned.
         let rb = gpu.route_buf.contents() as *const u32;
         let mut rows: Vec<u32> = (0..n_ex)
             .map(|i| unsafe { *rb.add(tab + i * 3 + 2) })
@@ -69,6 +78,9 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
     if gpu.pf_active_len != Some(xs.len()) || xs.len().checked_mul(4)? > gpu.pf_x_cap {
         return None;
     }
+    // SAFETY: `prefill_complete` committed and waited the one-buffer chunk and
+    // drained every deferred buffer, so the GPU is done writing `pf_x`; the check
+    // above bounds `xs.len() * 4` by `pf_x_cap`, the buffer's length.
     unsafe {
         std::ptr::copy_nonoverlapping(gpu.pf_x.contents() as *const f32, xs.as_mut_ptr(), xs.len());
     }
@@ -101,6 +113,10 @@ impl std::ops::Deref for SharedVector {
     type Target = [f32];
     fn deref(&self) -> &[f32] {
         // Only constructed after prefill_complete; storage outlives the slice.
+        // SAFETY: the buffer is the former `pf_x` (or a spare of the same length),
+        // taken out of the GPU state by `prefill_end_output` after `prefill_complete`
+        // drained all writers, with `len * 4 <= pf_x_cap == length`. Nothing else
+        // holds it, contents are page-aligned, and it lives as long as `self`.
         unsafe {
             std::slice::from_raw_parts(self.buf.as_ref().unwrap().contents().cast(), self.len)
         }
@@ -108,6 +124,8 @@ impl std::ops::Deref for SharedVector {
 }
 impl std::ops::DerefMut for SharedVector {
     fn deref_mut(&mut self) -> &mut [f32] {
+        // SAFETY: as for `deref`; `&mut self` makes this the only live view, and no
+        // command buffer references the allocation once it has been handed out.
         unsafe {
             std::slice::from_raw_parts_mut(self.buf.as_ref().unwrap().contents().cast(), self.len)
         }
@@ -320,6 +338,13 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
     let n_expert = fusion.as_ref().map_or(0, |f| f.n_expert);
     let y_total = router_at + align(req.m * n_expert);
     gpu.ensure_arenas(x_total * 4, y_total * 4);
+    // SAFETY: `ensure_arenas(x_total * 4, ..)` sized `x_arena` for both copies
+    // (`hs_at + hs.len() <= ropes_at`, `ropes_at + ropes.len() * 2 <= x_total`).
+    // Synchronous layers find the GPU idle on this arena. Deferred and one-buffer
+    // layers (fusion only, so `hs` is not uploaded) may still have an earlier
+    // layer's buffer in flight that reads the rope tables here; every attention
+    // layer of a chunk writes byte-identical tables at the same `ropes_at`, so the
+    // overlap rewrites equal values and no Rust reference to the arena exists.
     unsafe {
         let xp = gpu.x_arena.contents() as *mut f32;
         if fusion.is_none() {
@@ -913,6 +938,10 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             (out_at, req.m * hidden)
         };
         let mut out = vec![0f32; out_len];
+        // SAFETY: reached only on the paths that committed and waited this buffer
+        // (onebuf and defer return earlier, as they need GPU routing), so the GPU is
+        // done with `y_arena`; `src_at + out.len()` is within `y_total`, which
+        // `ensure_arenas` reserved.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 (gpu.y_arena.contents() as *const f32).add(src_at),
@@ -1410,6 +1439,9 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             return Vec::new();
         }
         let mut out = vec![0f32; req.m * n_expert];
+        // SAFETY: as in `prefill_attn_block`: only the waited, non-GPU-routing
+        // path gets here, and `router_at + m * n_expert` is inside the y arena
+        // reserved by `ensure_arenas` above.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 (gpu.y_arena.contents() as *const f32).add(router_at),

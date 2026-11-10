@@ -83,6 +83,9 @@ fn attach_and_matvec_parity() {
     let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is from `alloc_zeroed`, so every byte is initialised. `ptr` is non-null
+    // (asserted), owns `len` bytes at `PAGE` alignment, and is never freed, so the slice is unique
+    // and may live for the whole test.
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0xC0FF_EE00_D15C_AFE1u64;
     for b in region.iter_mut() {
@@ -169,6 +172,9 @@ fn gemm_q4k_q6k_parity() {
     let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is from `alloc_zeroed`, so every byte is initialised. `ptr` is non-null
+    // (asserted), owns `len` bytes at `PAGE` alignment, and is never freed, so the slice is unique
+    // and may live for the whole test.
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0xA5A5_5A5A_C0DE_BEEFu64;
     for b in region.iter_mut() {

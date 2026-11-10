@@ -93,6 +93,10 @@ fn grouped_tail_stores_match_conservative_barriers() {
                 let pipe = device
                     .new_compute_pipeline_state_with_function(&fun)
                     .unwrap();
+                // SAFETY: `out` is a StorageModeShared buffer of `(rows * no + 64) * 4` bytes, so
+                // `contents()` is a page-aligned host pointer to exactly `rows * no + 64` f32s. No
+                // command buffer using `out` has been committed yet, so the CPU has exclusive
+                // access for the fill.
                 unsafe {
                     std::slice::from_raw_parts_mut(
                         out.contents().cast::<f32>(),
@@ -128,6 +132,11 @@ fn grouped_tail_stores_match_conservative_barriers() {
                 cmd.wait_until_completed();
                 assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{name}");
             }
+            // SAFETY: Both `outputs` are StorageModeShared buffers allocated above with room for
+            // exactly `rows * no + 64` f32s; `contents()` is page-aligned, so the cast is aligned.
+            // The command buffer that wrote them has finished (`wait_until_completed`) and nothing
+            // else is queued, so the host reads settled memory; the slices borrow buffers that stay
+            // alive for the rest of the scope.
             let output = |i: usize| unsafe {
                 std::slice::from_raw_parts(
                     outputs[i].contents().cast::<f32>(),
@@ -179,6 +188,10 @@ fn grouped_tail_stores_match_conservative_barriers() {
                     ((rows * no as usize + 64) * 4) as u64,
                     MTLResourceOptions::StorageModeShared,
                 );
+                // SAFETY: `out` is a StorageModeShared buffer of `(rows * no + 64) * 4` bytes, so
+                // `contents()` is a page-aligned host pointer to exactly `rows * no + 64` f32s. No
+                // command buffer using `out` has been committed yet, so the CPU has exclusive
+                // access for the fill.
                 unsafe {
                     std::slice::from_raw_parts_mut(
                         out.contents().cast::<f32>(),
@@ -217,12 +230,18 @@ fn grouped_tail_stores_match_conservative_barriers() {
                 assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{kname}");
                 out
             });
+            // SAFETY: `outputs[0]` and `outputs[1]` are StorageModeShared buffers allocated above
+            // with room for exactly `rows * no + 64` f32s; `contents()` is page-aligned, so the
+            // cast is aligned. The command buffer that wrote them has finished
+            // (`wait_until_completed`) and nothing else is queued, so the host reads settled
+            // memory; the slices borrow buffers that stay alive for the rest of the scope.
             let out32 = unsafe {
                 std::slice::from_raw_parts(
                     outputs[0].contents().cast::<f32>(),
                     rows * no as usize + 64,
                 )
             };
+            // SAFETY: as for `out32` above.
             let out16 = unsafe {
                 std::slice::from_raw_parts(
                     outputs[1].contents().cast::<f32>(),
@@ -386,8 +405,14 @@ fn fused_qkv_kernels_match_separate_dispatches() {
             "{qkv_name}"
         );
 
+        // SAFETY: `ref_out` and `fused_out` are StorageModeShared buffers allocated above with room
+        // for exactly `total_out` f32s; `contents()` is page-aligned, so the cast is aligned. The
+        // command buffer that wrote them has finished (`wait_until_completed`) and nothing else is
+        // queued, so the host reads settled memory; the slices borrow buffers that stay alive for
+        // the rest of the scope.
         let s_ref =
             unsafe { std::slice::from_raw_parts(ref_out.contents().cast::<f32>(), total_out) };
+        // SAFETY: as for `s_ref` above.
         let s_fused =
             unsafe { std::slice::from_raw_parts(fused_out.contents().cast::<f32>(), total_out) };
         for (i, (&a, &b)) in s_ref.iter().zip(s_fused).enumerate() {
@@ -540,7 +565,13 @@ fn fused_qkv_mixed_q4k_q6k_matches_separate() {
     cmd.wait_until_completed();
     assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
 
+    // SAFETY: `ref_out` and `fused_out` are StorageModeShared buffers allocated above with room for
+    // exactly `total_out` f32s; `contents()` is page-aligned, so the cast is aligned. The command
+    // buffer that wrote them has finished (`wait_until_completed`) and nothing else is queued, so
+    // the host reads settled memory; the slices borrow buffers that stay alive for the rest of the
+    // scope.
     let s_ref = unsafe { std::slice::from_raw_parts(ref_out.contents().cast::<f32>(), total_out) };
+    // SAFETY: as for `s_ref` above.
     let s_fused =
         unsafe { std::slice::from_raw_parts(fused_out.contents().cast::<f32>(), total_out) };
     for (i, (&a, &b)) in s_ref.iter().zip(s_fused).enumerate() {
@@ -590,6 +621,9 @@ fn route_fused_matches_three_stage_router() {
     };
     let zbuf = |bytes: u64| {
         let b = device.new_buffer(bytes, MTLResourceOptions::StorageModeShared);
+        // SAFETY: `b` was just allocated with exactly `bytes` bytes of shared storage and has not
+        // been handed to any command buffer, so zeroing `bytes` bytes through `contents()` is in
+        // bounds and unobserved by the GPU.
         unsafe { std::ptr::write_bytes(b.contents().cast::<u8>(), 0, bytes as usize) };
         b
     };
@@ -704,31 +738,61 @@ fn route_fused_matches_three_stage_router() {
     cmd.wait_until_completed();
     assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
 
+    // SAFETY: `table_a` and `table_b` are StorageModeShared buffers allocated above with room for
+    // exactly `n_expert` `[u32; 3]` entries (`n_expert * 12` bytes) values; `contents()` is page-
+    // aligned, so the cast is aligned. The command buffer that wrote them has finished
+    // (`wait_until_completed`) and nothing else is queued, so the host reads settled memory; the
+    // slices borrow buffers that stay alive for the rest of the scope.
     let tab_a = unsafe {
         std::slice::from_raw_parts(table_a.contents().cast::<[u32; 3]>(), n_expert as usize)
     };
+    // SAFETY: as for `tab_a` above.
     let tab_b = unsafe {
         std::slice::from_raw_parts(table_b.contents().cast::<[u32; 3]>(), n_expert as usize)
     };
     assert_eq!(tab_a, tab_b, "group tables differ");
 
+    // SAFETY: `tok_off_a` and `tok_off_b` are StorageModeShared buffers allocated above with room
+    // for exactly `m + 1` u32s; `contents()` is page-aligned, so the cast is aligned. The command
+    // buffer that wrote them has finished (`wait_until_completed`) and nothing else is queued, so
+    // the host reads settled memory; the slices borrow buffers that stay alive for the rest of the
+    // scope.
     let off_a =
         unsafe { std::slice::from_raw_parts(tok_off_a.contents().cast::<u32>(), (m + 1) as usize) };
+    // SAFETY: as for `off_a` above.
     let off_b =
         unsafe { std::slice::from_raw_parts(tok_off_b.contents().cast::<u32>(), (m + 1) as usize) };
     assert_eq!(off_a, off_b, "tok_off differs");
 
+    // SAFETY: `hit_w_a` and `hit_w_b` are StorageModeShared buffers allocated above with room for
+    // exactly `hit_len` f32s; `contents()` is page-aligned, so the cast is aligned. The command
+    // buffer that wrote them has finished (`wait_until_completed`) and nothing else is queued, so
+    // the host reads settled memory; the slices borrow buffers that stay alive for the rest of the
+    // scope.
     let hw_a = unsafe { std::slice::from_raw_parts(hit_w_a.contents().cast::<f32>(), hit_len) };
+    // SAFETY: as for `hw_a` above.
     let hw_b = unsafe { std::slice::from_raw_parts(hit_w_b.contents().cast::<f32>(), hit_len) };
     for (i, (&a, &b)) in hw_a.iter().zip(hw_b).enumerate() {
         assert_eq!(a.to_bits(), b.to_bits(), "hit_w[{i}] differs");
     }
 
+    // SAFETY: `tok_a` and `tok_b` are StorageModeShared buffers allocated above with room for
+    // exactly `total_rows` u32s; `contents()` is page-aligned, so the cast is aligned. The command
+    // buffer that wrote them has finished (`wait_until_completed`) and nothing else is queued, so
+    // the host reads settled memory; the slices borrow buffers that stay alive for the rest of the
+    // scope.
     let tk_a =
         unsafe { std::slice::from_raw_parts(tok_a.contents().cast::<u32>(), total_rows as usize) };
+    // SAFETY: as for `tk_a` above.
     let tk_b =
         unsafe { std::slice::from_raw_parts(tok_b.contents().cast::<u32>(), total_rows as usize) };
+    // SAFETY: `hit_row_a` and `hit_row_b` are StorageModeShared buffers allocated above with room
+    // for exactly `hit_len` u32s; `contents()` is page-aligned, so the cast is aligned. The command
+    // buffer that wrote them has finished (`wait_until_completed`) and nothing else is queued, so
+    // the host reads settled memory; the slices borrow buffers that stay alive for the rest of the
+    // scope.
     let hr_a = unsafe { std::slice::from_raw_parts(hit_row_a.contents().cast::<u32>(), hit_len) };
+    // SAFETY: as for `hr_a` above.
     let hr_b = unsafe { std::slice::from_raw_parts(hit_row_b.contents().cast::<u32>(), hit_len) };
 
     for (e, entry) in tab_b.iter().enumerate().take(n_expert as usize) {
@@ -755,6 +819,11 @@ fn route_fused_matches_three_stage_router() {
     // Tile descriptors: exact cover of each expert's rows in 32-row chunks,
     // experts in order, then a rows=0 tail up to tile_bound.
     let tile_bound = (n_expert + total_rows / 32) as usize;
+    // SAFETY: `tiles_b` are StorageModeShared buffers allocated above with room for exactly
+    // `tile_bound` `[u32; 3]` entries (`(n_expert + total_rows / 32) * 12` bytes) values;
+    // `contents()` is page-aligned, so the cast is aligned. The command buffer that wrote them has
+    // finished (`wait_until_completed`) and nothing else is queued, so the host reads settled
+    // memory; the slices borrow buffers that stay alive for the rest of the scope.
     let tiles =
         unsafe { std::slice::from_raw_parts(tiles_b.contents().cast::<[u32; 3]>(), tile_bound) };
     let mut t = 0usize;
@@ -894,8 +963,14 @@ fn matvec_q6k_swiglu_fold_matches_separate() {
         cmd.wait_until_completed();
         assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
 
+        // SAFETY: `y_ref` and `y_fused` are StorageModeShared buffers allocated above with room for
+        // exactly `n_out` f32s; `contents()` is page-aligned, so the cast is aligned. The command
+        // buffer that wrote them has finished (`wait_until_completed`) and nothing else is queued,
+        // so the host reads settled memory; the slices borrow buffers that stay alive for the rest
+        // of the scope.
         let s_ref =
             unsafe { std::slice::from_raw_parts(y_ref.contents().cast::<f32>(), n_out as usize) };
+        // SAFETY: as for `s_ref` above.
         let s_fused =
             unsafe { std::slice::from_raw_parts(y_fused.contents().cast::<f32>(), n_out as usize) };
         for (i, (&a, &b)) in s_ref.iter().zip(s_fused).enumerate() {
@@ -1058,7 +1133,13 @@ fn matvec_qkv_q4k_q6k_matches_separate() {
     cmd.wait_until_completed();
     assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
 
+    // SAFETY: `ref_out` and `fused_out` are StorageModeShared buffers allocated above with room for
+    // exactly `total` f32s; `contents()` is page-aligned, so the cast is aligned. The command
+    // buffer that wrote them has finished (`wait_until_completed`) and nothing else is queued, so
+    // the host reads settled memory; the slices borrow buffers that stay alive for the rest of the
+    // scope.
     let s_ref = unsafe { std::slice::from_raw_parts(ref_out.contents().cast::<f32>(), total) };
+    // SAFETY: as for `s_ref` above.
     let s_fused = unsafe { std::slice::from_raw_parts(fused_out.contents().cast::<f32>(), total) };
     for (i, (&a, &b)) in s_ref.iter().zip(s_fused).enumerate() {
         assert!(

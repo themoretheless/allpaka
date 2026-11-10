@@ -32,7 +32,14 @@ impl SharedRegion {
     }
 }
 
+// SAFETY: the fields are a `CudaSlice<u8>` (cudarc already declares it Send + Sync) and
+// two `usize`s; `host` is only an address recorded for diagnostics and is never turned
+// back into a pointer, so no host memory is reachable through a `SharedRegion`. The
+// device buffer is only touched through `with_gpu`, i.e. under the global `GPU` mutex,
+// and `&SharedRegion` methods only read `len` or pass `&buf` to stream-ordered copies.
+// These impls are therefore what the auto traits would already derive.
 unsafe impl Send for SharedRegion {}
+// SAFETY: see the `Send` impl above; shared access never mutates any field.
 unsafe impl Sync for SharedRegion {}
 
 pub fn wrap_region(region: &[u8]) -> Option<SharedRegion> {

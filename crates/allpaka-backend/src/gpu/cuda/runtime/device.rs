@@ -175,6 +175,15 @@ pub struct CudaGpu {
     pub wo_fa_x: u64,
 }
 
+// SAFETY: what keeps `CudaGpu` from being Send automatically is `CudaGraph` (raw
+// CUgraph / CUgraphExec handles) and the raw exec pointers in `decode_fa_execs`. The
+// only instance lives inside the `Mutex` in `GPU`, so exactly one thread uses it at a
+// time. Driver handles are not thread-affine: they belong to the device context, and
+// every cudarc call (and `CudaGraph::drop`) binds that context to the calling thread
+// first; the raw `graph::launch` replay path in decode_fused calls `bind_to_thread`
+// itself before launching. `decode_fa_execs` is only ever assigned `None`; were it
+// filled, its pointers would be exec handles owned by graphs in this same struct.
+// `Sync` is deliberately not implemented: shared access goes through the mutex.
 unsafe impl Send for CudaGpu {}
 
 pub static GPU: OnceLock<Option<Mutex<CudaGpu>>> = OnceLock::new();

@@ -523,6 +523,11 @@ pub(super) fn matvec_batch_inner(
     }
 
     // Stage the activations into the shared arena: the only per-call copy.
+    // SAFETY: each slot's `x_off` was bump-planned with `align(rows * n_in * 4)`
+    // bytes, and `x_need`, their total, was passed to `ensure_arenas`, so every
+    // copy of `xs` (exactly `rows * n_in` floats, a bounds-checked subslice) lands
+    // inside the arena without overlapping another slot. The arena is idle (arena
+    // rule, `Gpu::x_arena`).
     unsafe {
         let xp = gpu.x_arena.contents() as *mut u8;
         for s in &slots {
@@ -605,6 +610,9 @@ pub(super) fn matvec_batch_inner(
             let n = s.rows * reqs[s.ri].n_out;
             let at = out[s.ri].len();
             out[s.ri].resize(at + n, 0.0);
+            // SAFETY: the buffer was waited above. `y_off` was planned with
+            // `align(rows * n_out * 4)` bytes inside `y_need`, the size given to
+            // `ensure_arenas`, and `out[s.ri]` was just resized to hold `n` more floats.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     yp.add(s.y_off),

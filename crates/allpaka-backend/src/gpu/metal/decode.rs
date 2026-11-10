@@ -878,6 +878,13 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     gpu.ensure_arenas(4096, total * 4);
 
     // Stage x (or token_id for GPU embedding lookup) and zero the first delta.
+    // SAFETY: `ensure_arenas(4096, total * 4)` reserved every offset used here
+    // (`tok_at`, `x_at + hidden`, `delta_at + hidden`, `flag_at`, `ctr_at` all lie
+    // before `total`); offsets are in f32 units, so the u32 store at `tok_at` is
+    // 4-byte aligned. `req.x` has at least `hidden` floats (`hidden` is
+    // `req.x.len() / m`). The shared-expert slot `wts_at + n_used` is inside the
+    // `max_slots >= n_used + 1` weights region. The arena is idle (arena rule,
+    // `Gpu::x_arena`).
     unsafe {
         let yp = gpu.y_arena.contents() as *mut f32;
         if let Some((_, _, _, _, tok_id)) = gpu_embed {
@@ -2272,6 +2279,10 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             let mut cpu_end = 0u64;
             let mut gpu_end = 0u64;
             gpu.device.sample_timestamps(&mut cpu_end, &mut gpu_end);
+            // SAFETY: `resolved` is a shared buffer of `MAX_SPLIT_SAMPLES` u64s and
+            // `split_index` never exceeds that (`split_here!` checks before advancing);
+            // the resolve blit that filled it ran in `cmd`, which `commit_and_wait`
+            // completed, so the GPU no longer writes it while the slice lives.
             let samples = unsafe {
                 std::slice::from_raw_parts(resolved.contents() as *const u64, split_index as usize)
             };
@@ -2319,12 +2330,17 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         DISPATCHES.fetch_add(dispatched + 2, Ordering::Relaxed);
 
         if req.argmax {
+            // SAFETY: `cmd` was committed and waited; `amax_at + 64 * 2` is the argmax
+            // winner slot inside the `align(64 * 2 + 1)` region before `total`, and the
+            // f32-unit offset keeps the u32 read aligned.
             let next = unsafe {
                 ((gpu.y_arena.contents() as *const f32).add(amax_at + 64 * 2) as *const u32).read()
             };
             TokenOut::Argmax(next)
         } else {
             let mut out = vec![0f32; vocab];
+            // SAFETY: waited above; `out_logits_at + vocab` lies inside the
+            // `align(vocab)` region reserved below `total`, and `out` holds `vocab` f32s.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     (gpu.y_arena.contents() as *const f32).add(out_logits_at),
@@ -2570,6 +2586,10 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
         ((n_more + 1) * 4) as u64,
         metal::MTLResourceOptions::StorageModeShared,
     );
+    // SAFETY: `hist_buf` was just created with `(n_more + 1) * 4` bytes and is
+    // not yet referenced by any command buffer; `wts_at + n_used` is inside the
+    // `max_slots >= n_used + 1` weights region of the `total` floats reserved by
+    // `ensure_arenas`, and the y arena is idle (arena rule, `Gpu::x_arena`).
     unsafe {
         *(hist_buf.contents() as *mut u32) = seed_token;
         let yp = gpu.y_arena.contents() as *mut f32;
@@ -3343,6 +3363,9 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
         DECODE_SUCCESSES.fetch_add(n_more as u64, Ordering::Relaxed);
 
         let mut results = vec![0u32; n_more];
+        // SAFETY: `cmd` was committed and waited, so the store kernels are done
+        // with `hist_buf`; elements `1..=n_more` are inside its `n_more + 1` u32s and
+        // `results` has `n_more` slots.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 (hist_buf.contents() as *const u32).add(1),

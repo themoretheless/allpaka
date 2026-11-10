@@ -107,6 +107,9 @@ fn main() {
     enc.end_encoding();
     cmd.commit();
     cmd.wait_until_completed();
+    // SAFETY: `y_buf` is a StorageModeShared buffer of `m * n_out * 4` bytes with page-aligned
+    // `contents()`, and `wait_until_completed` above means the kernel is done with it, so the host
+    // reads `m * n_out` settled f32s while `y_buf` is still alive.
     let got = unsafe { std::slice::from_raw_parts(y_buf.contents() as *const f32, m * n_out) };
     let mut bad = 0;
     for i in 0..m * n_out {
