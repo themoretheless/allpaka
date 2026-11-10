@@ -262,6 +262,7 @@ pub fn rmsnorm_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
 pub fn rmsnorm_rows_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
     let n = weight.len();
     let rows = src.len() / n;
+    assert!(dst.len() >= rows * n, "dst holds fewer rows than src");
     let threads = crate::thread_pool::cpu_threads().min(rows.max(1));
     if threads <= 1 || rows < 4 || src.len() < 16_384 {
         for (d, s) in dst.chunks_mut(n).zip(src.chunks(n)) {

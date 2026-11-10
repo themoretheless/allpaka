@@ -48,10 +48,15 @@ pub fn rope_neox_cached(x: &mut [f32], table: &[(f32, f32)]) {
 /// [`rope_norm`] over a precomputed per-position table stored as arrays.
 pub fn rope_norm_cached_from_array(x: &mut [f32], table: &[[f32; 2]]) {
     assert_eq!(x.len(), table.len() * 2);
-    // SAFETY: `[f32; 2]` and `(f32, f32)` have identical size, alignment, and layout.
-    let pairs =
-        unsafe { std::slice::from_raw_parts(table.as_ptr() as *const (f32, f32), table.len()) };
-    rope_norm_cached(x, pairs);
+    // Same arithmetic as `rope_norm_cached`, read straight from the arrays:
+    // reinterpreting `[f32; 2]` as `(f32, f32)` would rely on tuple layout,
+    // which Rust leaves unspecified.
+    for (i, &[sin, cos]) in table.iter().enumerate() {
+        let a = x[2 * i];
+        let b = x[2 * i + 1];
+        x[2 * i] = a * cos - b * sin;
+        x[2 * i + 1] = a * sin + b * cos;
+    }
 }
 
 /// [`rope_neox`] over a precomputed per-position table stored as arrays.
@@ -60,11 +65,15 @@ pub fn rope_norm_cached_from_array(x: &mut [f32], table: &[[f32; 2]]) {
 /// GLM): those channels rotate and the tail passes through unchanged.
 pub fn rope_neox_cached_from_array(x: &mut [f32], table: &[[f32; 2]]) {
     assert!(x.len() >= table.len() * 2);
-    let rot_len = table.len() * 2;
-    // SAFETY: `[f32; 2]` and `(f32, f32)` have identical size, alignment, and layout.
-    let pairs =
-        unsafe { std::slice::from_raw_parts(table.as_ptr() as *const (f32, f32), table.len()) };
-    rope_neox_cached(&mut x[..rot_len], pairs);
+    // Same arithmetic as `rope_neox_cached` over `x[..rot_len]`, read
+    // straight from the arrays (tuple layout is unspecified, see above).
+    let half = table.len();
+    for (i, &[sin, cos]) in table.iter().enumerate() {
+        let a = x[i];
+        let b = x[i + half];
+        x[i] = a * cos - b * sin;
+        x[i + half] = a * sin + b * cos;
+    }
 }
 
 /// Rotary embedding, "NORM" style: adjacent pairs `(x[2i], x[2i+1])` rotate

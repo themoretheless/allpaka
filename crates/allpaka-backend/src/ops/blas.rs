@@ -23,7 +23,7 @@ pub fn matmul_f32(x: &[f32], w: &[f32], m: usize, k: usize, n: usize) -> Vec<f32
 
 #[inline(always)]
 pub fn add_scaled_slice(dst: &mut [f32], src: &[f32], scale: f32) {
-    debug_assert_eq!(dst.len(), src.len());
+    assert_eq!(dst.len(), src.len());
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use std::arch::aarch64::*;
@@ -97,7 +97,7 @@ pub fn add_scaled_slice(dst: &mut [f32], src: &[f32], scale: f32) {
 
 #[inline(always)]
 pub fn add_assign_slice(a: &mut [f32], b: &[f32]) {
-    debug_assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "aarch64")]
     unsafe {
         use std::arch::aarch64::*;
