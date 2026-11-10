@@ -161,6 +161,10 @@ pub struct CudaGpu {
     pub dq_stream: Arc<CudaStream>,
     pub ev_w0: CudaEvent,
     pub ev_w1: CudaEvent,
+    /// Recorded on `stream` after the GEMM that read W slot 0 / 1; the
+    /// dequant of the next weight into that slot waits on it (WAR).
+    pub ev_c0: CudaEvent,
+    pub ev_c1: CudaEvent,
     pub w_ping: usize,
     pub w_pitch: usize,
     /// Reserved f16 elems for X before ping-pong W. Grows to max(m*n_in), never shrinks mid-run.
@@ -229,6 +233,8 @@ pub(super) fn init_device() -> Option<CudaGpu> {
     let dq_stream = ctx.new_stream().ok()?;
     let ev_w0 = ctx.new_event(None).ok()?;
     let ev_w1 = ctx.new_event(None).ok()?;
+    let ev_c0 = ctx.new_event(None).ok()?;
+    let ev_c1 = ctx.new_event(None).ok()?;
 
     let mut include_paths = Vec::new();
     if let Ok(root) = std::env::var("CUDA_PATH") {
@@ -440,6 +446,8 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         dq_stream,
         ev_w0,
         ev_w1,
+        ev_c0,
+        ev_c1,
         w_ping: 0,
         w_pitch: 0,
         f16_x_region: 0,

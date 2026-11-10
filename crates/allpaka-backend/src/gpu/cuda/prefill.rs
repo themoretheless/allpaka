@@ -24,6 +24,9 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
         gpu.pf_len = xs.len();
         gpu.pf_ffn_done = false;
         gpu.pf_rope_n = 0;
+        // Prefill kernels overwrite arena addresses a decode matvec may have
+        // quantised; the Q8 cache is keyed by pointer, so drop it.
+        gpu.invalidate_q8();
         if pf_graph_on()
             && !dual
             && gpu.pf_graph.is_none()
@@ -105,6 +108,7 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
             .memcpy_dtoh(&gpu.pf_x.slice(0..xs.len()), xs)
             .ok()?;
         gpu.pf_active = false;
+        gpu.invalidate_q8();
         // Re-install shared stream for decode CUDA graphs + FA-inline.
         crate::gpu::cuda::ggml::bind_peer_stream(&gpu.stream);
         Some(())

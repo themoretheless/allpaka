@@ -281,13 +281,19 @@ pub fn mark_cudarc_dirty() {
     CUDARC_DIRTY.store(true, Ordering::Release);
 }
 
-/// Before ggml reads tensors produced on the cudarc stream.
+/// Before ggml reads (or overwrites) buffers the cudarc stream touches.
+///
+/// In dual-queue prefill this always orders the ggml private stream after
+/// everything already queued on cudarc. It used to skip the wait unless a
+/// caller had called [`mark_cudarc_dirty`], but several cudarc producers
+/// never did (the attention RMSNorm into `pf_hs`, the Q/K norm + RoPE +
+/// `store_kv` before flash attention), so MMQ and FA raced the kernels that
+/// write their inputs: prefill logits changed run to run for any chunk of
+/// 32+ tokens and long prompts decoded to garbage. The wait is one event
+/// record + stream wait, far below the cost of the GEMM it guards.
 pub fn prepare_from_cudarc(stream: &CudaStream) {
+    CUDARC_DIRTY.store(false, Ordering::Release);
     if SHARED_STREAM.load(Ordering::Acquire) {
-        CUDARC_DIRTY.store(false, Ordering::Release);
-        return;
-    }
-    if !CUDARC_DIRTY.swap(false, Ordering::AcqRel) {
         return;
     }
     if PEER_BOUND.load(Ordering::Acquire) {

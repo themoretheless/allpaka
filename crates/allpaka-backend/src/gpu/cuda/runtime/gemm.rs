@@ -228,6 +228,13 @@ pub fn launch_gemm_dequant(gpu: &mut CudaGpu, req: &GemmReq<'_>) -> Option<()> {
                 shared_mem_bytes: 0,
             }
         };
+        // The GEMM two launches back read this slot on the compute stream;
+        // without this wait the dequant overwrote W while that GEMM still ran
+        // (prefill output varied run to run with ALLPAKA_GGML=0).
+        {
+            let used = if ping == 0 { &gpu.ev_c0 } else { &gpu.ev_c1 };
+            gpu.dq_stream.wait(used).ok()?;
+        }
         let w = &gpu.chunks[chunk].buf;
         let mut out = gpu.f16_arena.slice_mut(w16..w16 + w_elems);
         unsafe {
@@ -354,6 +361,10 @@ pub fn launch_gemm_dequant(gpu: &mut CudaGpu, req: &GemmReq<'_>) -> Option<()> {
                 .launch_pdl(cfg)
         }
         .ok()?;
+    }
+    {
+        let used = if ping == 0 { &gpu.ev_c0 } else { &gpu.ev_c1 };
+        used.record(&gpu.stream).ok()?;
     }
     crate::gpu::cuda::ggml::mark_cudarc_dirty();
     Some(())
