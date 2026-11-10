@@ -181,6 +181,7 @@ flags! {
     cuda_ggml_mmvq: bool = false, env "ALLPAKA_GGML_MMVQ", yes;
     cuda_ggml_decode: bool = false, env "ALLPAKA_GGML_DECODE", yes;
     cuda_gu_q8: bool = false, env "ALLPAKA_GU_Q8", off;
+    cuda_rms_mb: bool = true, env "ALLPAKA_RMS_MB", on;
     cuda_gu_n8: bool = false, env "ALLPAKA_GU_N8", off;
     cuda_k5120_gu: bool = false, env "ALLPAKA_K5120_GU", yes;
     cuda_fuse_log: bool = false, env "ALLPAKA_FUSE_LOG", off;

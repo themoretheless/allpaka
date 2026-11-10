@@ -74,6 +74,7 @@ to rewrite this file. Every switch is read once per process.
 | `ALLPAKA_QKV_MV` | `qkv_mv` | off | off unless `=1` |
 | `ALLPAKA_QKV_SPLIT` | `cuda_qkv_split` | off | off unless `=1` or `=true` |
 | `ALLPAKA_RFUSE` | `rfuse` | off | off unless `=1` |
+| `ALLPAKA_RMS_MB` | `cuda_rms_mb` | on | on unless `=0` |
 | `ALLPAKA_ROWS_DEBUG` | `metal_rows_debug` | off | on when set to anything |
 | `ALLPAKA_RTOPK` | `rtopk_fused` | off | off unless `=1` |
 | `ALLPAKA_SERIAL` | `serial` | off | on when set to anything |

@@ -7,6 +7,7 @@ pub(super) const KERNEL_NAMES: &[&str] = &[
     "rmsnorm_f32",
     "rmsnorm_into_f32",
     "rmsnorm_into_f32_q8",
+    "rmsnorm_into_f32_q8_mb",
     "residual_add",
     "swiglu",
     "swiglu_into_q8",

@@ -685,12 +685,28 @@ impl FusedCtx<'_> {
         // Fuse Q8 pack when decode mmvq is on and n is Q4_K-friendly.
         if q8_on && n % 256 == 0 {
             gpu.ensure_q8(n, rows)?;
-            let f = gpu.func_owned("rmsnorm_into_f32_q8")?;
-            // 1024 threads: the row stays in registers (up to 16 per thread).
-            // Measured back to back on RTX 5090 / Qwen3-32B: 1024 > 512 > 256.
-            let cfg = LaunchConfig {
-                block_dim: (1024, 1, 1),
-                ..cfg
+            // Multi-block variant (bit-identical): one-block RMSNorm cost ~4 us
+            // of serial time per call on RTX 5090 / Qwen3-32B.
+            let mb = dst != src
+                && n % 1024 == 0
+                && n <= 16384
+                && crate::runtime::get().cuda_rms_mb
+                && gpu.fns.contains_key("rmsnorm_into_f32_q8_mb");
+            let (f, cfg) = if mb {
+                let cfg = LaunchConfig {
+                    grid_dim: (n_u / 256, rows_u, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                (gpu.func_owned("rmsnorm_into_f32_q8_mb")?, cfg)
+            } else {
+                // 1024 threads: the row stays in registers (up to 16 per thread).
+                // Measured back to back on RTX 5090 / Qwen3-32B: 1024 > 512 > 256.
+                let cfg = LaunchConfig {
+                    block_dim: (1024, 1, 1),
+                    ..cfg
+                };
+                (gpu.func_owned("rmsnorm_into_f32_q8")?, cfg)
             };
             let mut q = gpu.q8_q.slice_mut(0..(n / 32) * 44 * rows);
             unsafe {

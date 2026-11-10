@@ -227,6 +227,75 @@ extern "C" __global__ void rmsnorm_into_f32_q8(
     }
 }
 
+// Multi-block decode RMSNorm + Q8: grid = (n / 256, rows), 256 threads. Every
+// block redundantly reduces the whole row (an L2-resident 4*n bytes) and then
+// normalizes / packs only its own 256 elements, so the serial one-block latency
+// of rmsnorm_into_f32_q8 is spread over n/256 SMs. The sum of squares follows
+// exactly the 1024-thread reduction order of rmsnorm_into_f32_q8 (thread o sums
+// o, o+1024, ...; xor tree per warp; xor tree over the 32 warp sums), so the
+// output is bit-identical. Requires n % 1024 == 0 and n <= 16384.
+extern "C" __global__ void __launch_bounds__(256) rmsnorm_into_f32_q8_mb(
+    float* __restrict__ dst,
+    const float* __restrict__ src,
+    const float* __restrict__ w,
+    block_q8_1* __restrict__ y,
+    unsigned n,
+    float eps,
+    unsigned rows)
+{
+    unsigned row = blockIdx.y;
+    pdl_lc();
+    if (row >= rows) return;
+    const float* sr = src + (size_t)row * n;
+    float* dr = dst + (size_t)row * n;
+    block_q8_1* yr = y + (size_t)row * (n / 32u);
+    const unsigned t = threadIdx.x;
+    const unsigned lane = t & 31u;
+    const unsigned warp = t >> 5;
+    const unsigned K = n >> 10;
+    const unsigned i = blockIdx.x * 256u + t;
+    __shared__ float wsum[32];
+    float wi = w[i];
+    pdl_sync();
+    float mine = sr[i];
+    // Emulated threads o = t + 256*a, a = 0..3 (warps warp, warp+8, +16, +24).
+    float loc[4] = {0.f, 0.f, 0.f, 0.f};
+    for (unsigned k = 0; k < K; k++) {
+        #pragma unroll
+        for (unsigned a = 0; a < 4; a++) {
+            float v = __ldcg(&sr[t + 256u * a + 1024u * k]);
+            loc[a] += v * v;
+        }
+    }
+    #pragma unroll
+    for (unsigned a = 0; a < 4; a++) {
+        float l = loc[a];
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) l += __shfl_xor_sync(0xffffffffu, l, off);
+        if (lane == 0) wsum[warp + 8u * a] = l;
+    }
+    __syncthreads();
+    float tot = wsum[lane];
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) tot += __shfl_xor_sync(0xffffffffu, tot, off);
+    const float scale = rsqrtf(tot / (float)n + eps);
+    float v = mine * scale * wi;
+    dr[i] = v;
+    float amax = fabsf(v);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+    }
+    float d = amax / 127.f;
+    if (d < 1e-8f) d = 1.f;
+    int qi = __float2int_rn(v / d);
+    if (qi > 127) qi = 127;
+    if (qi < -127) qi = -127;
+    unsigned blk = i >> 5;
+    yr[blk].qs[lane] = (int8_t)qi;
+    store_q8_meta(&yr[blk], lane, qi, d);
+}
+
 extern "C" __global__ void residual_add(
     float* __restrict__ a,
     const float* __restrict__ b,
