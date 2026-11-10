@@ -5,7 +5,34 @@
 //! `allpaka-gguf`, `allpaka-mlx`, and `allpaka-backend` share a single
 //! zero-duplication foundation.
 
-use anyhow::{bail, Result};
+use std::fmt;
+
+/// Error returned when computing expected byte size for a tensor of [`GgmlType`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DtypeError {
+    UnsupportedType(GgmlType),
+    UnalignedElementCount {
+        elements: usize,
+        block_elements: usize,
+    },
+}
+
+impl fmt::Display for DtypeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            DtypeError::UnsupportedType(ty) => write!(f, "ggml type {ty:?} is not supported"),
+            DtypeError::UnalignedElementCount {
+                elements,
+                block_elements,
+            } => write!(
+                f,
+                "{elements} elements is not a whole number of {block_elements}-element blocks"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DtypeError {}
 
 /// A tensor quantization or floating-point dtype, with block geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -83,13 +110,16 @@ impl GgmlType {
 
     /// Compute exact byte length required for `elements` of this dtype.
     #[inline]
-    pub fn expected_bytes(self, elements: usize) -> Result<usize> {
+    pub fn expected_bytes(self, elements: usize) -> Result<usize, DtypeError> {
         let (be, bb) = match (self.block_elements(), self.block_bytes()) {
             (Some(be), Some(bb)) => (be as usize, bb as usize),
-            _ => bail!("ggml type {self:?} is not supported"),
+            _ => return Err(DtypeError::UnsupportedType(self)),
         };
         if elements % be != 0 {
-            bail!("{elements} elements is not a whole number of {be}-element blocks");
+            return Err(DtypeError::UnalignedElementCount {
+                elements,
+                block_elements: be,
+            });
         }
         Ok(elements / be * bb)
     }
@@ -176,6 +206,7 @@ pub const fn f32_to_bf16(x: f32) -> u16 {
 pub fn f32_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
     assert_eq!(bytes.len(), dst.len() * 4);
     #[cfg(target_endian = "little")]
+    // SAFETY: `dst` has `dst.len() * 4 == bytes.len()` valid writable bytes and does not alias `bytes` (`&mut [f32]` vs `&[u8]`), and little-endian `f32` matches IEEE-754 byte order.
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_mut_ptr() as *mut u8, bytes.len());
     }
@@ -193,6 +224,7 @@ pub fn f16_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
     let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `aarch64` guarantees NEON (`fp16` vector conversions via `vcvt_f32_f16`); `bytes` has `2 * n` bytes (`vld1q_u16`/`vld1_u16` are unaligned-safe), and `dst` has `n` writable `f32` elements.
     unsafe {
         use std::arch::aarch64::*;
         let ptr = bytes.as_ptr() as *const u16;
@@ -220,12 +252,16 @@ pub fn f16_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
                 let n = dst.len();
                 let ptr = bytes.as_ptr();
                 while *i + 8 <= n {
-                    let h = _mm_loadu_si128(ptr.add(*i * 2) as *const __m128i);
-                    let f = _mm256_cvtph_ps(h);
-                    _mm256_storeu_ps(dst.as_mut_ptr().add(*i), f);
+                    // SAFETY: `*i + 8 <= n` ensures 16 readable bytes in `bytes` and 8 writable `f32`s in `dst`.
+                    unsafe {
+                        let h = _mm_loadu_si128(ptr.add(*i * 2) as *const __m128i);
+                        let f = _mm256_cvtph_ps(h);
+                        _mm256_storeu_ps(dst.as_mut_ptr().add(*i), f);
+                    }
                     *i += 8;
                 }
             }
+            // SAFETY: `is_x86_feature_detected!("f16c")` verified `f16c` support, and `bytes.len() == dst.len() * 2`.
             unsafe { convert_f16c(bytes, dst, &mut i) };
         }
     }
@@ -242,6 +278,7 @@ pub fn bf16_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
     let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `aarch64` guarantees NEON (`vld1q_u16`, `vshll_n_u16`, `vst1q_f32`); `bytes` has `2 * n` bytes (unaligned loads allowed) and `dst` has `n` writable `f32` elements.
     unsafe {
         use std::arch::aarch64::*;
         let ptr = bytes.as_ptr() as *const u16;
@@ -264,13 +301,17 @@ pub fn bf16_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
                 let n = dst.len();
                 let ptr = bytes.as_ptr();
                 while *i + 8 <= n {
-                    let h = _mm_loadu_si128(ptr.add(*i * 2) as *const __m128i);
-                    let wide = _mm256_cvtepu16_epi32(h);
-                    let shifted = _mm256_slli_epi32(wide, 16);
-                    _mm256_storeu_ps(dst.as_mut_ptr().add(*i), _mm256_castsi256_ps(shifted));
+                    // SAFETY: `*i + 8 <= n` ensures 16 readable bytes in `bytes` and 8 writable `f32`s in `dst`.
+                    unsafe {
+                        let h = _mm_loadu_si128(ptr.add(*i * 2) as *const __m128i);
+                        let wide = _mm256_cvtepu16_epi32(h);
+                        let shifted = _mm256_slli_epi32(wide, 16);
+                        _mm256_storeu_ps(dst.as_mut_ptr().add(*i), _mm256_castsi256_ps(shifted));
+                    }
                     *i += 8;
                 }
             }
+            // SAFETY: `is_x86_feature_detected!("avx2")` verified `avx2` support, and `bytes.len() == dst.len() * 2`.
             unsafe { convert_avx2(bytes, dst, &mut i) };
         }
     }
@@ -287,6 +328,7 @@ pub fn f32_to_f16_slice(src: &[f32], dst: &mut [u16]) {
     let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `aarch64` guarantees NEON (`vcvt_f16_f32`, `vld1q_f32`, `vst1q_u16`); `src` and `dst` both have `src.len()` elements and loop bounds check `i + 8 <= src.len()` and `i + 4 <= src.len()`.
     unsafe {
         use std::arch::aarch64::*;
         while i + 8 <= src.len() {
@@ -313,12 +355,16 @@ pub fn f32_to_f16_slice(src: &[f32], dst: &mut [u16]) {
                 use std::arch::x86_64::*;
                 let n = src.len();
                 while *i + 8 <= n {
-                    let v = _mm256_loadu_ps(src.as_ptr().add(*i));
-                    let h = _mm256_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
-                    _mm_storeu_si128(dst.as_mut_ptr().add(*i) as *mut __m128i, h);
+                    // SAFETY: `*i + 8 <= n` ensures 8 readable `f32`s in `src` and 8 writable `u16`s in `dst`.
+                    unsafe {
+                        let v = _mm256_loadu_ps(src.as_ptr().add(*i));
+                        let h = _mm256_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+                        _mm_storeu_si128(dst.as_mut_ptr().add(*i) as *mut __m128i, h);
+                    }
                     *i += 8;
                 }
             }
+            // SAFETY: `is_x86_feature_detected!("f16c")` verified `f16c` support, and `src.len() == dst.len()`.
             unsafe { convert_f16c(src, dst, &mut i) };
         }
     }
@@ -354,7 +400,23 @@ pub fn unpack_q3_k_scales_raw(packed: &[u8]) -> [i8; 16] {
     let u1 = (a1 & KMASK2) | (((tmp >> 2) & KMASK1) << 4);
     let u2 = ((a0 >> 4) & KMASK2) | (((tmp >> 4) & KMASK1) << 4);
     let u3 = ((a1 >> 4) & KMASK2) | (((tmp >> 6) & KMASK1) << 4);
-    unsafe { std::mem::transmute::<[u32; 4], [i8; 16]>([u0, u1, u2, u3]) }
+    // SAFETY: `[u32; 4]` and `[i8; 16]` both occupy 16 initialized bytes with no padding, and on little-endian targets (or byte-packed SWAR words) lane ordering matches `[0..16]`.
+    #[cfg(target_endian = "little")]
+    unsafe {
+        std::mem::transmute::<[u32; 4], [i8; 16]>([u0, u1, u2, u3])
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        let mut out = [0i8; 16];
+        for (w_idx, w) in [u0, u1, u2, u3].into_iter().enumerate() {
+            let b = w.to_le_bytes();
+            out[w_idx * 4] = b[0] as i8;
+            out[w_idx * 4 + 1] = b[1] as i8;
+            out[w_idx * 4 + 2] = b[2] as i8;
+            out[w_idx * 4 + 3] = b[3] as i8;
+        }
+        out
+    }
 }
 
 /// Dequantise one MLX affine 4-bit block (36 bytes: eight little-endian `u32` nibble words + bf16 scale + bf16 bias).
@@ -450,5 +512,21 @@ mod tests {
             let expected = (lo | (hi << 4)) as i8;
             assert_eq!(got, expected, "scale {i}");
         }
+    }
+
+    #[test]
+    fn expected_bytes_reports_typed_errors() {
+        assert_eq!(GgmlType::Q4K.expected_bytes(512), Ok(288));
+        assert_eq!(
+            GgmlType::Other(99).expected_bytes(64),
+            Err(DtypeError::UnsupportedType(GgmlType::Other(99)))
+        );
+        assert_eq!(
+            GgmlType::Q4K.expected_bytes(300),
+            Err(DtypeError::UnalignedElementCount {
+                elements: 300,
+                block_elements: 256,
+            })
+        );
     }
 }
