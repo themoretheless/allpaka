@@ -726,6 +726,8 @@ mod tests {
     static GREEDY_CHAIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
+    // The decode-path counters are only asserted on Metal.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     fn gpu_greedy_chain_matches_step_by_step_on_128_head_dim() {
         let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut rng = Rng(12345);
@@ -822,6 +824,8 @@ mod tests {
     }
 
     #[test]
+    // The decode-path counters are only asserted on Metal.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     fn gpu_moe_greedy_chain_matches_step_by_step() {
         let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut rng = Rng(67890);

@@ -19,10 +19,9 @@ use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 use cudarc::driver::{CudaSlice, DevicePtr, LaunchConfig, PushKernelArg};
 use pdl::{LaunchArgsPdl, StreamPdlExt};
 use runtime::{
-    dq_fmt, launch_embed_row, launch_embed_row_dtoken_ptr, launch_gemm_dequant, launch_inc_u32_ptr,
-    launch_matvec_q4k_2, launch_matvec_q4k_qkv, launch_matvec_y_ptr, launch_store_u32_at_ptr,
-    note_call, q8_decode_enabled, resolve_w, row_bytes, run_matvec, try_init, with_gpu, CudaGpu,
-    CALLS, DISPATCHES, ENCODE_NS, GPU, GPU_BUSY_NS, MM_MIN_M, SCHED_NS, WAIT_NS,
+    dq_fmt, launch_embed_row, launch_gemm_dequant, launch_matvec_q4k_2, launch_matvec_q4k_qkv,
+    launch_matvec_y_ptr, note_call, q8_decode_enabled, resolve_w, row_bytes, run_matvec, try_init,
+    with_gpu, CudaGpu, GPU, MM_MIN_M,
 };
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -142,21 +141,7 @@ pub fn arena_bytes() -> usize {
     0
 }
 
-pub fn stats() -> (u64, u64, u64, u64) {
-    (
-        CALLS.load(Ordering::Relaxed),
-        DISPATCHES.load(Ordering::Relaxed),
-        ENCODE_NS.load(Ordering::Relaxed),
-        WAIT_NS.load(Ordering::Relaxed),
-    )
-}
-
-pub fn gpu_time_stats() -> (u64, u64) {
-    (
-        GPU_BUSY_NS.load(Ordering::Relaxed),
-        SCHED_NS.load(Ordering::Relaxed),
-    )
-}
+pub use super::common::{gpu_time_stats, stats};
 
 pub fn matvec(ty: GgmlType, w: &[u8], n_in: usize, n_out: usize, x: &[f32]) -> Option<Vec<f32>> {
     matvec_batch(&[MatvecReq {

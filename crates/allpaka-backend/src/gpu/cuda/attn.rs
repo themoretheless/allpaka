@@ -4,12 +4,7 @@
 use super::*;
 
 pub(super) fn attn_shape_ok(req: &AttnReq) -> bool {
-    matches!(req.head_dim, 64 | 128 | 256)
-        && req.group > 0
-        && req.q.len() == req.n_q_heads * req.head_dim
-        && req.n_pos > 0
-        && (req.k_off + req.n_pos * req.kv_dim) * 2 <= req.cache.len
-        && (req.v_off + req.n_pos * req.kv_dim) * 2 <= req.cache.len
+    matches!(req.head_dim, 64 | 128 | 256) && crate::gpu::common::attn_bounds_ok(req, req.cache.len)
 }
 
 pub(super) fn attend_gqa_launch_cfg(n_q_or_kv: u32, m: u32) -> LaunchConfig {

@@ -53,14 +53,7 @@ pub fn matvec_launch_cfg(ty: GgmlType, n_out: u32, m: u32) -> LaunchConfig {
     }
 }
 
-pub fn row_bytes(ty: GgmlType, n_in: usize) -> Option<usize> {
-    let be = ty.block_elements()? as usize;
-    let bb = ty.block_bytes()? as usize;
-    if n_in % be != 0 {
-        return None;
-    }
-    Some(n_in / be * bb)
-}
+pub(crate) use crate::gpu::common::row_bytes;
 
 /// `fmt` codes the CUDA dequant kernels switch on. They must match the
 /// `// fmt:` line above `dequant_rows_f16` in `kernels.rs`; a test parses it.

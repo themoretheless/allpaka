@@ -2413,14 +2413,7 @@ kernel void",
     }
 }
 
-pub(super) fn row_bytes(ty: GgmlType, n_in: usize) -> Option<usize> {
-    let be = ty.block_elements()? as usize;
-    let bb = ty.block_bytes()? as usize;
-    if n_in % be != 0 {
-        return None;
-    }
-    Some(n_in / be * bb)
-}
+pub(super) use crate::gpu::common::row_bytes;
 
 /// After a successful greedy decode, run `n_more` further tokens on-device:
 /// embed(hist[step]) -> layers 0..N -> output_head -> argmax -> hist[step+1],

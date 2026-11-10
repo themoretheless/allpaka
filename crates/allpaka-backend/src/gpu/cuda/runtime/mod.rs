@@ -11,16 +11,11 @@ use cudarc::driver::{
 use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions, Ptx};
 use half::f16;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-pub static CALLS: AtomicU64 = AtomicU64::new(0);
-pub static DISPATCHES: AtomicU64 = AtomicU64::new(0);
-pub static ENCODE_NS: AtomicU64 = AtomicU64::new(0);
-pub static WAIT_NS: AtomicU64 = AtomicU64::new(0);
-pub static GPU_BUSY_NS: AtomicU64 = AtomicU64::new(0);
-pub static SCHED_NS: AtomicU64 = AtomicU64::new(0);
+pub(crate) use crate::gpu::common::{CALLS, DISPATCHES, ENCODE_NS, WAIT_NS};
 
 /// Batch size from which dequant + GEMM beats a loop of matvecs.
 pub const MM_MIN_M: usize = 32;

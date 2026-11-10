@@ -88,12 +88,7 @@ pub fn attend_project(req: &AttnReq, wo_ty: GgmlType, wo: &[u8], n_out: usize) -
 
 /// Shapes the attention kernel is written for.
 pub(super) fn attn_shape_ok(req: &AttnReq) -> bool {
-    req.head_dim == ATTN_HEAD_DIM
-        && req.n_pos > 0
-        && req.group > 0
-        && req.q.len() == req.n_q_heads * req.head_dim
-        && (req.k_off + req.n_pos * req.kv_dim) * 2 <= req.cache.len
-        && (req.v_off + req.n_pos * req.kv_dim) * 2 <= req.cache.len
+    req.head_dim == ATTN_HEAD_DIM && crate::gpu::common::attn_bounds_ok(req, req.cache.len)
 }
 
 /// Encode attention into an open encoder, q already staged in the x arena and

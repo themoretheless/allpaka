@@ -6,6 +6,9 @@
 
 pub mod types;
 
+#[cfg_attr(not(any(target_os = "macos", feature = "cuda")), allow(dead_code))]
+mod common;
+
 #[cfg(target_os = "macos")]
 mod metal_kernels;
 
