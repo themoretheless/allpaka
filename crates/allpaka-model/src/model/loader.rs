@@ -7,9 +7,9 @@ use super::{
     AttnBias, AttnWeights, Layer, Model,
 };
 use crate::config::{Config, MoeConfig};
+use crate::error::{bail, Context, Result};
 use allpaka_backend::{ops, quantmat::QuantMat};
 use allpaka_gguf::GgufFile;
-use anyhow::{bail, Context, Result};
 
 impl<'a> Model<'a> {
     pub fn load(f: &'a GgufFile) -> Result<Self> {
@@ -119,23 +119,7 @@ impl<'a> Model<'a> {
                 attn: if is_gdn {
                     None
                 } else {
-                    // qwen35moe fuses the output gate into the q projection
-                    // (second half of the rows per head).
-                    let gate_in_q = f
-                        .tensor(&name("attn_q"))
-                        .is_some_and(|t| t.dims.len() == 2 && t.dims[1] == 2 * q_dim as u64);
-                    Some(AttnWeights {
-                        wq: qmat(
-                            f,
-                            &name("attn_q"),
-                            if gate_in_q { 2 * q_dim } else { q_dim },
-                            hidden,
-                        )?,
-                        wk: qmat(f, &name("attn_k"), kv_dim, hidden)?,
-                        wv: qmat(f, &name("attn_v"), kv_dim, hidden)?,
-                        wo: qmat(f, &name("attn_output"), hidden, q_dim)?,
-                        gate_in_q,
-                    })
+                    Some(attn_weights(f, &name, &config)?)
                 },
                 gdn: if is_gdn {
                     let s = config.ssm.as_ref().expect("is_gdn implies ssm");
@@ -168,31 +152,16 @@ impl<'a> Model<'a> {
                 bias,
                 // Only full-attention layers carry q/k norms (qwen35moe's
                 // GDN layers have none), hence the !is_gdn guard.
-                q_norm: if config.has_qk_norm && !is_gdn {
-                    Some(norm_vec(f, &name("attn_q_norm"), config.head_dim as usize)?)
-                } else {
-                    None
-                },
-                k_norm: if config.has_qk_norm && !is_gdn {
-                    Some(norm_vec(f, &name("attn_k_norm"), config.head_dim as usize)?)
-                } else {
-                    None
-                },
+                q_norm: qk_norm(f, &name("attn_q_norm"), &config, !is_gdn)?,
+                k_norm: qk_norm(f, &name("attn_k_norm"), &config, !is_gdn)?,
                 ffn_norm: norm_vec(f, &ffn_norm, hidden)?,
                 ffn: match &config.moe {
                     // GLM's leading blocks are plain dense FFNs before the
                     // routing starts.
-                    Some(moe) if i < moe.leading_dense => Ffn::Dense {
-                        w_gate: qmat(f, &name("ffn_gate"), ffn, hidden)?,
-                        w_up: qmat(f, &name("ffn_up"), ffn, hidden)?,
-                        w_down: qmat(f, &name("ffn_down"), hidden, ffn)?,
-                    },
-                    None => Ffn::Dense {
-                        w_gate: qmat(f, &name("ffn_gate"), ffn, hidden)?,
-                        w_up: qmat(f, &name("ffn_up"), ffn, hidden)?,
-                        w_down: qmat(f, &name("ffn_down"), hidden, ffn)?,
-                    },
-                    Some(moe) => moe_ffn(f, &name, moe, hidden, &mut owned_weights)?,
+                    Some(moe) if i >= moe.leading_dense => {
+                        moe_ffn(f, &name, moe, hidden, &mut owned_weights)?
+                    }
+                    _ => dense_ffn(f, &name, ffn, hidden)?,
                 },
             });
         }
@@ -211,47 +180,15 @@ impl<'a> Model<'a> {
         let mtp = if config.nextn && !stage {
             let i = config.n_layers;
             let name = |part: &str| format!("blk.{i}.{part}.weight");
-            let q_dim = config.q_dim();
-            let kv_dim = config.kv_dim();
-            let gate_in_q = f
-                .tensor(&name("attn_q"))
-                .is_some_and(|t| t.dims.len() == 2 && t.dims[1] == 2 * q_dim as u64);
-            let attn = AttnWeights {
-                wq: qmat(
-                    f,
-                    &name("attn_q"),
-                    if gate_in_q { 2 * q_dim } else { q_dim },
-                    hidden,
-                )?,
-                wk: qmat(f, &name("attn_k"), kv_dim, hidden)?,
-                wv: qmat(f, &name("attn_v"), kv_dim, hidden)?,
-                wo: qmat(f, &name("attn_output"), hidden, q_dim)?,
-                gate_in_q,
-            };
             let ffn = match &config.moe {
                 Some(moe) => moe_ffn(f, &name, moe, hidden, &mut owned_weights)?,
-                None => {
-                    let ffn = config.ffn_hidden as usize;
-                    Ffn::Dense {
-                        w_gate: qmat(f, &name("ffn_gate"), ffn, hidden)?,
-                        w_up: qmat(f, &name("ffn_up"), ffn, hidden)?,
-                        w_down: qmat(f, &name("ffn_down"), hidden, ffn)?,
-                    }
-                }
+                None => dense_ffn(f, &name, ffn, hidden)?,
             };
             Some(MtpLayer {
                 attn_norm: norm_vec(f, &name("attn_norm"), hidden)?,
-                attn,
-                q_norm: if config.has_qk_norm {
-                    Some(norm_vec(f, &name("attn_q_norm"), config.head_dim as usize)?)
-                } else {
-                    None
-                },
-                k_norm: if config.has_qk_norm {
-                    Some(norm_vec(f, &name("attn_k_norm"), config.head_dim as usize)?)
-                } else {
-                    None
-                },
+                attn: attn_weights(f, &name, &config)?,
+                q_norm: qk_norm(f, &name("attn_q_norm"), &config, true)?,
+                k_norm: qk_norm(f, &name("attn_k_norm"), &config, true)?,
                 ffn_norm: norm_vec(f, &name("post_attention_norm"), hidden)?,
                 ffn,
                 eh_proj: qmat(f, &name("nextn.eh_proj"), hidden, 2 * hidden)?,
@@ -322,7 +259,62 @@ fn qmat_f32ish<'a>(
         unsafe { std::slice::from_raw_parts(f32s.as_ptr() as *const u8, f32s.len() * 4) };
     allpaka_backend::gpu::attach(bytes);
     owned_weights.push(f32s);
-    QuantMat::new(bytes, allpaka_gguf::GgmlType::F32, n_out, n_in)
+    Ok(QuantMat::new(
+        bytes,
+        allpaka_gguf::GgmlType::F32,
+        n_out,
+        n_in,
+    )?)
+}
+
+/// q/k/v/o projections of one full-attention block. qwen35moe fuses the
+/// output gate into the q projection (second half of the rows per head).
+fn attn_weights<'a>(
+    f: &'a GgufFile,
+    name: &dyn Fn(&str) -> String,
+    config: &Config,
+) -> Result<AttnWeights<'a>> {
+    let hidden = config.hidden as usize;
+    let q_dim = config.q_dim();
+    let kv_dim = config.kv_dim();
+    let gate_in_q = f
+        .tensor(&name("attn_q"))
+        .is_some_and(|t| t.dims.len() == 2 && t.dims[1] == 2 * q_dim as u64);
+    Ok(AttnWeights {
+        wq: qmat(
+            f,
+            &name("attn_q"),
+            if gate_in_q { 2 * q_dim } else { q_dim },
+            hidden,
+        )?,
+        wk: qmat(f, &name("attn_k"), kv_dim, hidden)?,
+        wv: qmat(f, &name("attn_v"), kv_dim, hidden)?,
+        wo: qmat(f, &name("attn_output"), hidden, q_dim)?,
+        gate_in_q,
+    })
+}
+
+/// A per-head q or k norm, when the model has them and this block uses them.
+fn qk_norm(f: &GgufFile, tensor: &str, config: &Config, used: bool) -> Result<Option<Vec<f32>>> {
+    if config.has_qk_norm && used {
+        Ok(Some(norm_vec(f, tensor, config.head_dim as usize)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// The gate/up/down SwiGLU FFN of a dense block.
+fn dense_ffn<'a>(
+    f: &'a GgufFile,
+    name: &dyn Fn(&str) -> String,
+    ffn: usize,
+    hidden: usize,
+) -> Result<Ffn<'a>> {
+    Ok(Ffn::Dense {
+        w_gate: qmat(f, &name("ffn_gate"), ffn, hidden)?,
+        w_up: qmat(f, &name("ffn_up"), ffn, hidden)?,
+        w_down: qmat(f, &name("ffn_down"), hidden, ffn)?,
+    })
 }
 
 fn moe_ffn<'a>(
@@ -418,7 +410,12 @@ fn qmat3<'a>(
             t.dims
         );
     }
-    QuantMat::new(f.data(t)?, t.ggml_type, n_out * n_expert, n_in)
+    Ok(QuantMat::new(
+        f.data(t)?,
+        t.ggml_type,
+        n_out * n_expert,
+        n_in,
+    )?)
 }
 
 /// A weight matrix by name, with its GGUF shape checked against what the
@@ -434,7 +431,7 @@ fn qmat<'a>(f: &'a GgufFile, name: &str, n_out: usize, n_in: usize) -> Result<Qu
             t.dims
         );
     }
-    QuantMat::new(f.data(t)?, t.ggml_type, n_out, n_in)
+    Ok(QuantMat::new(f.data(t)?, t.ggml_type, n_out, n_in)?)
 }
 
 /// A norm weight vector, dequantised once at load.

@@ -12,6 +12,7 @@
 
 pub mod arch;
 pub mod config;
+pub mod error;
 pub mod kv;
 pub mod model;
 pub mod pipeline;
@@ -23,6 +24,7 @@ pub mod tokenizer;
 
 pub use arch::Architecture;
 pub use config::{Config, ModelCapability, ModelSupport, RopeStyle};
+pub use error::ModelError;
 pub use kv::KvCache;
 pub use model::{set_trace_hook, Model, Session};
 pub use tokenizer::Tokenizer;

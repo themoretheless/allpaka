@@ -7,8 +7,8 @@
 //! through the forward pass as architecture ifs.
 
 use crate::arch::Architecture;
+use crate::error::{bail, Context, Result};
 use allpaka_gguf::GgufFile;
-use anyhow::{bail, Context, Result};
 
 /// Which channels rotate together in RoPE. Getting this wrong produces
 /// grammatical nonsense rather than an error, which is why it is decided from
