@@ -29,13 +29,11 @@ const MAX_OUTPUT_JSON_BYTES: usize = 128 * 1024 + 16;
 const PROGRESS_RESERVE: usize = 16 * 1024;
 fn run_reservation(run: &Run) -> Result<usize> {
     let mut fixed = run.clone();
-    fixed.status.clear();
     fixed.trace_id = None;
     fixed.recovered_ms = None;
     fixed.strict_quality = false;
     fixed.mean_scores.clear();
     for item in &mut fixed.items {
-        item.status.clear();
         item.output = None;
         item.output_truncated = false;
         item.scores.clear();
@@ -43,7 +41,15 @@ fn run_reservation(run: &Run) -> Result<usize> {
         item.duration_ms = None;
         item.error = None;
     }
+    // The status words are paid from the reserves: measure the rest as if each
+    // were the empty string `""`, which is what the accounting has always counted.
+    let mut status = crate::evaluation::json_serialized_len(&fixed.status)? - "\"\"".len();
+    for item in &fixed.items {
+        status += crate::evaluation::json_serialized_len(&item.status)? - "\"\"".len();
+    }
     let size = crate::evaluation::json_serialized_len(&fixed)?
+        .checked_sub(status)
+        .context("Experiment capacity overflow")?
         + PROGRESS_RESERVE
         + fixed.items.len() * (MAX_OUTPUT_JSON_BYTES + PROGRESS_RESERVE);
     if size > MAX_RUN_BYTES {
@@ -431,10 +437,44 @@ pub(crate) async fn metric_catalog() -> Json<Value> {
     ].into_iter().map(|(id,name,reference,description)|json!({"id":id,"name":name,"reference_requirement":reference,"description":description,"min_score":0,"max_score":1,"higher_is_better":true,"provider_calls":0,"kind":"deterministic"})).collect::<Vec<_>>();
     Json(json!({"metrics":metrics,"max_metrics_per_run":6}))
 }
+/// Where a run is. The words are the stored and API form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RunStatus {
+    Running,
+    Interrupted,
+    Completed,
+    Failed,
+    Cancelled,
+}
+impl RunStatus {
+    /// The stored word, also used as the trace span outcome.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Interrupted => "interrupted",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+/// Where one dataset item is. The words are the stored and API form; no
+/// producer writes `running` today, but recovery still accepts it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ItemStatus {
+    Pending,
+    Running,
+    Interrupted,
+    Completed,
+    Error,
+    Cancelled,
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Item {
     sample_id: String,
-    status: String,
+    status: ItemStatus,
     output: Option<String>,
     #[serde(default)]
     output_truncated: bool,
@@ -463,7 +503,7 @@ pub(crate) struct Run {
     playground: bool,
     concurrency: usize,
     item_timeout_secs: u64,
-    status: String,
+    status: RunStatus,
     items: Vec<Item>,
     strict_quality: bool,
     mean_scores: BTreeMap<String, f64>,
@@ -722,8 +762,8 @@ impl Manager {
                 .and_then(|s| s.to_str())
                 .context("Invalid experiment filename")?;
             let mut run = self.load(id)?;
-            if run.status == "running" {
-                run.status = "interrupted".into();
+            if run.status == RunStatus::Running {
+                run.status = RunStatus::Interrupted;
                 run.strict_quality = false;
                 run.mean_scores.clear();
                 run.recovered_ms = Some(
@@ -734,8 +774,8 @@ impl Manager {
                         .min(u64::MAX as u128) as u64,
                 );
                 for item in &mut run.items {
-                    if item.status == "pending" || item.status == "running" {
-                        item.status = "interrupted".into();
+                    if matches!(item.status, ItemStatus::Pending | ItemStatus::Running) {
+                        item.status = ItemStatus::Interrupted;
                         item.error = Some("process_restart".into());
                     }
                 }
@@ -793,7 +833,7 @@ impl Manager {
                     cached_weight
                 } else {
                     let existing = self.load(id)?;
-                    let w = if existing.status == "running" {
+                    let w = if existing.status == RunStatus::Running {
                         run_reservation(&existing)? as u64
                     } else {
                         file_len
@@ -820,7 +860,7 @@ impl Manager {
         let result = crate::storage::atomic_write_bytes_with_sync(&path, &bytes, true);
         if result.is_ok() {
             if let Ok(meta) = std::fs::symlink_metadata(&path) {
-                let weight = if run.status == "running" {
+                let weight = if run.status == RunStatus::Running {
                     run_reservation(run).map(|w| w as u64).ok()
                 } else {
                     meta.len().checked_add(PROGRESS_RESERVE as u64)
@@ -911,7 +951,10 @@ impl Manager {
                     .context("Invalid experiment file")?,
             )?;
             if run.project_id == query.project_id
-                && query.status.as_ref().is_none_or(|s| s == &run.status)
+                && query
+                    .status
+                    .as_ref()
+                    .is_none_or(|s| s == run.status.as_str())
                 && query
                     .provider
                     .as_ref()
@@ -971,7 +1014,7 @@ impl Manager {
             playground: request.playground,
             concurrency: request.concurrency,
             item_timeout_secs: request.item_timeout_secs,
-            status: "running".into(),
+            status: RunStatus::Running,
             strict_quality: false,
             mean_scores: BTreeMap::new(),
             items: snapshot
@@ -979,7 +1022,7 @@ impl Manager {
                 .iter()
                 .map(|s| Item {
                     sample_id: s.id.clone(),
-                    status: "pending".into(),
+                    status: ItemStatus::Pending,
                     output: None,
                     output_truncated: false,
                     scores: BTreeMap::new(),
@@ -1028,11 +1071,11 @@ struct RunGuard {
 }
 impl Drop for RunGuard {
     fn drop(&mut self) {
-        if self.run.status == "running" {
-            self.run.status = "interrupted".into();
+        if self.run.status == RunStatus::Running {
+            self.run.status = RunStatus::Interrupted;
             for item in &mut self.run.items {
-                if item.status == "pending" {
-                    item.status = "interrupted".into();
+                if item.status == ItemStatus::Pending {
+                    item.status = ItemStatus::Interrupted;
                 }
             }
         }
@@ -1056,9 +1099,9 @@ async fn execute(
     ) {
         Ok(trace) => trace,
         Err(error) => {
-            guard.run.status = "failed".into();
+            guard.run.status = RunStatus::Failed;
             for item in &mut guard.run.items {
-                item.status = "error".into();
+                item.status = ItemStatus::Error;
                 item.error = Some("trace_storage_error".into());
             }
             eprintln!("Experiment trace creation failed: {error}");
@@ -1068,7 +1111,7 @@ async fn execute(
     let mut root = trace.span("experiment", "dataset evaluation", None);
     guard.run.trace_id = Some(trace.id());
     if let Err(error) = guard.manager.save(&guard.run) {
-        guard.run.status = "failed".into();
+        guard.run.status = RunStatus::Failed;
         root.finish("failed", &Value::Null);
         eprintln!("Experiment trace receipt persistence failed: {error}");
         return;
@@ -1151,7 +1194,7 @@ async fn execute(
                 .await;
                 let mut item = Item {
                     sample_id: sample.id.clone(),
-                    status: "error".into(),
+                    status: ItemStatus::Error,
                     output: None,
                     output_truncated: false,
                     scores: BTreeMap::new(),
@@ -1181,7 +1224,7 @@ async fn execute(
                         if incomplete {
                             item.error = Some("incomplete_or_oversize_output".into());
                         } else {
-                            item.status = "completed".into();
+                            item.status = ItemStatus::Completed;
                             item.scores = score(&sample, &output, &metrics);
                         }
                         item.output = Some(output);
@@ -1201,7 +1244,7 @@ async fn execute(
                 span.finish(
                     if item.error.as_deref() == Some("timeout") {
                         "timeout"
-                    } else if item.status == "completed" {
+                    } else if item.status == ItemStatus::Completed {
                         "completed"
                     } else {
                         "failed"
@@ -1215,20 +1258,20 @@ async fn execute(
     loop {
         tokio::select! {
             biased;
-            _=cancel.cancelled()=>{guard.run.status="cancelled".into();for item in &mut guard.run.items{if item.status=="pending"{item.status="cancelled".into();}}break;},
+            _=cancel.cancelled()=>{guard.run.status=RunStatus::Cancelled;for item in &mut guard.run.items{if item.status==ItemStatus::Pending{item.status=ItemStatus::Cancelled;}}break;},
             next=stream.next()=>{
-                let Some((index,item))=next else {guard.run.status=if guard.run.items.iter().all(|i|i.status=="completed"){"completed"}else{"failed"}.into();break;};
+                let Some((index,item))=next else {guard.run.status=if guard.run.items.iter().all(|i|i.status==ItemStatus::Completed){RunStatus::Completed}else{RunStatus::Failed};break;};
                 guard.run.items[index]=item;
-                if let Err(error)=guard.manager.save(&guard.run){guard.run.status="failed".into();eprintln!("Experiment persistence failed: {error}");break;}
+                if let Err(error)=guard.manager.save(&guard.run){guard.run.status=RunStatus::Failed;eprintln!("Experiment persistence failed: {error}");break;}
             }
         }
     }
     drop(stream);
-    root.finish(&guard.run.status, &Value::Null);
+    root.finish(guard.run.status.as_str(), &Value::Null);
     guard.run.strict_quality = !guard.run.metrics.is_empty()
-        && guard.run.status == "completed"
+        && guard.run.status == RunStatus::Completed
         && guard.run.items.iter().all(|i| {
-            i.status == "completed"
+            i.status == ItemStatus::Completed
                 && i.error.is_none()
                 && i.scores.len() == guard.run.metrics.len()
         });
@@ -1482,7 +1525,7 @@ fn verify_run(run: &Run, snapshot: &Snapshot) -> Result<()> {
             bail!("Experiment prompt receipt mismatch");
         }
     }
-    if run.status != "completed"
+    if run.status != RunStatus::Completed
         || !run.strict_quality
         || run.items.len() != snapshot.samples.len()
         || run.dataset_sha256 != snapshot.sha256
@@ -1500,7 +1543,7 @@ fn verify_run(run: &Run, snapshot: &Snapshot) -> Result<()> {
             .find(|s| s.id == item.sample_id)
             .context("Run contains an unknown sample")?;
         if !ids.insert(&item.sample_id)
-            || item.status != "completed"
+            || item.status != ItemStatus::Completed
             || item.error.is_some()
             || item.output_truncated
         {
@@ -1964,6 +2007,84 @@ mod tests {
         assert!(run_reservation(&run).unwrap() < MAX_RUN_BYTES);
         std::fs::remove_dir_all(root).unwrap();
     }
+    /// The status enums must not move admission: run_reservation still counts
+    /// every status as `""`, byte for byte, and the stored words are the old ones.
+    #[test]
+    fn status_words_and_reserved_bytes_match_the_string_era() {
+        let (root, _manager, mut run) = capacity_fixture();
+        run.trace_id = Some("t".repeat(32));
+        run.recovered_ms = Some(1234);
+        run.strict_quality = true;
+        run.mean_scores.insert("json_valid".into(), 0.5);
+        run.items[0].output = Some("out \"quoted\"".into());
+        run.items[0].output_truncated = true;
+        run.items[0].scores.insert("json_valid".into(), 1.0);
+        run.items[0].usage = json!({"input_tokens":3});
+        run.items[0].duration_ms = Some(9);
+        run.items[0].error = Some("timeout".into());
+        let mut second = run.items[0].clone();
+        second.sample_id = "second".into();
+        run.items.push(second);
+        let runs = [
+            (RunStatus::Running, "running"),
+            (RunStatus::Interrupted, "interrupted"),
+            (RunStatus::Completed, "completed"),
+            (RunStatus::Failed, "failed"),
+            (RunStatus::Cancelled, "cancelled"),
+        ];
+        let items = [
+            (ItemStatus::Pending, "pending"),
+            (ItemStatus::Running, "running"),
+            (ItemStatus::Interrupted, "interrupted"),
+            (ItemStatus::Completed, "completed"),
+            (ItemStatus::Error, "error"),
+            (ItemStatus::Cancelled, "cancelled"),
+        ];
+        for (run_status, run_word) in runs {
+            assert_eq!(run_status.as_str(), run_word);
+            for (first, first_word) in items {
+                for (second, second_word) in items {
+                    run.status = run_status;
+                    run.items[0].status = first;
+                    run.items[1].status = second;
+                    let mut stored = serde_json::to_value(&run).unwrap();
+                    assert_eq!(stored["status"], run_word);
+                    assert_eq!(stored["items"][0]["status"], first_word);
+                    assert_eq!(stored["items"][1]["status"], second_word);
+                    let back: Run = serde_json::from_value(stored.clone()).unwrap();
+                    assert_eq!(back.status, run_status);
+                    assert_eq!(back.items[0].status, first);
+                    assert_eq!(back.items[1].status, second);
+                    // The pre-enum formula: statuses cleared to the empty
+                    // string along with every other mutable field.
+                    let object = stored.as_object_mut().unwrap();
+                    object.insert("status".into(), json!(""));
+                    object.insert("trace_id".into(), Value::Null);
+                    object.remove("recovered_ms");
+                    object.insert("strict_quality".into(), json!(false));
+                    object.insert("mean_scores".into(), json!({}));
+                    for item in object["items"].as_array_mut().unwrap() {
+                        item["status"] = json!("");
+                        item["output"] = Value::Null;
+                        item["output_truncated"] = json!(false);
+                        item["scores"] = json!({});
+                        item["usage"] = Value::Null;
+                        item["duration_ms"] = Value::Null;
+                        item["error"] = Value::Null;
+                    }
+                    let old = serde_json::to_vec(&stored).unwrap().len()
+                        + PROGRESS_RESERVE
+                        + run.items.len() * (MAX_OUTPUT_JSON_BYTES + PROGRESS_RESERVE);
+                    assert_eq!(
+                        run_reservation(&run).unwrap(),
+                        old,
+                        "{run_word}/{first_word}/{second_word}"
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn cancel_is_reported_once_and_only_for_an_active_run() {
         let (root, manager, run) = capacity_fixture();
@@ -1984,7 +2105,7 @@ mod tests {
     #[test]
     fn full_run_catalog_rejects_new_write_callbacks_and_keeps_updates() {
         let (root, manager, mut run) = capacity_fixture();
-        run.status = "completed".into();
+        run.status = RunStatus::Completed;
         for i in 0..MAX_RUNS {
             let mut existing = run.clone();
             existing.id = format!("{i:x}");
@@ -2006,9 +2127,9 @@ mod tests {
         assert!(!called.load(std::sync::atomic::Ordering::Relaxed));
         assert!(!manager.path(&run.id).unwrap().exists());
         run.id = "0".into();
-        run.status = "interrupted".into();
+        run.status = RunStatus::Interrupted;
         manager.save(&run).unwrap();
-        assert_eq!(manager.load("0").unwrap().status, "interrupted");
+        assert_eq!(manager.load("0").unwrap().status, RunStatus::Interrupted);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

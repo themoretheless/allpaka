@@ -373,13 +373,13 @@ async fn execute_job(
         loop {
             let notified = app.experiments.notify.notified();
             let run = app.experiments.load(&id)?;
-            if run.status != "running" {
+            if run.status != RunStatus::Running {
                 verify_variant(&run, &request, &snapshot)?;
                 break;
             }
             if !app.experiments.active.lock().unwrap().contains_key(&id) {
                 let final_run = app.experiments.load(&id)?;
-                if final_run.status == "running" {
+                if final_run.status == RunStatus::Running {
                     bail!("Experiment stopped without a terminal receipt");
                 }
                 verify_variant(&final_run, &request, &snapshot)?;
@@ -617,10 +617,10 @@ pub(crate) async fn retry(
                         }
                         let run = app.experiments.load(run_id)?;
                         verify_variant_configuration(&run, request, snapshot)?;
-                        if run.status == "running" {
+                        if run.status == RunStatus::Running {
                             bail!("Original experiment has no confirmed terminal state");
                         }
-                        if run.status == "completed" && run.strict_quality {
+                        if run.status == RunStatus::Completed && run.strict_quality {
                             verify_variant(&run, request, snapshot)?;
                             reusable = true;
                         }
