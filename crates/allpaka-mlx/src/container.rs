@@ -215,6 +215,10 @@ where
     P: AsRef<Path>,
 {
     let f = std::fs::File::open(path.as_ref())?;
+    // SAFETY: the map is read-only and owned by the returned `Mmap`, so slices of it
+    // cannot outlive the mapping. A process that truncates or rewrites the shard while
+    // it is mapped would be undefined behaviour; like every mmap-based loader we
+    // accept that model files are not modified while being served.
     unsafe { memmap2::Mmap::map(&f) }
         .map_err(|e| crate::error::format_err!("mmap fail {}: {}", path.as_ref().display(), e))
 }

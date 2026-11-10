@@ -90,7 +90,7 @@ impl GgufFile {
             let file = File::open(&p).with_context(|| format!("opening {}", p.display()))?;
             let mut h = parse(&mut BufReader::new(&file))
                 .with_context(|| format!("parsing {}", p.display()))?;
-            // Safety: the map is read-only; a concurrent writer to the file would
+            // SAFETY: the map is read-only; a concurrent writer to the file would
             // be undefined behaviour, which is the standard mmap trade every
             // GGUF-serving runtime makes.
             let mmap = unsafe { Mmap::map(&file) }

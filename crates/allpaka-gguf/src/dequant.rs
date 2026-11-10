@@ -92,6 +92,12 @@ pub fn dequant_into(ty: GgmlType, data: &[u8], dst: &mut [f32]) -> Result<()> {
 fn dequant_q8_0_block_slice(block: &[u8], out: &mut [f32]) {
     let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: the only caller passes `chunks_exact(34)` blocks and
+    // `chunks_exact_mut(32)` outputs, so the two 16-byte loads at `block[2..34]` and
+    // the eight 4-float stores into `out[0..32]` are in bounds. The loads are of i8
+    // (align 1) and the stores go to an f32 slice, so alignment holds. This
+    // private fn relies on that caller; any new
+    // caller must keep the 34-byte / 32-float shape (the scalar arm panics instead).
     unsafe {
         use std::arch::aarch64::*;
         let vd = vdupq_n_f32(d);

@@ -217,6 +217,13 @@ pub fn f16_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
     let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `bytes.len() == 2 * n` (asserted above); every load reads 8 or 4 u16 at
+    // element `i` only while `i + 8 <= n` / `i + 4 <= n`, and every store writes the
+    // same number of f32 to `dst[i..]`, so all accesses stay in bounds. The
+    // byte buffer may not be 2-aligned; that is fine because stdarch's aarch64
+    // `vld1`/`vst1` are unaligned reads/writes. The transmutes reinterpret
+    // 64-bit vectors of the same size (uint16x4_t -> float16x4_t), where every
+    // bit pattern is valid.
     unsafe {
         use std::arch::aarch64::*;
         let ptr = bytes.as_ptr() as *const u16;
@@ -250,6 +257,10 @@ pub fn f16_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
                     *i += 8;
                 }
             }
+            // SAFETY: the `f16c` target feature was detected at runtime just above. Inside,
+            // the loop reads 16 bytes at `*i * 2` and writes 8 f32 at `*i` only while
+            // `*i + 8 <= dst.len()`, and `bytes.len() == 2 * dst.len()` was asserted, so
+            // both stay in bounds; `loadu`/`storeu` take unaligned pointers.
             unsafe { convert_f16c(bytes, dst, &mut i) };
         }
     }
@@ -266,6 +277,10 @@ pub fn bf16_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
     let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `bytes.len() == 2 * n` (asserted above); each iteration reads 8 u16 at
+    // element `i` and writes 8 f32 to `dst[i..]` only while `i + 8 <= n`. The
+    // byte buffer may not be 2-aligned, which stdarch's unaligned aarch64
+    // `vld1`/`vst1` reads/writes allow.
     unsafe {
         use std::arch::aarch64::*;
         let ptr = bytes.as_ptr() as *const u16;
@@ -295,6 +310,9 @@ pub fn bf16_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
                     *i += 8;
                 }
             }
+            // SAFETY: `avx2` was detected at runtime just above. The loop reads 16 bytes at
+            // `*i * 2` and writes 8 f32 at `*i` only while `*i + 8 <= dst.len()`, with
+            // `bytes.len() == 2 * dst.len()` asserted, using unaligned `loadu`/`storeu`.
             unsafe { convert_avx2(bytes, dst, &mut i) };
         }
     }
@@ -311,6 +329,11 @@ pub fn f32_to_f16_slice(src: &[f32], dst: &mut [u16]) {
     let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `src.len() == dst.len()` (asserted above); each load reads 8 or 4 f32 at
+    // `i` and each store writes the same count of u16 at `i`, guarded by
+    // `i + 8 <= len` / `i + 4 <= len`; both pointers come from typed slices, so
+    // they are element-aligned. The transmutes reinterpret
+    // float16x4_t as uint16x4_t: same size, every bit pattern valid.
     unsafe {
         use std::arch::aarch64::*;
         while i + 8 <= src.len() {
@@ -346,6 +369,10 @@ pub fn f32_to_f16_slice(src: &[f32], dst: &mut [u16]) {
                     *i += 8;
                 }
             }
+            // SAFETY: `f16c` was detected at runtime just above. The loop reads 8 f32 and
+            // writes 8 u16 at `*i` only while `*i + 8 <= src.len()`, and the caller asserted
+            // `src.len() == dst.len()`, so both accesses are in bounds (unaligned
+            // `loadu`/`storeu`).
             unsafe { convert_f16c(src, dst, &mut i) };
         }
     }
@@ -381,6 +408,9 @@ pub fn unpack_q3_k_scales_raw(packed: &[u8]) -> [i8; 16] {
     let u1 = (a1 & KMASK2) | (((tmp >> 2) & KMASK1) << 4);
     let u2 = ((a0 >> 4) & KMASK2) | (((tmp >> 4) & KMASK1) << 4);
     let u3 = ((a1 >> 4) & KMASK2) | (((tmp >> 6) & KMASK1) << 4);
+    // SAFETY: `[u32; 4]` and `[i8; 16]` have the same size, `i8` has alignment 1
+    // and every bit pattern is a valid `i8`. The byte order is the target's native
+    // one, which matches the little-endian SWAR packing on every supported target.
     unsafe { std::mem::transmute::<[u32; 4], [i8; 16]>([u0, u1, u2, u3]) }
 }
 
