@@ -574,3 +574,41 @@ a quiet-machine A/B.
   (softmax+argsort+gather router), MOE_REDUCE (weighted expert sum).
   Our decode already folds swiglu into down-matvec and gate+up into one
   dispatch; norms/router are candidates if the dispatch count gap shows.
+
+## 2026-11-11: Q2_K/Q3_K/Q5_K/Q8_0 pipelining, vectorized Q2_K decode, universal mixed QKV, FA-db & NORM RoPE
+
+All remaining kernel and architecture gaps identified in the Metal vs
+`llama.cpp` audit are now implemented on `main`:
+
+- **Standalone Metal shader (`crates/allpaka-backend/src/gpu/shaders/kernels.metal`)**:
+  extracted from Rust string literals for clean syntax checking and maintenance.
+- **Inner-loop pipelined FlashAttention (`24feaeb`, opt-in via `ALLPAKA_FA_DB=1`)**:
+  `attend_mm_db`, `attend_mm_fq_db`, and `attend_mm256_db` stage two QK `8`-dim
+  strips and four PV `V` tiles (`mv[4]`) in flight, matching `llama.cpp` v0.9.0
+  `fa_common.metal` while remaining bit-identical (`gpu_moe_tail::attend_mm_db_variants_are_bit_identical`).
+- **Full K-loop double-buffering (`MM_PIPE`) across all MoE & dense quant formats (`230c42e`)**:
+  added `mmllp_{q2_k,q3_k,q5_k}` plus grouped MoE gather/SwiGLU-folded variants
+  `mmllpg_id_{q2_k,q3_k,q5_k,q6_k,q8_0}` and `mmllps_id_{q2_k,q3_k,q5_k,q8_0}`
+  in both `BN=32` and `BN=16` (`_bn16`), closing the `UD-Q2_K_XL` / `Q3_K` /
+  `Q5_K` / `Q8_0` prefill gap on `235B` and mixed-quant MoEs.
+- **Vectorized `matvec_q2_k_mv` (`230c42e`)**:
+  `float4` activation loads + `packed_uint2` qs loads + `NR0=4` (`LPR=8`,
+  sweepable via `ALLPAKA_Q2_NR0`). Isolated Metal microbench (`gpu_ffnbench`)
+  on `235B` shapes:
+  - expert gate/up `[1536×4096]×8`: **+9%**
+  - expert down with `SWIGLU_X` `[4096×1536]×8`: **+108%** (`169 → 352 GB/s`)
+  - dense `[4096×4096]`: **+180%** (`163 → 457 GB/s`)
+- **Generalized mixed-quant prefill QKV (`230c42e`)**:
+  added `mmllp_qkv_{q2_k,q3_k}` and generalized `mmllp_qkv_mixed` to dispatch a
+  single fused activation-sharing kernel for any arbitrary `(wq, wk, wv)` or
+  `(wqkv, zgate)` combination across `{Q4_K, Q5_K, Q6_K, Q8_0, Q2_K, Q3_K}`
+  encoded in `args.pad`.
+- **Adjacent-pair `RopeStyle::Norm` on GPU (`763ec65`)**:
+  Llama 3.x / Mistral models with `RopeStyle::Norm` (full or partial `rot_dim`)
+  now run through all fast Metal and CUDA prefill, decode, and multi-token verify
+  kernels (`qk_prep*`, `attend_mm_fq*`, `qk_prep256*`).
+- **Unified 10-format GPU embedding & `RuntimePolicy` (`14c23ec`, `7fe532d`)**:
+  all 10 GGUF formats (`Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q2_K`, `Q3_K`, `Q5_0`,
+  `F16`, `F32`, `BF16`) share one `dq_fmt` ABI across Metal and CUDA, static
+  Metal flags live in `RuntimePolicy`, and `resolve_decode_layers` hashes
+  descriptors inline via FNV-1a.

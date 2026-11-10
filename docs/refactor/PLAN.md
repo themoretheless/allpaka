@@ -3,37 +3,31 @@
 Связанные документы: [BASELINE](BASELINE.md), [INVENTORY](INVENTORY.md),
 [ARCHITECTURE](ARCHITECTURE.md). Размер: S (часы), M (день), L (несколько дней).
 
-## Что осталось (на `572e167`, 2026-11-10)
+## Что осталось (на `main`, 2026-11-11)
 
 Короткая сводка для следующего захода; подробности и статусы в таблицах ниже.
 
 **Заблокировано свободным GPU** (на этой машине шум между одинаковыми
 конфигурациями до 12.5%, см. BASELINE):
-- 0.2: сравнение с llama.cpp на 8B и 30B и `verify --decode`.
-- Горячие правки 3.20–3.27 (model: `ffn_residual`, `AttnMode`, `QuantMat::desc`,
-  `GpuEligibility`, `enum Mixer`; backend: разбор `decode_token` и
-  `decode_token_one_fused`, request-структуры вместо 13–19 параметров).
-- Волна 4: кэш дескрипторов `token_layers`, быстрые GPU-пути для не-Neox RoPE,
-  повтор серии переключателей. Первая цель по записям: prefill 8B (0.946×).
+- 0.2: финальный парный замер против llama.cpp на 8B/30B/235B и `verify --decode`
+  (включая A/B для `ALLPAKA_FA_DB=1` — ядра `attend_mm*_db` влиты в `main`
+  за флагом).
+- Горячие правки 3.21, 3.24–3.27 (model: `AttnMode`, `enum Mixer`;
+  backend: разбор `decode_token` и `decode_token_one_fused`, request-структуры
+  вместо 13–19 параметров).
 
 **Можно делать без замеров:**
-- 3.5: строковые поля в `guardrail_policies` и `online_evaluation`; статусы
-  `experiments`/`matrix_jobs` после разбора байтового бюджета записи.
 - 3.6: `turn_traced` (577 строк) на стадии: вызов провайдера, цикл
   инструментов, guardrails, сохранение. Риск высокий, нужен прогон
   `scripts/test-studio.py`.
-- 3.8: блокирующий `std::fs` в async-обработчиках → `spawn_blocking`.
+- 3.8: оставшиеся блокирующие `std::fs` в async-обработчиках → `spawn_blocking`.
 - 3.9: реестр инструментов вместо `match name`; токены отмены в experiments,
   judge_runs, memory_extract, swarm.
-- 3.10: таблица маршрутов вместо цепочки `starts_with` в `serve`.
 - 3.12, 3.13: один `Architecture` enum и `ModelError` в model; типизированные
-  ошибки в gguf, mlx, dtype.
-- 2.5: MLX-деквант из `allpaka-dtype` в `allpaka-mlx`, `anyhow` из dtype.
+  ошибки в gguf и mlx (`DtypeError` в dtype сделан).
 - 2.10: общий harness для 58 UI-тестов Studio.
-- 1.4, 1.8: тест кодов `dq_fmt` против ядер; комментарии `// SAFETY:`.
-- Волна 5: справочник `ALLPAKA_*`, обновление `docs/roadmap.md` (D6 сделан),
-  тесты непокрытых модулей.
-- B7: гонка чтение-изменение-запись в `state_file`.
+- 1.8: комментарии `// SAFETY:`.
+- Волна 5: справочник `ALLPAKA_*`, тесты непокрытых модулей.
 
 **Ждёт вашего решения:** единое правило `valid_id` (3.4), судьба
 недостижимого megakernel-кода и проигравших вариантов ядер (5.1).
@@ -64,8 +58,8 @@
 | 1.1 | B1: стаб приведён к API; проверка — `scripts/check-backends.sh` (stub и CUDA) | S | низкий | done (`4b12e1a`, `523c5e9`) |
 | 1.2 | B2: >256 экспертов | S | низкий | не дефект: буфер по `n_used` (top-k), а не по числу экспертов; `moe.rs` при >256 уходит в кучу. Осталась только именованная константа |
 | 1.3 | B3: `total_cmp` вместо `partial_cmp().unwrap()` | S | низкий | done (`704972c`) |
-| 1.4 | B4: именованные таблицы `dq_fmt` и тест | S | низкий | done: общий `gpu/common.rs`, все 10 форматов `embed_row` на Metal/CUDA и parity-тест `gpu_embed_decode_token_matches_cpu_for_all_ten_formats` |
-| 1.5 | B5 и все некэшированные чтения env → `RuntimePolicy` / `DebugFlags` | M | низкий | wip: B5 done (`9e538b5`); B6 не дефект (аргумент `_def` дублирует соглашение о флаге, таблица согласована); CUDA и Metal — todo |
+| 1.4 | B4: именованные таблицы `dq_fmt` и тест | S | низкий | done: общий `gpu/common.rs`, все 10 форматов `embed_row` на Metal/CUDA, прямые и сквозные parity-тесты (`embed_row_f32_dtoken_all_formats_match_cpu_dequant`, `gpu_embed_decode_token_matches_cpu_for_all_ten_formats`) |
+| 1.5 | B5 и все некэшированные чтения env → `RuntimePolicy` / `DebugFlags` | M | низкий | wip: B5 done (`9e538b5`); статические Metal- и model-флаги сведены в `RuntimePolicy` и `OnceLock`; B6 не дефект; CUDA — todo |
 | 1.6 | Оставшиеся предупреждения clippy | S | низкий | done (`9bd193d`): 0 предупреждений |
 | 1.7 | `cargo fmt --all` отдельным коммитом | S | — | done: `fmt --check` проходит |
 | 1.8 | `// SAFETY:` для `unsafe impl` и срезов из сырых указателей | M | — | todo |
@@ -104,7 +98,7 @@
 | 3.10 | cli: таблица маршрутов вместо `starts_with` | M | средний | done (`e60b831`) |
 | 3.11 | core: общий co-residency, типизированные ошибки | M | низкий | done: `FleetError` (`e3159c0`), `cost::charge_co_residency` через трейт `PoolLoad` (`fcb018e`). Общий тип для `Placement`/`Replica` не вводился: у них разные поля отчёта, общий хелпер снял единственное дублирование логики |
 | 3.12 | model: один `Architecture` enum; `ModelError`; дедупликация `loader.rs` | M | низкий | todo |
-| 3.13 | gguf/mlx/dtype: типизированные ошибки | M | низкий | todo |
+| 3.13 | gguf/mlx/dtype: типизированные ошибки | M | низкий | wip: `DtypeError` в `allpaka-dtype` done; gguf/mlx — todo |
 
 Горячий код (каждый пункт — отдельный A/B, заблокировано до 0.2):
 
