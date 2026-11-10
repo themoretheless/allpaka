@@ -225,26 +225,43 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 .to_owned(),
         );
     }
-    let qkv_state = if wq_out % 64 == 0 && kv % 64 == 0 {
+    let (qkv_state, qkv_pad) = if wq_out % 64 == 0 && kv % 64 == 0 {
         if mats[0].ty == mats[1].ty && mats[1].ty == mats[2].ty {
-            mm_qkv_kernel_for(mats[0].ty)
-                .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned()))
-        } else if mm_pipe()
-            && mats[0].ty == GgmlType::Q4K
-            && mats[1].ty == GgmlType::Q4K
-            && mats[2].ty == GgmlType::Q6K
+            (
+                mm_qkv_kernel_for(mats[0].ty)
+                    .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned())),
+                0u32,
+            )
+        } else if mm_ll()
+            && !mm_k64()
+            && mm_pipe()
+            && std::env::var_os("ALLPAKA_NO_FUSED_QKV").is_none()
         {
-            // Qwen3-8B's odd layers: v stays Q6_K where q/k are Q4_K.
-            if debug_qkv() {
-                eprintln!("debug-qkv: mixed q4k/q6k fused selected");
+            match (
+                super::decode::dq_fmt(mats[0].ty),
+                super::decode::dq_fmt(mats[1].ty),
+                super::decode::dq_fmt(mats[2].ty),
+            ) {
+                (Some(fq), Some(fk), Some(fv)) if fq <= 5 && fk <= 5 && fv <= 5 => {
+                    if debug_qkv() {
+                        eprintln!(
+                            "debug-qkv: mmllp_qkv_mixed selected ({:?}/{:?}/{:?})",
+                            mats[0].ty, mats[1].ty, mats[2].ty
+                        );
+                    }
+                    let pad = fq | (fk << 8) | (fv << 16);
+                    (
+                        gpu.pipeline("mmllp_qkv_mixed", 1, 1).map(|p| p.to_owned()),
+                        pad,
+                    )
+                }
+                _ => (None, 0),
             }
-            gpu.pipeline("mmllp_qkv_q4k_q6k", 1, 1)
-                .map(|p| p.to_owned())
         } else {
-            None
+            (None, 0)
         }
     } else {
-        None
+        (None, 0)
     };
     let prep_state = gpu.pipelines[&("qk_prep_batch", 1, 1)].to_owned();
     let attend_state = gpu.pipelines[&(attend_rows_kernel(), 1, 1)].to_owned();
@@ -490,7 +507,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 k_off: e(k_at),
                 v_off: e(v_at),
                 m: req.m as u32,
-                pad: 0,
+                pad: qkv_pad,
             };
             enc.set_bytes(
                 5,
@@ -969,11 +986,33 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 .to_owned(),
         );
     }
-    let qkvz_state = if channels % 64 == 0 && value_dim % 64 == 0 && mats[0].ty == mats[1].ty {
-        mm_qkv_kernel_for(mats[0].ty)
-            .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned()))
+    let (qkvz_state, qkvz_pad) = if channels % 64 == 0 && value_dim % 64 == 0 {
+        if mats[0].ty == mats[1].ty {
+            (
+                mm_qkv_kernel_for(mats[0].ty)
+                    .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned())),
+                0u32,
+            )
+        } else if mm_ll()
+            && !mm_k64()
+            && mm_pipe()
+            && std::env::var_os("ALLPAKA_NO_FUSED_QKV").is_none()
+        {
+            match (
+                super::decode::dq_fmt(mats[0].ty),
+                super::decode::dq_fmt(mats[1].ty),
+            ) {
+                (Some(fq), Some(fk)) if fq <= 5 && fk <= 5 => (
+                    gpu.pipeline("mmllp_qkv_mixed", 1, 1).map(|p| p.to_owned()),
+                    fq | (fk << 8),
+                ),
+                _ => (None, 0),
+            }
+        } else {
+            (None, 0)
+        }
     } else {
-        None
+        (None, 0)
     };
     let conv1d = {
         let addr = req.conv1d.as_ptr() as usize;
@@ -1171,7 +1210,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 k_off: e(z_at),
                 v_off: 0,
                 m: req.m as u32,
-                pad: 0,
+                pad: qkvz_pad,
             };
             enc.set_bytes(
                 5,

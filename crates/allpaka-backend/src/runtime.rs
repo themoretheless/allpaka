@@ -95,7 +95,7 @@ flags! {
     attend_mm: bool = true, env "ALLPAKA_ATTN_MM", on;
     fa_db: bool = false, env "ALLPAKA_FA_DB", off;
     mm_ll: bool = true, env "ALLPAKA_MM_LL", on;
-    q2_mv: bool = false, env "ALLPAKA_Q2_MV", off;
+    q2_mv: bool = true, env "ALLPAKA_Q2_MV", on;
     mega_debug: bool = false, env "ALLPAKA_MEGA_DEBUG", off;
     gpu_counters: bool = false, env "ALLPAKA_GPU_COUNTERS", off;
     cfuse: bool = false, env "ALLPAKA_CFUSE", off;
@@ -145,8 +145,8 @@ mod tests {
         let p = RuntimePolicy::default();
         assert!(p.normflag && p.prefill_defer && p.prefill_one_buffer);
         assert!(p.gpu_route && p.mm_pipeline);
-        assert!(p.q4_mv && p.q8_mv && p.attend_mm && p.mm_ll && p.mv_id_grid);
-        assert!(!p.decode_serial && !p.q2_mv && !p.serial && !p.mm_k64);
+        assert!(p.q2_mv && p.q4_mv && p.q8_mv && p.attend_mm && p.mm_ll && p.mv_id_grid);
+        assert!(!p.decode_serial && !p.serial && !p.mm_k64);
         assert_eq!(p.attention_split, None);
         assert_eq!(p.mv_tg, 128);
         assert_eq!(p.q8_nr0, 2);

@@ -14,15 +14,17 @@ pub(super) fn lanes_per_row(ty: GgmlType, n_in: usize) -> usize {
     // block count. The old kernel also runs correctly at LPR 8, so the tile
     // fallbacks in pipeline_ex need no geometry special-casing.
     if ty == GgmlType::Q2K && q2_mv() && std::env::var_os("ALLPAKA_Q2_ILV").is_none() {
-        // 32 / NR0 threads per row; NR0 sweepable (occupancy vs activation
-        // reuse). ffnbench picked 2 rows per SIMD group on M4 Max.
+        // 32 / NR0 threads per row; NR0=4 (LPR=8, llama's default) wins across
+        // 235B gate [1536x4096]x8 (+9%), down-sw [4096x1536]x8 (+108%), and
+        // dense [4096x4096] (+180%) once float4 + packed_uint2 vector loads
+        // land. Sweepable via ALLPAKA_Q2_NR0 ∈ {1,2,4}.
         static NR0: OnceLock<usize> = OnceLock::new();
         let nr0 = *NR0.get_or_init(|| {
             std::env::var("ALLPAKA_Q2_NR0")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .filter(|n: &usize| [1, 2, 4].contains(n))
-                .unwrap_or(2)
+                .unwrap_or(4)
         });
         return 32 / nr0;
     }
@@ -201,8 +203,20 @@ pub(super) fn mm_kernel_for(ty: GgmlType, m: usize) -> Option<(&'static str, usi
             // Plain (non-indexed) Q5_0 mm: GLM shared / dense projections that
             // are not expert-indexed. Indexed MoE already had mmll_id_q5_0.
             (GgmlType::Q5_0, false) => "mmll_q5_0",
-            (GgmlType::Q2K, false) => "mmll_q2_k",
-            (GgmlType::Q3K, false) => "mmll_q3_k",
+            (GgmlType::Q2K, false) => {
+                if mm_pipe() {
+                    "mmllp_q2_k"
+                } else {
+                    "mmll_q2_k"
+                }
+            }
+            (GgmlType::Q3K, false) => {
+                if mm_pipe() {
+                    "mmllp_q3_k"
+                } else {
+                    "mmll_q3_k"
+                }
+            }
             (GgmlType::Q4K, false) => {
                 // Software-pipelined double-buffer K-loop: mmbench on the
                 // 30B forms measured 12.4 vs 11.4 TFLOPS loop and 8.9 vs
@@ -214,7 +228,13 @@ pub(super) fn mm_kernel_for(ty: GgmlType, m: usize) -> Option<(&'static str, usi
                     "mmll_q4_k"
                 }
             }
-            (GgmlType::Q5K, false) => "mmll_q5_k",
+            (GgmlType::Q5K, false) => {
+                if mm_pipe() {
+                    "mmllp_q5_k"
+                } else {
+                    "mmll_q5_k"
+                }
+            }
             (GgmlType::Q6K, false) => {
                 // The 8B dense keeps attn_v + ffn_down on Q6_K for half its
                 // layers (and the output head); the pipe halves the barrier
@@ -320,8 +340,20 @@ pub(super) fn mm_qkv_kernel_for(ty: GgmlType) -> Option<&'static str> {
             }
         }
         GgmlType::Q5_0 => "mmll_qkv_q5_0",
-        GgmlType::Q2K => "mmll_qkv_q2_k",
-        GgmlType::Q3K => "mmll_qkv_q3_k",
+        GgmlType::Q2K => {
+            if mm_pipe() {
+                "mmllp_qkv_q2_k"
+            } else {
+                "mmll_qkv_q2_k"
+            }
+        }
+        GgmlType::Q3K => {
+            if mm_pipe() {
+                "mmllp_qkv_q3_k"
+            } else {
+                "mmll_qkv_q3_k"
+            }
+        }
         GgmlType::Q4K => {
             if mm_pipe() {
                 "mmllp_qkv_q4_k"
@@ -329,8 +361,20 @@ pub(super) fn mm_qkv_kernel_for(ty: GgmlType) -> Option<&'static str> {
                 "mmll_qkv_q4_k"
             }
         }
-        GgmlType::Q5K => "mmll_qkv_q5_k",
-        GgmlType::Q6K => "mmll_qkv_q6_k",
+        GgmlType::Q5K => {
+            if mm_pipe() {
+                "mmllp_qkv_q5_k"
+            } else {
+                "mmll_qkv_q5_k"
+            }
+        }
+        GgmlType::Q6K => {
+            if mm_pipe() {
+                "mmllp_qkv_q6_k"
+            } else {
+                "mmll_qkv_q6_k"
+            }
+        }
         _ => return None,
     })
 }

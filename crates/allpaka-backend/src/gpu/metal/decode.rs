@@ -304,9 +304,11 @@ pub(super) fn resolve_decode_layers(
         };
         let normflag = allow_normflag
             && runtime_normflag
-            && mats_pre
-                .as_ref()
-                .is_some_and(|(m, _)| m.iter().take(3).all(|m| m.kernel == "matvec_q4_k_mv"))
+            && mats_pre.as_ref().is_some_and(|(m, _)| {
+                m.iter()
+                    .take(3)
+                    .all(|m| matches!(m.kernel, "matvec_q2_k_mv" | "matvec_q4_k_mv"))
+            })
             && matches!(l.ffn, TokenFfn::Moe { .. });
         let (mats, mat_states) = match mats_pre {
             Some((mats, dims)) => {
@@ -337,6 +339,7 @@ pub(super) fn resolve_decode_layers(
                     matches!(
                         k,
                         "matvec_q2_k"
+                            | "matvec_q2_k_mv"
                             | "matvec_q3_k_mv"
                             | "matvec_q4_k_mv"
                             | "matvec_q5_k_mv"
@@ -417,6 +420,7 @@ pub(super) fn resolve_decode_layers(
                     matches!(
                         k,
                         "matvec_q2_k"
+                            | "matvec_q2_k_mv"
                             | "matvec_q3_k_mv"
                             | "matvec_q4_k_mv"
                             | "matvec_q5_k_mv"
@@ -438,11 +442,12 @@ pub(super) fn resolve_decode_layers(
                     .enumerate()
                 {
                     let lpr = lanes_per_row(mat.ty, n_in);
+                    let nr0 = (32 / lpr).max(1);
                     let kernel = match mat.kernel {
-                        "matvec_q2_k_mv" if n_out % 4 != 0 => "matvec_q2_k",
+                        "matvec_q2_k_mv" if n_out % nr0 != 0 => "matvec_q2_k",
                         "matvec_q3_k_mv" if n_out % 2 != 0 => "matvec_q3_k",
-                        "matvec_q4_k_mv" if n_out % 2 != 0 => "matvec_q4_k",
-                        "matvec_q5_k_mv" if n_out % 2 != 0 => "matvec_q5_k",
+                        "matvec_q4_k_mv" if n_out % nr0 != 0 => "matvec_q4_k",
+                        "matvec_q5_k_mv" if n_out % nr0 != 0 => "matvec_q5_k",
                         "matvec_q6_k_mv" if n_out % 2 != 0 => "matvec_q6_k",
                         "matvec_q8_0_mv" if n_out % q8_nr0() != 0 => "matvec_q8_0",
                         k => k,

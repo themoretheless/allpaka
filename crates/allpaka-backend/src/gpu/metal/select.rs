@@ -410,42 +410,104 @@ pub(super) fn mmid_use_bn16(avg_rows: usize) -> bool {
 }
 
 /// Down-projection kernel with swiglu folded into B staging: gate and up
-/// stay raw in y, the mm applies silu(g)*u while loading. q4_k only;
-/// anything else keeps the standalone swiglu pass.
+/// stay raw in y, the mm applies silu(g)*u while loading. Covers Q2_K, Q3_K,
+/// Q4_K, Q5_K, Q6_K, and Q8_0 across BN=32 and BN=16.
 pub(super) fn mmid_swiglu_kernel_for(ty: GgmlType, bn16: bool) -> Option<(&'static str, usize)> {
     if !mm_ll() || mm_k64() {
         return None;
     }
-    match (ty, bn16) {
-        (GgmlType::Q4K, false) => Some((
-            if mm_pipe() {
+    let pipe = mm_pipe();
+    let name = match (ty, bn16) {
+        (GgmlType::Q2K, false) => {
+            if pipe {
+                "mmllps_id_q2_k"
+            } else {
+                "mmlls_id_q2_k"
+            }
+        }
+        (GgmlType::Q3K, false) => {
+            if pipe {
+                "mmllps_id_q3_k"
+            } else {
+                "mmlls_id_q3_k"
+            }
+        }
+        (GgmlType::Q4K, false) => {
+            if pipe {
                 "mmllps_id_q4_k"
             } else {
                 "mmlls_id_q4_k"
-            },
-            64,
-        )),
-        (GgmlType::Q4K, true) => Some((
-            if mm_pipe() {
-                "mmllps_id_q4_k_bn16"
+            }
+        }
+        (GgmlType::Q5K, false) => {
+            if pipe {
+                "mmllps_id_q5_k"
             } else {
-                "mmlls_id_q4_k_bn16"
-            },
-            64,
-        )),
-        // The 8B dense's Q6_K down (18/36 layers): pipelined + swiglu fold.
+                "mmlls_id_q5_k"
+            }
+        }
         (GgmlType::Q6K, false) => {
-            if mm_pipe() {
+            if pipe {
                 if debug_qkv() {
                     eprintln!("debug-qkv: mmllps_id_q6_k selected");
                 }
-                Some(("mmllps_id_q6_k", 64))
+                "mmllps_id_q6_k"
             } else {
-                None
+                "mmlls_id_q6_k"
             }
         }
-        _ => None,
-    }
+        (GgmlType::Q8_0, false) => {
+            if pipe {
+                "mmllps_id_q8_0"
+            } else {
+                "mmlls_id_q8_0"
+            }
+        }
+        (GgmlType::Q2K, true) => {
+            if pipe {
+                "mmllps_id_q2_k_bn16"
+            } else {
+                "mmlls_id_q2_k_bn16"
+            }
+        }
+        (GgmlType::Q3K, true) => {
+            if pipe {
+                "mmllps_id_q3_k_bn16"
+            } else {
+                "mmlls_id_q3_k_bn16"
+            }
+        }
+        (GgmlType::Q4K, true) => {
+            if pipe {
+                "mmllps_id_q4_k_bn16"
+            } else {
+                "mmlls_id_q4_k_bn16"
+            }
+        }
+        (GgmlType::Q5K, true) => {
+            if pipe {
+                "mmllps_id_q5_k_bn16"
+            } else {
+                "mmlls_id_q5_k_bn16"
+            }
+        }
+        (GgmlType::Q6K, true) => {
+            if pipe {
+                "mmllps_id_q6_k_bn16"
+            } else {
+                "mmlls_id_q6_k_bn16"
+            }
+        }
+        (GgmlType::Q8_0, true) => {
+            if pipe {
+                "mmllps_id_q8_0_bn16"
+            } else {
+                "mmlls_id_q8_0_bn16"
+            }
+        }
+        _ => return None,
+    };
+    Some((name, 64))
 }
 
 pub(super) fn mmid_kernel_for(
@@ -455,6 +517,7 @@ pub(super) fn mmid_kernel_for(
 ) -> Option<(&'static str, usize)> {
     if mm_ll() {
         let k64 = mm_k64() || mmid_k64();
+        let pipe = mm_pipe();
         if bn16 && !k64 {
             let name = match (ty, gather) {
                 (GgmlType::Q8_0, false) => "mmll_id_q8_0_bn16",
@@ -464,18 +527,48 @@ pub(super) fn mmid_kernel_for(
                 (GgmlType::Q5K, false) => "mmll_id_q5_k_bn16",
                 (GgmlType::Q6K, false) => "mmll_id_q6_k_bn16",
                 (GgmlType::Q5_0, false) => "mmll_id_q5_0_bn16",
-                (GgmlType::Q8_0, true) => "mmllg_id_q8_0_bn16",
-                (GgmlType::Q2K, true) => "mmllg_id_q2_k_bn16",
-                (GgmlType::Q3K, true) => "mmllg_id_q3_k_bn16",
+                (GgmlType::Q8_0, true) => {
+                    if pipe {
+                        "mmllpg_id_q8_0_bn16"
+                    } else {
+                        "mmllg_id_q8_0_bn16"
+                    }
+                }
+                (GgmlType::Q2K, true) => {
+                    if pipe {
+                        "mmllpg_id_q2_k_bn16"
+                    } else {
+                        "mmllg_id_q2_k_bn16"
+                    }
+                }
+                (GgmlType::Q3K, true) => {
+                    if pipe {
+                        "mmllpg_id_q3_k_bn16"
+                    } else {
+                        "mmllg_id_q3_k_bn16"
+                    }
+                }
                 (GgmlType::Q4K, true) => {
-                    if mm_pipe() {
+                    if pipe {
                         "mmllpg_id_q4_k_bn16"
                     } else {
                         "mmllg_id_q4_k_bn16"
                     }
                 }
-                (GgmlType::Q5K, true) => "mmllg_id_q5_k_bn16",
-                (GgmlType::Q6K, true) => "mmllg_id_q6_k_bn16",
+                (GgmlType::Q5K, true) => {
+                    if pipe {
+                        "mmllpg_id_q5_k_bn16"
+                    } else {
+                        "mmllg_id_q5_k_bn16"
+                    }
+                }
+                (GgmlType::Q6K, true) => {
+                    if pipe {
+                        "mmllpg_id_q6_k_bn16"
+                    } else {
+                        "mmllg_id_q6_k_bn16"
+                    }
+                }
                 (GgmlType::Q5_0, true) => "mmllg_id_q5_0_bn16",
                 _ => return None,
             };
@@ -489,18 +582,48 @@ pub(super) fn mmid_kernel_for(
             (GgmlType::Q5K, false, false) => "mmll_id_q5_k",
             (GgmlType::Q6K, false, false) => "mmll_id_q6_k",
             (GgmlType::Q5_0, false, false) => "mmll_id_q5_0",
-            (GgmlType::Q8_0, true, false) => "mmllg_id_q8_0",
-            (GgmlType::Q2K, true, false) => "mmllg_id_q2_k",
-            (GgmlType::Q3K, true, false) => "mmllg_id_q3_k",
+            (GgmlType::Q8_0, true, false) => {
+                if pipe {
+                    "mmllpg_id_q8_0"
+                } else {
+                    "mmllg_id_q8_0"
+                }
+            }
+            (GgmlType::Q2K, true, false) => {
+                if pipe {
+                    "mmllpg_id_q2_k"
+                } else {
+                    "mmllg_id_q2_k"
+                }
+            }
+            (GgmlType::Q3K, true, false) => {
+                if pipe {
+                    "mmllpg_id_q3_k"
+                } else {
+                    "mmllg_id_q3_k"
+                }
+            }
             (GgmlType::Q4K, true, false) => {
-                if mm_pipe() {
+                if pipe {
                     "mmllpg_id_q4_k"
                 } else {
                     "mmllg_id_q4_k"
                 }
             }
-            (GgmlType::Q5K, true, false) => "mmllg_id_q5_k",
-            (GgmlType::Q6K, true, false) => "mmllg_id_q6_k",
+            (GgmlType::Q5K, true, false) => {
+                if pipe {
+                    "mmllpg_id_q5_k"
+                } else {
+                    "mmllg_id_q5_k"
+                }
+            }
+            (GgmlType::Q6K, true, false) => {
+                if pipe {
+                    "mmllpg_id_q6_k"
+                } else {
+                    "mmllg_id_q6_k"
+                }
+            }
             (GgmlType::Q5_0, true, false) => "mmllg_id_q5_0",
             (GgmlType::Q8_0, false, true) => "mm64ll_id_q8_0",
             (GgmlType::Q2K, false, true) => "mm64ll_id_q2_k",
