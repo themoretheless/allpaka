@@ -8,9 +8,62 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 // Reserve room for both requests admitted by App::memory_extractions.
 // Keeping this conservative avoids oversubscription without holding a filesystem lock across await.
 const PROPOSAL_MAX_BYTES: u64 = 128000;
+/// Cancellation for in-flight extractions, keyed by conversation, so that
+/// deleting a conversation stops proposals still being drawn from it.
+#[derive(Clone, Default)]
+pub(crate) struct Cancels(Arc<Mutex<HashMap<String, (crate::cancel::CancelToken, usize)>>>);
+/// One extraction's hold on its conversation's token; released on drop.
+pub(crate) struct Registration {
+    cancels: Cancels,
+    session: String,
+    token: crate::cancel::CancelToken,
+}
+impl Cancels {
+    pub(crate) fn register(&self, session: &str) -> Registration {
+        let mut map = self.0.lock().unwrap();
+        let entry = map.entry(session.to_owned()).or_default();
+        entry.1 += 1;
+        Registration {
+            cancels: self.clone(),
+            session: session.to_owned(),
+            token: entry.0.clone(),
+        }
+    }
+    /// Cancel every extraction running for `session`. Later extractions get a
+    /// fresh token.
+    pub(crate) fn cancel_session(&self, session: &str) {
+        if let Some((token, _)) = self.0.lock().unwrap().remove(session) {
+            token.cancel();
+        }
+    }
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        let mut map = self.cancels.0.lock().unwrap();
+        if let Some(entry) = map.get_mut(&self.session) {
+            // A cancelled session's entry was already replaced or removed.
+            if entry.0.same_as(&self.token) {
+                entry.1 -= 1;
+                if entry.1 == 0 {
+                    map.remove(&self.session);
+                }
+            }
+        }
+    }
+}
+fn deleted_during_extraction() -> crate::ApiError {
+    crate::error(
+        StatusCode::CONFLICT,
+        "Conversation was deleted during memory extraction",
+    )
+}
 fn admit_proposal_storage(data: &std::path::Path) -> Result<()> {
     let path = data.join("memory/proposals");
     std::fs::create_dir_all(&path)?;
@@ -155,6 +208,9 @@ pub(crate) async fn extract(
                 "Memory extraction capacity reached",
             )
         })?;
+    // Registered before the conversation is read, so a deletion that lands
+    // after that read always reaches this extraction.
+    let registration = app.memory_extraction_cancels.register(&id);
     // Admission scans the proposal directory and guardrails read policy
     // files: keep both off the async worker threads.
     let (task_app, source_id) = (app.clone(), id.clone());
@@ -228,24 +284,31 @@ pub(crate) async fn extract(
             return Err(crate::error(StatusCode::BAD_REQUEST, error));
         }
     }
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        trace.generation(
-            &input.settings.model,
-            &input.settings.provider,
-            root.id(),
-            crate::provider::generate(
-                &app.client,
-                &prepared.2,
-                &input.settings,
-                SYSTEM,
-                &history,
-                &[],
-                |_, _| {},
+    let result = tokio::select! {
+        biased;
+        () = registration.token.cancelled() => None,
+        result = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            trace.generation(
+                &input.settings.model,
+                &input.settings.provider,
+                root.id(),
+                crate::provider::generate(
+                    &app.client,
+                    &prepared.2,
+                    &input.settings,
+                    SYSTEM,
+                    &history,
+                    &[],
+                    |_, _| {},
+                ),
             ),
-        ),
-    )
-    .await;
+        ) => Some(result),
+    };
+    let Some(result) = result else {
+        root.finish("interrupted", &Value::Null);
+        return Err(deleted_during_extraction());
+    };
     let (message, usage) = match result {
         Ok(Ok(response)) => response,
         other => {
@@ -267,6 +330,10 @@ pub(crate) async fn extract(
         let receipt = json!({"id":proposal_id,"project_id":input.settings.project_id,"session_id":id,"message_count":input.message_count,"source_sha256":prepared.1,"settings":input.settings,"trace_id":trace.id(),"usage":usage,"notes":candidates.notes,"accepted":false});
         Ok(receipt)
     })();
+    if registration.token.is_cancelled() {
+        root.finish("interrupted", &Value::Null);
+        return Err(deleted_during_extraction());
+    }
     let receipt = match receipt {
         Ok(receipt) => {
             let (data, id) = (app.data.clone(), proposal_id.clone());
@@ -685,6 +752,24 @@ pub(crate) async fn list_consolidations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deleting_a_conversation_cancels_only_its_running_extractions() {
+        let cancels = Cancels::default();
+        let first = cancels.register("a");
+        let second = cancels.register("a");
+        let other = cancels.register("b");
+        cancels.cancel_session("a");
+        assert!(first.token.is_cancelled() && second.token.is_cancelled());
+        assert!(!other.token.is_cancelled());
+        let later = cancels.register("a");
+        assert!(!later.token.is_cancelled(), "a new extraction starts clean");
+        drop(first);
+        drop(second);
+        assert!(cancels.0.lock().unwrap().contains_key("a"));
+        drop(later);
+        drop(other);
+        assert!(cancels.0.lock().unwrap().is_empty());
+    }
     #[test]
     fn storage_admission_reserves_both_concurrent_proposals() {
         let root = std::env::temp_dir().join(format!(

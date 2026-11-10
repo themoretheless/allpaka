@@ -24,6 +24,10 @@ impl CancelToken {
         self.0
             .send_if_modified(|cancelled| !std::mem::replace(cancelled, true))
     }
+    /// Whether both handles belong to the same token.
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
     pub(crate) fn is_cancelled(&self) -> bool {
         *self.0.borrow()
     }

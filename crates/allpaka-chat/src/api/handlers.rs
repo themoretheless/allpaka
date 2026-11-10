@@ -339,6 +339,9 @@ pub(crate) async fn delete_session(
         }
         app.background.cancel_owned(&id);
         app.sessions.lock().unwrap().remove(&id);
+        // After removal: an extraction either fails to find the conversation
+        // or was registered before this cancel and sees it.
+        app.memory_extraction_cancels.cancel_session(&id);
         let _ = std::fs::remove_file(app.data.join(format!("{id}.json")));
         Ok(Json(json!({"deleted": id})))
     })
