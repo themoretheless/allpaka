@@ -19,16 +19,6 @@ pub fn matvec_kernel(ty: GgmlType) -> Option<&'static str> {
     })
 }
 
-/// Q4/Q6_K: Metal-style — 4 warps × 4 output rows per block.
-/// Q5_K: one warp per output row, several rows per block.
-pub fn matvec_warp_rows(ty: GgmlType) -> Option<u32> {
-    match ty {
-        GgmlType::Q4K | GgmlType::Q6K => Some(4),
-        GgmlType::Q5K => Some(8),
-        _ => None,
-    }
-}
-
 pub fn matvec_launch_cfg(ty: GgmlType, n_out: u32, m: u32) -> LaunchConfig {
     match ty {
         // Q4/Q6_K: 4 warps × 4 rows = 16 outs/block (best Metal-style decode).

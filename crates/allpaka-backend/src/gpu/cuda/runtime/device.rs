@@ -162,7 +162,6 @@ pub struct CudaGpu {
     pub q8_q: CudaSlice<i8>,
     pub q8_q_cap: usize,
     pub q8_d: CudaSlice<f32>,
-    pub q8_d_cap: usize,
     /// Last quantized activation pointer (skip re-quantize for Q/K/V share).
     pub q8_src: u64,
     pub q8_src_n: usize,
@@ -435,7 +434,6 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         q8_q,
         q8_q_cap: 1 << 16,
         q8_d,
-        q8_d_cap: 1 << 12,
         q8_src: 0,
         q8_src_n: 0,
         q8_src_m: 0,

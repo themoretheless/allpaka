@@ -1421,7 +1421,7 @@ pub(super) fn decode_token_one_fused(
                                 fa_attn.push(g);
                                 captured_fa = true;
                             }
-                            (_, Ok(None)) | (false, Ok(Some(_))) | (false, Ok(None)) => {
+                            (_, Ok(None)) | (false, Ok(Some(_))) => {
                                 fa_attn_ok = false;
                                 fa_attn.clear();
                             }

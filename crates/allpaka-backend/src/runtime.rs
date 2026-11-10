@@ -295,6 +295,8 @@ pub fn get() -> &'static RuntimePolicy {
     POLICY.get_or_init(RuntimePolicy::from_env)
 }
 
+// Mirrors OnceLock::set: a refused policy is handed back to the caller.
+#[allow(clippy::result_large_err)]
 pub fn install(policy: RuntimePolicy) -> Result<(), RuntimePolicy> {
     POLICY.set(policy)
 }

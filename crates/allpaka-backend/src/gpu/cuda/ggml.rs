@@ -41,7 +41,6 @@ type FlashAttnFn = unsafe extern "C" fn(
 type SyncFn = unsafe extern "C" fn();
 type BindPeerFn = unsafe extern "C" fn(*mut c_void) -> i32;
 type PeerFn = unsafe extern "C" fn();
-type PeerSharedFn = unsafe extern "C" fn() -> i32;
 type ClearSharedFn = unsafe extern "C" fn();
 type HybridReplayFn = unsafe extern "C" fn(
     pre_execs: *const *mut c_void,
@@ -82,7 +81,6 @@ struct Api {
     bind_peer: Option<BindPeerFn>,
     wait_peer: Option<PeerFn>,
     signal_peer: Option<PeerFn>,
-    peer_is_shared: Option<PeerSharedFn>,
     clear_shared: Option<ClearSharedFn>,
 }
 
@@ -186,8 +184,6 @@ fn load() -> Option<&'static Api> {
                 unsafe { lib.get(b"allpaka_ggml_wait_peer\0").ok().map(|s| *s) };
             let signal_peer: Option<PeerFn> =
                 unsafe { lib.get(b"allpaka_ggml_signal_peer\0").ok().map(|s| *s) };
-            let peer_is_shared: Option<PeerSharedFn> =
-                unsafe { lib.get(b"allpaka_ggml_peer_is_shared\0").ok().map(|s| *s) };
             let clear_shared: Option<ClearSharedFn> =
                 unsafe { lib.get(b"allpaka_ggml_clear_shared\0").ok().map(|s| *s) };
             let api = Api {
@@ -205,7 +201,6 @@ fn load() -> Option<&'static Api> {
                 bind_peer,
                 wait_peer,
                 signal_peer,
-                peer_is_shared,
                 clear_shared,
             };
             let rc = unsafe { (api.init)(0) };
@@ -548,8 +543,8 @@ pub fn hybrid_replay(
     // q/out/cache/d_pos are device addresses that only the kernels dereference.
     let rc = unsafe {
         hr(
-            pre_execs.as_ptr() as *const *mut c_void,
-            post_execs.as_ptr() as *const *mut c_void,
+            pre_execs.as_ptr(),
+            post_execs.as_ptr(),
             tail_exec,
             pre_execs.len() as i32,
             stream.cu_stream() as *mut c_void,

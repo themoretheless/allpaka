@@ -275,30 +275,6 @@ pub fn run_matvec(
     gpu.stream.clone_dtoh(&gpu.y_arena.slice(0..m * n_out)).ok()
 }
 
-/// Device-resident matvec: `y_arena[y_off..]` ← W · `y_arena[x_off..]`.
-/// No H2D / D2H / synchronize — caller owns stream ordering.
-pub fn launch_matvec_y(
-    gpu: &mut CudaGpu,
-    ty: GgmlType,
-    chunk: usize,
-    w_off: u64,
-    n_in: usize,
-    n_out: usize,
-    x_off: usize,
-    y_off: usize,
-    m: usize,
-) -> Option<()> {
-    let stream = Arc::clone(&gpu.stream);
-    let base = {
-        let (p, g) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
-        drop(g);
-        p
-    };
-    launch_matvec_y_ptr(
-        gpu, ty, chunk, w_off, n_in, n_out, x_off, y_off, m, base, false,
-    )
-}
-
 /// Like [`launch_matvec_y`] but uses a pre-resolved `y_arena` device base so
 /// CUDA graph capture can avoid per-launch `DevicePtr` event recording.
 pub fn launch_matvec_y_ptr(

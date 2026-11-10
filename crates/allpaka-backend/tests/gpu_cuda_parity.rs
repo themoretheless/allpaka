@@ -3,6 +3,8 @@
 //! Skips when `ALLPAKA_NO_GPU` is set or no CUDA device is available.
 
 #![cfg(all(feature = "cuda", not(target_os = "macos")))]
+// Reference math indexes several arrays by the same position.
+#![allow(clippy::needless_range_loop)]
 
 use allpaka_backend::gpu;
 use allpaka_gguf::GgmlType;

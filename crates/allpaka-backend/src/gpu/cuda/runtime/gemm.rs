@@ -265,7 +265,7 @@ pub fn launch_gemm_dequant(
         gpu.stream.wait(ev).ok()?;
     }
     let mut used_blas = false;
-    if gpu.blaslt.is_some() {
+    if let Some(blas) = gpu.blaslt.as_ref() {
         let (head, mut c16s) = gpu.f16_arena.split_at_mut(c16);
         let a = head.slice(x16..x16 + m * n_in);
         let b = head.slice(w16..w16 + w_elems);
@@ -287,10 +287,7 @@ pub fn launch_gemm_dequant(
             stride_bias: None,
             batch_size: None,
         };
-        let blas_ok = {
-            let blas = gpu.blaslt.as_ref().unwrap();
-            unsafe { Matmul::matmul(blas, cfg, &b, &a, &mut c16s, None, None) }.is_ok()
-        };
+        let blas_ok = unsafe { Matmul::matmul(blas, cfg, &b, &a, &mut c16s, None, None) }.is_ok();
         if blas_ok {
             let f = gpu.func_owned("cast_f16_to_f32")?;
             let n = (m * n_out) as u32;
