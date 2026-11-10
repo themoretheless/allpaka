@@ -615,7 +615,7 @@ pub(super) fn decode_token_one(
                         s.0 /= sum;
                     }
                 }
-                scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                scores.sort_by(|a, b| b.0.total_cmp(&a.0));
                 let mut picks: Vec<(usize, f32)> = scores
                     .into_iter()
                     .take(*n_used)
@@ -691,7 +691,7 @@ pub(super) fn decode_token_one(
         let idx = logits
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .map(|(i, _)| i as u32)
             .unwrap_or(0);
         Some(TokenOut::Rows {
@@ -702,7 +702,7 @@ pub(super) fn decode_token_one(
         let idx = logits
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .map(|(i, _)| i as u32)
             .unwrap_or(0);
         Some(TokenOut::Argmax(idx))

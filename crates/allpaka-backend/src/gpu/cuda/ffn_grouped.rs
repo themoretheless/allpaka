@@ -65,7 +65,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                     s.0 *= route.scale;
                 }
             }
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            scored.sort_by(|a, b| b.0.total_cmp(&a.0));
             let mut picks: Vec<(usize, f32)> = scored
                 .into_iter()
                 .take(route.n_used)
