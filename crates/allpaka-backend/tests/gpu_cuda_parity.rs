@@ -250,48 +250,21 @@ fn gemm_q4k_q6k_parity() {
         .unwrap();
         assert_eq!(got.len(), m * n_out);
         let w_f32 = allpaka_gguf::dequant::dequant(ty, w, n_out * n_in).unwrap();
-        // Q8 activation paths match Q8*W, not float*W.
-        // Near-cancelling dots can differ from float by more than 2e-2 abs.
-        let q8_path = matches!(ty, GgmlType::Q4K | GgmlType::Q6K)
-            && std::env::var("ALLPAKA_Q8")
-                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                .unwrap_or(true);
+        // m >= MM_MIN_M goes through the GEMM path: f16 dequant + cuBLASLt by
+        // default, or ggml MMQ (Q8 activations) when that library is loaded.
+        // Compare against float*W with a tolerance that also covers Q8
+        // activation rounding, which grows with sum(|x*w|), not with |dot|.
         for row in 0..m {
             let xr = &x[row * n_in..(row + 1) * n_in];
-            let recon: Vec<f32> = if q8_path {
-                let mut q = vec![0i8; n_in];
-                let mut qd = vec![0f32; n_in / 32];
-                for blk in 0..n_in / 32 {
-                    let base = blk * 32;
-                    let mut amax = 0f32;
-                    for j in 0..32 {
-                        amax = amax.max(xr[base + j].abs());
-                    }
-                    let scale = if amax < 1e-8 * 127.0 {
-                        1.0
-                    } else {
-                        amax / 127.0
-                    };
-                    qd[blk] = scale;
-                    for j in 0..32 {
-                        let qi = (xr[base + j] / scale).round().clamp(-127.0, 127.0) as i32;
-                        q[base + j] = qi as i8;
-                    }
-                }
-                (0..n_in).map(|i| q[i] as f32 * qd[i / 32]).collect()
-            } else {
-                xr.to_vec()
-            };
             for j in 0..n_out {
-                let mut want = 0f32;
-                for k in 0..n_in {
-                    want += recon[k] * w_f32[j * n_in + k];
-                }
+                let wr = &w_f32[j * n_in..(j + 1) * n_in];
+                let want: f32 = xr.iter().zip(wr).map(|(a, b)| a * b).sum();
+                let mag: f32 = xr.iter().zip(wr).map(|(a, b)| (a * b).abs()).sum();
                 let g = got[row * n_out + j];
-                let tol = 2e-2 + 2e-2 * want.abs();
+                let tol = 2e-2 + 2e-2 * want.abs() + 2e-3 * mag;
                 assert!(
                     (g - want).abs() < tol,
-                    "{ty:?} r{row} c{j}: gpu {g} vs cpu {want}"
+                    "{ty:?} r{row} c{j}: gpu {g} vs cpu {want} (sum|x*w| {mag})"
                 );
             }
         }
