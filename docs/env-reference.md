@@ -32,7 +32,7 @@ to rewrite this file. Every switch is read once per process.
 | `ALLPAKA_GU_N8` | `cuda_gu_n8` | off | off unless `=1` |
 | `ALLPAKA_GU_Q8` | `cuda_gu_q8` | off | off unless `=1` |
 | `ALLPAKA_HYBRID_REPLAY` | `cuda_hybrid_replay` | off | off unless `=1` or `=true` |
-| `ALLPAKA_K5120` | `cuda_k5120` | off | off unless `=1` or `=true` |
+| `ALLPAKA_K5120` | `cuda_k5120` | on | on unless `=0` or `=false` |
 | `ALLPAKA_K5120_GU` | `cuda_k5120_gu` | off | off unless `=1` or `=true` |
 | `ALLPAKA_K8192` | `cuda_k8192` | on | on unless `=0` or `=false` |
 | `ALLPAKA_MEGA_DEBUG` | `mega_debug` | off | off unless `=1` |

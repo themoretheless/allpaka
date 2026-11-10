@@ -176,7 +176,7 @@ flags! {
     cuda_out_n4: bool = true, env "ALLPAKA_OUT_N4", not_no;
     cuda_q6_f32: bool = false, env "ALLPAKA_Q6_F32", yes;
     cuda_k8192: bool = true, env "ALLPAKA_K8192", not_no;
-    cuda_k5120: bool = false, env "ALLPAKA_K5120", yes;
+    cuda_k5120: bool = true, env "ALLPAKA_K5120", not_no;
     cuda_q6_k25600: bool = false, env "ALLPAKA_Q6_K25600", yes;
     cuda_ggml_mmvq: bool = false, env "ALLPAKA_GGML_MMVQ", yes;
     cuda_ggml_decode: bool = false, env "ALLPAKA_GGML_DECODE", yes;

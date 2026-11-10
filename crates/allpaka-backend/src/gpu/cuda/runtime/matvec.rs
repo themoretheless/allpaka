@@ -188,7 +188,7 @@ pub(super) fn launch_qk_q8_matvec_on(
         {
             ("matvec_q4_k_q8_k8192", 4u32, n_out as u32)
         }
-        // Opt-in: measured ~61 tg vs ~70.6 generic on Qwen3-32B / 5090.
+        // Default on (ALLPAKA_K5120=0 disables); bit-identical to the generic kernel.
         (GgmlType::Q4K, false, false, false)
             if n_in == 5120
                 && gpu.fns.contains_key("matvec_q4_k_q8_k5120")
@@ -612,7 +612,7 @@ pub fn launch_matvec_q4k_2(gpu: &mut CudaGpu, req: &GateUpReq) -> Option<()> {
             && n_in == 5120
             && gpu.fns.contains_key("matvec_q4_k_q8_2_k5120_bal")
             && crate::runtime::get().cuda_k5120_gu;
-        // Opt-in only; imbalanced 4-warp k5120 regressed on 5090.
+        // Default on: unrolled k5120 dual (bit-identical to _2) measured +0.3% tg on 5090.
         let use_k5120 = !use_n8
             && !use_k5120_gu
             && n_in == 5120
