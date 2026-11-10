@@ -143,11 +143,18 @@ impl<'a> Model<'a> {
                 }
             }
             // MTP rollback slot: this row's window and state, mirrored.
-            if let Some((cp, sp, dp, conv_off, state_off, ncv, nst, total)) = slot_ptrs {
+            if let Some((_, _, dp, conv_off, state_off, ncv, nst, total)) = slot_ptrs {
+                // Copy from `conv` / `state` themselves rather than from the
+                // conv/state pointers `slot_write_ptrs` returned: those were
+                // derived before `both_mut` created the live `&mut` slices
+                // over the same memory, and reading through them after
+                // writes via those slices is undefined behaviour under
+                // Rust's aliasing rules. Same addresses, same bytes.
+                debug_assert_eq!((conv.len(), state.len()), (ncv, nst));
                 unsafe {
                     let slot = dp.add(i * total);
-                    std::ptr::copy_nonoverlapping(cp, slot.add(conv_off), ncv);
-                    std::ptr::copy_nonoverlapping(sp, slot.add(state_off), nst);
+                    std::ptr::copy_nonoverlapping(conv.as_ptr(), slot.add(conv_off), ncv);
+                    std::ptr::copy_nonoverlapping(state.as_ptr(), slot.add(state_off), nst);
                 }
             }
             if i == 0 {
