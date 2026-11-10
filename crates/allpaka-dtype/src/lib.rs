@@ -1,9 +1,8 @@
 //! Core tensor data types, quantization block geometry, and SIMD float conversions.
 //!
 //! Centralizes primitive format conversions (`f16`, `bf16`, `f32`), `GgmlType`
-//! geometry, K-quant scale unpacking, and MLX affine block dequantization so
-//! `allpaka-gguf`, `allpaka-mlx`, and `allpaka-backend` share a single
-//! zero-duplication foundation.
+//! geometry, and K-quant scale unpacking so `allpaka-gguf`, `allpaka-mlx`, and
+//! `allpaka-backend` share a single zero-duplication foundation.
 
 use std::fmt;
 
@@ -416,47 +415,6 @@ pub fn unpack_q3_k_scales_raw(packed: &[u8]) -> [i8; 16] {
             out[w_idx * 4 + 3] = b[3] as i8;
         }
         out
-    }
-}
-
-/// Dequantise one MLX affine 4-bit block (36 bytes: eight little-endian `u32` nibble words + bf16 scale + bf16 bias).
-#[inline]
-pub fn dequant_mlx_q4_block_slice(block: &[u8], out: &mut [f32]) {
-    assert!(
-        block.len() >= 36 && out.len() >= 64,
-        "Q4Affine block requires 36 input bytes and 64 output elements"
-    );
-    let scale = bf16_to_f32(u16::from_le_bytes([block[32], block[33]]));
-    let bias = bf16_to_f32(u16::from_le_bytes([block[34], block[35]]));
-    let mut table = [0.0f32; 16];
-    for (q, slot) in table.iter_mut().enumerate() {
-        *slot = (q as f32).mul_add(scale, bias);
-    }
-    for w in 0..8 {
-        let word = u32::from_le_bytes(block[w * 4..w * 4 + 4].try_into().unwrap());
-        let dst = &mut out[w * 8..w * 8 + 8];
-        dst[0] = table[(word & 0xf) as usize];
-        dst[1] = table[((word >> 4) & 0xf) as usize];
-        dst[2] = table[((word >> 8) & 0xf) as usize];
-        dst[3] = table[((word >> 12) & 0xf) as usize];
-        dst[4] = table[((word >> 16) & 0xf) as usize];
-        dst[5] = table[((word >> 20) & 0xf) as usize];
-        dst[6] = table[((word >> 24) & 0xf) as usize];
-        dst[7] = table[((word >> 28) & 0xf) as usize];
-    }
-}
-
-/// Dequantise one MLX affine 8-bit block (68 bytes: 64 unsigned payload bytes + bf16 scale + bf16 bias).
-#[inline]
-pub fn dequant_mlx_q8_block_slice(block: &[u8], out: &mut [f32]) {
-    assert!(
-        block.len() >= 68 && out.len() >= 64,
-        "Q8Affine block requires 68 input bytes and 64 output elements"
-    );
-    let scale = bf16_to_f32(u16::from_le_bytes([block[64], block[65]]));
-    let bias = bf16_to_f32(u16::from_le_bytes([block[66], block[67]]));
-    for (&q, slot) in block[..64].iter().zip(out[..64].iter_mut()) {
-        *slot = (q as f32).mul_add(scale, bias);
     }
 }
 
