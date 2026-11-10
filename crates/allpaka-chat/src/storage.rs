@@ -104,6 +104,8 @@ pub fn atomic_write_bytes_with_sync(path: &Path, bytes: &[u8], sync_parent: bool
         let mut file = options.open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        // Windows refuses to rename a file that still has an open handle.
+        drop(file);
         std::fs::rename(&temp, path)?;
         if sync_parent {
             #[cfg(unix)]
@@ -130,6 +132,8 @@ pub fn atomic_create_new_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         let mut file = options.open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        // Close before linking so the temp name can be removed on Windows.
+        drop(file);
         std::fs::hard_link(&temp, path)?;
         Ok(())
     })();
