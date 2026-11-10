@@ -6,8 +6,8 @@ use super::*;
 pub fn prefill_begin(xs: &[f32]) -> Option<()> {
     with_gpu(|gpu| {
         gpu.ensure_prefill(xs.len())?;
-        // Dual-queue: ggml MMQ/FA on private stream, cudarc on peer.
-        // Opt out with ALLPAKA_PREFILL_DUAL=0 (shared stream, no overlap).
+        // Default: ggml shares the cudarc stream (no cross-stream waits).
+        // ALLPAKA_PREFILL_DUAL=1 puts ggml on a private stream (slower).
         let dual = crate::runtime::get().cuda_prefill_dual;
         if dual {
             crate::gpu::cuda::ggml::clear_shared_for_prefill();

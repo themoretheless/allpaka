@@ -56,11 +56,11 @@ to rewrite this file. Every switch is read once per process.
 | `ALLPAKA_PF_COMBINE_RESNORM` | `pf_combine_resnorm` | on | on unless `=0` |
 | `ALLPAKA_PF_DEFER` | `prefill_defer` | on | on unless `=0` |
 | `ALLPAKA_PF_FQK` | `pf_fused_qk` | on | on unless `=0` |
-| `ALLPAKA_PF_GRAPH` | `cuda_pf_graph` | on | on unless `=0` or `=false` |
+| `ALLPAKA_PF_GRAPH` | `cuda_pf_graph` | off | off unless `=1` or `=true` |
 | `ALLPAKA_PF_OBUF_DENSE` | `dense_obuf` | on | on unless `=0` |
 | `ALLPAKA_PF_ONEBUF` | `prefill_one_buffer` | on | on unless `=0` |
 | `ALLPAKA_PF_SPLIT` | `metal_pf_split` | off | on when set to anything |
-| `ALLPAKA_PREFILL_DUAL` | `cuda_prefill_dual` | on | on unless `=0` or `=false` |
+| `ALLPAKA_PREFILL_DUAL` | `cuda_prefill_dual` | off | off unless `=1` or `=true` |
 | `ALLPAKA_PREFILL_ZERO_COPY` | `prefill_zero_copy` | on | on unless `=0` |
 | `ALLPAKA_Q2_ILV` | `metal_q2_ilv` | off | on when set to anything |
 | `ALLPAKA_Q2_MV` | `q2_mv` | off | off unless `=1` |

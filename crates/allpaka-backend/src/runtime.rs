@@ -194,8 +194,10 @@ flags! {
     cuda_wo_fa_q8: bool = false, env "ALLPAKA_WO_FA_Q8", yes;
     cuda_no_fa_graph: bool = false, env "ALLPAKA_NO_FA_GRAPH", yes;
     cuda_ggml_gemm: bool = true, env "ALLPAKA_GGML_GEMM", not_no;
-    cuda_prefill_dual: bool = true, env "ALLPAKA_PREFILL_DUAL", not_no;
-    cuda_pf_graph: bool = true, env "ALLPAKA_PF_GRAPH", not_no;
+    // Off: a private ggml stream needs a cross-stream wait per GEMM (~9% prefill).
+    cuda_prefill_dual: bool = false, env "ALLPAKA_PREFILL_DUAL", yes;
+    // Off: capturing the single-stream prefill gives non-finite logits on replay.
+    cuda_pf_graph: bool = false, env "ALLPAKA_PF_GRAPH", yes;
     cuda_gpu_embed: bool = false, env "ALLPAKA_GPU_EMBED", yes;
     gdn_zero: bool = false, env "ALLPAKA_GDN_ZERO", present;
     // Metal switches, formerly read from the environment on every call.
