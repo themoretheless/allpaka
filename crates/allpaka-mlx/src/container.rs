@@ -33,12 +33,14 @@ struct ShardedIndex {
 }
 
 impl ShardedIndex {
-    fn parse(json_str: &str) -> anyhow::Result<Self> {
+    fn parse(json_str: &str) -> crate::error::Result<Self> {
         let obj: serde_json::Value = serde_json::from_str(json_str)?;
         let weight_map = obj
             .get("weight_map")
             .and_then(|v| v.as_object())
-            .ok_or_else(|| anyhow::anyhow!("no weight_map object in safetensors index"))?;
+            .ok_or_else(|| {
+                crate::error::format_err!("no weight_map object in safetensors index")
+            })?;
         let mut files: Vec<String> = weight_map
             .values()
             .filter_map(|v| v.as_str().map(str::to_owned))
@@ -49,7 +51,7 @@ impl ShardedIndex {
     }
 }
 
-pub fn load<P>(root: P) -> anyhow::Result<MlxSafetensors>
+pub fn load<P>(root: P) -> crate::error::Result<MlxSafetensors>
 where
     P: AsRef<Path>,
 {
@@ -80,13 +82,13 @@ where
                 let info = parse_safetensors_header(&mm)?;
                 Ok((mm, info))
             })
-            .collect::<anyhow::Result<Vec<_>>>()?
+            .collect::<crate::error::Result<Vec<_>>>()?
     } else {
         std::thread::scope(|s| {
             let handles: Vec<_> = shard_files
                 .iter()
                 .map(|fname| {
-                    s.spawn(move || -> anyhow::Result<(Mmap, FileInfo)> {
+                    s.spawn(move || -> crate::error::Result<(Mmap, FileInfo)> {
                         let mm = mmap_shard(root.join(fname))?;
                         let info = parse_safetensors_header(&mm)?;
                         Ok((mm, info))
@@ -96,7 +98,7 @@ where
             handles
                 .into_iter()
                 .map(|h| h.join().expect("shard parse thread panicked"))
-                .collect::<anyhow::Result<Vec<_>>>()
+                .collect::<crate::error::Result<Vec<_>>>()
         })?
     };
 
@@ -113,10 +115,9 @@ where
         let start = info.data_start as u64;
         mmaps.push(mm);
         for mut t in info.tensors {
-            t.offset = t
-                .offset
-                .checked_add(start)
-                .ok_or_else(|| anyhow::anyhow!("tensor offset overflow for {}", t.name))?;
+            t.offset = t.offset.checked_add(start).ok_or_else(|| {
+                crate::error::format_err!("tensor offset overflow for {}", t.name)
+            })?;
             let raw_name = t.name;
             let prefixed_name = format!("{i}/{fname}/{raw_name}");
             t.name = prefixed_name.clone();
@@ -136,24 +137,24 @@ where
     })
 }
 
-fn parse_safetensors_header(mm: &Mmap) -> anyhow::Result<FileInfo> {
+fn parse_safetensors_header(mm: &Mmap) -> crate::error::Result<FileInfo> {
     let len = mm.len() as u64;
     if len < 8 {
-        return Err(anyhow::anyhow!("empty safetensors"));
+        return Err(crate::error::format_err!("empty safetensors"));
     }
     let n_bytes = u64::from_le_bytes(mm[0..8].try_into()?);
     let h_start = 8u64;
     let h_end = h_start
         .checked_add(n_bytes)
-        .ok_or_else(|| anyhow::anyhow!("header size overflow"))?;
+        .ok_or_else(|| crate::error::format_err!("header size overflow"))?;
     if h_end > len {
-        return Err(anyhow::anyhow!("header exceeds mmap"));
+        return Err(crate::error::format_err!("header exceeds mmap"));
     }
     let hdr_txt = std::str::from_utf8(&mm[h_start as usize..h_end as usize])?;
     let hdr: serde_json::Value = serde_json::from_str(hdr_txt)?;
     let hdr_obj = hdr
         .as_object()
-        .ok_or_else(|| anyhow::anyhow!("safetensors header must be a JSON object"))?;
+        .ok_or_else(|| crate::error::format_err!("safetensors header must be a JSON object"))?;
     let empty_map = serde_json::Map::new();
     let meta = hdr_obj
         .get("__metadata__")
@@ -192,7 +193,8 @@ fn parse_safetensors_header(mm: &Mmap) -> anyhow::Result<FileInfo> {
             });
         }
     }
-    let mut hdr_sz = usize::try_from(h_end).map_err(|_| anyhow::anyhow!("header too large"))?;
+    let mut hdr_sz =
+        usize::try_from(h_end).map_err(|_| crate::error::format_err!("header too large"))?;
     let align: usize = meta
         .get("alignment")
         .and_then(|v| v.as_u64())
@@ -201,20 +203,20 @@ fn parse_safetensors_header(mm: &Mmap) -> anyhow::Result<FileInfo> {
     hdr_sz = hdr_sz
         .div_ceil(align)
         .checked_mul(align)
-        .ok_or_else(|| anyhow::anyhow!("header alignment overflow"))?;
+        .ok_or_else(|| crate::error::format_err!("header alignment overflow"))?;
     Ok(FileInfo {
         tensors,
         data_start: hdr_sz,
     })
 }
 
-fn mmap_shard<P>(path: P) -> anyhow::Result<Mmap>
+fn mmap_shard<P>(path: P) -> crate::error::Result<Mmap>
 where
     P: AsRef<Path>,
 {
     let f = std::fs::File::open(path.as_ref())?;
     unsafe { memmap2::Mmap::map(&f) }
-        .map_err(|e| anyhow::anyhow!("mmap fail {}: {}", path.as_ref().display(), e))
+        .map_err(|e| crate::error::format_err!("mmap fail {}: {}", path.as_ref().display(), e))
 }
 
 fn glob_pattern_to_filenames(pattern: &str) -> Vec<String> {
@@ -231,9 +233,9 @@ struct FileInfo {
     data_start: usize,
 }
 
-pub fn tensor_data<'a>(f: &'a MlxSafetensors, t: &TensorInfo) -> anyhow::Result<&'a [u8]> {
+pub fn tensor_data<'a>(f: &'a MlxSafetensors, t: &TensorInfo) -> crate::error::Result<&'a [u8]> {
     if f.mmaps.is_empty() {
-        return Err(anyhow::anyhow!("no mmaps loaded in container"));
+        return Err(crate::error::format_err!("no mmaps loaded in container"));
     }
     let shard_idx = f
         .by_name
@@ -243,12 +245,12 @@ pub fn tensor_data<'a>(f: &'a MlxSafetensors, t: &TensorInfo) -> anyhow::Result<
         .min(f.mmaps.len() - 1);
     let mm = &f.mmaps[shard_idx];
     let off = usize::try_from(t.offset)
-        .map_err(|_| anyhow::anyhow!("tensor {} offset overflow", t.name))?;
+        .map_err(|_| crate::error::format_err!("tensor {} offset overflow", t.name))?;
     let end = off
         .checked_add(t.bytes)
-        .ok_or_else(|| anyhow::anyhow!("tensor {} size overflow", t.name))?;
+        .ok_or_else(|| crate::error::format_err!("tensor {} size overflow", t.name))?;
     if end > mm.len() {
-        return Err(anyhow::anyhow!("tensor {} out of bounds", t.name));
+        return Err(crate::error::format_err!("tensor {} out of bounds", t.name));
     }
     Ok(&mm[off..end])
 }

@@ -1,8 +1,8 @@
 //! Access to tensor data: the table, the mmap, and bounds-checked views.
 
+use crate::error::{bail, Context, Result};
 use crate::metadata::{parse, Header};
 pub use allpaka_dtype::GgmlType;
-use anyhow::{bail, Context, Result};
 use memmap2::Mmap;
 use std::fs::File;
 use std::io::BufReader;

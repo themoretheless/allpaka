@@ -2,8 +2,8 @@
 //!
 //! Format reference: <https://github.com/ggml-org/ggml/blob/master/docs/gguf.md>
 
+use crate::error::{bail, Context, Result};
 use crate::tensors::{GgmlType, TensorInfo};
-use anyhow::{bail, Context, Result};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;

@@ -82,7 +82,7 @@ impl<'a> QuantMat<'a> {
             );
         }
         let bytes = &self.data[j * self.row_bytes..(j + 1) * self.row_bytes];
-        dequant::dequant_into(self.ty, bytes, dst)
+        Ok(dequant::dequant_into(self.ty, bytes, dst)?)
     }
 
     /// A contiguous band of rows as its own matrix, borrowing the same bytes.

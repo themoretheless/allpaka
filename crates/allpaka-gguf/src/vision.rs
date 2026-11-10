@@ -16,9 +16,9 @@
 //! engine can run the projector; `allpaka inspect --mmproj` prints the census
 //! and says so.
 
+use crate::error::{Context, Result};
 use crate::metadata::parse_file;
 use crate::tensors::TensorInfo;
-use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
 

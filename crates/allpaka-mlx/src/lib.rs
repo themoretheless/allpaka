@@ -13,6 +13,7 @@
 
 mod container;
 mod dequant;
+pub mod error;
 mod ffi;
 mod shapes;
 
@@ -60,7 +61,7 @@ impl MlxQuantType {
 }
 
 /// Parse an MLX checkpoint directory containing `*.safetensors`.
-pub fn load_safetensors<P>(path: P) -> anyhow::Result<MlxSafetensors>
+pub fn load_safetensors<P>(path: P) -> crate::error::Result<MlxSafetensors>
 where
     P: AsRef<std::path::Path>,
 {

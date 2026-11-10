@@ -8,6 +8,7 @@
 //! acceptance test. The unit tests here pin the bit layout so a refactor
 //! cannot silently move a shift.
 
+use crate::error::{bail, Result};
 use crate::tensors::GgmlType;
 use allpaka_dtype::{
     bf16_bytes_to_f32, f16_bytes_to_f32, f32_bytes_to_f32, unpack_q3_k_scales_raw,
@@ -15,7 +16,6 @@ use allpaka_dtype::{
 pub use allpaka_dtype::{
     bf16_to_f32, dequant_mlx_q4_block_slice, dequant_mlx_q8_block_slice, f16_to_f32, scale_min_k4,
 };
-use anyhow::{bail, Result};
 
 /// Dequantise `data` holding `elements` values of type `ty`.
 pub fn dequant(ty: GgmlType, data: &[u8], elements: usize) -> Result<Vec<f32>> {
