@@ -68,3 +68,20 @@ Qwen3-32B Q4_K_M:
 - **Prefill:** about 101%.
 
 **Known problem:** prompts of about 1 200 tokens still give incoherent output through `serve`. This happens with `ALLPAKA_ATTN_G8=0` too, where the server crashed during prefill. Short prompts are coherent.
+
+## After the prefill correctness fixes
+
+The numbers above came from prefill that read wrong data:
+- the flash-attention output layout was scrambled;
+- the queue wait between cudarc and ggml was missing.
+
+Prefill argmax was 8 then; correct is 201. Commits `3815e23` and `4af983e` fix this, together with a rebuilt `allpaka_ggml.dll`. With them, a 1 220-token prompt answers coherently through `serve`. Same interleaved setup:
+
+| Round | allpaka pp | llama pp | pp ratio | allpaka tg | llama tg | tg ratio |
+|---|---|---|---|---|---|---|
+| 1 | 3 162 | 3 385 | 93% | 76.5 | 69.54 | 110.0% |
+| 2 | 3 159 | 3 372 | 94% | 76.5 | 69.54 | 110.0% |
+| 3 | 3 145 | 3 392 | 93% | 76.5 | 69.42 | 110.2% |
+
+- **Decode:** about 110% of llama.cpp.
+- **Prefill:** 93% of llama.cpp. The always-on queue wait costs it; the earlier 101% was measured on wrong results.
