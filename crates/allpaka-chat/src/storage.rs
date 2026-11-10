@@ -162,9 +162,8 @@ mod tests {
         assert!(!valid_id("a.b") && !valid_id("a/b"));
         assert!(valid_hex_id("0a-F9") && valid_hex_id(&long80));
         assert!(!valid_hex_id("g") && !valid_hex_id("a_b") && !valid_hex_id(&long81));
-        for named in [crate::plugins::valid_id] {
-            assert!(named("Ab_9-z") && named(&"a".repeat(100)) && !named("a.b"));
-        }
+        let named = crate::plugins::valid_id;
+        assert!(named("Ab_9-z") && named(&"a".repeat(100)) && !named("a.b"));
         let generated = crate::api::valid_id;
         assert!(generated("0a-f") && generated(&long80));
         assert!(!generated("a_b") && !generated(&long81) && !generated(""));
