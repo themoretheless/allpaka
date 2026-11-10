@@ -15,6 +15,8 @@ mod predict;
 mod rag_tools;
 mod request_control;
 mod resources;
+#[cfg(test)]
+mod route_tests;
 mod router;
 mod sampler;
 mod session;
