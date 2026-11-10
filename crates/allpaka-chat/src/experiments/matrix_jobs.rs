@@ -10,12 +10,25 @@ fn reserved_size(job: &Job) -> Result<usize> {
     let mut fixed = job.clone();
     fixed.run_ids = vec![None; job.variants.len()];
     fixed.run_attempted = vec![false; job.variants.len()];
-    fixed.status.clear();
     fixed.error = None;
+    // The status belongs to MUTABLE_RESERVE: measure the rest as if it were
+    // the empty string `""`, which is what the accounting has always counted.
+    let status = serde_json::to_vec(&fixed.status)?.len() - "\"\"".len();
     serde_json::to_vec(&fixed)?
         .len()
-        .checked_add(MUTABLE_RESERVE)
+        .checked_sub(status)
+        .and_then(|fixed| fixed.checked_add(MUTABLE_RESERVE))
         .context("Matrix job capacity overflow")
+}
+/// Where a job is. The words are the stored and API form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum JobStatus {
+    Running,
+    Interrupted,
+    Completed,
+    Failed,
+    Cancelled,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,7 +55,7 @@ struct Job {
     run_ids: Vec<Option<String>>,
     run_attempted: Vec<bool>,
     provider_routes: Vec<String>,
-    status: String,
+    status: JobStatus,
     matrix_id: String,
     error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,7 +67,7 @@ impl Job {
     fn view(&self) -> Value {
         json!({"kind":"experiment_matrix_job","schema_version":1,"id":self.id,
             "project_id":self.project_id,"status":self.status,"error":self.error,
-            "matrix_id":if self.status=="completed" {Some(&self.matrix_id)} else {None},
+            "matrix_id":if self.status==JobStatus::Completed {Some(&self.matrix_id)} else {None},
             "variants":self.variants.iter().zip(&self.run_ids).map(|(v,id)|json!({"label":v.label,"run_id":id})).collect::<Vec<_>>(),
             "retry_of":self.retry_of,"previous_run_ids":self.previous_run_ids,
             "automatic_replay":false,"automatic_promotion":false})
@@ -153,10 +166,6 @@ impl Manager {
                 .provider_routes
                 .iter()
                 .any(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
-            || !matches!(
-                job.status.as_str(),
-                "running" | "interrupted" | "completed" | "failed" | "cancelled"
-            )
             || job.run_ids.iter().flatten().any(|id| !valid_id(id))
         {
             bail!("Invalid matrix job receipt");
@@ -199,8 +208,8 @@ impl Manager {
     pub(crate) fn recover(&self) -> Result<()> {
         for id in self.ids()? {
             let mut job = self.load(&id)?;
-            if job.status == "running" {
-                job.status = "interrupted".into();
+            if job.status == JobStatus::Running {
+                job.status = JobStatus::Interrupted;
                 job.error = Some("process_restart; resume requires an explicit request".into());
                 self.save(&job)?;
             }
@@ -217,7 +226,7 @@ impl Manager {
         if active.contains_key(&job.id) || active.len() >= 2 {
             bail!("Matrix job already active or two jobs are running");
         }
-        job.status = "running".into();
+        job.status = JobStatus::Running;
         job.error = None;
         self.save(&job)?;
         let stop = CancelToken::new();
@@ -228,11 +237,10 @@ impl Manager {
             let mut guard = JobGuard { manager, job };
             if let Err(error) = execute_job(&app, &mut guard, &stop, prepared).await {
                 guard.job.status = if stop.is_cancelled() {
-                    "cancelled"
+                    JobStatus::Cancelled
                 } else {
-                    "failed"
-                }
-                .into();
+                    JobStatus::Failed
+                };
                 guard.job.error = Some(error.to_string().chars().take(1000).collect());
             }
         });
@@ -245,8 +253,8 @@ struct JobGuard {
 }
 impl Drop for JobGuard {
     fn drop(&mut self) {
-        if self.job.status == "running" {
-            self.job.status = "interrupted".into();
+        if self.job.status == JobStatus::Running {
+            self.job.status = JobStatus::Interrupted;
         }
         if let Err(error) = self.manager.save(&self.job) {
             eprintln!("Matrix job persistence failed: {error}");
@@ -424,7 +432,7 @@ async fn execute_job(
     } else {
         crate::evaluation::commit_new(&path, &receipt)?;
     }
-    guard.job.status = "completed".into();
+    guard.job.status = JobStatus::Completed;
     guard.manager.save(&guard.job)?;
     Ok(())
 }
@@ -446,7 +454,7 @@ pub(crate) async fn start(
                     .map(|(_, _, provider)| provider_route(provider))
                     .collect(),
                 variants: input.variants,
-                status: "running".into(),
+                status: JobStatus::Running,
                 matrix_id: crate::evaluation::new_id(),
                 error: None,
                 retry_of: None,
@@ -521,7 +529,7 @@ pub(crate) async fn resume(
     crate::blocking(move || {
         let result = (|| -> Result<Value> {
             let job = app.matrix_jobs.load(&id)?;
-            if !matches!(job.status.as_str(), "interrupted" | "failed") {
+            if !matches!(job.status, JobStatus::Interrupted | JobStatus::Failed) {
                 bail!("Only interrupted or failed jobs can be resumed");
             }
             let prepared = prepare(&app, &job.project_id, &job.variants)?;
@@ -575,8 +583,8 @@ pub(crate) async fn retry(
         let result = (|| -> Result<Value> {
             let original = app.matrix_jobs.load(&id)?;
             if !matches!(
-                original.status.as_str(),
-                "interrupted" | "failed" | "cancelled"
+                original.status,
+                JobStatus::Interrupted | JobStatus::Failed | JobStatus::Cancelled
             ) {
                 bail!("Only interrupted, failed or cancelled jobs can be retried");
             }
@@ -658,7 +666,7 @@ mod tests {
             run_ids: vec![Some(crate::evaluation::new_id()), None],
             run_attempted: vec![false; 2],
             provider_routes: vec!["a".repeat(64); 2],
-            status: "running".into(),
+            status: JobStatus::Running,
             matrix_id: crate::evaluation::new_id(),
             error: None,
             retry_of: None,
@@ -686,9 +694,9 @@ mod tests {
             .contains("retention limit"));
         assert!(!manager.path(&job.id).unwrap().exists());
         job.id = "0".into();
-        job.status = "completed".into();
+        job.status = JobStatus::Completed;
         manager.save(&job).unwrap();
-        assert_eq!(manager.load("0").unwrap().status, "completed");
+        assert_eq!(manager.load("0").unwrap().status, JobStatus::Completed);
         assert_eq!(manager.ids().unwrap().len(), MAX_JOBS);
         std::fs::remove_dir_all(data).unwrap();
     }
@@ -730,6 +738,39 @@ mod tests {
         assert_eq!(manager.ids().unwrap().len(), capacity);
         std::fs::remove_dir_all(data).unwrap();
     }
+    /// The status enum must not move admission: reserved_size still counts
+    /// the status as `""`, byte for byte, and the stored words are the old ones.
+    #[test]
+    fn status_words_and_reserved_bytes_match_the_string_era() {
+        let (data, _, mut job) = fixture();
+        job.error = Some("x".repeat(10));
+        for (status, word) in [
+            (JobStatus::Running, "running"),
+            (JobStatus::Interrupted, "interrupted"),
+            (JobStatus::Completed, "completed"),
+            (JobStatus::Failed, "failed"),
+            (JobStatus::Cancelled, "cancelled"),
+        ] {
+            job.status = status;
+            let mut stored = serde_json::to_value(&job).unwrap();
+            assert_eq!(stored["status"], word);
+            assert_eq!(
+                serde_json::from_value::<Job>(stored.clone())
+                    .unwrap()
+                    .status,
+                status
+            );
+            // The pre-enum formula: blank run IDs, attempts and error, and
+            // status cleared to the empty string.
+            stored["run_ids"] = json!(vec![Value::Null; job.variants.len()]);
+            stored["run_attempted"] = json!(vec![false; job.variants.len()]);
+            stored["status"] = json!("");
+            stored["error"] = Value::Null;
+            let old = serde_json::to_vec(&stored).unwrap().len() + MUTABLE_RESERVE;
+            assert_eq!(reserved_size(&job).unwrap(), old, "{word}");
+        }
+        std::fs::remove_dir_all(data).unwrap();
+    }
     #[test]
     fn reserved_catalog_capacity_keeps_space_for_progress() {
         let (data, manager, mut job) = fixture();
@@ -755,7 +796,7 @@ mod tests {
         let before = reserved_size(&job).unwrap();
         job.run_ids = vec![Some("a".repeat(80)); 2];
         job.error = Some("\u{0000}".repeat(1000));
-        job.status = "interrupted".into();
+        job.status = JobStatus::Interrupted;
         assert_eq!(reserved_size(&job).unwrap(), before);
         assert!(serde_json::to_vec(&job).unwrap().len() <= before);
         manager.save(&job).unwrap();
@@ -829,7 +870,7 @@ mod tests {
         let reopened = Manager::new(&data).unwrap();
         reopened.recover().unwrap();
         let recovered = reopened.load(&job.id).unwrap();
-        assert_eq!(recovered.status, "interrupted");
+        assert_eq!(recovered.status, JobStatus::Interrupted);
         assert_eq!(recovered.run_ids, job.run_ids);
         assert_eq!(recovered.matrix_id, job.matrix_id);
         assert!(reopened.active.lock().unwrap().is_empty());
