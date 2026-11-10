@@ -47,24 +47,15 @@ unsafe impl Sync for Region {}
 impl Region {
     const PAGE: usize = 16384;
 
+    /// Always zeroed: the accessors hand out `&[u16]` / `&[u8]` over the
+    /// whole region, and a reference to uninitialised integers is undefined
+    /// behaviour. At least one page, because a zero-sized `alloc` is too
+    /// (an empty cache, e.g. `capacity == 0`, still gets a valid region).
     fn zeroed(elems: usize) -> Self {
-        let bytes = (elems * 2).div_ceil(Self::PAGE) * Self::PAGE;
+        let bytes = (elems * 2).div_ceil(Self::PAGE).max(1) * Self::PAGE;
         let layout =
             std::alloc::Layout::from_size_align(bytes, Self::PAGE).expect("kv cache layout");
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) } as *mut u16;
-        assert!(!ptr.is_null(), "out of memory for a {bytes}-byte kv cache");
-        Self {
-            ptr,
-            elems: bytes / 2,
-            layout,
-        }
-    }
-
-    fn uninit(elems: usize) -> Self {
-        let bytes = (elems * 2).div_ceil(Self::PAGE) * Self::PAGE;
-        let layout =
-            std::alloc::Layout::from_size_align(bytes, Self::PAGE).expect("kv cache layout");
-        let ptr = unsafe { std::alloc::alloc(layout) } as *mut u16;
         assert!(!ptr.is_null(), "out of memory for a {bytes}-byte kv cache");
         Self {
             ptr,
@@ -201,7 +192,7 @@ impl SsmCache {
             .as_ref()
             .is_none_or(|store| store.as_slice().len() < needed_elems);
         if needs_alloc {
-            let store = Region::uninit(needed_elems);
+            let store = Region::zeroed(needed_elems);
             self.slot_shared = allpaka_backend::gpu::wrap_region(store.as_bytes());
             self.slot_store = Some(store);
         }
@@ -845,5 +836,32 @@ mod tests {
         ssm.restore(&snap);
         assert_eq!(ssm.conv_layer(0)[0], 1.5);
         assert_eq!(ssm.state_layer(1)[3], -2.25);
+    }
+
+    /// Empty caches used to request a zero-sized allocation, which is
+    /// undefined behaviour for the global allocator; they now get a page.
+    #[test]
+    fn empty_caches_allocate_a_valid_region() {
+        let kv = KvCache::new(2, 8, 0);
+        assert!(!kv.store.as_bytes().is_empty());
+        let kv = KvCache::new(0, 0, 16);
+        assert!(!kv.store.as_bytes().is_empty());
+        let mut ssm = SsmCache::new(1, 2, 4, 1, 2);
+        ssm.arm_slots(0);
+        assert!(ssm
+            .slot_store
+            .as_ref()
+            .is_some_and(|s| !s.as_bytes().is_empty()));
+    }
+
+    /// Rollback slots are handed out as `&[f32]` before any row writes them,
+    /// so the buffer must start initialised (it used to be `alloc`ed raw).
+    #[test]
+    fn armed_slots_start_zeroed() {
+        let mut ssm = SsmCache::new(2, 3, 8, 2, 4);
+        ssm.arm_slots(3);
+        for i in 0..3 {
+            assert!(ssm.slot(i).iter().all(|&v| v == 0.0));
+        }
     }
 }
