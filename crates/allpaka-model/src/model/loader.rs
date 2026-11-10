@@ -152,9 +152,18 @@ impl<'a> Model<'a> {
                         conv1d_t,
                         conv1d_raw: norm_raw(f, &name("ssm_conv1d")),
                         // ssm_a is the rare tensor with no `.weight` suffix.
-                        a: norm_vec(f, &format!("blk.{i}.ssm_a"), s.dt_rank as usize)?,
-                        dt: norm_vec(f, &format!("blk.{i}.ssm_dt.bias"), s.dt_rank as usize)?,
-                        ssm_norm: norm_vec(f, &name("ssm_norm"), s.d_state as usize)?,
+                        a: owned_f32_slice(
+                            norm_vec(f, &format!("blk.{i}.ssm_a"), s.dt_rank as usize)?,
+                            &mut owned_weights,
+                        ),
+                        dt: owned_f32_slice(
+                            norm_vec(f, &format!("blk.{i}.ssm_dt.bias"), s.dt_rank as usize)?,
+                            &mut owned_weights,
+                        ),
+                        ssm_norm: owned_f32_slice(
+                            norm_vec(f, &name("ssm_norm"), s.d_state as usize)?,
+                            &mut owned_weights,
+                        ),
                         ssm_out: qmat(f, &name("ssm_out"), hidden, value_dim)?,
                     })
                 } else {
@@ -164,12 +173,18 @@ impl<'a> Model<'a> {
                 // Only full-attention layers carry q/k norms (qwen35moe's
                 // GDN layers have none), hence the !is_gdn guard.
                 q_norm: if config.has_qk_norm && !is_gdn {
-                    Some(norm_vec(f, &name("attn_q_norm"), config.head_dim as usize)?)
+                    Some(owned_f32_slice(
+                        norm_vec(f, &name("attn_q_norm"), config.head_dim as usize)?,
+                        &mut owned_weights,
+                    ))
                 } else {
                     None
                 },
                 k_norm: if config.has_qk_norm && !is_gdn {
-                    Some(norm_vec(f, &name("attn_k_norm"), config.head_dim as usize)?)
+                    Some(owned_f32_slice(
+                        norm_vec(f, &name("attn_k_norm"), config.head_dim as usize)?,
+                        &mut owned_weights,
+                    ))
                 } else {
                     None
                 },
@@ -261,6 +276,7 @@ impl<'a> Model<'a> {
             None
         };
 
+        let token_layer_template = Self::build_token_layer_template(&config, &layers);
         let model = Model {
             embd: if first == 0 {
                 Some(qmat(f, "token_embd.weight", config.vocab as usize, hidden)?)
@@ -279,6 +295,7 @@ impl<'a> Model<'a> {
                 &[]
             },
             layers,
+            token_layer_template,
             mtp,
             output,
             rope_inv_freq: ops::rope_inv_freq(config.rope_dim as usize, config.rope_freq_base),
@@ -431,7 +448,15 @@ fn qmat<'a>(f: &'a GgufFile, name: &str, n_out: usize, n_in: usize) -> Result<Qu
     QuantMat::new(f.data(t)?, t.ggml_type, n_out, n_in)
 }
 
-/// A norm weight vector, dequantised once at load.
+fn owned_f32_slice<'a>(vals: Vec<f32>, owned_weights: &mut Vec<Box<[f32]>>) -> &'a [f32] {
+    let boxed = vals.into_boxed_slice();
+    // SAFETY: `boxed` is heap-allocated and stored in `Model::_owned_weights`,
+    // which is the last field of `Model<'a>` and is dropped only after every
+    // earlier field (`layers`, `token_layer_template`, etc.) has been dropped.
+    let slice: &'a [f32] = unsafe { std::slice::from_raw_parts(boxed.as_ptr(), boxed.len()) };
+    owned_weights.push(boxed);
+    slice
+}
 /// The raw bytes of an F32 norm tensor inside the mmap, or empty. The GPU
 /// binds these directly; anything but F32 falls back to per-layer paths.
 fn norm_raw<'a>(f: &'a GgufFile, name: &str) -> &'a [u8] {

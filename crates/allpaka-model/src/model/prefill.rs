@@ -172,8 +172,8 @@ impl<'a> Model<'a> {
                             &aw.wo,
                             hs,
                             m,
-                            layer.q_norm.as_deref(),
-                            layer.k_norm.as_deref(),
+                            layer.q_norm,
+                            layer.k_norm,
                             rope_flat,
                             c.rope_dim as usize,
                             matches!(c.rope_style, RopeStyle::Norm),
@@ -226,8 +226,8 @@ impl<'a> Model<'a> {
 
             let mut projected = self.run_cpu_attention_from_qkv(
                 aw,
-                layer.q_norm.as_deref(),
-                layer.k_norm.as_deref(),
+                layer.q_norm,
+                layer.k_norm,
                 layer.bias.as_ref(),
                 q,
                 k,
@@ -319,11 +319,11 @@ impl<'a> Model<'a> {
             // none and skips the router matmul entirely.
             let (router_raw, n_expert) = match &layer.ffn {
                 Ffn::Moe { router, .. } => {
-                    let (router_ty, router_raw) = router.raw();
+                    let (router_ty, router_raw, n_expert) = router.desc();
                     if router_ty != allpaka_gguf::GgmlType::F32 {
                         return None;
                     }
-                    (router_raw, router.n_out)
+                    (router_raw, n_expert)
                 }
                 Ffn::Dense { .. } => (&[][..], 0),
             };
@@ -349,9 +349,9 @@ impl<'a> Model<'a> {
                     &g.alpha,
                     &g.beta,
                     g.conv1d_raw,
-                    &g.a,
-                    &g.dt,
-                    &g.ssm_norm,
+                    g.a,
+                    g.dt,
+                    g.ssm_norm,
                     &g.ssm_out,
                     (
                         sc.n_group as usize,
@@ -377,8 +377,8 @@ impl<'a> Model<'a> {
                     &aw.wo,
                     xs,
                     m,
-                    layer.q_norm.as_deref(),
-                    layer.k_norm.as_deref(),
+                    layer.q_norm,
+                    layer.k_norm,
                     rope_flat,
                     c.rope_dim as usize,
                     matches!(c.rope_style, RopeStyle::Norm),

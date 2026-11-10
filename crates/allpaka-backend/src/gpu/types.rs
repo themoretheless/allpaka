@@ -77,6 +77,7 @@ pub struct AttnBlockReq<'a> {
 }
 
 /// One gated-delta-net (linear attention) layer inside [`TokenLayer`].
+#[derive(Clone, Copy)]
 pub struct TokenGdn<'a> {
     /// `hidden -> key_dim*2 + value_dim`, Q8_0.
     pub wqkv: (GgmlType, &'a [u8], usize),
@@ -103,6 +104,7 @@ pub struct TokenGdn<'a> {
     pub state_off: usize,
 }
 
+#[derive(Clone, Copy)]
 pub struct TokenLayer<'a> {
     /// Raw GGUF bytes of the F32 norm weights (`hidden` floats each).
     pub attn_norm: &'a [u8],
@@ -128,6 +130,7 @@ pub struct TokenLayer<'a> {
     pub ffn: TokenFfn<'a>,
 }
 
+#[derive(Clone, Copy)]
 pub enum TokenFfn<'a> {
     Dense {
         gate: (GgmlType, &'a [u8], usize),

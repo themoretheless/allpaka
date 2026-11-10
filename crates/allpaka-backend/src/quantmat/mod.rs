@@ -471,9 +471,22 @@ impl<'a> QuantMat<'a> {
         crate::gpu::attend_project(req, self.ty, self.data, self.n_out)
     }
 
-    /// The raw quantised bytes and их формат - what the GPU paths address.
-    pub fn raw(&self) -> (GgmlType, &[u8]) {
+    /// The raw quantised bytes and their format - what the GPU paths address.
+    #[inline]
+    pub const fn raw(&self) -> (GgmlType, &'a [u8]) {
         (self.ty, self.data)
+    }
+
+    /// `(ty, data, n_out)` descriptor tuple expected by GPU request structs.
+    #[inline]
+    pub const fn desc(&self) -> (GgmlType, &'a [u8], usize) {
+        (self.ty, self.data, self.n_out)
+    }
+
+    /// `(ty, data, n_in)` descriptor tuple expected by GPU embedding lookups.
+    #[inline]
+    pub const fn embd_desc(&self) -> (GgmlType, &'a [u8], usize) {
+        (self.ty, self.data, self.n_in)
     }
 
     /// One decode layer's whole attention half in one command buffer; see
@@ -499,10 +512,10 @@ impl<'a> QuantMat<'a> {
     ) -> Option<Vec<f32>> {
         let (kv_dim, head_dim, n_heads, n_kv_heads) = dims;
         crate::gpu::attn_block(&crate::gpu::AttnBlockReq {
-            wq: (wq.ty, wq.data, wq.n_out),
-            wk: (wk.ty, wk.data, wk.n_out),
-            wv: (wv.ty, wv.data, wv.n_out),
-            wo: (wo.ty, wo.data, wo.n_out),
+            wq: wq.desc(),
+            wk: wk.desc(),
+            wv: wv.desc(),
+            wo: wo.desc(),
             x,
             q_norm,
             k_norm,
@@ -548,10 +561,10 @@ impl<'a> QuantMat<'a> {
     ) -> Option<Vec<f32>> {
         let (kv_dim, head_dim, n_heads, n_kv_heads) = dims;
         crate::gpu::prefill_attn_block(&crate::gpu::PrefillAttnReq {
-            wq: (wq.ty, wq.data, wq.n_out),
-            wk: (wk.ty, wk.data, wk.n_out),
-            wv: (wv.ty, wv.data, wv.n_out),
-            wo: (wo.ty, wo.data, wo.n_out),
+            wq: wq.desc(),
+            wk: wk.desc(),
+            wv: wv.desc(),
+            wo: wo.desc(),
             hs,
             m,
             q_norm,
@@ -599,15 +612,15 @@ impl<'a> QuantMat<'a> {
     ) -> Option<Vec<f32>> {
         let (heads_k, heads_v, d, d_conv) = dims;
         crate::gpu::prefill_gdn_block(&crate::gpu::PrefillGdnReq {
-            wqkv: (wqkv.ty, wqkv.data, wqkv.n_out),
-            zgate: (zgate.ty, zgate.data, zgate.n_out),
+            wqkv: wqkv.desc(),
+            zgate: zgate.desc(),
             alpha: alpha.data,
             beta: beta.data,
             conv1d: conv1d_raw,
             a,
             dt,
             ssm_norm,
-            ssm_out: (ssm_out.ty, ssm_out.data, ssm_out.n_out),
+            ssm_out: ssm_out.desc(),
             heads_k,
             heads_v,
             d,
@@ -643,16 +656,16 @@ impl<'a> QuantMat<'a> {
         route: Option<crate::gpu::GroupedRoute>,
     ) -> Option<Vec<f32>> {
         let shared = shared.map(|(g, u, d, go)| crate::gpu::GroupedShared {
-            gate: (g.ty, g.data),
-            up: (u.ty, u.data),
-            down: (d.ty, d.data),
+            gate: g.raw(),
+            up: u.raw(),
+            down: d.raw(),
             ffn: g.n_out,
-            gate_out: go.map(|g| (g.ty, g.data)),
+            gate_out: go.map(QuantMat::raw),
         });
         crate::gpu::ffn_batch_grouped(&crate::gpu::GroupedFfnReq {
-            gate: (gate.ty, gate.data),
-            up: (up.ty, up.data),
-            down: (down.ty, down.data),
+            gate: gate.raw(),
+            up: up.raw(),
+            down: down.raw(),
             n_expert,
             hidden,
             ffn,

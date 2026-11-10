@@ -12,9 +12,9 @@ pub(crate) struct GdnLayer<'a> {
     /// Pre-transposed `[d_conv][channels]` conv1d weights for contiguous SIMD FMA.
     pub(crate) conv1d_t: Vec<f32>,
     pub(crate) conv1d_raw: &'a [u8],
-    pub(crate) a: Vec<f32>,
-    pub(crate) dt: Vec<f32>,
-    pub(crate) ssm_norm: Vec<f32>,
+    pub(crate) a: &'a [f32],
+    pub(crate) dt: &'a [f32],
+    pub(crate) ssm_norm: &'a [f32],
     pub(crate) ssm_out: QuantMat<'a>,
 }
 
@@ -112,8 +112,8 @@ impl<'a> Model<'a> {
             for (((dst, &x), &dt), &a) in gate_i
                 .iter_mut()
                 .zip(&alpha[i * heads_v..(i + 1) * heads_v])
-                .zip(&g.dt)
-                .zip(&g.a)
+                .zip(g.dt)
+                .zip(g.a)
             {
                 *dst = ops::softplus(x + dt) * a;
             }
@@ -136,7 +136,7 @@ impl<'a> Model<'a> {
             // silu(z) (llama.cpp build_norm_gated).
             for h in 0..heads_v {
                 let y = &mut out[i * value_dim + h * d_state..i * value_dim + (h + 1) * d_state];
-                ops::rmsnorm(y, &g.ssm_norm, eps);
+                ops::rmsnorm(y, g.ssm_norm, eps);
                 let z_head = &z[i * value_dim + h * d_state..][..d_state];
                 for (y, &zv) in y.iter_mut().zip(z_head) {
                     *y *= ops::silu(zv);

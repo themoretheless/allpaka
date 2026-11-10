@@ -48,8 +48,8 @@ pub(crate) struct Layer<'a> {
     pub(crate) gdn: Option<GdnLayer<'a>>,
     pub(crate) bias: Option<AttnBias<'a>>,
     /// Qwen3 per-head norms, absent on Llama/Mistral.
-    pub(crate) q_norm: Option<Vec<f32>>,
-    pub(crate) k_norm: Option<Vec<f32>>,
+    pub(crate) q_norm: Option<&'a [f32]>,
+    pub(crate) k_norm: Option<&'a [f32]>,
     pub(crate) ffn_norm: Vec<f32>,
     pub(crate) ffn: Ffn<'a>,
 }
@@ -70,6 +70,10 @@ pub struct Model<'a> {
     pub(crate) embd: Option<QuantMat<'a>>,
     pub(crate) layer_start: usize,
     pub(crate) layers: Vec<Layer<'a>>,
+    /// Pre-validated static GPU decode layer descriptors (`k_off`/`v_off` stamped per session);
+    /// `Err(decline_reason)` when a norm is non-F32 or sigmoid router gating uses unsupported scale/norm.
+    pub(crate) token_layer_template:
+        Result<Vec<allpaka_backend::gpu::TokenLayer<'a>>, &'static str>,
     /// The MTP (nextn) speculative block past the trunk, when the GGUF
     /// carries one (qwen35moe with nextn_predict_layers).
     pub(crate) mtp: Option<MtpLayer<'a>>,
