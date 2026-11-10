@@ -1226,6 +1226,10 @@ impl FusedCtx<'_> {
             ..
         } = *self;
 
+        if self.launch_attend_g8(gpu, q_off, out_off, k_off, v_off).is_some() {
+            return Some(());
+        }
+
         // ggml FA when available. Skip during whole-token graph capture
         // unless ALLPAKA_FA_INLINE (direct fattn is stream-capturable).
         // ALLPAKA_NATIVE_ATTEND forces native dpos attend (better at short KV).
@@ -1330,6 +1334,86 @@ impl FusedCtx<'_> {
                 .launch_pdl(cfg)
         }
         .ok()?;
+        Some(())
+    }
+
+    /// Own split-KV decode attention (hd 128, GQA group 8, f16 KV) that also
+    /// packs the WO Q8 input: one kernel instead of ggml FA + combine + permute.
+    /// The split count is fixed per FA pow2 bucket, which is part of the graph key.
+    fn launch_attend_g8(
+        &self,
+        gpu: &mut CudaGpu,
+        q_off: usize,
+        out_off: usize,
+        k_off: usize,
+        v_off: usize,
+    ) -> Option<()> {
+        let FusedCtx {
+            req,
+            stream,
+            ybase,
+            pos,
+            q8_on,
+            plan: FusedPlan { hd, group, .. },
+            ..
+        } = *self;
+        let mut bucket = 256usize;
+        while bucket < pos + 1 {
+            bucket *= 2;
+        }
+        // ~32 positions per block measured best on RTX 5090 / Qwen3-32B at pp512.
+        let splits = (bucket / 32).clamp(8, 64);
+        let n_kvh = req.n_kv_heads;
+        let n = hd * req.n_heads;
+        if !(crate::runtime::get().cuda_attn_g8
+            && q8_on
+            && hd == 128
+            && group == 8
+            && bucket <= splits * 128
+            && k_off % 4 == 0
+            && v_off % 4 == 0
+            && req.kv_dim % 4 == 0
+            && n_kvh <= crate::gpu::cuda::runtime::ATTN_CNT_ELEMS
+            && n_kvh * splits * 8 * 132 <= crate::gpu::cuda::runtime::ATTN_PART_ELEMS
+            && gpu.fns.contains_key("attn_decode_g8_q8"))
+        {
+            return None;
+        }
+        gpu.ensure_q8(n, 1)?;
+        let f = gpu.func_owned("attn_decode_g8_q8")?;
+        let cfg = LaunchConfig {
+            grid_dim: (n_kvh as u32, splits as u32, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let qp = ybase + (q_off * 4) as u64;
+        let op = ybase + (out_off * 4) as u64;
+        let k_off_u = k_off as u64;
+        let v_off_u = v_off as u64;
+        let kv_dim_u = req.kv_dim as u32;
+        let scale = req.scale;
+        let mut q = gpu.q8_q.slice_mut(0..(n / 32) * 44);
+        unsafe {
+            stream
+                .launch_builder_pdl(&f)
+                .arg(&qp)
+                .arg(&req.cache.buf)
+                .arg(&k_off_u)
+                .arg(&v_off_u)
+                .arg(&kv_dim_u)
+                .arg(&gpu.d_pos)
+                .arg(&scale)
+                .arg(&gpu.attn_part)
+                .arg(&gpu.attn_cnt)
+                .arg(&op)
+                .arg(&mut q)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        gpu.q8_src = op;
+        gpu.q8_src_n = n;
+        gpu.q8_src_m = 1;
+        gpu.q8_off = 0;
         Some(())
     }
 

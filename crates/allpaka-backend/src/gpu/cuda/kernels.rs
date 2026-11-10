@@ -1669,6 +1669,193 @@ extern "C" __global__ void permute_q8_m1(
     store_q8_meta(b, lane, qi, scale);
 }
 
+// Decode attention for head_dim 128, GQA group 8, f16 KV, one token (m = 1).
+// grid = (n_kv_heads, S), 256 threads. Block (kvh, s) handles positions
+// [s*chunk, (s+1)*chunk) of 0..=d_pos[0] (chunk = ceil(L / S) <= 128) for the
+// 8 query heads sharing kv head kvh: K and V rows are fetched together (V is
+// staged in shared memory), and an online-softmax partial (m, l, acc[128]) per
+// head goes to `part`. The last block per kv head (atomic counter, reset
+// afterwards so graph replays stay valid) merges the S partials, writes
+// out[h*128 + d] and packs it as block_q8_1 for the WO matvec. One kernel
+// replaces flash_attn_ext_vec + flash_attn_combine_results +
+// permute_q8_m1_qonly, and it only visits the live positions.
+#define ATT_CH 128u
+extern "C" __global__ void __launch_bounds__(256) attn_decode_g8_q8(
+    const float* __restrict__ q,
+    const uint16_t* __restrict__ cache,
+    unsigned long long k_off,
+    unsigned long long v_off,
+    unsigned kv_dim,
+    const unsigned* __restrict__ d_pos,
+    float scale,
+    float* __restrict__ part,
+    unsigned* __restrict__ cnt,
+    float* __restrict__ out,
+    block_q8_1* __restrict__ yq)
+{
+    const unsigned kvh = blockIdx.x;
+    const unsigned s = blockIdx.y;
+    const unsigned S = gridDim.y;
+    const unsigned t = threadIdx.x;
+    const unsigned lane = t & 31u;
+    const unsigned warp = t >> 5;
+    __shared__ float4 qs[8][32];
+    __shared__ float sc[8][ATT_CH];
+    __shared__ uint2 vs[ATT_CH][32];
+    __shared__ unsigned last;
+    pdl_sync();
+    const unsigned L = d_pos[0] + 1u;
+    const float4 qv = ((const float4*)(q + (size_t)kvh * 1024u))[t];
+    const unsigned chunk = (L + S - 1u) / S;
+    const unsigned p0 = s * chunk;
+    unsigned p1 = p0 + chunk;
+    if (p1 > L) p1 = L;
+    if (p1 > p0 + ATT_CH) p1 = p0 + ATT_CH;
+    const unsigned n = p1 > p0 ? p1 - p0 : 0u;
+    qs[t >> 5][t & 31u] = qv;
+    __syncthreads();
+
+    // Scores: warp handles positions p0+warp, +8, ...; lane covers d = 4*lane..+3.
+    const unsigned d0 = lane * 4u;
+    const unsigned hsel = ((lane >> 4) & 1u) * 4u + ((lane >> 3) & 1u) * 2u + ((lane >> 2) & 1u);
+    const uint16_t* kb = cache + k_off + (size_t)p0 * kv_dim + kvh * 128u + d0;
+    const uint16_t* vb = cache + v_off + (size_t)p0 * kv_dim + kvh * 128u + d0;
+    #pragma unroll 2
+    for (unsigned j = warp; j < n; j += 8u) {
+        uint2 raw = *(const uint2*)(kb + (size_t)j * kv_dim);
+        vs[j][lane] = *(const uint2*)(vb + (size_t)j * kv_dim);
+        float k0 = half_bits_to_f32((uint16_t)(raw.x & 0xffffu));
+        float k1 = half_bits_to_f32((uint16_t)(raw.x >> 16));
+        float k2 = half_bits_to_f32((uint16_t)(raw.y & 0xffffu));
+        float k3 = half_bits_to_f32((uint16_t)(raw.y >> 16));
+        float v[8];
+        #pragma unroll
+        for (unsigned h = 0; h < 8u; h++) {
+            float4 qh = qs[h][lane];
+            v[h] = qh.x * k0 + qh.y * k1 + qh.z * k2 + qh.w * k3;
+        }
+        // Reduce-scatter the 8 head partials over the warp (9 shuffles).
+        #pragma unroll
+        for (unsigned i = 0; i < 4u; i++) {
+            bool hi = (lane & 16u) != 0u;
+            float send = hi ? v[i] : v[i + 4u];
+            float keep = hi ? v[i + 4u] : v[i];
+            v[i] = keep + __shfl_xor_sync(0xffffffffu, send, 16);
+        }
+        #pragma unroll
+        for (unsigned i = 0; i < 2u; i++) {
+            bool hi = (lane & 8u) != 0u;
+            float send = hi ? v[i] : v[i + 2u];
+            float keep = hi ? v[i + 2u] : v[i];
+            v[i] = keep + __shfl_xor_sync(0xffffffffu, send, 8);
+        }
+        {
+            bool hi = (lane & 4u) != 0u;
+            float send = hi ? v[0] : v[1];
+            float keep = hi ? v[1] : v[0];
+            v[0] = keep + __shfl_xor_sync(0xffffffffu, send, 4);
+        }
+        v[0] += __shfl_xor_sync(0xffffffffu, v[0], 2);
+        v[0] += __shfl_xor_sync(0xffffffffu, v[0], 1);
+        if ((lane & 3u) == 0u) sc[hsel][j] = v[0] * scale;
+    }
+    __syncthreads();
+
+    // Softmax partial and P*V: warp == head, lane covers d0..d0+3.
+    const unsigned h = warp;
+    float m = -1e30f;
+    for (unsigned j = lane; j < n; j += 32u) m = fmaxf(m, sc[h][j]);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, off));
+    float l = 0.f;
+    for (unsigned j = lane; j < n; j += 32u) {
+        float e = expf(sc[h][j] - m);
+        sc[h][j] = e;
+        l += e;
+    }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) l += __shfl_xor_sync(0xffffffffu, l, off);
+    __syncwarp();
+
+    float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
+    #pragma unroll 4
+    for (unsigned j = 0; j < n; j++) {
+        uint2 raw = vs[j][lane];
+        float e = sc[h][j];
+        a0 += e * half_bits_to_f32((uint16_t)(raw.x & 0xffffu));
+        a1 += e * half_bits_to_f32((uint16_t)(raw.x >> 16));
+        a2 += e * half_bits_to_f32((uint16_t)(raw.y & 0xffffu));
+        a3 += e * half_bits_to_f32((uint16_t)(raw.y >> 16));
+    }
+    const unsigned oh = kvh * 8u + h;
+    float o0, o1, o2, o3;
+    if (S == 1u) {
+        float inv = 1.f / l;
+        o0 = a0 * inv; o1 = a1 * inv; o2 = a2 * inv; o3 = a3 * inv;
+        pdl_lc();
+    } else {
+        float* pp = part + ((size_t)(kvh * S + s) * 8u + h) * 132u;
+        if (lane == 0) {
+            pp[0] = m;
+            pp[1] = l;
+        }
+        *(float4*)(pp + 4u + d0) = make_float4(a0, a1, a2, a3);
+        __threadfence();
+        __syncthreads();
+        if (t == 0) last = (atomicAdd(&cnt[kvh], 1u) == S - 1u) ? 1u : 0u;
+        __syncthreads();
+        pdl_lc();
+        if (!last) return;
+        __threadfence();
+        // Single-pass online merge of the S partials of head h.
+        float M = -1e30f, den = 0.f;
+        o0 = 0.f; o1 = 0.f; o2 = 0.f; o3 = 0.f;
+        const float* pr = part + ((size_t)(kvh * S) * 8u + h) * 132u;
+        #pragma unroll 4
+        for (unsigned r = 0; r < S; r++, pr += 8u * 132u) {
+            float2 ml = __ldcg((const float2*)pr);
+            float4 a = __ldcg((const float4*)(pr + 4u + d0));
+            float nm = fmaxf(M, ml.x);
+            float c = expf(M - nm);
+            float w = expf(ml.x - nm);
+            den = den * c + w * ml.y;
+            o0 = o0 * c + w * a.x;
+            o1 = o1 * c + w * a.y;
+            o2 = o2 * c + w * a.z;
+            o3 = o3 * c + w * a.w;
+            M = nm;
+        }
+        float inv = 1.f / den;
+        o0 *= inv; o1 *= inv; o2 *= inv; o3 *= inv;
+        if (t == 0) cnt[kvh] = 0u;
+    }
+    *(float4*)(out + (size_t)oh * 128u + d0) = make_float4(o0, o1, o2, o3);
+    // block_q8_1 = 32 values = 8 lanes x 4.
+    float amax = fmaxf(fmaxf(fabsf(o0), fabsf(o1)), fmaxf(fabsf(o2), fabsf(o3)));
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 4));
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));
+    float dsc = amax / 127.f;
+    if (dsc < 1e-8f) dsc = 1.f;
+    float ov[4] = {o0, o1, o2, o3};
+    int packed = 0;
+    int sum = 0;
+    #pragma unroll
+    for (unsigned i = 0; i < 4u; i++) {
+        int qi = __float2int_rn(ov[i] / dsc);
+        if (qi > 127) qi = 127;
+        if (qi < -127) qi = -127;
+        sum += qi;
+        packed |= (qi & 0xff) << (8u * i);
+    }
+    block_q8_1* b = yq + (size_t)oh * 4u + (lane >> 3);
+    unsigned mi = lane & 7u;
+    *(int*)(b->qs + 4u * mi) = packed;
+    int ps = sum + __shfl_xor_sync(0xffffffffu, sum, 4);
+    if (mi < 4u) b->ps[mi] = (int16_t)ps;
+    if (mi == 0u) b->d = dsc;
+}
+
 extern "C" __global__ void permute_q8_m1_qonly(
     const float* __restrict__ in,
     block_q8_1* __restrict__ yq,

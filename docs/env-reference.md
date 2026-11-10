@@ -6,6 +6,7 @@ to rewrite this file. Every switch is read once per process.
 
 | Variable | Policy field | Default | How it is read |
 |---|---|---|---|
+| `ALLPAKA_ATTN_G8` | `cuda_attn_g8` | on | on unless `=0` |
 | `ALLPAKA_ATTN_MM` | `attend_mm` | on | on unless `=0` |
 | `ALLPAKA_ATTN_ZERO` | `attn_zero` | off | on when set to anything |
 | `ALLPAKA_CFUSE` | `cfuse` | off | off unless `=1` |

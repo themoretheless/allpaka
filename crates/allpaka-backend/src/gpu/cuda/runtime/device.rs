@@ -3,11 +3,16 @@
 
 use super::*;
 
+/// Capacity of `CudaGpu::attn_part` (f32) and `attn_cnt` (u32).
+pub const ATTN_PART_ELEMS: usize = 1 << 20;
+pub const ATTN_CNT_ELEMS: usize = 256;
+
 pub(super) const KERNEL_NAMES: &[&str] = &[
     "rmsnorm_f32",
     "rmsnorm_into_f32",
     "rmsnorm_into_f32_q8",
     "rmsnorm_into_f32_q8_mb",
+    "attn_decode_g8_q8",
     "residual_add",
     "swiglu",
     "swiglu_into_q8",
@@ -173,6 +178,10 @@ pub struct CudaGpu {
     pub q8_l2_bytes: usize,
     /// FA output device ptr for fused WO f32→Q8 mmvq (`ALLPAKA_WO_FA_Q8`).
     pub wo_fa_x: u64,
+    /// Split-KV partials (m, l, pad, pad, acc[128]) for attn_decode_g8_q8.
+    pub attn_part: CudaSlice<f32>,
+    /// Zeroed per-kv-head completion counters (the kernel resets them).
+    pub attn_cnt: CudaSlice<u32>,
 }
 
 // SAFETY: what keeps `CudaGpu` from being Send automatically is `CudaGraph` (raw
@@ -375,6 +384,8 @@ pub(super) fn init_device() -> Option<CudaGpu> {
     let w_scratch = stream.alloc_zeros::<f32>(1 << 14).ok()?;
     let q8_q = stream.alloc_zeros::<i8>(1 << 16).ok()?;
     let q8_d = stream.alloc_zeros::<f32>(1 << 12).ok()?;
+    let attn_part = stream.alloc_zeros::<f32>(ATTN_PART_ELEMS).ok()?;
+    let attn_cnt = stream.alloc_zeros::<u32>(ATTN_CNT_ELEMS).ok()?;
 
     println!("cuda: device attached, kernels compiled");
 
@@ -441,6 +452,8 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         q8_off: 0,
         q8_l2_bytes: 0,
         wo_fa_x: 0,
+        attn_part,
+        attn_cnt,
     })
 }
 
