@@ -520,12 +520,10 @@ fn run_presets() -> Result<()> {
 fn run_inspect(model: &std::path::Path, mmproj: bool) -> Result<()> {
     if mmproj {
         report::vision_census(model, &gguf::vision::VisionCensus::read(model)?);
-        Ok(())
     } else {
-        let info = gguf::read(model)?;
-        report::gguf(model, &info);
-        Ok(())
+        report::gguf(model, &gguf::read(model)?);
     }
+    Ok(())
 }
 
 fn run_bench(
@@ -539,14 +537,7 @@ fn run_bench(
 ) -> Result<()> {
     match (engine, mem, serve, connect) {
         (Some(model), _, _, _) => {
-            if config.is_none() {
-                autotune::apply_cached(&model, None)?;
-            }
-            let runtime = config.as_deref().map(config::Config::load).transpose()?;
-            runtime
-                .as_ref()
-                .map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone())
-                .apply();
+            apply_runtime_config(config.as_deref(), Some(&model))?;
             bench::measure_engine(&model, draft.as_deref())
         }
         (None, true, _, _) => bench::measure_memory(),
@@ -631,38 +622,47 @@ fn run_serve(args: ServeArgs) -> Result<()> {
         memory_budget_mib,
         prefix_cache_mib,
     } = args;
+    apply_runtime_config(config.as_deref(), model.first().map(PathBuf::as_path))?;
+    let limits = serving_runtime::ServingLimits {
+        max_queued,
+        max_batch,
+        max_batch_context_tokens: batch_context_tokens,
+        model_budget_bytes: if model_budget_gib == 0 {
+            u64::MAX
+        } else {
+            model_budget_gib.saturating_mul(1 << 30)
+        },
+        prefix_budget_bytes: prefix_cache_mib.saturating_mul(1 << 20),
+        memory_budget_bytes: if memory_budget_mib == 0 {
+            u64::MAX
+        } else {
+            memory_budget_mib
+                .checked_mul(1 << 20)
+                .context("memory budget overflow")?
+        },
+    };
+    serve::run(&model, &bind, limits)
+}
+
+/// Runtime knobs for a run on the local engine. With `--config`, its typed
+/// runtime section; without, the autotune cache entry for `model` (if any)
+/// and then the default runtime config. A bad `--config` fails here, before
+/// any limits are checked.
+fn apply_runtime_config(
+    config: Option<&std::path::Path>,
+    model: Option<&std::path::Path>,
+) -> Result<()> {
     if config.is_none() {
-        if let Some(primary) = model.first() {
-            autotune::apply_cached(primary, None)?;
+        if let Some(model) = model {
+            autotune::apply_cached(model, None)?;
         }
     }
-    let runtime = config.as_deref().map(config::Config::load).transpose()?;
+    let runtime = config.map(config::Config::load).transpose()?;
     runtime
         .as_ref()
         .map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone())
         .apply();
-    serve::run(
-        &model,
-        &bind,
-        serving_runtime::ServingLimits {
-            max_queued,
-            max_batch,
-            max_batch_context_tokens: batch_context_tokens,
-            model_budget_bytes: if model_budget_gib == 0 {
-                u64::MAX
-            } else {
-                model_budget_gib.saturating_mul(1 << 30)
-            },
-            prefix_budget_bytes: prefix_cache_mib.saturating_mul(1 << 20),
-            memory_budget_bytes: if memory_budget_mib == 0 {
-                u64::MAX
-            } else {
-                memory_budget_mib
-                    .checked_mul(1 << 20)
-                    .context("memory budget overflow")?
-            },
-        },
-    )
+    Ok(())
 }
 
 /// Build the planner's view of a model from a GGUF file on disk.
