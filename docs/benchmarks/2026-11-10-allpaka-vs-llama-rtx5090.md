@@ -34,3 +34,13 @@ turn them off. Re-measured with no environment variables set:
 
 With both set to 0, 7B gives 273 prefill / 180 decode, the same as the old
 default.
+
+## Interleaved run with the new defaults
+
+allpaka (`89f110d`, no environment variables set) and `llama-bench`
+(CUDA) took turns on the same model, 3 rounds each, pp512/tg128. Medians:
+
+| Model | allpaka pp | llama pp | ratio | allpaka tg | llama tg | ratio |
+|---|---|---|---|---|---|---|
+| Qwen2.5-7B Q4_K_M | 14 144 | 13 269 | 107% | 256.3 | 267.1 | 96% |
+| Qwen3-32B Q4_K_M | 3 391 | 3 362 | 101% | 66.9 | 69.8 | 96% |
