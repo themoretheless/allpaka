@@ -64,10 +64,30 @@ impl Rule {
         Ok((bucket as f64) / ((1u64 << 53) as f64) < self.sample_rate)
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum SnapshotKind {
+    #[serde(rename = "online_evaluation_rule")]
+    OnlineEvaluationRule,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum BindingKind {
+    #[serde(rename = "online_evaluation_binding")]
+    OnlineEvaluationBinding,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OnlineJobStatus {
+    Pending,
+    Completed,
+    Failed,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Snapshot {
-    pub kind: String,
+    pub kind: SnapshotKind,
     pub schema_version: u32,
     pub rule_sha256: String,
     pub rule: Rule,
@@ -79,7 +99,7 @@ impl Snapshot {
         serde_json::to_writer(&mut w, &rule)?;
         let hash = crate::evaluation::hex_sha256(w.0);
         Ok(Self {
-            kind: "online_evaluation_rule".into(),
+            kind: SnapshotKind::OnlineEvaluationRule,
             schema_version: 1,
             rule_sha256: hash,
             rule,
@@ -90,7 +110,7 @@ impl Snapshot {
         let mut w = crate::evaluation::DigestWriter(Sha256::new());
         serde_json::to_writer(&mut w, &self.rule)?;
         let expected_hash = crate::evaluation::hex_sha256(w.0);
-        if self.kind != "online_evaluation_rule"
+        if self.kind != SnapshotKind::OnlineEvaluationRule
             || self.schema_version != 1
             || self.rule_sha256 != expected_hash
         {
@@ -102,7 +122,7 @@ impl Snapshot {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Binding {
-    kind: String,
+    kind: BindingKind,
     project_id: String,
     rule_id: String,
     rule_sha256: String,
@@ -246,7 +266,7 @@ impl Store {
         }
         let binding: Binding =
             serde_json::from_value(crate::strict_json::parse(std::str::from_utf8(&bytes)?)?)?;
-        if binding.kind != "online_evaluation_binding"
+        if binding.kind != BindingKind::OnlineEvaluationBinding
             || binding.project_id != project
             || binding.rule_id != rule
             || binding.version != *version
@@ -278,7 +298,7 @@ impl Store {
             bail!("Cannot activate disabled rule snapshot");
         }
         let mut binding = Binding {
-            kind: "online_evaluation_binding".into(),
+            kind: BindingKind::OnlineEvaluationBinding,
             project_id: snapshot.rule.project_id,
             rule_id: snapshot.rule.id,
             rule_sha256: input.rule_sha256,
@@ -330,7 +350,8 @@ impl Store {
         if job.as_object().map(|v| v.len()) != Some(8)
             || job["kind"] != "online_evaluation_job"
             || job["schema_version"] != 1
-            || job["status"] != "pending"
+            || serde_json::from_value::<OnlineJobStatus>(job["status"].clone()).ok()
+                != Some(OnlineJobStatus::Pending)
             || job["provider_calls"] != 0
             || !technical(project)
             || !technical(trace)
@@ -369,12 +390,16 @@ impl Store {
                 .remove("result_sha256")
                 .ok_or_else(|| anyhow::anyhow!("Missing result digest"))?;
             let expected = crate::storage::hex_sha256(&serde_json::to_vec(&result)?);
+            let status = serde_json::from_value::<OnlineJobStatus>(result["status"].clone()).ok();
             if result.as_object().map(|v| v.len()) != Some(9)
                 || hash != expected
                 || result["kind"] != "online_evaluation_job_result"
                 || result["job_sha256"] != job_hash
                 || result["selection_sha256"] != key
-                || !matches!(result["status"].as_str(), Some("completed" | "failed"))
+                || !matches!(
+                    status,
+                    Some(OnlineJobStatus::Completed | OnlineJobStatus::Failed)
+                )
             {
                 bail!("Job result integrity mismatch");
             }
@@ -384,8 +409,8 @@ impl Store {
             {
                 bail!("Invalid completed job result");
             }
-            if (result["status"] == "completed" && !result["error_code"].is_null())
-                || (result["status"] == "failed"
+            if (status == Some(OnlineJobStatus::Completed) && !result["error_code"].is_null())
+                || (status == Some(OnlineJobStatus::Failed)
                     && !matches!(
                         result["error_code"].as_str(),
                         Some("evaluator_failed" | "assessment_rejected")
@@ -416,7 +441,7 @@ impl Store {
                 if hash != actual {
                     bail!("Retained assessment evidence mismatch");
                 }
-            } else if result["status"] == "completed" {
+            } else if status == Some(OnlineJobStatus::Completed) {
                 bail!("Completed job lacks assessment evidence");
             }
             return Ok(None);
@@ -462,7 +487,12 @@ impl Store {
                 serde_json::Value::Null,
             ),
         };
-        let mut result = serde_json::json!({"kind":"online_evaluation_job_result","schema_version":1,"selection_sha256":key,"job_sha256":job_hash,"status":if success{"completed"}else{"failed"},"error_code":error,"assessment_sha256":assessment_hash,"provider_calls":0,"automatic_execution":automatic});
+        let outcome_status = if success {
+            OnlineJobStatus::Completed
+        } else {
+            OnlineJobStatus::Failed
+        };
+        let mut result = serde_json::json!({"kind":"online_evaluation_job_result","schema_version":1,"selection_sha256":key,"job_sha256":job_hash,"status":outcome_status,"error_code":error,"assessment_sha256":assessment_hash,"provider_calls":0,"automatic_execution":automatic});
         result["result_sha256"] =
             serde_json::json!(crate::storage::hex_sha256(&serde_json::to_vec(&result)?));
         crate::evaluation::commit_new(&result_path, &result)?;
@@ -508,7 +538,7 @@ impl Store {
         {
             return Ok(None);
         }
-        let packet = serde_json::json!({"kind":"online_evaluation_job","schema_version":1,"project_id":project,"trace_id":trace,"trace_sha256":trace_hash,"selection_sha256":selection["selection_sha256"],"status":"pending","provider_calls":0});
+        let packet = serde_json::json!({"kind":"online_evaluation_job","schema_version":1,"project_id":project,"trace_id":trace,"trace_sha256":trace_hash,"selection_sha256":selection["selection_sha256"],"status":OnlineJobStatus::Pending,"provider_calls":0});
         let _lock = WRITES
             .lock()
             .map_err(|_| anyhow::anyhow!("Rule storage lock unavailable"))?;
@@ -588,7 +618,12 @@ impl Store {
             }
             let supported = snapshot.rule.evaluator_id == "trace_health"
                 && snapshot.rule.evaluator_version == 1;
-            assessments.push(serde_json::json!({"rule_id":binding.rule_id,"rule_sha256":binding.rule_sha256,"binding_sha256":binding.binding_sha256,"binding_version":binding.version,"evaluator_id":snapshot.rule.evaluator_id,"evaluator_version":snapshot.rule.evaluator_version,"status":if supported{"completed"}else{"failed"},"scores":if supported{serde_json::json!({"span_success_rate":health})}else{serde_json::json!({})},"error_code":if supported{serde_json::Value::Null}else{serde_json::json!("evaluator_unavailable")}}));
+            let status = if supported {
+                OnlineJobStatus::Completed
+            } else {
+                OnlineJobStatus::Failed
+            };
+            assessments.push(serde_json::json!({"rule_id":binding.rule_id,"rule_sha256":binding.rule_sha256,"binding_sha256":binding.binding_sha256,"binding_version":binding.version,"evaluator_id":snapshot.rule.evaluator_id,"evaluator_version":snapshot.rule.evaluator_version,"status":status,"scores":if supported{serde_json::json!({"span_success_rate":health})}else{serde_json::json!({})},"error_code":if supported{serde_json::Value::Null}else{serde_json::json!("evaluator_unavailable")}}));
         }
         let mut packet = serde_json::json!({"kind":"online_evaluation_assessments","schema_version":1,"project_id":project,"trace_id":trace,"trace_sha256":trace_hash,"selection_sha256":selection["selection_sha256"],"assessments":assessments,"assessment_source":"native_trace_metadata","provider_calls":0,"automatic_execution":automatic});
         if serde_json::to_vec(&packet)?.len() > 1024 * 1024 {
@@ -811,7 +846,7 @@ impl Store {
                 bail!("Invalid selection decision");
             }
             let binding: Binding = serde_json::from_value(decision["binding"].clone())?;
-            if binding.kind != "online_evaluation_binding"
+            if binding.kind != BindingKind::OnlineEvaluationBinding
                 || binding.project_id != project
                 || !binding.active
                 || binding.version == 0
@@ -908,11 +943,20 @@ impl Store {
         Ok(snapshot)
     }
 }
+async fn run_blocking_bad_request<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T, crate::ApiError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(crate::internal)?
+        .map_err(crate::bad_request)
+}
+
 pub(crate) async fn save_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     body: axum::body::Bytes,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
+    run_blocking_bad_request(move || {
         if body.len() > 8192 {
             bail!("Rule request exceeds limit");
         }
@@ -921,18 +965,22 @@ pub(crate) async fn save_api(
         crate::memory::project_exists(&app, &rule.project_id)?;
         crate::model_evaluators::validate_rule(&app.data, &rule)?;
         Ok(serde_json::to_value(Store::open(&app.data)?.put(rule)?)?)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
+    .map(axum::Json)
 }
 pub(crate) async fn get_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Path(hash): axum::extract::Path<String>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result =
-        (|| -> Result<_> { Ok(serde_json::to_value(Store::open(&app.data)?.get(&hash)?)?) })();
-    result.map(axum::Json).map_err(|_| {
+    let data = app.data.clone();
+    tokio::task::spawn_blocking(move || {
+        Ok::<_, anyhow::Error>(serde_json::to_value(Store::open(&data)?.get(&hash)?)?)
+    })
+    .await
+    .map_err(crate::internal)?
+    .map(axum::Json)
+    .map_err(|_| {
         crate::error(
             axum::http::StatusCode::NOT_FOUND,
             "Online evaluation rule unavailable",
@@ -955,27 +1003,25 @@ pub(crate) async fn list_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Query(page): axum::extract::Query<Page>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
+    run_blocking_bad_request(move || {
         crate::memory::project_exists(&app, &page.project_id)?;
         Store::open(&app.data)?.list(&page.project_id, page.offset, page.limit)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
+    .map(axum::Json)
 }
 pub(crate) async fn bind_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::Json(input): axum::Json<BindInput>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
+    run_blocking_bad_request(move || {
         let store = Store::open(&app.data)?;
         let snapshot = store.get(&input.rule_sha256)?;
         crate::memory::project_exists(&app, &snapshot.rule.project_id)?;
         Ok(serde_json::to_value(store.bind(input)?)?)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
+    .map(axum::Json)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -987,15 +1033,14 @@ pub(crate) async fn binding_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Query(query): axum::extract::Query<BindingQuery>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
+    run_blocking_bad_request(move || {
         crate::memory::project_exists(&app, &query.project_id)?;
         Ok(
             serde_json::json!({"kind":"online_evaluation_binding_status","project_id":query.project_id,"rule_id":query.rule_id,"binding":Store::open(&app.data)?.binding(&query.project_id,&query.rule_id)?,"provider_calls":0,"automatic_execution":false}),
         )
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
+    .map(axum::Json)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1007,53 +1052,49 @@ pub(crate) async fn select_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::Json(input): axum::Json<SelectionInput>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
+    run_blocking_bad_request(move || {
         let fingerprint = app
             .observability
             .completed_trace_fingerprint(&input.trace_id, &input.project_id)?;
         Store::open(&app.data)?.select_trace(&input.project_id, &input.trace_id, &fingerprint)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
+    .map(axum::Json)
 }
 pub(crate) async fn selection_archive_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Query(input): axum::extract::Query<SelectionInput>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
+    run_blocking_bad_request(move || {
         crate::memory::project_exists(&app, &input.project_id)?;
         Store::open(&app.data)?.read_selection_archive(&input.project_id, &input.trace_id)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
+    .map(axum::Json)
 }
 pub(crate) async fn assess_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::Json(input): axum::Json<SelectionInput>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
+    run_blocking_bad_request(move || {
         let (hash, health) = app
             .observability
             .completed_trace_health(&input.trace_id, &input.project_id)?;
         Store::open(&app.data)?.assess_trace(&input.project_id, &input.trace_id, &hash, health)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
+    .map(axum::Json)
 }
 pub(crate) async fn jobs_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Query(page): axum::extract::Query<Page>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
+    run_blocking_bad_request(move || {
         crate::memory::project_exists(&app, &page.project_id)?;
         jobs_catalog(&app.data, &page.project_id, page.offset, page.limit)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
+    .map(axum::Json)
 }
 fn read_catalog_packet(path: &std::path::Path) -> Result<serde_json::Value> {
     use std::io::Read;
@@ -1222,9 +1263,10 @@ pub(crate) async fn drain_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::Json(input): axum::Json<DrainInput>,
 ) -> crate::ApiResult<serde_json::Value> {
-    drain_jobs(&app.data, input.limit)
+    let data = app.data.clone();
+    run_blocking_bad_request(move || drain_jobs(&data, input.limit))
+        .await
         .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
 }
 pub(crate) fn selection_pin(
     data: &std::path::Path,
