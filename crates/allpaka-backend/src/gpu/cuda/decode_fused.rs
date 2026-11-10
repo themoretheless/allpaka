@@ -260,116 +260,10 @@ pub(super) fn decode_token_one_fused(
         let use_freq_rope = gpu.d_rope_freq.is_some()
             && gpu.d_rope_freq_n == rope_pairs
             && gpu.fns.contains_key("rmsnorm_rope_freq_dpos");
-        if x_in.is_empty() {
-            let (ty, w, n_in) = req.embd?;
-            let tok = req.token_id?;
-            if n_in != hidden {
-                return None;
-            }
-            launch_embed_row(gpu, ty, w, tok, n_in, x_at)?;
-        } else {
-            stream
-                .memcpy_htod(x_in, &mut gpu.y_arena.slice_mut(x_at..x_at + hidden))
-                .ok()?;
-        }
-        if !use_freq_rope {
-            if rope.len() < rope_pairs {
-                return None;
-            }
-            let rope_q = rope_replicated(rope, req.n_heads);
-            let rope_k = rope_replicated(rope, req.n_kv_heads);
-            stream
-                .memcpy_htod(
-                    &rope_q,
-                    &mut gpu.x_arena.slice_mut(rope_q_at..rope_q_at + rope_q.len()),
-                )
-                .ok()?;
-            stream
-                .memcpy_htod(
-                    &rope_k,
-                    &mut gpu.x_arena.slice_mut(rope_k_at..rope_k_at + rope_k.len()),
-                )
-                .ok()?;
-        }
-        stream.memcpy_htod(&[pos as u32], &mut gpu.d_pos).ok()?;
+        upload_token_inputs(gpu, req, &plan, x_in, rope, pos, use_freq_rope)?;
 
         if gpu.decode_norms_key != graph_key {
-            stream
-                .memcpy_htod(
-                    &out_norm,
-                    &mut gpu.x_arena.slice_mut(out_norm_at..out_norm_at + hidden),
-                )
-                .ok()?;
-            for (li, layer) in req.layers.iter().enumerate() {
-                let base = norms_base + li * per_layer_norms;
-                let attn_w = norm_f32_bytes(layer.attn_norm, hidden)?;
-                let ffn_w = norm_f32_bytes(layer.ffn_norm, hidden)?;
-                stream
-                    .memcpy_htod(&attn_w, &mut gpu.x_arena.slice_mut(base..base + hidden))
-                    .ok()?;
-                stream
-                    .memcpy_htod(
-                        &ffn_w,
-                        &mut gpu.x_arena.slice_mut(base + hidden..base + 2 * hidden),
-                    )
-                    .ok()?;
-                if let Some(wn) = layer.q_norm {
-                    if wn.len() < hd {
-                        return None;
-                    }
-                    stream
-                        .memcpy_htod(
-                            &wn[..hd],
-                            &mut gpu
-                                .x_arena
-                                .slice_mut(base + 2 * hidden..base + 2 * hidden + hd),
-                        )
-                        .ok()?;
-                }
-                if let Some(wn) = layer.k_norm {
-                    if wn.len() < hd {
-                        return None;
-                    }
-                    stream
-                        .memcpy_htod(
-                            &wn[..hd],
-                            &mut gpu
-                                .x_arena
-                                .slice_mut(base + 2 * hidden + hd..base + 2 * hidden + 2 * hd),
-                        )
-                        .ok()?;
-                }
-                if has_attn_bias {
-                    let qb_at = base + 2 * hidden + 2 * hd;
-                    let kb_at = qb_at + q_dim;
-                    let vb_at = kb_at + kv;
-                    if let Some(b) = layer.q_bias {
-                        let qb = norm_f32_bytes(b, q_dim)?;
-                        stream
-                            .memcpy_htod(&qb, &mut gpu.x_arena.slice_mut(qb_at..qb_at + q_dim))
-                            .ok()?;
-                    }
-                    if let Some(b) = layer.k_bias {
-                        let kb = norm_f32_bytes(b, kv)?;
-                        stream
-                            .memcpy_htod(&kb, &mut gpu.x_arena.slice_mut(kb_at..kb_at + kv))
-                            .ok()?;
-                    }
-                    if let Some(b) = layer.v_bias {
-                        let vb = norm_f32_bytes(b, kv)?;
-                        stream
-                            .memcpy_htod(&vb, &mut gpu.x_arena.slice_mut(vb_at..vb_at + kv))
-                            .ok()?;
-                    }
-                }
-            }
-            gpu.decode_norms_key = graph_key;
-            gpu.decode_graph = None;
-            gpu.decode_fa_graphs = None;
-            gpu.decode_fa_attn = None;
-            gpu.decode_fa_kv_offs = None;
-            gpu.decode_fa_execs = None;
-            gpu.decode_graph_key = 0;
+            refresh_layer_norms(gpu, req, &plan, &out_norm)?;
         }
 
         let t0 = Instant::now();
@@ -2160,4 +2054,159 @@ pub(super) fn decode_token_one_fused(
         };
         Some(out)
     })
+}
+
+/// Stage the token's input row (embedding gather or H2D copy), the host RoPE
+/// tables when the device frequency table is not in use, and the position.
+fn upload_token_inputs(
+    gpu: &mut CudaGpu,
+    req: &TokenReq,
+    plan: &FusedPlan,
+    x_in: &[f32],
+    rope: &[[f32; 2]],
+    pos: usize,
+    use_freq_rope: bool,
+) -> Option<()> {
+    let FusedPlan {
+        hidden,
+        rope_pairs,
+        x_at,
+        rope_q_at,
+        rope_k_at,
+        ..
+    } = *plan;
+    let stream = Arc::clone(&gpu.stream);
+    if x_in.is_empty() {
+        let (ty, w, n_in) = req.embd?;
+        let tok = req.token_id?;
+        if n_in != hidden {
+            return None;
+        }
+        launch_embed_row(gpu, ty, w, tok, n_in, x_at)?;
+    } else {
+        stream
+            .memcpy_htod(x_in, &mut gpu.y_arena.slice_mut(x_at..x_at + hidden))
+            .ok()?;
+    }
+    if !use_freq_rope {
+        if rope.len() < rope_pairs {
+            return None;
+        }
+        let rope_q = rope_replicated(rope, req.n_heads);
+        let rope_k = rope_replicated(rope, req.n_kv_heads);
+        stream
+            .memcpy_htod(
+                &rope_q,
+                &mut gpu.x_arena.slice_mut(rope_q_at..rope_q_at + rope_q.len()),
+            )
+            .ok()?;
+        stream
+            .memcpy_htod(
+                &rope_k,
+                &mut gpu.x_arena.slice_mut(rope_k_at..rope_k_at + rope_k.len()),
+            )
+            .ok()?;
+    }
+    stream.memcpy_htod(&[pos as u32], &mut gpu.d_pos).ok()?;
+    Some(())
+}
+
+/// Upload the output norm and every layer's norm / QK-norm / bias vectors into
+/// the `x_arena` and drop graphs captured against the previous contents.
+fn refresh_layer_norms(
+    gpu: &mut CudaGpu,
+    req: &TokenReq,
+    plan: &FusedPlan,
+    out_norm: &[f32],
+) -> Option<()> {
+    let FusedPlan {
+        hidden,
+        hd,
+        q_dim,
+        kv,
+        has_attn_bias,
+        out_norm_at,
+        norms_base,
+        per_layer_norms,
+        graph_key,
+        ..
+    } = *plan;
+    let stream = Arc::clone(&gpu.stream);
+    stream
+        .memcpy_htod(
+            out_norm,
+            &mut gpu.x_arena.slice_mut(out_norm_at..out_norm_at + hidden),
+        )
+        .ok()?;
+    for (li, layer) in req.layers.iter().enumerate() {
+        let base = norms_base + li * per_layer_norms;
+        let attn_w = norm_f32_bytes(layer.attn_norm, hidden)?;
+        let ffn_w = norm_f32_bytes(layer.ffn_norm, hidden)?;
+        stream
+            .memcpy_htod(&attn_w, &mut gpu.x_arena.slice_mut(base..base + hidden))
+            .ok()?;
+        stream
+            .memcpy_htod(
+                &ffn_w,
+                &mut gpu.x_arena.slice_mut(base + hidden..base + 2 * hidden),
+            )
+            .ok()?;
+        if let Some(wn) = layer.q_norm {
+            if wn.len() < hd {
+                return None;
+            }
+            stream
+                .memcpy_htod(
+                    &wn[..hd],
+                    &mut gpu
+                        .x_arena
+                        .slice_mut(base + 2 * hidden..base + 2 * hidden + hd),
+                )
+                .ok()?;
+        }
+        if let Some(wn) = layer.k_norm {
+            if wn.len() < hd {
+                return None;
+            }
+            stream
+                .memcpy_htod(
+                    &wn[..hd],
+                    &mut gpu
+                        .x_arena
+                        .slice_mut(base + 2 * hidden + hd..base + 2 * hidden + 2 * hd),
+                )
+                .ok()?;
+        }
+        if has_attn_bias {
+            let qb_at = base + 2 * hidden + 2 * hd;
+            let kb_at = qb_at + q_dim;
+            let vb_at = kb_at + kv;
+            if let Some(b) = layer.q_bias {
+                let qb = norm_f32_bytes(b, q_dim)?;
+                stream
+                    .memcpy_htod(&qb, &mut gpu.x_arena.slice_mut(qb_at..qb_at + q_dim))
+                    .ok()?;
+            }
+            if let Some(b) = layer.k_bias {
+                let kb = norm_f32_bytes(b, kv)?;
+                stream
+                    .memcpy_htod(&kb, &mut gpu.x_arena.slice_mut(kb_at..kb_at + kv))
+                    .ok()?;
+            }
+            if let Some(b) = layer.v_bias {
+                let vb = norm_f32_bytes(b, kv)?;
+                stream
+                    .memcpy_htod(&vb, &mut gpu.x_arena.slice_mut(vb_at..vb_at + kv))
+                    .ok()?;
+            }
+        }
+    }
+    gpu.decode_norms_key = graph_key;
+    gpu.decode_graph = None;
+    gpu.decode_fa_graphs = None;
+    gpu.decode_fa_attn = None;
+    gpu.decode_fa_kv_offs = None;
+    gpu.decode_fa_execs = None;
+    gpu.decode_graph_key = 0;
+    Some(())
 }
