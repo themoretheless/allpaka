@@ -134,113 +134,146 @@ pub(crate) fn execute_scoped(
     args: &Value,
     excluded: Option<&Path>,
 ) -> Result<Value> {
+    let call = ToolCall {
+        root,
+        settings,
+        args,
+        excluded,
+    };
     match name {
-        "agentgrep" => crate::code_search::search(root, args, excluded),
-        "list_files" => {
-            let path = resolve(
-                root,
-                args["path"].as_str().context("path is required")?,
-                false,
-            )?;
-            let mut entries = vec![];
-            for entry in fs::read_dir(path)?.take(201) {
-                let e = entry?;
-                let name = e.file_name().to_string_lossy().to_string();
-                if !name.starts_with('.') {
-                    entries.push(json!({"name":name,"directory":e.file_type()?.is_dir()}));
-                }
-            }
-            entries.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_owned());
-            let truncated = entries.len() > 200;
-            entries.truncate(200);
-            Ok(json!({"entries":entries,"truncated":truncated}))
-        }
-        "read_file" => {
-            let path = resolve(
-                root,
-                args["path"].as_str().context("path is required")?,
-                false,
-            )?;
-            if !fs::metadata(&path)?.is_file() {
-                bail!("Not a regular file");
-            }
-            let content = read_text(&path, 8 * 1024 * 1024)?;
-            let lines: Vec<&str> = content.split_inclusive('\n').collect();
-            let start = line_arg(args, "start_line")?.unwrap_or(1);
-            let end = line_arg(args, "end_line")?.unwrap_or(lines.len().max(1));
-            if end < start || start > lines.len().max(1) {
-                bail!("Invalid line range for {} lines", lines.len());
-            }
-            let selected = lines
-                .get(start - 1..end.min(lines.len()))
-                .unwrap_or(&[])
-                .concat();
-            if selected.len() > 131072 {
-                bail!("Output exceeds 128 KiB; request a smaller line range");
-            }
-            Ok(
-                json!({"content":selected,"start_line":start,"end_line":end.min(lines.len()),"total_lines":lines.len()}),
-            )
-        }
-        "edit_file" => {
-            if !matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes {
-                bail!("Writing requires Auto or Goal mode and enabled workspace writes");
-            }
-            let name = args["path"].as_str().context("path is required")?;
-            let path = resolve(root, name, false)?;
-            let lock = mutation_lock(&path);
-            let _guard = lock
-                .lock()
-                .map_err(|_| anyhow::anyhow!("File mutation lock poisoned"))?;
-            let before = read_text(&path, 131072)?;
-            let old = args["old_text"].as_str().context("old_text is required")?;
-            let new = args["new_text"].as_str().context("new_text is required")?;
-            if old.is_empty() || before.matches(old).count() != 1 {
-                bail!(
-                    "old_text must match exactly once; read the current file and include more context"
-                );
-            }
-            let after = before.replacen(old, new, 1);
-            if after.len() > 131072 {
-                bail!("Write exceeds 128 KiB");
-            }
-            fs::write(&path, &after)?;
-            Ok(json!({"written":name,"bytes":after.len(),"diff":unified_diff(name,&before,&after)}))
-        }
-
-        "write_file" => {
-            if !matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes {
-                bail!("Writing requires Auto or Goal mode and enabled workspace writes");
-            }
-            create_parents(root, args["path"].as_str().context("path is required")?)?;
-            let path = resolve(
-                root,
-                args["path"].as_str().context("path is required")?,
-                true,
-            )?;
-            let lock = mutation_lock(&path);
-            let _guard = lock
-                .lock()
-                .map_err(|_| anyhow::anyhow!("File mutation lock poisoned"))?;
-            let content = args["content"].as_str().context("content is required")?;
-            if content.len() > 131072 {
-                bail!("Write exceeds 128 KiB");
-            }
-            if path.exists() && !path.is_file() {
-                bail!("Not a regular file");
-            }
-            let before = if path.exists() {
-                read_text(&path, 131072)?
-            } else {
-                String::new()
-            };
-            fs::write(&path, content)?;
-            Ok(
-                json!({"written":args["path"],"bytes":content.len(),"diff":unified_diff(args["path"].as_str().unwrap(),&before,content)}),
-            )
-        }
+        "agentgrep" => agentgrep(&call),
+        "list_files" => list_files(&call),
+        "read_file" => read_file(&call),
+        "edit_file" => edit_file(&call),
+        "write_file" => write_file(&call),
         _ => bail!("Unknown tool: {name}"),
     }
+}
+/// What a built-in tool runs against: the resolved workspace root, the
+/// turn's settings, the call's arguments and a directory hidden from search.
+#[derive(Clone, Copy)]
+struct ToolCall<'a> {
+    root: &'a Path,
+    settings: &'a Settings,
+    args: &'a Value,
+    excluded: Option<&'a Path>,
+}
+fn list_files(call: &ToolCall<'_>) -> Result<Value> {
+    let ToolCall { root, args, .. } = *call;
+    let path = resolve(
+        root,
+        args["path"].as_str().context("path is required")?,
+        false,
+    )?;
+    let mut entries = vec![];
+    for entry in fs::read_dir(path)?.take(201) {
+        let e = entry?;
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with('.') {
+            entries.push(json!({"name":name,"directory":e.file_type()?.is_dir()}));
+        }
+    }
+    entries.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_owned());
+    let truncated = entries.len() > 200;
+    entries.truncate(200);
+    Ok(json!({"entries":entries,"truncated":truncated}))
+}
+fn read_file(call: &ToolCall<'_>) -> Result<Value> {
+    let ToolCall { root, args, .. } = *call;
+    let path = resolve(
+        root,
+        args["path"].as_str().context("path is required")?,
+        false,
+    )?;
+    if !fs::metadata(&path)?.is_file() {
+        bail!("Not a regular file");
+    }
+    let content = read_text(&path, 8 * 1024 * 1024)?;
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let start = line_arg(args, "start_line")?.unwrap_or(1);
+    let end = line_arg(args, "end_line")?.unwrap_or(lines.len().max(1));
+    if end < start || start > lines.len().max(1) {
+        bail!("Invalid line range for {} lines", lines.len());
+    }
+    let selected = lines
+        .get(start - 1..end.min(lines.len()))
+        .unwrap_or(&[])
+        .concat();
+    if selected.len() > 131072 {
+        bail!("Output exceeds 128 KiB; request a smaller line range");
+    }
+    Ok(
+        json!({"content":selected,"start_line":start,"end_line":end.min(lines.len()),"total_lines":lines.len()}),
+    )
+}
+fn edit_file(call: &ToolCall<'_>) -> Result<Value> {
+    let ToolCall {
+        root,
+        settings,
+        args,
+        ..
+    } = *call;
+    if !matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes {
+        bail!("Writing requires Auto or Goal mode and enabled workspace writes");
+    }
+    let name = args["path"].as_str().context("path is required")?;
+    let path = resolve(root, name, false)?;
+    let lock = mutation_lock(&path);
+    let _guard = lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("File mutation lock poisoned"))?;
+    let before = read_text(&path, 131072)?;
+    let old = args["old_text"].as_str().context("old_text is required")?;
+    let new = args["new_text"].as_str().context("new_text is required")?;
+    if old.is_empty() || before.matches(old).count() != 1 {
+        bail!("old_text must match exactly once; read the current file and include more context");
+    }
+    let after = before.replacen(old, new, 1);
+    if after.len() > 131072 {
+        bail!("Write exceeds 128 KiB");
+    }
+    fs::write(&path, &after)?;
+    Ok(json!({"written":name,"bytes":after.len(),"diff":unified_diff(name,&before,&after)}))
+}
+fn write_file(call: &ToolCall<'_>) -> Result<Value> {
+    let ToolCall {
+        root,
+        settings,
+        args,
+        ..
+    } = *call;
+    if !matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes {
+        bail!("Writing requires Auto or Goal mode and enabled workspace writes");
+    }
+    create_parents(root, args["path"].as_str().context("path is required")?)?;
+    let path = resolve(
+        root,
+        args["path"].as_str().context("path is required")?,
+        true,
+    )?;
+    let lock = mutation_lock(&path);
+    let _guard = lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("File mutation lock poisoned"))?;
+    let content = args["content"].as_str().context("content is required")?;
+    if content.len() > 131072 {
+        bail!("Write exceeds 128 KiB");
+    }
+    if path.exists() && !path.is_file() {
+        bail!("Not a regular file");
+    }
+    let before = if path.exists() {
+        read_text(&path, 131072)?
+    } else {
+        String::new()
+    };
+    fs::write(&path, content)?;
+    Ok(
+        json!({"written":args["path"],"bytes":content.len(),"diff":unified_diff(args["path"].as_str().unwrap(),&before,content)}),
+    )
+}
+fn agentgrep(call: &ToolCall<'_>) -> Result<Value> {
+    crate::code_search::search(call.root, call.args, call.excluded)
 }
 pub fn writes(name: &str) -> bool {
     matches!(name, "write_file" | "edit_file")
