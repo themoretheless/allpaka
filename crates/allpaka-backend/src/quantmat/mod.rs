@@ -9,6 +9,8 @@
 pub(crate) mod dot_f32;
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod dot_neon;
+#[cfg(test)]
+mod kernel_tests;
 pub(crate) mod q8_acts;
 
 use crate::ops::dot;
