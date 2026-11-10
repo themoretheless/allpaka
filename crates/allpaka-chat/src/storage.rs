@@ -145,6 +145,28 @@ pub fn atomic_create_new_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// PLAN 0.4 / B9: the identifier rules as they stand. Each store keeps
+    /// its own rule until 3.4 picks one; these pin what accepts what.
+    #[test]
+    fn identifier_rules_as_they_stand() {
+        let long80 = "a".repeat(80);
+        let long81 = "a".repeat(81);
+        // storage::valid_id: [A-Za-z0-9_-], 1..=80.
+        assert!(valid_id("Ab_9-z") && valid_id(&long80));
+        assert!(!valid_id("") && !valid_id(&long81) && !valid_id("a.b") && !valid_id("a/b"));
+        // storage::valid_hex_id (matrix jobs): hex and '-', 1..=80.
+        assert!(valid_hex_id("0a-F9") && valid_hex_id(&long80));
+        assert!(!valid_hex_id("g") && !valid_hex_id("a_b") && !valid_hex_id(&long81));
+        // api::handlers::valid_id (sessions, projects): hex and '-', 1..=79.
+        let v = crate::api::valid_id;
+        assert!(v("0a-f") && v(&"a".repeat(79)));
+        assert!(!v(&long80) && !v("a_b") && !v(""));
+        // plugins::valid_id: [A-Za-z0-9_-], 1..=79.
+        let p = crate::plugins::valid_id;
+        assert!(p("Ab_9-z") && p(&"a".repeat(79)));
+        assert!(!p(&long80) && !p("a.b"));
+    }
+
     #[test]
     fn hex_and_validation_primitives_match_spec() {
         let h = hex_sha256(b"hello");
