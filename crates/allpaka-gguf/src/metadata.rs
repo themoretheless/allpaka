@@ -2,8 +2,8 @@
 //!
 //! Format reference: <https://github.com/ggml-org/ggml/blob/master/docs/gguf.md>
 
+use crate::error::{GgufError, Result};
 use crate::tensors::{GgmlType, TensorInfo};
-use anyhow::{bail, Context, Result};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -193,14 +193,15 @@ impl Header {
 
 pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
     let mut magic = [0u8; 4];
-    r.read_exact(&mut magic).context("reading GGUF magic")?;
+    r.read_exact(&mut magic)
+        .map_err(|e| GgufError::io_ctx("reading GGUF magic", e))?;
     if &magic != MAGIC {
-        bail!("not a GGUF file (bad magic)");
+        return Err(GgufError::InvalidMagic);
     }
 
     let version = read_u32(r)?;
     if version < 2 {
-        bail!("GGUF version {version} is not supported; version 2 or later is required");
+        return Err(GgufError::UnsupportedVersion(version));
     }
     let tensor_count = read_u64(r)?;
     let kv_count = read_u64(r)?;
@@ -215,10 +216,10 @@ pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
     let mut merges: Option<Vec<String>> = None;
 
     for i in 0..kv_count {
-        let key = read_string(r).with_context(|| format!("reading key {i}"))?;
+        let key = read_string(r).map_err(|e| e.with_context(format!("reading key {i}")))?;
         let keep_array = key == "tokenizer.ggml.tokens" || key == "tokenizer.ggml.merges";
-        let value =
-            read_value(r, keep_array).with_context(|| format!("reading value for {key:?}"))?;
+        let value = read_value(r, keep_array)
+            .map_err(|e| e.with_context(format!("reading value for {key:?}")))?;
         if let Value::StrArray(items) = value {
             if key == "tokenizer.ggml.tokens" {
                 tokens = Some(items);
@@ -250,10 +251,14 @@ pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
 
     let mut tensors = Vec::with_capacity(tensor_count.min(1 << 20) as usize);
     for i in 0..tensor_count {
-        let name = read_string(r).with_context(|| format!("reading tensor name {i}"))?;
+        let name =
+            read_string(r).map_err(|e| e.with_context(format!("reading tensor name {i}")))?;
         let n_dims = read_u32(r)?;
         if n_dims > 4 {
-            bail!("tensor {name:?} claims {n_dims} dimensions; GGUF allows at most 4");
+            return Err(GgufError::Tensor {
+                name,
+                detail: format!("claims {n_dims} dimensions; GGUF allows at most 4"),
+            });
         }
         let mut dims = Vec::with_capacity(n_dims as usize);
         for _ in 0..n_dims {
@@ -272,13 +277,13 @@ pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
 
     // The data section starts at the next aligned position after the header.
     if alignment == 0 {
-        bail!("invalid GGUF alignment 0");
+        return Err(GgufError::Format("invalid GGUF alignment 0".to_string()));
     }
     let here = r.stream_position()?;
     let data_offset = here
         .div_ceil(alignment)
         .checked_mul(alignment)
-        .context("GGUF data_offset alignment overflow")?;
+        .ok_or_else(|| GgufError::Format("GGUF data_offset alignment overflow".to_string()))?;
 
     Ok(Header {
         architecture,
@@ -294,24 +299,27 @@ pub(crate) fn parse(r: &mut (impl Read + Seek)) -> Result<Header> {
 /// Open one GGUF file and parse its header. Shared by the planner view and the
 /// mmproj census, so the format is read in exactly one place.
 pub(crate) fn parse_file(path: &Path) -> Result<Header> {
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let file = File::open(path)
+        .map_err(|e| GgufError::io_ctx(format!("opening {}", path.display()), e))?;
     let mut r = BufReader::new(file);
-    parse(&mut r).with_context(|| format!("parsing {}", path.display()))
+    parse(&mut r).map_err(|e| e.with_context(format!("parsing {}", path.display())))
 }
 
 /// Read the planner's view of a model. Only the header is touched.
 pub fn read(path: &Path) -> Result<GgufInfo> {
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let file = File::open(path)
+        .map_err(|e| GgufError::io_ctx(format!("opening {}", path.display()), e))?;
     let file_bytes = file.metadata()?.len();
     let mut r = BufReader::new(file);
-    let header = parse(&mut r).with_context(|| format!("parsing {}", path.display()))?;
+    let header =
+        parse(&mut r).map_err(|e| e.with_context(format!("parsing {}", path.display())))?;
 
     let block_count = header
         .get_u32("block_count")
-        .with_context(|| format!("GGUF file has no {}.block_count", header.architecture))?;
-    let embedding_length = header
-        .get_u32("embedding_length")
-        .with_context(|| format!("GGUF file has no {}.embedding_length", header.architecture))?;
+        .ok_or_else(|| GgufError::MissingField(format!("{}.block_count", header.architecture)))?;
+    let embedding_length = header.get_u32("embedding_length").ok_or_else(|| {
+        GgufError::MissingField(format!("{}.embedding_length", header.architecture))
+    })?;
     let head_count = header.get_u32("attention.head_count").unwrap_or(0);
     let head_count_kv = header
         .get_u32("attention.head_count_kv")
@@ -373,11 +381,15 @@ fn read_value(r: &mut (impl Read + Seek), keep_array: bool) -> Result<Value> {
         9 if keep_array => {
             let elem_type = read_u32(r)?;
             if elem_type != 8 {
-                bail!("expected a string array, found element type {elem_type}");
+                return Err(GgufError::Format(format!(
+                    "expected a string array, found element type {elem_type}"
+                )));
             }
             let len = read_u64(r)?;
             if len > 4 << 20 {
-                bail!("implausible vocabulary size {len}");
+                return Err(GgufError::Format(format!(
+                    "implausible vocabulary size {len}"
+                )));
             }
             let mut items = Vec::with_capacity(len as usize);
             for _ in 0..len {
@@ -402,7 +414,11 @@ fn read_value(r: &mut (impl Read + Seek), keep_array: bool) -> Result<Value> {
         10 => Value::Uint(read_u64(r)?),
         11 => Value::Int(i64::from_le_bytes(read_exact_n::<8>(r)?)),
         12 => Value::Float(f64::from_le_bytes(read_exact_n::<8>(r)?)),
-        other => bail!("unknown GGUF value type {other}"),
+        other => {
+            return Err(GgufError::Format(format!(
+                "unknown GGUF value type {other}"
+            )))
+        }
     })
 }
 
@@ -423,14 +439,15 @@ fn skip_array(r: &mut (impl Read + Seek)) -> Result<()> {
             let skip_bytes = len
                 .checked_mul(w)
                 .and_then(|b| i64::try_from(b).ok())
-                .context("GGUF array skip size overflow")?;
+                .ok_or_else(|| GgufError::Format("GGUF array skip size overflow".to_string()))?;
             r.seek(SeekFrom::Current(skip_bytes))?;
         }
         None if elem_type == 8 => {
             // Strings are length-prefixed, so each must be stepped over in turn.
             for _ in 0..len {
                 let n = read_u64(r)?;
-                let skip_bytes = i64::try_from(n).context("GGUF string skip size overflow")?;
+                let skip_bytes = i64::try_from(n)
+                    .map_err(|_| GgufError::Format("GGUF string skip size overflow".to_string()))?;
                 r.seek(SeekFrom::Current(skip_bytes))?;
             }
         }
@@ -439,7 +456,11 @@ fn skip_array(r: &mut (impl Read + Seek)) -> Result<()> {
                 skip_array(r)?;
             }
         }
-        None => bail!("unknown GGUF array element type {elem_type}"),
+        None => {
+            return Err(GgufError::Format(format!(
+                "unknown GGUF array element type {elem_type}"
+            )))
+        }
     }
     Ok(())
 }
@@ -447,7 +468,9 @@ fn skip_array(r: &mut (impl Read + Seek)) -> Result<()> {
 fn read_string(r: &mut impl Read) -> Result<String> {
     let len = read_u64(r)?;
     if len > 1 << 20 {
-        bail!("implausible GGUF string length {len}");
+        return Err(GgufError::Format(format!(
+            "implausible GGUF string length {len}"
+        )));
     }
     let mut buf = vec![0u8; len as usize];
     r.read_exact(&mut buf)?;

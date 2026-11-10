@@ -16,9 +16,9 @@
 //! engine can run the projector; `allpaka inspect --mmproj` prints the census
 //! and says so.
 
+use crate::error::{GgufError, Result};
 use crate::metadata::parse_file;
 use crate::tensors::TensorInfo;
-use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -59,7 +59,7 @@ impl VisionCensus {
     pub fn read(path: &Path) -> Result<Self> {
         let header = parse_file(path)?;
         let file_bytes = std::fs::metadata(path)
-            .with_context(|| format!("reading size of {}", path.display()))?
+            .map_err(|e| GgufError::io_ctx(format!("reading size of {}", path.display()), e))?
             .len();
 
         let projector_type = header.field_str("clip.projector_type").map(str::to_string);

@@ -484,5 +484,5 @@ fn norm_vec(f: &GgufFile, name: &str, len: usize) -> Result<Vec<f32>> {
         }
         .into());
     }
-    f.dequant(t)
+    Ok(f.dequant(t)?)
 }
