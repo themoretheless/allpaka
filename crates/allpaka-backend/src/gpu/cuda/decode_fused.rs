@@ -319,18 +319,16 @@ pub(super) fn decode_token_one_fused(
             }
             stream
                 .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
-                .map_err(|e| {
+                .inspect_err(|&e| {
                     eprintln!("cuda: begin_capture failed: {e}");
-                    e
                 })
                 .ok()?;
         } else if whole_graph {
             if let Some(g) = gpu.decode_graph.as_ref() {
                 if gpu.decode_graph_key == graph_key {
                     g.launch()
-                        .map_err(|e| {
+                        .inspect_err(|&e| {
                             eprintln!("cuda: decode graph launch failed: {e}");
-                            e
                         })
                         .ok()?;
                     launches = 1;
@@ -1077,7 +1075,8 @@ pub(super) fn decode_token_one_fused(
                     },
                 ) {
                     if fuse_q8 && crate::gpu::cuda::ggml::fa_q8_consumed() {
-                        if let Some(fa) = crate::gpu::cuda::ggml::fa_last_src() {
+                        {
+                            let fa = crate::gpu::cuda::ggml::fa_last_src()?;
                             let wo_fa_q8 =
                                 q8_only && crate::runtime::get().cuda_wo_fa_q8 && q_n == 8192;
                             if wo_fa_q8 {
@@ -1100,8 +1099,6 @@ pub(super) fn decode_token_one_fused(
                                     req.n_heads,
                                 )?;
                             }
-                        } else {
-                            return None;
                         }
                     }
                     crate::gpu::cuda::ggml::mark_cudarc_dirty();
@@ -1192,9 +1189,8 @@ pub(super) fn decode_token_one_fused(
             if capturing_hybrid {
                 stream
                     .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
-                    .map_err(|e| {
+                    .inspect_err(|&e| {
                         eprintln!("cuda: hybrid pre begin_capture failed: {e}");
-                        e
                     })
                     .ok()?;
             }
@@ -1468,9 +1464,8 @@ pub(super) fn decode_token_one_fused(
             if capturing_hybrid {
                 stream
                     .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
-                    .map_err(|e| {
+                    .inspect_err(|&e| {
                         eprintln!("cuda: hybrid post begin_capture failed: {e}");
-                        e
                     })
                     .ok()?;
             }
@@ -1562,9 +1557,8 @@ pub(super) fn decode_token_one_fused(
         if capturing_hybrid {
             stream
                 .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
-                .map_err(|e| {
+                .inspect_err(|&e| {
                     eprintln!("cuda: hybrid tail begin_capture failed: {e}");
-                    e
                 })
                 .ok()?;
             capture_guard.active = true;

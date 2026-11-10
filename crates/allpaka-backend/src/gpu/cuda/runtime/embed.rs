@@ -26,7 +26,7 @@ pub fn launch_embed_row(
     let f = gpu.func_owned("embed_row_f32")?;
     let n_in_u = n_in as u32;
     let fmt_u = fmt;
-    let cfg = if matches!(fmt, 0 | 1 | 2) && n_in % 256 == 0 {
+    let cfg = if matches!(fmt, 0..=2) && n_in % 256 == 0 {
         LaunchConfig {
             grid_dim: (1, n_in_u / 256, 1),
             block_dim: (32, 1, 1),
@@ -77,7 +77,7 @@ pub fn launch_embed_row_dtoken_ptr(
     let fmt_u = fmt;
     let rb_u = rb as u32;
     let w_base = base;
-    let cfg = if matches!(fmt, 0 | 1 | 2) && n_in % 256 == 0 {
+    let cfg = if matches!(fmt, 0..=2) && n_in % 256 == 0 {
         LaunchConfig {
             grid_dim: (1, n_in_u / 256, 1),
             block_dim: (32, 1, 1),

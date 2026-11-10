@@ -51,7 +51,7 @@ pub fn attach(mapping: &[u8]) -> bool {
 /// a later model whose mmap or heap buffer lands at the same address would
 /// otherwise run on the old weights.
 pub fn detach(mapping: &[u8]) {
-    if GPU.get().map_or(true, Option::is_none) {
+    if GPU.get().is_none_or(Option::is_none) {
         return;
     }
     let _ = with_gpu(|gpu| {
@@ -104,7 +104,7 @@ pub fn can_embed_on_gpu(ty: GgmlType, bytes: &[u8], n_in: usize) -> bool {
 }
 
 pub fn is_attached() -> bool {
-    GPU.get().map_or(false, Option::is_some)
+    GPU.get().is_some_and(Option::is_some)
 }
 
 /// Active physical memory architecture for the CUDA backend.

@@ -24,15 +24,14 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
         gpu.pf_len = xs.len();
         gpu.pf_ffn_done = false;
         gpu.pf_rope_n = 0;
-        if pf_graph_on() && !dual && gpu.pf_graph.is_none() && gpu.pf_graph_seen == 1 {
-            if gpu
+        if pf_graph_on() && !dual && gpu.pf_graph.is_none() && gpu.pf_graph_seen == 1
+            && gpu
                 .stream
                 .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
                 .is_ok()
             {
                 gpu.pf_capturing = true;
             }
-        }
         Some(())
     })
 }

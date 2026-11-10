@@ -492,7 +492,7 @@ fn windows_memory_mib() -> (u64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{gpu_query, memory_mib};
+    use super::memory_mib;
 
     #[test]
     fn host_memory_and_gpu_queries_report_positive_capacity() {

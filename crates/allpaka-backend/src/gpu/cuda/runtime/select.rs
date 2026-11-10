@@ -87,6 +87,12 @@ pub fn dq_fmt(ty: GgmlType) -> Option<u32> {
     })
 }
 
+pub fn resolve_w(gpu: &CudaGpu, w: &[u8]) -> Option<(usize, u64)> {
+    let addr = w.as_ptr() as usize;
+    let chunk = gpu.chunk_for(addr, w.len())?;
+    Some((chunk, (addr - gpu.chunks[chunk].start) as u64))
+}
+
 #[cfg(test)]
 mod dq_fmt_tests {
     use super::*;
@@ -132,10 +138,4 @@ mod dq_fmt_tests {
             assert_eq!(dq_fmt(ty), None);
         }
     }
-}
-
-pub fn resolve_w(gpu: &CudaGpu, w: &[u8]) -> Option<(usize, u64)> {
-    let addr = w.as_ptr() as usize;
-    let chunk = gpu.chunk_for(addr, w.len())?;
-    Some((chunk, (addr - gpu.chunks[chunk].start) as u64))
 }

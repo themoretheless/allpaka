@@ -197,7 +197,7 @@ pub fn launch_gemm_dequant(
         let rb_u = rb as u32;
         let w_off_u = w_off;
         const ROWS: u32 = 16;
-        let k_blocks = matches!(fmt, 0 | 1 | 2) && n_in % 256 == 0;
+        let k_blocks = matches!(fmt, 0..=2) && n_in % 256 == 0;
         let cfg = if k_blocks {
             LaunchConfig {
                 grid_dim: (n_out_u.div_ceil(ROWS), n_in_u / 256, 1),

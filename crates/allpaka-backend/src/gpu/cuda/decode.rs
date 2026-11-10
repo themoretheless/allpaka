@@ -48,9 +48,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     }
     let has_gdn = req.layers.iter().any(|l| l.gdn.is_some());
     if has_gdn {
-        if req.ssm.is_none() {
-            return None;
-        }
+        req.ssm?;
         if req
             .layers
             .iter()
@@ -149,7 +147,7 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
         let n_in_u = hidden as u32;
         let fmt_u = fmt;
         let rb_u = rb as u32;
-        let embed_cfg = if matches!(fmt, 0 | 1 | 2) && hidden % 256 == 0 {
+        let embed_cfg = if matches!(fmt, 0..=2) && hidden % 256 == 0 {
             LaunchConfig {
                 grid_dim: (1, n_in_u / 256, 1),
                 block_dim: (32, 1, 1),
@@ -192,9 +190,8 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
             gpu.decode_graph
                 .as_ref()?
                 .launch()
-                .map_err(|e| {
+                .inspect_err(|&e| {
                     eprintln!("cuda: greedy chain graph launch failed: {e}");
-                    e
                 })
                 .ok()?;
             let idx = i as u32;
@@ -394,7 +391,7 @@ pub(super) fn gdn_decode_layer(
                 .ok()?;
             }
             gpu.sync()?;
-            return gpu.stream.clone_dtoh(&out_buf).ok();
+            gpu.stream.clone_dtoh(&out_buf).ok()
         }
     })?;
 
