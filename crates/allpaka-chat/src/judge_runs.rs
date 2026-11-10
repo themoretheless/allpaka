@@ -1,4 +1,5 @@
 //! Durable immutable event receipts for cancellable native judge batches.
+use crate::cancel::CancelToken;
 use crate::{judge, App};
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -13,11 +14,11 @@ use std::{
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
 };
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::Semaphore;
 #[derive(Clone)]
 pub(crate) struct Manager {
     root: Arc<PathBuf>,
-    active: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    active: Arc<Mutex<HashMap<String, CancelToken>>>,
     capacity: Arc<Semaphore>,
 }
 fn read(path: &FsPath) -> Result<Value> {
@@ -204,12 +205,12 @@ pub(crate) async fn start(
             let initial=json!({"id":id,"kind":"judge_run","trace_id":trace.id(),"plan_id":plan["id"],"plan_sha256":plan["plan_sha256"],"project_id":plan["project_id"],"dataset_id":plan["dataset_id"],"dataset_version":plan["dataset_version"],"dataset_sha256":plan["dataset_sha256"],"sample_count":samples.len()});
             crate::evaluation::commit_new(&directory.join("initial.json"),&initial)?;Ok((id,directory,initial,trace,root))
         })().map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))?;
-        let (sender, mut cancellation) = watch::channel(false);
+        let cancellation = CancelToken::new();
         app.judge_runs
             .active
             .lock()
             .unwrap()
-            .insert(prepared.0.clone(), sender);
+            .insert(prepared.0.clone(), cancellation.clone());
         let response = json!({"id":prepared.0,"status":"running","plan_id":plan["id"]});
         tokio::spawn(async move {
             let _permit = permit;
@@ -218,7 +219,7 @@ pub(crate) async fn start(
             let mut total = 0.0;
             let mut completed = 0usize;
             for (index, sample) in plan["samples"].as_array().unwrap().iter().enumerate() {
-                if *cancellation.borrow() {
+                if cancellation.is_cancelled() {
                     status = "cancelled";
                     break;
                 }
@@ -229,7 +230,7 @@ pub(crate) async fn start(
                 let request = json!({"settings":plan["settings"],"rubric":plan["rubric"],"input":sample["input"],"output":sample["output"],"reference":sample["reference"],"dataset_ref":{"dataset_id":plan["dataset_id"],"dataset_version":plan["dataset_version"],"sample_id":sample["sample_id"]}});
                 let result = match serde_json::from_value(request) {
                     Ok(request) => {
-                        tokio::select! {biased;result=judge::judge_inner(&app, request)=>Some(result),_=cancellation.changed()=>None}
+                        tokio::select! {biased;result=judge::judge_inner(&app, request)=>Some(result),_=cancellation.cancelled()=>None}
                     }
                     Err(_) => {
                         item_span.finish("failed", &Value::Null);
@@ -381,8 +382,8 @@ pub(crate) async fn cancel(
 ) -> crate::ApiResult<Value> {
     crate::blocking(move || {
         app.judge_runs.load(&id).map_err(crate::bad_request)?;
-        if let Some(sender) = app.judge_runs.active.lock().unwrap().get(&id) {
-            let _ = sender.send(true);
+        if let Some(token) = app.judge_runs.active.lock().unwrap().get(&id) {
+            token.cancel();
         }
         Ok(Json(json!({"id":id,"cancel_requested":true})))
     })

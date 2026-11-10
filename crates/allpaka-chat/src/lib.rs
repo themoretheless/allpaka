@@ -1,6 +1,7 @@
 mod api;
 mod background;
 mod bookmarks;
+mod cancel;
 mod code_search;
 mod compact;
 mod context;
