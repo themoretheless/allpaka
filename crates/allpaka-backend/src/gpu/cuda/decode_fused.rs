@@ -419,22 +419,26 @@ pub(super) fn decode_token_one_fused(
                                 .map(|g| g.cu_graph_exec() as *mut std::ffi::c_void)
                                 .collect();
                             crate::gpu::cuda::ggml::hybrid_replay(
-                                &pre_e,
-                                &post_e,
-                                tail.cu_graph_exec() as *mut std::ffi::c_void,
                                 &stream,
-                                qp,
-                                op,
-                                cache_p,
-                                k_offs,
-                                v_offs,
-                                hd,
-                                req.n_heads,
-                                req.n_kv_heads.max(1),
-                                pos,
-                                req.kv_dim,
-                                req.scale,
-                                d_pos_p,
+                                &HybridReplay {
+                                    pre_execs: &pre_e,
+                                    post_execs: &post_e,
+                                    tail_exec: tail.cu_graph_exec() as *mut std::ffi::c_void,
+                                    q: qp,
+                                    out: op,
+                                    cache_base: cache_p,
+                                    k_off: k_offs,
+                                    v_off: v_offs,
+                                    shape: FaShape {
+                                        head_dim: hd,
+                                        n_q_heads: req.n_heads,
+                                        n_kv_heads: req.n_kv_heads.max(1),
+                                        base: pos,
+                                        kv_dim: req.kv_dim,
+                                        scale: req.scale,
+                                    },
+                                    d_pos: d_pos_p,
+                                },
                             )
                         } else if stream.context().bind_to_thread().is_err() {
                             false
@@ -479,20 +483,22 @@ pub(super) fn decode_token_one_fused(
                                     }
                                     let k_dev = cache_p + (k_offs[li] as u64) * 2;
                                     let v_dev = cache_p + (v_offs[li] as u64) * 2;
-                                    if !crate::gpu::cuda::ggml::flash_attn(
-                                        qp,
-                                        k_dev,
-                                        v_dev,
-                                        op,
-                                        hd,
-                                        req.n_heads,
-                                        req.n_kv_heads.max(1),
-                                        1,
-                                        pos,
-                                        req.kv_dim,
-                                        req.scale,
-                                        Some(d_pos_p),
-                                    ) {
+                                    if !crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
+                                        q: qp,
+                                        k: k_dev,
+                                        v: v_dev,
+                                        out: op,
+                                        m: 1,
+                                        shape: FaShape {
+                                            head_dim: hd,
+                                            n_q_heads: req.n_heads,
+                                            n_kv_heads: req.n_kv_heads.max(1),
+                                            base: pos,
+                                            kv_dim: req.kv_dim,
+                                            scale: req.scale,
+                                        },
+                                        d_pos: Some(d_pos_p),
+                                    }) {
                                         ok = false;
                                         break;
                                     }
@@ -1056,24 +1062,26 @@ pub(super) fn decode_token_one_fused(
                     // Non-null flag: DLL skips permute; NVRTC does permute+Q8.
                     crate::gpu::cuda::ggml::fa_set_q8(1);
                 }
-                if crate::gpu::cuda::ggml::flash_attn(
-                    qp,
-                    k_dev,
-                    v_dev,
-                    op,
-                    hd,
-                    req.n_heads,
-                    req.n_kv_heads.max(1),
-                    1,
-                    pos,
-                    req.kv_dim,
-                    req.scale,
-                    {
+                if crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
+                    q: qp,
+                    k: k_dev,
+                    v: v_dev,
+                    out: op,
+                    m: 1,
+                    shape: FaShape {
+                        head_dim: hd,
+                        n_q_heads: req.n_heads,
+                        n_kv_heads: req.n_kv_heads.max(1),
+                        base: pos,
+                        kv_dim: req.kv_dim,
+                        scale: req.scale,
+                    },
+                    d_pos: {
                         let (p, g) = DevicePtr::device_ptr(&gpu.d_pos, &stream);
                         drop(g);
                         Some(p)
                     },
-                ) {
+                }) {
                     if fuse_q8 && crate::gpu::cuda::ggml::fa_q8_consumed() {
                         {
                             let fa = crate::gpu::cuda::ggml::fa_last_src()?;
@@ -1216,26 +1224,38 @@ pub(super) fn decode_token_one_fused(
                 )
                 && launch_matvec_q4k_qkv(
                     gpu,
-                    wq_c,
-                    wk_c,
-                    wv_c,
-                    wq_o,
-                    wk_o,
-                    wv_o,
-                    hidden,
-                    q_dim,
-                    kv,
-                    h_at,
-                    q_at,
-                    k_at,
-                    v_at,
-                    1,
-                    ybase,
-                    layer.wv.0,
-                    if write_v_cache {
-                        Some((&req.cache.buf, layer.v_off as u64, req.kv_dim as u32))
-                    } else {
-                        None
+                    &QkvReq {
+                        q: WeightLoc {
+                            chunk: wq_c,
+                            off: wq_o,
+                        },
+                        k: WeightLoc {
+                            chunk: wk_c,
+                            off: wk_o,
+                        },
+                        v: WeightLoc {
+                            chunk: wv_c,
+                            off: wv_o,
+                        },
+                        v_ty: layer.wv.0,
+                        n_in: hidden,
+                        n_q: q_dim,
+                        n_kv: kv,
+                        y_base: ybase,
+                        x_off: h_at,
+                        q_off: q_at,
+                        k_off: k_at,
+                        v_off: v_at,
+                        m: 1,
+                        v_cache: if write_v_cache {
+                            Some(VCacheDst {
+                                buf: &req.cache.buf,
+                                off: layer.v_off as u64,
+                                kv_dim: req.kv_dim as u32,
+                            })
+                        } else {
+                            None
+                        },
                     },
                 )
                 .is_some();
@@ -1251,13 +1271,61 @@ pub(super) fn decode_token_one_fused(
             }
             if !qkv_fused {
                 launch_matvec_y_ptr(
-                    gpu, layer.wq.0, wq_c, wq_o, hidden, q_dim, h_at, q_at, 1, ybase, false,
+                    gpu,
+                    DevWeight {
+                        ty: layer.wq.0,
+                        loc: WeightLoc {
+                            chunk: wq_c,
+                            off: wq_o,
+                        },
+                        n_in: hidden,
+                        n_out: q_dim,
+                    },
+                    ArenaMatvec {
+                        y_base: ybase,
+                        x_off: h_at,
+                        y_off: q_at,
+                        m: 1,
+                        add: false,
+                    },
                 )?;
                 launch_matvec_y_ptr(
-                    gpu, layer.wk.0, wk_c, wk_o, hidden, kv, h_at, k_at, 1, ybase, false,
+                    gpu,
+                    DevWeight {
+                        ty: layer.wk.0,
+                        loc: WeightLoc {
+                            chunk: wk_c,
+                            off: wk_o,
+                        },
+                        n_in: hidden,
+                        n_out: kv,
+                    },
+                    ArenaMatvec {
+                        y_base: ybase,
+                        x_off: h_at,
+                        y_off: k_at,
+                        m: 1,
+                        add: false,
+                    },
                 )?;
                 launch_matvec_y_ptr(
-                    gpu, layer.wv.0, wv_c, wv_o, hidden, kv, h_at, v_at, 1, ybase, false,
+                    gpu,
+                    DevWeight {
+                        ty: layer.wv.0,
+                        loc: WeightLoc {
+                            chunk: wv_c,
+                            off: wv_o,
+                        },
+                        n_in: hidden,
+                        n_out: kv,
+                    },
+                    ArenaMatvec {
+                        y_base: ybase,
+                        x_off: h_at,
+                        y_off: v_at,
+                        m: 1,
+                        add: false,
+                    },
                 )?;
                 launches += 3;
                 if ggml_decode {
@@ -1401,20 +1469,22 @@ pub(super) fn decode_token_one_fused(
                             drop(g);
                             p
                         };
-                        let fa_ok = crate::gpu::cuda::ggml::flash_attn(
-                            qp,
-                            cache_p + (layer.k_off as u64) * 2,
-                            cache_p + (layer.v_off as u64) * 2,
-                            op,
-                            hd,
-                            req.n_heads,
-                            req.n_kv_heads.max(1),
-                            1,
-                            pos,
-                            req.kv_dim,
-                            req.scale,
-                            Some(d_pos_p),
-                        );
+                        let fa_ok = crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
+                            q: qp,
+                            k: cache_p + (layer.k_off as u64) * 2,
+                            v: cache_p + (layer.v_off as u64) * 2,
+                            out: op,
+                            m: 1,
+                            shape: FaShape {
+                                head_dim: hd,
+                                n_q_heads: req.n_heads,
+                                n_kv_heads: req.n_kv_heads.max(1),
+                                base: pos,
+                                kv_dim: req.kv_dim,
+                                scale: req.scale,
+                            },
+                            d_pos: Some(d_pos_p),
+                        });
                         match (fa_ok, stream.end_capture(graph_flags)) {
                             (true, Ok(Some(g))) => {
                                 g.launch().ok()?;
@@ -1471,7 +1541,23 @@ pub(super) fn decode_token_one_fused(
             }
 
             launch_matvec_y_ptr(
-                gpu, layer.wo.0, wo_c, wo_o, q_dim, hidden, attn_at, x_at, 1, ybase, true,
+                gpu,
+                DevWeight {
+                    ty: layer.wo.0,
+                    loc: WeightLoc {
+                        chunk: wo_c,
+                        off: wo_o,
+                    },
+                    n_in: q_dim,
+                    n_out: hidden,
+                },
+                ArenaMatvec {
+                    y_base: ybase,
+                    x_off: attn_at,
+                    y_off: x_at,
+                    m: 1,
+                    add: true,
+                },
             )?;
             launches += 1;
 
@@ -1490,15 +1576,64 @@ pub(super) fn decode_token_one_fused(
                 && matches!((gate.0, up.0), (GgmlType::Q4K, GgmlType::Q4K))
                 && gate.2 == up.2
                 && launch_matvec_q4k_2(
-                    gpu, g_c, u_c, g_o, u_o, hidden, gate.2, h_at, gate_at, up_at, 1, ybase,
+                    gpu,
+                    &GateUpReq {
+                        gate: WeightLoc {
+                            chunk: g_c,
+                            off: g_o,
+                        },
+                        up: WeightLoc {
+                            chunk: u_c,
+                            off: u_o,
+                        },
+                        n_in: hidden,
+                        n_out: gate.2,
+                        y_base: ybase,
+                        x_off: h_at,
+                        gate_off: gate_at,
+                        up_off: up_at,
+                        m: 1,
+                    },
                 )
                 .is_some();
             if !gu_fused {
                 launch_matvec_y_ptr(
-                    gpu, gate.0, g_c, g_o, hidden, gate.2, h_at, gate_at, 1, ybase, false,
+                    gpu,
+                    DevWeight {
+                        ty: gate.0,
+                        loc: WeightLoc {
+                            chunk: g_c,
+                            off: g_o,
+                        },
+                        n_in: hidden,
+                        n_out: gate.2,
+                    },
+                    ArenaMatvec {
+                        y_base: ybase,
+                        x_off: h_at,
+                        y_off: gate_at,
+                        m: 1,
+                        add: false,
+                    },
                 )?;
                 launch_matvec_y_ptr(
-                    gpu, up.0, u_c, u_o, hidden, up.2, h_at, up_at, 1, ybase, false,
+                    gpu,
+                    DevWeight {
+                        ty: up.0,
+                        loc: WeightLoc {
+                            chunk: u_c,
+                            off: u_o,
+                        },
+                        n_in: hidden,
+                        n_out: up.2,
+                    },
+                    ArenaMatvec {
+                        y_base: ybase,
+                        x_off: h_at,
+                        y_off: up_at,
+                        m: 1,
+                        add: false,
+                    },
                 )?;
                 launches += 2;
                 if ggml_decode {
@@ -1532,7 +1667,23 @@ pub(super) fn decode_token_one_fused(
                 }
             }
             launch_matvec_y_ptr(
-                gpu, down.0, d_c, d_o, gate.2, hidden, gate_at, x_at, 1, ybase, true,
+                gpu,
+                DevWeight {
+                    ty: down.0,
+                    loc: WeightLoc {
+                        chunk: d_c,
+                        off: d_o,
+                    },
+                    n_in: gate.2,
+                    n_out: hidden,
+                },
+                ArenaMatvec {
+                    y_base: ybase,
+                    x_off: gate_at,
+                    y_off: x_at,
+                    m: 1,
+                    add: true,
+                },
             )?;
             launches += 1;
 
@@ -1569,16 +1720,22 @@ pub(super) fn decode_token_one_fused(
         let (o_c, o_o) = resolve_w(gpu, req.output.1)?;
         launch_matvec_y_ptr(
             gpu,
-            req.output.0,
-            o_c,
-            o_o,
-            hidden,
-            vocab,
-            h_at,
-            out_logits_at,
-            1,
-            ybase,
-            false,
+            DevWeight {
+                ty: req.output.0,
+                loc: WeightLoc {
+                    chunk: o_c,
+                    off: o_o,
+                },
+                n_in: hidden,
+                n_out: vocab,
+            },
+            ArenaMatvec {
+                y_base: ybase,
+                x_off: h_at,
+                y_off: out_logits_at,
+                m: 1,
+                add: false,
+            },
         )?;
         launches += 2;
         if crate::gpu::cuda::ggml::enabled() && crate::runtime::get().cuda_ggml_decode {

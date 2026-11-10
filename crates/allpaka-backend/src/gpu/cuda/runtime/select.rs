@@ -83,6 +83,23 @@ pub fn resolve_w(gpu: &CudaGpu, w: &[u8]) -> Option<(usize, u64)> {
     Some((chunk, (addr - gpu.chunks[chunk].start) as u64))
 }
 
+/// Where a resident weight lives: device chunk index and byte offset in it,
+/// as returned by [`resolve_w`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WeightLoc {
+    pub chunk: usize,
+    pub off: u64,
+}
+
+/// A resident quantized weight matrix `[n_out, n_in]` of format `ty`.
+#[derive(Clone, Copy, Debug)]
+pub struct DevWeight {
+    pub ty: GgmlType,
+    pub loc: WeightLoc,
+    pub n_in: usize,
+    pub n_out: usize,
+}
+
 #[cfg(test)]
 mod dq_fmt_tests {
     use super::*;

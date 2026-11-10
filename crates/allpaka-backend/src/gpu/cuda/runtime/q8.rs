@@ -149,20 +149,7 @@ pub fn launch_permute_q8_m1_qonly(
     Some(())
 }
 
-pub(super) fn launch_qk_q8_matvec(
-    gpu: &mut CudaGpu,
-    ty: GgmlType,
-    chunk: usize,
-    w_off: u64,
-    n_in: usize,
-    n_out: usize,
-    x_ptr: u64,
-    y_ptr: u64,
-    m: usize,
-    add: bool,
-) -> Option<()> {
+pub(super) fn launch_qk_q8_matvec(gpu: &mut CudaGpu, w: DevWeight, io: MatvecPtrs) -> Option<()> {
     let stream = Arc::clone(&gpu.stream);
-    launch_qk_q8_matvec_on(
-        gpu, &stream, ty, chunk, w_off, n_in, n_out, x_ptr, y_ptr, m, add,
-    )
+    launch_qk_q8_matvec_on(gpu, &stream, w, io)
 }

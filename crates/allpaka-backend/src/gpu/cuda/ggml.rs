@@ -454,20 +454,50 @@ pub fn fa_last_src() -> Option<u64> {
     }
 }
 
-pub fn flash_attn(
-    q_dev: u64,
-    k_dev: u64,
-    v_dev: u64,
-    out_dev: u64,
-    head_dim: usize,
-    n_q_heads: usize,
-    n_kv_heads: usize,
-    m: usize,
-    base: usize,
-    kv_dim: usize,
-    scale: f32,
-    d_pos_dev: Option<u64>,
-) -> bool {
+/// Attention geometry shared by every flash-attention launch of one token.
+#[derive(Clone, Copy, Debug)]
+pub struct FaShape {
+    pub head_dim: usize,
+    pub n_q_heads: usize,
+    pub n_kv_heads: usize,
+    /// KV position of the first query row.
+    pub base: usize,
+    /// Row stride of the f16 KV cache, in elements.
+    pub kv_dim: usize,
+    pub scale: f32,
+}
+
+/// One flash-attention launch over `m` query rows; all addresses are device pointers.
+#[derive(Clone, Copy, Debug)]
+pub struct FlashAttnReq {
+    pub q: u64,
+    pub k: u64,
+    pub v: u64,
+    pub out: u64,
+    pub m: usize,
+    pub shape: FaShape,
+    /// Device `u32` holding the decode position (graph-replayable), if any.
+    pub d_pos: Option<u64>,
+}
+
+pub fn flash_attn(req: &FlashAttnReq) -> bool {
+    let FlashAttnReq {
+        q: q_dev,
+        k: k_dev,
+        v: v_dev,
+        out: out_dev,
+        m,
+        shape:
+            FaShape {
+                head_dim,
+                n_q_heads,
+                n_kv_heads,
+                base,
+                kv_dim,
+                scale,
+            },
+        d_pos: d_pos_dev,
+    } = *req;
     let Some(api) = load() else {
         return false;
     };
@@ -504,25 +534,45 @@ pub fn flash_attn(
     true
 }
 
+/// One-token hybrid replay: per-layer pre/post segment graphs, a tail graph,
+/// and the KV offsets FA needs between them.
+#[derive(Clone, Copy, Debug)]
+pub struct HybridReplay<'a> {
+    pub pre_execs: &'a [*mut c_void],
+    pub post_execs: &'a [*mut c_void],
+    pub tail_exec: *mut c_void,
+    pub q: u64,
+    pub out: u64,
+    pub cache_base: u64,
+    /// Per-layer K/V element offsets into the f16 cache.
+    pub k_off: &'a [i32],
+    pub v_off: &'a [i32],
+    pub shape: FaShape,
+    pub d_pos: u64,
+}
+
 /// One-token hybrid replay: segment CUDA graphs + FA interleaved (DLL-side loop).
-pub fn hybrid_replay(
-    pre_execs: &[*mut c_void],
-    post_execs: &[*mut c_void],
-    tail_exec: *mut c_void,
-    stream: &CudaStream,
-    q_dev: u64,
-    out_dev: u64,
-    cache_base: u64,
-    k_off: &[i32],
-    v_off: &[i32],
-    head_dim: usize,
-    n_q_heads: usize,
-    n_kv_heads: usize,
-    base: usize,
-    kv_dim: usize,
-    scale: f32,
-    d_pos_dev: u64,
-) -> bool {
+pub fn hybrid_replay(stream: &CudaStream, req: &HybridReplay<'_>) -> bool {
+    let HybridReplay {
+        pre_execs,
+        post_execs,
+        tail_exec,
+        q: q_dev,
+        out: out_dev,
+        cache_base,
+        k_off,
+        v_off,
+        shape:
+            FaShape {
+                head_dim,
+                n_q_heads,
+                n_kv_heads,
+                base,
+                kv_dim,
+                scale,
+            },
+        d_pos: d_pos_dev,
+    } = *req;
     let Some(api) = load() else {
         return false;
     };

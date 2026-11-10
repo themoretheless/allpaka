@@ -192,48 +192,66 @@ pub(super) fn try_prefill_attn_fused_dev(
         let (wo_c, wo_o) = resolve_w(gpu, req.wo.1)?;
         launch_gemm_dequant(
             gpu,
-            req.wq.0,
-            wq_c,
-            wq_o,
-            hidden,
-            q_dim,
-            m,
-            true,
-            &[],
-            q_at,
-            false,
-            true,
-            None,
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.wq.0,
+                    loc: WeightLoc {
+                        chunk: wq_c,
+                        off: wq_o,
+                    },
+                    n_in: hidden,
+                    n_out: q_dim,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: q_at,
+                reuse_x_f16: false,
+                x_from_pf_hs: true,
+                x_dev_override: None,
+            },
         )?;
         launch_gemm_dequant(
             gpu,
-            req.wk.0,
-            wk_c,
-            wk_o,
-            hidden,
-            kv,
-            m,
-            true,
-            &[],
-            k_at,
-            true,
-            true,
-            None,
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.wk.0,
+                    loc: WeightLoc {
+                        chunk: wk_c,
+                        off: wk_o,
+                    },
+                    n_in: hidden,
+                    n_out: kv,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: k_at,
+                reuse_x_f16: true,
+                x_from_pf_hs: true,
+                x_dev_override: None,
+            },
         )?;
         launch_gemm_dequant(
             gpu,
-            req.wv.0,
-            wv_c,
-            wv_o,
-            hidden,
-            kv,
-            m,
-            true,
-            &[],
-            v_at,
-            true,
-            true,
-            None,
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.wv.0,
+                    loc: WeightLoc {
+                        chunk: wv_c,
+                        off: wv_o,
+                    },
+                    n_in: hidden,
+                    n_out: kv,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: v_at,
+                reuse_x_f16: true,
+                x_from_pf_hs: true,
+                x_dev_override: None,
+            },
         )?;
 
         crate::gpu::cuda::ggml::prepare_for_cudarc();
@@ -458,20 +476,22 @@ pub(super) fn try_prefill_attn_fused_dev(
                     drop(cg);
                     let k_dev = cache_p + k_off * 2;
                     let v_dev = cache_p + v_off * 2;
-                    used_fa = crate::gpu::cuda::ggml::flash_attn(
-                        qp,
-                        k_dev,
-                        v_dev,
-                        op,
-                        hd,
-                        req.n_heads,
-                        req.n_kv_heads.max(1),
+                    used_fa = crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
+                        q: qp,
+                        k: k_dev,
+                        v: v_dev,
+                        out: op,
                         m,
-                        req.base,
-                        req.kv_dim,
-                        scale,
-                        None,
-                    );
+                        shape: FaShape {
+                            head_dim: hd,
+                            n_q_heads: req.n_heads,
+                            n_kv_heads: req.n_kv_heads.max(1),
+                            base: req.base,
+                            kv_dim: req.kv_dim,
+                            scale,
+                        },
+                        d_pos: None,
+                    });
                     if used_fa {
                         crate::gpu::cuda::ggml::mark_cudarc_dirty();
                     }
@@ -523,18 +543,24 @@ pub(super) fn try_prefill_attn_fused_dev(
         };
         launch_gemm_dequant(
             gpu,
-            req.wo.0,
-            wo_c,
-            wo_o,
-            q_dim,
-            hidden,
-            m,
-            true,
-            &[],
-            proj_at,
-            false,
-            false,
-            Some(attn_dev),
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.wo.0,
+                    loc: WeightLoc {
+                        chunk: wo_c,
+                        off: wo_o,
+                    },
+                    n_in: q_dim,
+                    n_out: hidden,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: proj_at,
+                reuse_x_f16: false,
+                x_from_pf_hs: false,
+                x_dev_override: Some(attn_dev),
+            },
         )?;
         crate::gpu::cuda::ggml::prepare_for_cudarc();
         // residual into pf_x
@@ -614,33 +640,45 @@ pub(super) fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         let (d_c, d_o) = resolve_w(gpu, req.down.1)?;
         launch_gemm_dequant(
             gpu,
-            req.gate.0,
-            g_c,
-            g_o,
-            hidden,
-            ffn,
-            m,
-            true,
-            &[],
-            gate_at,
-            false,
-            true,
-            None,
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.gate.0,
+                    loc: WeightLoc {
+                        chunk: g_c,
+                        off: g_o,
+                    },
+                    n_in: hidden,
+                    n_out: ffn,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: gate_at,
+                reuse_x_f16: false,
+                x_from_pf_hs: true,
+                x_dev_override: None,
+            },
         )?;
         launch_gemm_dequant(
             gpu,
-            req.up.0,
-            u_c,
-            u_o,
-            hidden,
-            ffn,
-            m,
-            true,
-            &[],
-            up_at,
-            true,
-            true,
-            None,
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.up.0,
+                    loc: WeightLoc {
+                        chunk: u_c,
+                        off: u_o,
+                    },
+                    n_in: hidden,
+                    n_out: ffn,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: up_at,
+                reuse_x_f16: true,
+                x_from_pf_hs: true,
+                x_dev_override: None,
+            },
         )?;
         crate::gpu::cuda::ggml::prepare_for_cudarc();
         let stream = Arc::clone(&gpu.stream);
@@ -671,18 +709,24 @@ pub(super) fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         };
         launch_gemm_dequant(
             gpu,
-            req.down.0,
-            d_c,
-            d_o,
-            ffn,
-            hidden,
-            m,
-            true,
-            &[],
-            down_at,
-            false,
-            false,
-            Some(gate_dev),
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.down.0,
+                    loc: WeightLoc {
+                        chunk: d_c,
+                        off: d_o,
+                    },
+                    n_in: ffn,
+                    n_out: hidden,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: down_at,
+                reuse_x_f16: false,
+                x_from_pf_hs: false,
+                x_dev_override: Some(gate_dev),
+            },
         )?;
         crate::gpu::cuda::ggml::prepare_for_cudarc();
         {

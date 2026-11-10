@@ -3,27 +3,44 @@
 
 use super::*;
 
-/// Launch dequant+GEMM into `y_arena[y_off..]`. No synchronize / D2H.
+/// One dequant+GEMM launch: `y_arena[y_off..] = X[m, n_in] @ W^T`.
 ///
 /// f16 scratch layout is `[X | W | C]` so Q/K/V (same X, different n_out) can
 /// reuse the X cast. `reuse_x_f16` skips that cast when the front of the arena
 /// already holds `m * n_in` f16 activations. `x_from_pf_hs` reads X from the
 /// prefill residual-norm buffer instead of `x_arena`.
-pub fn launch_gemm_dequant(
-    gpu: &mut CudaGpu,
-    ty: GgmlType,
-    chunk: usize,
-    w_off: u64,
-    n_in: usize,
-    n_out: usize,
-    m: usize,
-    x_already_in_arena: bool,
-    x_elems: &[f32],
-    y_off: usize,
-    reuse_x_f16: bool,
-    x_from_pf_hs: bool,
-    x_dev_override: Option<u64>,
-) -> Option<()> {
+#[derive(Clone, Copy, Debug)]
+pub struct GemmReq<'a> {
+    pub w: DevWeight,
+    pub m: usize,
+    /// X is already in `x_arena`; otherwise `x_elems` is uploaded first.
+    pub x_already_in_arena: bool,
+    pub x_elems: &'a [f32],
+    pub y_off: usize,
+    pub reuse_x_f16: bool,
+    pub x_from_pf_hs: bool,
+    /// Read X from this device address (ggml MMQ path only; otherwise fails).
+    pub x_dev_override: Option<u64>,
+}
+
+/// Launch dequant+GEMM into `y_arena[y_off..]`. No synchronize / D2H.
+pub fn launch_gemm_dequant(gpu: &mut CudaGpu, req: &GemmReq<'_>) -> Option<()> {
+    let GemmReq {
+        w:
+            DevWeight {
+                ty,
+                loc: WeightLoc { chunk, off: w_off },
+                n_in,
+                n_out,
+            },
+        m,
+        x_already_in_arena,
+        x_elems,
+        y_off,
+        reuse_x_f16,
+        x_from_pf_hs,
+        x_dev_override,
+    } = *req;
     gpu.ensure_arenas(m * n_in * 4, (y_off + m * n_out) * 4)?;
     if !x_already_in_arena {
         gpu.stream
@@ -345,21 +362,29 @@ pub fn launch_gemm_dequant(
 /// Dequant weight matrix to f16 then GEMM: y[m,n_out] = x[m,n_in] @ W^T.
 pub fn gemm_dequant(
     gpu: &mut CudaGpu,
-    ty: GgmlType,
-    chunk: usize,
-    w_off: u64,
-    n_in: usize,
-    n_out: usize,
+    w: DevWeight,
     m: usize,
     x_elems: &[f32],
 ) -> Option<Vec<f32>> {
     let t0 = Instant::now();
     launch_gemm_dequant(
-        gpu, ty, chunk, w_off, n_in, n_out, m, false, x_elems, 0, false, false, None,
+        gpu,
+        &GemmReq {
+            w,
+            m,
+            x_already_in_arena: false,
+            x_elems,
+            y_off: 0,
+            reuse_x_f16: false,
+            x_from_pf_hs: false,
+            x_dev_override: None,
+        },
     )?;
     let encode_ns = t0.elapsed().as_nanos() as u64;
     let t1 = Instant::now();
     gpu.sync()?;
     note_call(2, encode_ns, t1.elapsed().as_nanos() as u64);
-    gpu.stream.clone_dtoh(&gpu.y_arena.slice(0..m * n_out)).ok()
+    gpu.stream
+        .clone_dtoh(&gpu.y_arena.slice(0..m * w.n_out))
+        .ok()
 }

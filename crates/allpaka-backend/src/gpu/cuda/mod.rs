@@ -17,11 +17,13 @@ mod runtime;
 use allpaka_dtype::GgmlType;
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 use cudarc::driver::{CudaSlice, DevicePtr, LaunchConfig, PushKernelArg};
+use ggml::{FaShape, FlashAttnReq, HybridReplay};
 use pdl::{LaunchArgsPdl, StreamPdlExt};
 use runtime::{
     dq_fmt, launch_embed_row, launch_gemm_dequant, launch_matvec_q4k_2, launch_matvec_q4k_qkv,
     launch_matvec_y_ptr, note_call, q8_decode_enabled, resolve_w, row_bytes, run_matvec, try_init,
-    with_gpu, CudaGpu, GPU, MM_MIN_M,
+    with_gpu, ArenaMatvec, CudaGpu, DevWeight, GateUpReq, GemmReq, QkvReq, VCacheDst, WeightLoc,
+    GPU, MM_MIN_M,
 };
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -176,18 +178,21 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
                 let (chunk, w_off) = resolve_w(gpu, r.w)?;
                 launch_gemm_dequant(
                     gpu,
-                    r.ty,
-                    chunk,
-                    w_off,
-                    r.n_in,
-                    r.n_out,
-                    r.m,
-                    i > 0,
-                    x,
-                    y_off,
-                    i > 0,
-                    false,
-                    None,
+                    &GemmReq {
+                        w: DevWeight {
+                            ty: r.ty,
+                            loc: WeightLoc { chunk, off: w_off },
+                            n_in: r.n_in,
+                            n_out: r.n_out,
+                        },
+                        m: r.m,
+                        x_already_in_arena: i > 0,
+                        x_elems: x,
+                        y_off,
+                        reuse_x_f16: i > 0,
+                        x_from_pf_hs: false,
+                        x_dev_override: None,
+                    },
                 )?;
                 offs.push((y_off, r.m * r.n_out));
                 y_off += r.m * r.n_out;
