@@ -1148,19 +1148,19 @@ async fn pre_tool_blocks_and_post_tool_trims_inside_a_real_turn() {
 
 /// A Studio app wired to a fake OpenAI-compatible model whose replies
 /// come from `model(request)`.
-struct Fixture {
-    root: PathBuf,
-    app: App,
-    provider: crate::provider::Provider,
-    project: context::Project,
-    workspace: PathBuf,
-    data: PathBuf,
-    server: tokio::task::JoinHandle<()>,
+pub(crate) struct Fixture {
+    pub(crate) root: PathBuf,
+    pub(crate) app: App,
+    pub(crate) provider: crate::provider::Provider,
+    pub(crate) project: context::Project,
+    pub(crate) workspace: PathBuf,
+    pub(crate) data: PathBuf,
+    pub(crate) server: tokio::task::JoinHandle<()>,
 }
-fn say(text: &str) -> Value {
+pub(crate) fn say(text: &str) -> Value {
     json!({"choices":[{"delta":{"content":text},"finish_reason":"stop"}]})
 }
-fn call(name: &str, args: Value) -> Value {
+pub(crate) fn call(name: &str, args: Value) -> Value {
     json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("c-{name}-{}", crate::evaluation::new_id()),"type":"function","function":{"name":name,"arguments":args.to_string()}}]},"finish_reason":"tool_calls"}]})
 }
 fn system_of(request: &Value) -> String {
@@ -1179,7 +1179,7 @@ fn tools_of(request: &Value) -> Vec<String> {
         })
         .unwrap_or_default()
 }
-fn results_of(request: &Value) -> Vec<String> {
+pub(crate) fn results_of(request: &Value) -> Vec<String> {
     request["messages"]
         .as_array()
         .unwrap()
@@ -1188,7 +1188,7 @@ fn results_of(request: &Value) -> Vec<String> {
         .map(|m| m["content"].as_str().unwrap().to_string())
         .collect()
 }
-async fn fixture(model: fn(&Value) -> Value) -> Fixture {
+pub(crate) async fn fixture(model: fn(&Value) -> Value) -> Fixture {
     use axum::{response::IntoResponse, routing::post, Router};
     let root = temp();
     std::fs::create_dir_all(root.join("workspace")).unwrap();
@@ -1265,7 +1265,7 @@ async fn fixture(model: fn(&Value) -> Value) -> Fixture {
         server,
     }
 }
-fn auto_settings() -> Settings {
+pub(crate) fn auto_settings() -> Settings {
     serde_json::from_value(json!({"provider":"fixture","model":"tiny","project_id":"p","mode":"auto","allow_writes":true})).unwrap()
 }
 fn engine(f: &Fixture, task: &str) -> StudioEngine {
