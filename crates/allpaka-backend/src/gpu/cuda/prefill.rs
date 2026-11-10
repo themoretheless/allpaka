@@ -322,6 +322,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                 let heads_u = req.n_heads as u32;
                 let hd_u = hd as u32;
                 let rot_u = rot as u32;
+                let rope_norm_u = req.rope_norm as u32;
                 let cfg = LaunchConfig {
                     grid_dim: (heads_u, m_u, 1),
                     block_dim: (256, 1, 1),
@@ -338,6 +339,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                         .arg(&heads_u)
                         .arg(&hd_u)
                         .arg(&rot_u)
+                        .arg(&rope_norm_u)
                         .launch_pdl(cfg)
                 }
                 .ok()?;
@@ -372,6 +374,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                 let heads_u = req.n_kv_heads as u32;
                 let hd_u = hd as u32;
                 let rot_u = rot as u32;
+                let rope_norm_u = req.rope_norm as u32;
                 let cfg = LaunchConfig {
                     grid_dim: (heads_u, m_u, 1),
                     block_dim: (256, 1, 1),
@@ -388,6 +391,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                         .arg(&heads_u)
                         .arg(&hd_u)
                         .arg(&rot_u)
+                        .arg(&rope_norm_u)
                         .launch_pdl(cfg)
                 }
                 .ok()?;
@@ -806,14 +810,22 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             if let Some(wn) = req.q_norm {
                 crate::ops::rmsnorm(qh, wn, req.eps);
             }
-            crate::ops::rope_neox_cached_from_array(&mut qh[..req.rot_dim.min(hd)], rope);
+            if req.rope_norm {
+                crate::ops::rope_norm_cached_from_array(&mut qh[..req.rot_dim.min(hd)], rope);
+            } else {
+                crate::ops::rope_neox_cached_from_array(&mut qh[..req.rot_dim.min(hd)], rope);
+            }
         }
         for h in 0..req.n_kv_heads {
             let kh = &mut k[row * kv + h * hd..row * kv + (h + 1) * hd];
             if let Some(wn) = req.k_norm {
                 crate::ops::rmsnorm(kh, wn, req.eps);
             }
-            crate::ops::rope_neox_cached_from_array(&mut kh[..req.rot_dim.min(hd)], rope);
+            if req.rope_norm {
+                crate::ops::rope_norm_cached_from_array(&mut kh[..req.rot_dim.min(hd)], rope);
+            } else {
+                crate::ops::rope_neox_cached_from_array(&mut kh[..req.rot_dim.min(hd)], rope);
+            }
         }
     }
     store_kv_batch(req.cache, &k, req.k_off, req.base, req.kv_dim, req.m)?;

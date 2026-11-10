@@ -95,9 +95,7 @@ impl<'a> Model<'a> {
             embd.row_into(t as usize, &mut xs[i * hidden..(i + 1) * hidden])?;
         }
         s.ensure_rope_cache(&self.rope_inv_freq, base + m);
-        let prefill_fused_ok = matches!(c.rope_style, RopeStyle::Neox)
-            && !cpu_attn_enabled()
-            && !no_tokenbuf_enabled();
+        let prefill_fused_ok = !cpu_attn_enabled() && !no_tokenbuf_enabled();
         drop(embed_span);
 
         // The fully fused prefill: xs lives on the GPU for the whole chunk,
@@ -178,6 +176,7 @@ impl<'a> Model<'a> {
                             layer.k_norm.as_deref(),
                             rope_flat,
                             c.rope_dim as usize,
+                            matches!(c.rope_style, RopeStyle::Norm),
                             aw.gate_in_q,
                             layer.bias.as_ref().map(|b| (b.q.1, b.k.1, b.v.1)),
                             c.rms_eps,
@@ -382,6 +381,7 @@ impl<'a> Model<'a> {
                     layer.k_norm.as_deref(),
                     rope_flat,
                     c.rope_dim as usize,
+                    matches!(c.rope_style, RopeStyle::Norm),
                     aw.gate_in_q,
                     layer.bias.as_ref().map(|b| (b.q.1, b.k.1, b.v.1)),
                     c.rms_eps,

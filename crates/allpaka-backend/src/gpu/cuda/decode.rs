@@ -521,14 +521,22 @@ pub(super) fn decode_token_one(
                 if let Some(wn) = layer.q_norm {
                     crate::ops::rmsnorm(qh, wn, req.eps);
                 }
-                crate::ops::rope_neox_cached_from_array(&mut qh[..rot_dim], rope);
+                if req.rope_norm {
+                    crate::ops::rope_norm_cached_from_array(&mut qh[..rot_dim], rope);
+                } else {
+                    crate::ops::rope_neox_cached_from_array(&mut qh[..rot_dim], rope);
+                }
             }
             for hi in 0..req.n_kv_heads {
                 let kh = &mut k[hi * hd..(hi + 1) * hd];
                 if let Some(wn) = layer.k_norm {
                     crate::ops::rmsnorm(kh, wn, req.eps);
                 }
-                crate::ops::rope_neox_cached_from_array(&mut kh[..rot_dim], rope);
+                if req.rope_norm {
+                    crate::ops::rope_norm_cached_from_array(&mut kh[..rot_dim], rope);
+                } else {
+                    crate::ops::rope_neox_cached_from_array(&mut kh[..rot_dim], rope);
+                }
             }
 
             store_kv(req.cache, &k, layer.k_off, pos, req.kv_dim)?;

@@ -7472,16 +7472,29 @@ struct QkPrepArgs {
     ulong k_base;
     ulong v_base;
     uint has_bias;
-    uint pad2;
+    uint rope_norm; // 1 = adjacent-pair NORM RoPE (Llama 3.x), 0 = split-half NeoX
 };
 
-// Rotary for one head already loaded as e[0..3] = elements lane, lane+32,
-// lane+64, lane+96. Full rotary (rot_h == 64): pairs (lane, lane+64) and
-// (lane+32, lane+96). Partial (rot_h == 32): pair (lane, lane+32) only,
-// the upper half of the head passes through. The Rust side rejects other
-// rotary widths.
-#define QK_PREP_ROPE(ROT_H)                                                      \
-    if (ROT_H == 64) {                                                           \
+// Rotary for one head already loaded as e[0..3].
+// - NeoX (ROPE_NORM == 0): lane owns elements (lane, lane+32, lane+64, lane+96).
+//   Full rotary (rot_h == 64): pairs (lane, lane+64) and (lane+32, lane+96).
+//   Partial (rot_h == 32): pair (lane, lane+32) only.
+// - NORM (ROPE_NORM != 0): lane owns adjacent pairs (2*lane, 2*lane+1) and
+//   (64+2*lane, 64+2*lane+1). Pair 0 rotates with rope[lane] (always < rot_h),
+//   pair 1 rotates with rope[lane+32] when rot_h == 64.
+#define QK_PREP_ROPE(ROT_H, ROPE_NORM)                                           \
+    if ((ROPE_NORM) != 0) {                                                      \
+        float2 r0 = rope[lane];                                                  \
+        float t0 = e0 * r0.y - e1 * r0.x;                                        \
+        float t1 = e0 * r0.x + e1 * r0.y;                                        \
+        e0 = t0; e1 = t1;                                                        \
+        if ((ROT_H) == 64) {                                                     \
+            float2 r1 = rope[lane + 32];                                         \
+            float t2 = e2 * r1.y - e3 * r1.x;                                    \
+            float t3 = e2 * r1.x + e3 * r1.y;                                    \
+            e2 = t2; e3 = t3;                                                    \
+        }                                                                        \
+    } else if ((ROT_H) == 64) {                                                  \
         float2 r0 = rope[lane];                                                  \
         float2 r1 = rope[lane + 32];                                             \
         float t0 = e0 * r0.y - e2 * r0.x;                                        \
@@ -7530,37 +7543,41 @@ kernel void qk_prep(
     constant float* w = is_q ? qw : kw;
     constant float* bias = is_q ? qb : kb;
     uint boff = is_q ? hid * hd : (hid - a.n_heads) * hd;
-    float e0 = xh[lane];
-    float e1 = xh[lane + 32];
-    float e2 = xh[lane + 64];
-    float e3 = xh[lane + 96];
+    uint i0 = a.rope_norm != 0 ? 2 * lane : lane;
+    uint i1 = a.rope_norm != 0 ? 2 * lane + 1 : lane + 32;
+    uint i2 = a.rope_norm != 0 ? 64 + 2 * lane : lane + 64;
+    uint i3 = a.rope_norm != 0 ? 64 + 2 * lane + 1 : lane + 96;
+    float e0 = xh[i0];
+    float e1 = xh[i1];
+    float e2 = xh[i2];
+    float e3 = xh[i3];
     if (a.has_bias != 0) {
-        e0 += bias[boff + lane];
-        e1 += bias[boff + lane + 32];
-        e2 += bias[boff + lane + 64];
-        e3 += bias[boff + lane + 96];
+        e0 += bias[boff + i0];
+        e1 += bias[boff + i1];
+        e2 += bias[boff + i2];
+        e3 += bias[boff + i3];
     }
     if (a.has_qk_norm != 0) {
         float ms = simd_sum(e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3) / (float)hd;
         float scale = rsqrt(ms + a.eps);
-        e0 *= scale * w[lane];
-        e1 *= scale * w[lane + 32];
-        e2 *= scale * w[lane + 64];
-        e3 *= scale * w[lane + 96];
+        e0 *= scale * w[i0];
+        e1 *= scale * w[i1];
+        e2 *= scale * w[i2];
+        e3 *= scale * w[i3];
     }
-    QK_PREP_ROPE(rot_h)
+    QK_PREP_ROPE(rot_h, a.rope_norm)
     if (is_q) {
-        xh[lane] = e0;
-        xh[lane + 32] = e1;
-        xh[lane + 64] = e2;
-        xh[lane + 96] = e3;
+        xh[i0] = e0;
+        xh[i1] = e1;
+        xh[i2] = e2;
+        xh[i3] = e3;
     } else {
         uint kvh = hid - a.n_heads;
         device half* dst = cache + a.k_base + (ulong)a.pos * a.kv_dim + kvh * hd;
-        dst[lane] = (half)e0;
-        dst[lane + 32] = (half)e1;
-        dst[lane + 64] = (half)e2;
-        dst[lane + 96] = (half)e3;
+        dst[i0] = (half)e0;
+        dst[i1] = (half)e1;
+        dst[i2] = (half)e2;
+        dst[i3] = (half)e3;
     }
 }
 
@@ -7607,37 +7624,41 @@ kernel void qk_prep_batch(
     constant float* w = is_q ? qw : kw;
     constant float* bias = is_q ? qb : kb;
     uint boff = is_q ? hid * hd : (hid - a.n_heads) * hd;
-    float e0 = xh[lane];
-    float e1 = xh[lane + 32];
-    float e2 = xh[lane + 64];
-    float e3 = xh[lane + 96];
+    uint i0 = a.rope_norm != 0 ? 2 * lane : lane;
+    uint i1 = a.rope_norm != 0 ? 2 * lane + 1 : lane + 32;
+    uint i2 = a.rope_norm != 0 ? 64 + 2 * lane : lane + 64;
+    uint i3 = a.rope_norm != 0 ? 64 + 2 * lane + 1 : lane + 96;
+    float e0 = xh[i0];
+    float e1 = xh[i1];
+    float e2 = xh[i2];
+    float e3 = xh[i3];
     if (a.has_bias != 0) {
-        e0 += bias[boff + lane];
-        e1 += bias[boff + lane + 32];
-        e2 += bias[boff + lane + 64];
-        e3 += bias[boff + lane + 96];
+        e0 += bias[boff + i0];
+        e1 += bias[boff + i1];
+        e2 += bias[boff + i2];
+        e3 += bias[boff + i3];
     }
     if (a.has_qk_norm != 0) {
         float ms = simd_sum(e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3) / (float)hd;
         float scale = rsqrt(ms + a.eps);
-        e0 *= scale * w[lane];
-        e1 *= scale * w[lane + 32];
-        e2 *= scale * w[lane + 64];
-        e3 *= scale * w[lane + 96];
+        e0 *= scale * w[i0];
+        e1 *= scale * w[i1];
+        e2 *= scale * w[i2];
+        e3 *= scale * w[i3];
     }
-    QK_PREP_ROPE(rot_h)
+    QK_PREP_ROPE(rot_h, a.rope_norm)
     if (is_q) {
-        xh[lane] = e0;
-        xh[lane + 32] = e1;
-        xh[lane + 64] = e2;
-        xh[lane + 96] = e3;
+        xh[i0] = e0;
+        xh[i1] = e1;
+        xh[i2] = e2;
+        xh[i3] = e3;
     } else {
         uint kvh = hid - a.n_heads;
         device half* dst = cache + a.k_base + (ulong)pos * a.kv_dim + kvh * hd;
-        dst[lane] = (half)e0;
-        dst[lane + 32] = (half)e1;
-        dst[lane + 64] = (half)e2;
-        dst[lane + 96] = (half)e3;
+        dst[i0] = (half)e0;
+        dst[i1] = (half)e1;
+        dst[i2] = (half)e2;
+        dst[i3] = (half)e3;
     }
 }
 
@@ -8531,6 +8552,8 @@ struct FqPrepArgs {
     uint has_bias;
     uint n_kv_heads;
     uint wait_base;
+    uint rope_norm;
+    uint pad0;
 };
 
 // attend_mm with qk_prep_batch folded in (fused prefill, head_dim 128): one
@@ -8595,6 +8618,10 @@ inline void attend_mm_fq_impl(
     // holding elements lane, lane+32, lane+64, lane+96 - exactly
     // qk_prep_batch's element mapping, so the norm reductions sum
     // identically.
+    const uint i0 = pa.rope_norm != 0 ? 2 * (uint)lane : (uint)lane;
+    const uint i1 = pa.rope_norm != 0 ? 2 * (uint)lane + 1 : (uint)lane + 32;
+    const uint i2 = pa.rope_norm != 0 ? 64 + 2 * (uint)lane : (uint)lane + 64;
+    const uint i3 = pa.rope_norm != 0 ? 64 + 2 * (uint)lane + 1 : (uint)lane + 96;
     const uint n_prod = 2 * pa.n_kv_heads;
     if (qh < n_prod) {
         const bool is_k = qh < pa.n_kv_heads;
@@ -8606,33 +8633,33 @@ inline void attend_mm_fq_impl(
             if (is_k) {
                 device const float* xh = k_in + (ulong)rc * kv_dim + kvh * 128;
                 device const float2* rope = ropes + (ulong)rc * rot_h;
-                float e0 = xh[lane];
-                float e1 = xh[lane + 32];
-                float e2 = xh[lane + 64];
-                float e3 = xh[lane + 96];
+                float e0 = xh[i0];
+                float e1 = xh[i1];
+                float e2 = xh[i2];
+                float e3 = xh[i3];
                 if (pa.has_bias != 0) {
-                    e0 += kb[kvh * 128 + lane];
-                    e1 += kb[kvh * 128 + lane + 32];
-                    e2 += kb[kvh * 128 + lane + 64];
-                    e3 += kb[kvh * 128 + lane + 96];
+                    e0 += kb[kvh * 128 + i0];
+                    e1 += kb[kvh * 128 + i1];
+                    e2 += kb[kvh * 128 + i2];
+                    e3 += kb[kvh * 128 + i3];
                 }
                 if (pa.has_qk_norm != 0) {
                     float ms = simd_sum(e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3)
                         / 128.0f;
                     float sc = rsqrt(ms + pa.eps);
-                    e0 *= sc * kw[lane];
-                    e1 *= sc * kw[lane + 32];
-                    e2 *= sc * kw[lane + 64];
-                    e3 *= sc * kw[lane + 96];
+                    e0 *= sc * kw[i0];
+                    e1 *= sc * kw[i1];
+                    e2 *= sc * kw[i2];
+                    e3 *= sc * kw[i3];
                 }
-                QK_PREP_ROPE(rot_h)
+                QK_PREP_ROPE(rot_h, pa.rope_norm)
                 if (valid) {
                     device half* dst = kc + k_base
                         + (ulong)(base + row) * kv_dim + kvh * 128;
-                    dst[lane] = (half)e0;
-                    dst[lane + 32] = (half)e1;
-                    dst[lane + 64] = (half)e2;
-                    dst[lane + 96] = (half)e3;
+                    dst[i0] = (half)e0;
+                    dst[i1] = (half)e1;
+                    dst[i2] = (half)e2;
+                    dst[i3] = (half)e3;
                 }
             } else if (valid) {
                 device const float* src = v_in + (ulong)rc * kv_dim + kvh * 128;
@@ -8668,30 +8695,30 @@ inline void attend_mm_fq_impl(
         uint rr = min(row0 + r, n_rows - 1);
         device const float* xh = q + (ulong)rr * q_dim + qh * head_dim;
         device const float2* rope = ropes + (ulong)rr * rot_h;
-        float e0 = xh[lane];
-        float e1 = xh[lane + 32];
-        float e2 = xh[lane + 64];
-        float e3 = xh[lane + 96];
+        float e0 = xh[i0];
+        float e1 = xh[i1];
+        float e2 = xh[i2];
+        float e3 = xh[i3];
         if (pa.has_bias != 0) {
-            e0 += qb[qh * 128 + lane];
-            e1 += qb[qh * 128 + lane + 32];
-            e2 += qb[qh * 128 + lane + 64];
-            e3 += qb[qh * 128 + lane + 96];
+            e0 += qb[qh * 128 + i0];
+            e1 += qb[qh * 128 + i1];
+            e2 += qb[qh * 128 + i2];
+            e3 += qb[qh * 128 + i3];
         }
         if (pa.has_qk_norm != 0) {
             float ms = simd_sum(e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3)
                 / 128.0f;
             float sc = rsqrt(ms + pa.eps);
-            e0 *= sc * qw[lane];
-            e1 *= sc * qw[lane + 32];
-            e2 *= sc * qw[lane + 64];
-            e3 *= sc * qw[lane + 96];
+            e0 *= sc * qw[i0];
+            e1 *= sc * qw[i1];
+            e2 *= sc * qw[i2];
+            e3 *= sc * qw[i3];
         }
-        QK_PREP_ROPE(rot_h)
-        sq[r * 128 + lane] = (half)e0;
-        sq[r * 128 + lane + 32] = (half)e1;
-        sq[r * 128 + lane + 64] = (half)e2;
-        sq[r * 128 + lane + 96] = (half)e3;
+        QK_PREP_ROPE(rot_h, pa.rope_norm)
+        sq[r * 128 + i0] = (half)e0;
+        sq[r * 128 + i1] = (half)e1;
+        sq[r * 128 + i2] = (half)e2;
+        sq[r * 128 + i3] = (half)e3;
     }
     for (uint i = tiitg; i < 8 * 128; i += 128) {
         so[i] = 0.0f;
@@ -9892,6 +9919,8 @@ struct QkPrep256Args {
     uint gate_in_q;
     ulong k_base;
     ulong v_base;
+    uint rope_norm;
+    uint pad0;
 };
 
 kernel void qk_prep256(
@@ -9923,9 +9952,13 @@ kernel void qk_prep256(
     const uint src_stride = (is_q && a.gate_in_q != 0) ? 2 * hd : hd;
     device float* xh = is_q ? (q + hid * src_stride) : (k + (hid - a.n_heads) * hd);
     constant float* w = is_q ? qw : kw;
+    uint idx[8];
+    for (uint j = 0; j < 8; j++) {
+        idx[j] = (a.rope_norm != 0 && j < 2) ? (2 * lane + j) : (lane + j * 32);
+    }
     float e[8];
     for (uint j = 0; j < 8; j++) {
-        e[j] = xh[lane + j * 32];
+        e[j] = xh[idx[j]];
     }
     if (a.gate_in_q != 0 && is_q) {
         device float* gs = q + hid * 2 * hd + hd;
@@ -9940,12 +9973,12 @@ kernel void qk_prep256(
         }
         const float scale = rsqrt(simd_sum(ss) / (float)hd + a.eps);
         for (uint j = 0; j < 8; j++) {
-            e[j] *= scale * w[lane + j * 32];
+            e[j] *= scale * w[idx[j]];
         }
     }
-    // Partial rotary: rot_h == 32 pairs elements (lane, lane + 32) of the
-    // first 64; the rest of the 256-wide head passes through. The host
-    // rejects other widths.
+    // Partial rotary: rot_h == 32 pairs of the first 64 dims; the rest of the
+    // 256-wide head passes through. NeoX pairs (lane, lane+32); NORM pairs
+    // (2*lane, 2*lane+1) via idx[0..1].
     const uint rot_h = a.rot_dim / 2;
     if (rot_h == 32 && lane < 32) {
         const float2 r0 = rope[lane];
@@ -9955,13 +9988,13 @@ kernel void qk_prep256(
     }
     if (is_q) {
         for (uint j = 0; j < 8; j++) {
-            q_out[hid * hd + lane + j * 32] = e[j];
+            q_out[hid * hd + idx[j]] = e[j];
         }
     } else {
         const uint kvh = hid - a.n_heads;
         device half* dst = cache + a.k_base + (ulong)a.pos * a.kv_dim + kvh * hd;
         for (uint j = 0; j < 8; j++) {
-            dst[lane + j * 32] = (half)e[j];
+            dst[idx[j]] = (half)e[j];
         }
     }
 }
@@ -10341,6 +10374,8 @@ struct QkPrepBatch256Args {
     uint gate_in_q;
     ulong k_base;
     ulong v_base;
+    uint rope_norm;
+    uint pad0;
 };
 
 kernel void qk_prep_batch256(
@@ -10376,9 +10411,13 @@ kernel void qk_prep_batch256(
         ? (q + (ulong)row * a.n_heads * src_stride + hid * src_stride)
         : (k + (ulong)row * a.kv_dim + (hid - a.n_heads) * hd);
     constant float* w = is_q ? qw : kw;
+    uint idx[8];
+    for (uint j = 0; j < 8; j++) {
+        idx[j] = (a.rope_norm != 0 && j < 2) ? (2 * lane + j) : (lane + j * 32);
+    }
     float e[8];
     for (uint j = 0; j < 8; j++) {
-        e[j] = xh[lane + j * 32];
+        e[j] = xh[idx[j]];
     }
     if (a.gate_in_q != 0 && is_q) {
         device float* gs = q + (ulong)row * a.n_heads * 2 * hd + hid * 2 * hd + hd;
@@ -10394,10 +10433,10 @@ kernel void qk_prep_batch256(
         }
         const float scale = rsqrt(simd_sum(ss) / (float)hd + a.eps);
         for (uint j = 0; j < 8; j++) {
-            e[j] *= scale * w[lane + j * 32];
+            e[j] *= scale * w[idx[j]];
         }
     }
-    // Partial rotary: rot_h == 32 pairs (lane, lane + 32) of the first 64.
+    // Partial rotary: rot_h == 32 pairs of the first 64 dims.
     const uint rot_h = a.rot_dim / 2;
     if (rot_h == 32 && lane < 32) {
         const float2 r0 = rope[(ulong)row * rot_h + lane];
@@ -10408,13 +10447,13 @@ kernel void qk_prep_batch256(
     if (is_q) {
         device float* dst = q_out + (ulong)row * a.n_heads * hd + hid * hd;
         for (uint j = 0; j < 8; j++) {
-            dst[lane + j * 32] = e[j];
+            dst[idx[j]] = e[j];
         }
     } else {
         const uint kvh = hid - a.n_heads;
         device half* dst = cache + a.k_base + (ulong)pos * a.kv_dim + kvh * hd;
         for (uint j = 0; j < 8; j++) {
-            dst[lane + j * 32] = (half)e[j];
+            dst[idx[j]] = (half)e[j];
         }
     }
 }

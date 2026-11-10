@@ -226,7 +226,10 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
         );
     }
     let (qkv_state, qkv_pad) = if wq_out % 64 == 0 && kv % 64 == 0 {
-        if mats[0].ty == mats[1].ty && mats[1].ty == mats[2].ty {
+        if mats[0].ty == mats[1].ty
+            && mats[1].ty == mats[2].ty
+            && (mats[0].ty == GgmlType::Q8_0 || hidden % 256 == 0)
+        {
             (
                 mm_qkv_kernel_for(mats[0].ty)
                     .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned())),
@@ -242,7 +245,12 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 super::decode::dq_fmt(mats[1].ty),
                 super::decode::dq_fmt(mats[2].ty),
             ) {
-                (Some(fq), Some(fk), Some(fv)) if fq <= 5 && fk <= 5 && fv <= 5 => {
+                (Some(fq), Some(fk), Some(fv))
+                    if fq <= 5
+                        && fk <= 5
+                        && fv <= 5
+                        && ((fq == 3 && fk == 3 && fv == 3) || hidden % 256 == 0) =>
+                {
                     if debug_qkv() {
                         eprintln!(
                             "debug-qkv: mmllp_qkv_mixed selected ({:?}/{:?}/{:?})",
@@ -558,6 +566,8 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 gate_in_q: req.gate_in_q as u32,
                 k_base: req.k_off as u64,
                 v_base: req.v_off as u64,
+                rope_norm: req.rope_norm as u32,
+                pad0: 0,
             };
             enc.set_bytes(
                 4,
@@ -642,8 +652,11 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             // barrier. gate_in_q (GLM) keeps the two-dispatch path: its q
             // rows are double-wide, which this kernel does not handle.
             let tiles = (req.m as u32).div_ceil(8);
-            let fused_qk =
-                attend_mm() && crate::runtime::get().pf_fused_qk && !req.gate_in_q && tiles <= 64;
+            let fused_qk = attend_mm()
+                && crate::runtime::get().pf_fused_qk
+                && !req.gate_in_q
+                && req.n_heads >= 2 * req.n_kv_heads
+                && tiles <= 64;
             if fused_qk && !pf_skip("attend") {
                 // The producer/consumer sync counters are per row-block and
                 // must start at zero: consumers wait for this dispatch's
@@ -685,6 +698,8 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                     has_bias: req.attn_bias.is_some() as u32,
                     n_kv_heads: req.n_kv_heads as u32,
                     wait_base: 0,
+                    rope_norm: req.rope_norm as u32,
+                    pad0: 0,
                 };
                 enc.set_bytes(
                     15,
@@ -738,7 +753,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                     k_base: req.k_off as u64,
                     v_base: req.v_off as u64,
                     has_bias: req.attn_bias.is_some() as u32,
-                    pad2: 0,
+                    rope_norm: req.rope_norm as u32,
                 };
                 enc.set_bytes(
                     4,
@@ -987,7 +1002,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
         );
     }
     let (qkvz_state, qkvz_pad) = if channels % 64 == 0 && value_dim % 64 == 0 {
-        if mats[0].ty == mats[1].ty {
+        if mats[0].ty == mats[1].ty && (mats[0].ty == GgmlType::Q8_0 || hidden % 256 == 0) {
             (
                 mm_qkv_kernel_for(mats[0].ty)
                     .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned())),
@@ -1002,10 +1017,14 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 super::decode::dq_fmt(mats[0].ty),
                 super::decode::dq_fmt(mats[1].ty),
             ) {
-                (Some(fq), Some(fk)) if fq <= 5 && fk <= 5 => (
-                    gpu.pipeline("mmllp_qkv_mixed", 1, 1).map(|p| p.to_owned()),
-                    fq | (fk << 8),
-                ),
+                (Some(fq), Some(fk))
+                    if fq <= 5 && fk <= 5 && ((fq == 3 && fk == 3) || hidden % 256 == 0) =>
+                {
+                    (
+                        gpu.pipeline("mmllp_qkv_mixed", 1, 1).map(|p| p.to_owned()),
+                        fq | (fk << 8),
+                    )
+                }
                 _ => (None, 0),
             }
         } else {

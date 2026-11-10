@@ -143,14 +143,22 @@ pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
         if let Some(wn) = req.q_norm {
             crate::ops::rmsnorm(qh, wn, req.eps);
         }
-        crate::ops::rope_neox_cached_from_array(&mut qh[..rot_dim], req.rope);
+        if req.rope_norm {
+            crate::ops::rope_norm_cached_from_array(&mut qh[..rot_dim], req.rope);
+        } else {
+            crate::ops::rope_neox_cached_from_array(&mut qh[..rot_dim], req.rope);
+        }
     }
     for h in 0..req.n_kv_heads {
         let kh = &mut k[h * hd..(h + 1) * hd];
         if let Some(wn) = req.k_norm {
             crate::ops::rmsnorm(kh, wn, req.eps);
         }
-        crate::ops::rope_neox_cached_from_array(&mut kh[..rot_dim], req.rope);
+        if req.rope_norm {
+            crate::ops::rope_norm_cached_from_array(&mut kh[..rot_dim], req.rope);
+        } else {
+            crate::ops::rope_neox_cached_from_array(&mut kh[..rot_dim], req.rope);
+        }
     }
     store_kv(req.cache, &k, req.k_off, req.pos, req.kv_dim)?;
     store_kv(req.cache, &v, req.v_off, req.pos, req.kv_dim)?;

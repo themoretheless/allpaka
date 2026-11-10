@@ -46,12 +46,16 @@ pub fn rope_neox_cached(x: &mut [f32], table: &[(f32, f32)]) {
 }
 
 /// [`rope_norm`] over a precomputed per-position table stored as arrays.
+///
+/// The table may cover only a leading slice of the head (partial rotary):
+/// those adjacent channel pairs rotate and the tail passes through unchanged.
 pub fn rope_norm_cached_from_array(x: &mut [f32], table: &[[f32; 2]]) {
-    assert_eq!(x.len(), table.len() * 2);
+    assert!(x.len() >= table.len() * 2);
+    let rot_len = table.len() * 2;
     // SAFETY: `[f32; 2]` and `(f32, f32)` have identical size, alignment, and layout.
     let pairs =
         unsafe { std::slice::from_raw_parts(table.as_ptr() as *const (f32, f32), table.len()) };
-    rope_norm_cached(x, pairs);
+    rope_norm_cached(&mut x[..rot_len], pairs);
 }
 
 /// [`rope_neox`] over a precomputed per-position table stored as arrays.

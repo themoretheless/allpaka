@@ -108,6 +108,7 @@ pub(super) fn decode_token_one_fused(
             ssm_id,
             w0_id,
             out_id,
+            req.rope_norm as u64,
         ] {
             h ^= v;
             h = h.wrapping_mul(0x100000001b3);
@@ -765,6 +766,7 @@ pub(super) fn decode_token_one_fused(
             Some(false)
         };
 
+        let rope_norm_u = req.rope_norm as u32;
         let launch_rms_rope = |gpu: &mut CudaGpu,
                                x_off: usize,
                                w_off: usize,
@@ -795,6 +797,7 @@ pub(super) fn decode_token_one_fused(
                         .arg(&hd_u)
                         .arg(&rot_u)
                         .arg(&eps)
+                        .arg(&rope_norm_u)
                         .launch_pdl(cfg)
                 }
                 .ok()?;
@@ -811,6 +814,7 @@ pub(super) fn decode_token_one_fused(
                         .arg(&hd_u)
                         .arg(&rot_u)
                         .arg(&eps)
+                        .arg(&rope_norm_u)
                         .launch_pdl(cfg)
                 }
                 .ok()?;
@@ -818,7 +822,7 @@ pub(super) fn decode_token_one_fused(
             Some(())
         };
 
-        // RMSNorm + NeoX RoPE + store K into f16 cache (skips a separate store launch).
+        // RMSNorm + RoPE + store K into f16 cache (skips a separate store launch).
         let launch_rms_rope_store = |gpu: &mut CudaGpu,
                                      x_off: usize,
                                      w_off: usize,
@@ -855,6 +859,7 @@ pub(super) fn decode_token_one_fused(
                         .arg(&rot_u)
                         .arg(&kv_dim_u)
                         .arg(&eps)
+                        .arg(&rope_norm_u)
                         .launch_pdl(cfg)
                 }
                 .ok()?;
@@ -875,6 +880,7 @@ pub(super) fn decode_token_one_fused(
                         .arg(&rot_u)
                         .arg(&kv_dim_u)
                         .arg(&eps)
+                        .arg(&rope_norm_u)
                         .launch_pdl(cfg)
                 }
                 .ok()?;
@@ -931,6 +937,7 @@ pub(super) fn decode_token_one_fused(
                     .arg(&rot_u)
                     .arg(&kv_dim_u)
                     .arg(&eps)
+                    .arg(&rope_norm_u)
                     .launch_pdl(cfg)
             }
             .ok()?;
@@ -959,6 +966,7 @@ pub(super) fn decode_token_one_fused(
                             .arg(&heads_u)
                             .arg(&hd_u)
                             .arg(&rot_u)
+                            .arg(&rope_norm_u)
                             .launch_pdl(cfg)
                     }
                     .ok()?;
@@ -973,6 +981,7 @@ pub(super) fn decode_token_one_fused(
                             .arg(&heads_u)
                             .arg(&hd_u)
                             .arg(&rot_u)
+                            .arg(&rope_norm_u)
                             .launch_pdl(cfg)
                     }
                     .ok()?;

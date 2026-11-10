@@ -1080,6 +1080,8 @@ fn attend_mm_db_variants_are_bit_identical() {
         has_bias: u32,
         n_kv_heads: u32,
         wait_base: u32,
+        rope_norm: u32,
+        pad0: u32,
     }
 
     let Some(device) = Device::system_default() else {
@@ -1222,6 +1224,8 @@ fn attend_mm_db_variants_are_bit_identical() {
         has_bias: 0,
         n_kv_heads: n_kv_heads as u32,
         wait_base: 0,
+        rope_norm: 0,
+        pad0: 0,
     };
     let k_base = 0u64;
     let v_base = (total_pos * kv_dim) as u64;
@@ -1636,6 +1640,684 @@ fn matvec_q2_k_mv_matches_reference_and_swiglu_fold() {
                 );
             }
             assert!(max_rel < 1e-5);
+        }
+    }
+}
+
+/// Verify `RopeStyle::Norm` (`rope_norm == 1`) across all Metal RoPE-bearing
+/// kernels:
+/// - `qk_prep` (`hd = 128`, full `rot_dim = 128` and partial `rot_dim = 64`,
+///   with `has_qk_norm = 1` and `has_bias = 1`),
+/// - `qk_prep_batch` (`m = 17`, `hd = 128`, full & partial rotary),
+/// - `attend_mm_fq` and `attend_mm_fq_db` (`m = 29`, `hd = 128`, full & partial
+///   rotary, `has_qk_norm = 1`, `has_bias = 1`) vs `qk_prep_batch` + `attend_mm`
+///   and CPU reference,
+/// - `qk_prep256` and `qk_prep_batch256` (`hd = 256`, `rot_dim = 64`,
+///   `gate_in_q = 1`, `has_qk_norm = 1`).
+#[test]
+fn rope_norm_metal_kernels_match_cpu_reference() {
+    #[repr(C)]
+    struct QkPrepArgs {
+        n_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        kv_dim: u32,
+        eps: f32,
+        pos: u32,
+        has_qk_norm: u32,
+        rot_dim: u32,
+        k_base: u64,
+        v_base: u64,
+        has_bias: u32,
+        rope_norm: u32,
+    }
+    #[repr(C)]
+    struct FqPrepArgs {
+        eps: f32,
+        has_qk_norm: u32,
+        rot_dim: u32,
+        has_bias: u32,
+        n_kv_heads: u32,
+        wait_base: u32,
+        rope_norm: u32,
+        pad0: u32,
+    }
+    #[repr(C)]
+    struct QkPrep256Args {
+        n_heads: u32,
+        n_kv_heads: u32,
+        kv_dim: u32,
+        eps: f32,
+        pos: u32,
+        has_qk_norm: u32,
+        rot_dim: u32,
+        gate_in_q: u32,
+        k_base: u64,
+        v_base: u64,
+        rope_norm: u32,
+        pad0: u32,
+    }
+    #[repr(C)]
+    struct QkPrepBatch256Args {
+        n_heads: u32,
+        n_kv_heads: u32,
+        kv_dim: u32,
+        eps: f32,
+        base: u32,
+        has_qk_norm: u32,
+        rot_dim: u32,
+        gate_in_q: u32,
+        k_base: u64,
+        v_base: u64,
+        rope_norm: u32,
+        pad0: u32,
+    }
+
+    let Some(device) = Device::system_default() else {
+        return;
+    };
+    let queue = device.new_command_queue();
+    let lib = device
+        .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
+        .unwrap();
+    let pipe = |name: &str| {
+        let f = lib.get_function(name, None).unwrap();
+        device.new_compute_pipeline_state_with_function(&f).unwrap()
+    };
+    let buffer = |p, n| device.new_buffer_with_data(p, n, MTLResourceOptions::StorageModeShared);
+
+    use allpaka_backend::ops::{self, f16};
+
+    // 1. hd=128: qk_prep, qk_prep_batch, attend_mm_fq, attend_mm_fq_db.
+    let n_heads = 8usize;
+    let n_kv_heads = 2usize;
+    let hd = 128usize;
+    let q_dim = n_heads * hd;
+    let kv_dim = n_kv_heads * hd;
+    let eps = 1e-6f32;
+
+    for rot_dim in [128usize, 64usize] {
+        let rot_h = rot_dim / 2;
+        let qw: Vec<f32> = (0..hd).map(|i| 0.8 + (i as f32) * 0.003).collect();
+        let kw: Vec<f32> = (0..hd).map(|i| 0.9 + (i as f32) * 0.002).collect();
+        let qb: Vec<f32> = (0..q_dim)
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.01)
+            .collect();
+        let kb: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.01)
+            .collect();
+        let vb: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.01)
+            .collect();
+
+        let cpu_prep_row = |q_src: &[f32], k_src: &[f32], v_src: &[f32], rope: &[[f32; 2]]| {
+            let mut q_ref = q_src.to_vec();
+            let mut k_ref = k_src.to_vec();
+            let mut v_ref = v_src.to_vec();
+            for (dst, b) in q_ref.iter_mut().zip(&qb) {
+                *dst += b;
+            }
+            for (dst, b) in k_ref.iter_mut().zip(&kb) {
+                *dst += b;
+            }
+            for (dst, b) in v_ref.iter_mut().zip(&vb) {
+                *dst += b;
+            }
+            for h in 0..n_heads {
+                let sl = &mut q_ref[h * hd..(h + 1) * hd];
+                ops::rmsnorm(sl, &qw, eps);
+                ops::rope_norm_cached_from_array(sl, rope);
+            }
+            for h in 0..n_kv_heads {
+                let sl = &mut k_ref[h * hd..(h + 1) * hd];
+                ops::rmsnorm(sl, &kw, eps);
+                ops::rope_norm_cached_from_array(sl, rope);
+            }
+            let k_f16: Vec<u16> = k_ref.iter().map(|&x| f16::scalar_from_f32(x)).collect();
+            let v_f16: Vec<u16> = v_ref.iter().map(|&x| f16::scalar_from_f32(x)).collect();
+            (q_ref, k_f16, v_f16)
+        };
+
+        // 1a. Single-row `qk_prep`.
+        let q0: Vec<f32> = (0..q_dim)
+            .map(|i| ((i * 53 + 7) % 101) as f32 * 0.02 - 1.0)
+            .collect();
+        let k0: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i * 41 + 9) % 89) as f32 * 0.02 - 0.9)
+            .collect();
+        let v0: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i * 37 + 13) % 83) as f32 * 0.02 - 0.8)
+            .collect();
+        let rope0: Vec<[f32; 2]> = (0..rot_h)
+            .map(|i| {
+                let ang = 0.031 * (i as f32 + 1.0);
+                [ang.sin(), ang.cos()]
+            })
+            .collect();
+        let (q_want, k_want, v_want) = cpu_prep_row(&q0, &k0, &v0, &rope0);
+
+        let pos = 5u32;
+        let cap = 16usize;
+        let q_buf = buffer(q0.as_ptr().cast(), (q0.len() * 4) as u64);
+        let k_buf = buffer(k0.as_ptr().cast(), (k0.len() * 4) as u64);
+        let v_buf = buffer(v0.as_ptr().cast(), (v0.len() * 4) as u64);
+        let cache = device.new_buffer(
+            (2 * cap * kv_dim * 2) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let qb_buf = buffer(qb.as_ptr().cast(), (qb.len() * 4) as u64);
+        let kb_buf = buffer(kb.as_ptr().cast(), (kb.len() * 4) as u64);
+        let vb_buf = buffer(vb.as_ptr().cast(), (vb.len() * 4) as u64);
+        let qa = QkPrepArgs {
+            n_heads: n_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            head_dim: hd as u32,
+            kv_dim: kv_dim as u32,
+            eps,
+            pos,
+            has_qk_norm: 1,
+            rot_dim: rot_dim as u32,
+            k_base: 0,
+            v_base: (cap * kv_dim) as u64,
+            has_bias: 1,
+            rope_norm: 1,
+        };
+        let p_qk = pipe("qk_prep");
+        let cmd = queue.new_command_buffer();
+        let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+        enc.set_compute_pipeline_state(&p_qk);
+        enc.set_buffer(0, Some(&q_buf), 0);
+        enc.set_buffer(1, Some(&k_buf), 0);
+        enc.set_buffer(2, Some(&v_buf), 0);
+        enc.set_buffer(3, Some(&cache), 0);
+        enc.set_bytes(
+            4,
+            std::mem::size_of::<QkPrepArgs>() as u64,
+            (&qa as *const QkPrepArgs).cast(),
+        );
+        enc.set_bytes(5, (hd * 4) as u64, qw.as_ptr().cast());
+        enc.set_bytes(6, (hd * 4) as u64, kw.as_ptr().cast());
+        enc.set_bytes(7, (rot_h * 8) as u64, rope0.as_ptr().cast());
+        enc.set_buffer(8, Some(&qb_buf), 0);
+        enc.set_buffer(9, Some(&kb_buf), 0);
+        enc.set_buffer(10, Some(&vb_buf), 0);
+        enc.dispatch_thread_groups(
+            MTLSize::new((n_heads + 2 * n_kv_heads) as u64, 1, 1),
+            MTLSize::new(32, 1, 1),
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+        let q_got = unsafe { std::slice::from_raw_parts(q_buf.contents().cast::<f32>(), q_dim) };
+        let cache_u16 =
+            unsafe { std::slice::from_raw_parts(cache.contents().cast::<u16>(), 2 * cap * kv_dim) };
+        for (i, (&g, &w)) in q_got.iter().zip(&q_want).enumerate() {
+            assert!(
+                (g - w).abs() < 2e-5,
+                "qk_prep(rot_dim={rot_dim}) q[{i}]: {g} vs {w}"
+            );
+        }
+        let k_off = pos as usize * kv_dim;
+        let v_off = (cap + pos as usize) * kv_dim;
+        for i in 0..kv_dim {
+            let gk = f16::to_f32(cache_u16[k_off + i]);
+            let wk = f16::to_f32(k_want[i]);
+            assert!(
+                (gk - wk).abs() < 2e-3,
+                "qk_prep(rot_dim={rot_dim}) k[{i}]: {gk} vs {wk}"
+            );
+            let gv = f16::to_f32(cache_u16[v_off + i]);
+            let wv = f16::to_f32(v_want[i]);
+            assert_eq!(gv.to_bits(), wv.to_bits());
+        }
+
+        // 1b. Batched `qk_prep_batch` + `attend_mm` vs `attend_mm_fq` + `attend_mm_fq_db`
+        //     and CPU causal attention reference.
+        let base = 19usize;
+        let m = 29usize;
+        let total_pos = base + m;
+        let kv_cap = 64usize;
+        let mut kv_prefix = vec![0u16; 2 * kv_cap * kv_dim];
+        for r in 0..base {
+            for d in 0..kv_dim {
+                let kv = (((r * 61 + d * 17) % 103) as f32 - 51.0) * 0.015;
+                let vv = (((r * 47 + d * 29) % 97) as f32 - 48.0) * 0.017;
+                kv_prefix[r * kv_dim + d] = f16::scalar_from_f32(kv);
+                kv_prefix[(kv_cap + r) * kv_dim + d] = f16::scalar_from_f32(vv);
+            }
+        }
+        let qm: Vec<f32> = (0..m * q_dim)
+            .map(|i| ((i * 53 + 7) % 101) as f32 * 0.019 - 0.95)
+            .collect();
+        let km: Vec<f32> = (0..m * kv_dim)
+            .map(|i| ((i * 41 + 9) % 89) as f32 * 0.018 - 0.8)
+            .collect();
+        let vm: Vec<f32> = (0..m * kv_dim)
+            .map(|i| ((i * 37 + 13) % 83) as f32 * 0.017 - 0.7)
+            .collect();
+        let ropes_m: Vec<[f32; 2]> = (0..m * rot_h)
+            .map(|i| {
+                let ang = 0.017 * (i as f32 + 1.0);
+                [ang.sin(), ang.cos()]
+            })
+            .collect();
+
+        // CPU reference: prep each row into kv_cpu, then run causal GQA attention.
+        let mut kv_cpu = kv_prefix.clone();
+        let mut q_cpu = vec![0.0f32; m * q_dim];
+        for r in 0..m {
+            let (qr, kr, vr) = cpu_prep_row(
+                &qm[r * q_dim..(r + 1) * q_dim],
+                &km[r * kv_dim..(r + 1) * kv_dim],
+                &vm[r * kv_dim..(r + 1) * kv_dim],
+                &ropes_m[r * rot_h..(r + 1) * rot_h],
+            );
+            q_cpu[r * q_dim..(r + 1) * q_dim].copy_from_slice(&qr);
+            kv_cpu[(base + r) * kv_dim..(base + r + 1) * kv_dim].copy_from_slice(&kr);
+            kv_cpu[(kv_cap + base + r) * kv_dim..(kv_cap + base + r + 1) * kv_dim]
+                .copy_from_slice(&vr);
+        }
+        let scale = (hd as f32).sqrt().recip();
+        let group = n_heads / n_kv_heads;
+        let mut attn_cpu = vec![0.0f32; m * q_dim];
+        for r in 0..m {
+            let n_pos = base + r + 1;
+            for qh in 0..n_heads {
+                let kvh = qh / group;
+                let qv: Vec<f32> = q_cpu[r * q_dim + qh * hd..r * q_dim + (qh + 1) * hd]
+                    .iter()
+                    .map(|&x| f16::to_f32(f16::scalar_from_f32(x)))
+                    .collect();
+                let mut scores = vec![0.0f32; n_pos];
+                let mut mx = f32::NEG_INFINITY;
+                for (t, sc_out) in scores.iter_mut().enumerate() {
+                    let ks = &kv_cpu[t * kv_dim + kvh * hd..t * kv_dim + (kvh + 1) * hd];
+                    let dot: f32 = qv
+                        .iter()
+                        .zip(ks)
+                        .map(|(&q_e, &k_e)| q_e * f16::to_f32(k_e))
+                        .sum();
+                    let s = dot * scale;
+                    *sc_out = s;
+                    mx = mx.max(s);
+                }
+                let mut den = 0.0f32;
+                for s in &mut scores {
+                    *s = (*s - mx).exp();
+                    den += *s;
+                }
+                let out_sl = &mut attn_cpu[r * q_dim + qh * hd..r * q_dim + (qh + 1) * hd];
+                for (t, &wgt) in scores.iter().enumerate() {
+                    let p = wgt / den;
+                    let vs = &kv_cpu
+                        [(kv_cap + t) * kv_dim + kvh * hd..(kv_cap + t) * kv_dim + (kvh + 1) * hd];
+                    for d in 0..hd {
+                        out_sl[d] += p * f16::to_f32(vs[d]);
+                    }
+                }
+            }
+        }
+
+        // Two-dispatch GPU path (`qk_prep_batch` + `attend_mm_db`).
+        let qm_b = buffer(qm.as_ptr().cast(), (qm.len() * 4) as u64);
+        let km_b = buffer(km.as_ptr().cast(), (km.len() * 4) as u64);
+        let vm_b = buffer(vm.as_ptr().cast(), (vm.len() * 4) as u64);
+        let ropes_b = buffer(ropes_m.as_ptr().cast(), (ropes_m.len() * 8) as u64);
+        let kv_sep = buffer(kv_prefix.as_ptr().cast(), (kv_prefix.len() * 2) as u64);
+        let out_sep = device.new_buffer(
+            (m * q_dim * 4) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let qba = QkPrepArgs {
+            n_heads: n_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            head_dim: hd as u32,
+            kv_dim: kv_dim as u32,
+            eps,
+            pos: base as u32,
+            has_qk_norm: 1,
+            rot_dim: rot_dim as u32,
+            k_base: 0,
+            v_base: (kv_cap * kv_dim) as u64,
+            has_bias: 1,
+            rope_norm: 1,
+        };
+        let p_qkb = pipe("qk_prep_batch");
+        let p_amm = pipe("attend_mm_db");
+        let k_base = 0u64;
+        let v_base = (kv_cap * kv_dim) as u64;
+        let kv_dim32 = kv_dim as u32;
+        let hd32 = hd as u32;
+        let base32 = base as u32;
+        let group32 = group as u32;
+        let heads32 = n_heads as u32;
+        let rows32 = m as u32;
+
+        let cmd = queue.new_command_buffer();
+        let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+        enc.set_compute_pipeline_state(&p_qkb);
+        enc.set_buffer(0, Some(&qm_b), 0);
+        enc.set_buffer(1, Some(&km_b), 0);
+        enc.set_buffer(2, Some(&vm_b), 0);
+        enc.set_buffer(3, Some(&kv_sep), 0);
+        enc.set_bytes(
+            4,
+            std::mem::size_of::<QkPrepArgs>() as u64,
+            (&qba as *const QkPrepArgs).cast(),
+        );
+        enc.set_bytes(5, (hd * 4) as u64, qw.as_ptr().cast());
+        enc.set_bytes(6, (hd * 4) as u64, kw.as_ptr().cast());
+        enc.set_buffer(7, Some(&ropes_b), 0);
+        enc.set_buffer(8, Some(&qb_buf), 0);
+        enc.set_buffer(9, Some(&kb_buf), 0);
+        enc.set_buffer(10, Some(&vb_buf), 0);
+        enc.dispatch_thread_groups(
+            MTLSize::new((n_heads + 2 * n_kv_heads) as u64, m as u64, 1),
+            MTLSize::new(32, 1, 1),
+        );
+        enc.set_compute_pipeline_state(&p_amm);
+        enc.set_buffer(0, Some(&kv_sep), 0);
+        enc.set_buffer(1, Some(&kv_sep), 0);
+        enc.set_buffer(2, Some(&qm_b), 0);
+        enc.set_buffer(3, Some(&out_sep), 0);
+        enc.set_bytes(4, 4, (&kv_dim32 as *const u32).cast());
+        enc.set_bytes(5, 4, (&hd32 as *const u32).cast());
+        enc.set_bytes(6, 4, (&base32 as *const u32).cast());
+        enc.set_bytes(7, 4, (&group32 as *const u32).cast());
+        enc.set_bytes(8, 4, (&scale as *const f32).cast());
+        enc.set_bytes(9, 8, (&k_base as *const u64).cast());
+        enc.set_bytes(10, 8, (&v_base as *const u64).cast());
+        enc.set_bytes(11, 4, (&heads32 as *const u32).cast());
+        enc.set_bytes(12, 4, (&rows32 as *const u32).cast());
+        enc.dispatch_thread_groups(
+            MTLSize::new(n_heads as u64, (m as u64).div_ceil(8), 1),
+            MTLSize::new(128, 1, 1),
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+        let sep_s =
+            unsafe { std::slice::from_raw_parts(out_sep.contents().cast::<f32>(), m * q_dim) };
+        for (i, (&g, &w)) in sep_s.iter().zip(&attn_cpu).enumerate() {
+            assert!(
+                (g - w).abs() < 2e-3,
+                "qk_prep_batch+attend_mm(rot_dim={rot_dim})[{i}]: {g} vs cpu {w}"
+            );
+        }
+
+        // Fused `attend_mm_fq` and `attend_mm_fq_db` must match `sep_s` and CPU!
+        let qm_raw_b = buffer(qm.as_ptr().cast(), (qm.len() * 4) as u64);
+        let km_raw_b = buffer(km.as_ptr().cast(), (km.len() * 4) as u64);
+        let vm_raw_b = buffer(vm.as_ptr().cast(), (vm.len() * 4) as u64);
+        let pa = FqPrepArgs {
+            eps,
+            has_qk_norm: 1,
+            rot_dim: rot_dim as u32,
+            has_bias: 1,
+            n_kv_heads: n_kv_heads as u32,
+            wait_base: 0,
+            rope_norm: 1,
+            pad0: 0,
+        };
+        for kname in ["attend_mm_fq", "attend_mm_fq_db"] {
+            let kv_fq = buffer(kv_prefix.as_ptr().cast(), (kv_prefix.len() * 2) as u64);
+            let sync = device.new_buffer(256, MTLResourceOptions::StorageModeShared);
+            unsafe { std::ptr::write_bytes(sync.contents().cast::<u8>(), 0, 256) };
+            let out_fq = device.new_buffer(
+                (m * q_dim * 4) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let p_fq = pipe(kname);
+            let cmd = queue.new_command_buffer();
+            let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+            enc.set_compute_pipeline_state(&p_fq);
+            enc.set_buffer(0, Some(&kv_fq), 0);
+            enc.set_buffer(1, Some(&kv_fq), 0);
+            enc.set_buffer(2, Some(&qm_raw_b), 0);
+            enc.set_buffer(3, Some(&out_fq), 0);
+            enc.set_bytes(4, 4, (&kv_dim32 as *const u32).cast());
+            enc.set_bytes(5, 4, (&hd32 as *const u32).cast());
+            enc.set_bytes(6, 4, (&base32 as *const u32).cast());
+            enc.set_bytes(7, 4, (&group32 as *const u32).cast());
+            enc.set_bytes(8, 4, (&scale as *const f32).cast());
+            enc.set_bytes(9, 8, (&k_base as *const u64).cast());
+            enc.set_bytes(10, 8, (&v_base as *const u64).cast());
+            enc.set_bytes(11, 4, (&heads32 as *const u32).cast());
+            enc.set_bytes(12, 4, (&rows32 as *const u32).cast());
+            enc.set_buffer(13, Some(&km_raw_b), 0);
+            enc.set_buffer(14, Some(&vm_raw_b), 0);
+            enc.set_bytes(
+                15,
+                std::mem::size_of::<FqPrepArgs>() as u64,
+                (&pa as *const FqPrepArgs).cast(),
+            );
+            enc.set_bytes(16, (hd * 4) as u64, qw.as_ptr().cast());
+            enc.set_bytes(17, (hd * 4) as u64, kw.as_ptr().cast());
+            enc.set_buffer(18, Some(&ropes_b), 0);
+            enc.set_buffer(19, Some(&qb_buf), 0);
+            enc.set_buffer(20, Some(&kb_buf), 0);
+            enc.set_buffer(21, Some(&vb_buf), 0);
+            enc.set_buffer(22, Some(&sync), 0);
+            enc.dispatch_thread_groups(
+                MTLSize::new(n_heads as u64, (m as u64).div_ceil(8), 1),
+                MTLSize::new(128, 1, 1),
+            );
+            enc.end_encoding();
+            cmd.commit();
+            cmd.wait_until_completed();
+            assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{kname}");
+
+            let fq_s =
+                unsafe { std::slice::from_raw_parts(out_fq.contents().cast::<f32>(), m * q_dim) };
+            for (i, (&a, &b)) in sep_s.iter().zip(fq_s).enumerate() {
+                assert!(
+                    a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
+                    "{kname}(rot_dim={rot_dim})[{i}]: {b} != {a}"
+                );
+            }
+            let kv_sep_s = unsafe {
+                std::slice::from_raw_parts(kv_sep.contents().cast::<u16>(), total_pos * kv_dim)
+            };
+            let kv_fq_s = unsafe {
+                std::slice::from_raw_parts(kv_fq.contents().cast::<u16>(), total_pos * kv_dim)
+            };
+            assert_eq!(kv_sep_s, kv_fq_s, "{kname} K cache mismatch");
+        }
+    }
+
+    // 2. hd=256 (`qk_prep256` & `qk_prep_batch256`, rot_dim=64, gate_in_q=1, rope_norm=1).
+    let hd256 = 256usize;
+    let rot256 = 64usize;
+    let rot_h256 = rot256 / 2;
+    let n_h256 = 4usize;
+    let n_kv256 = 2usize;
+    let q_dim256 = n_h256 * hd256;
+    let kv_dim256 = n_kv256 * hd256;
+    let m256 = 5usize;
+    let cap256 = 16usize;
+    let qw256: Vec<f32> = (0..hd256).map(|i| 0.85 + (i as f32) * 0.001).collect();
+    let kw256: Vec<f32> = (0..hd256).map(|i| 0.92 + (i as f32) * 0.001).collect();
+    let qg_in: Vec<f32> = (0..m256 * n_h256 * 2 * hd256)
+        .map(|i| ((i * 43 + 5) % 97) as f32 * 0.02 - 0.95)
+        .collect();
+    let k256_in: Vec<f32> = (0..m256 * kv_dim256)
+        .map(|i| ((i * 31 + 11) % 89) as f32 * 0.02 - 0.88)
+        .collect();
+    let v256_in: Vec<f32> = (0..m256 * kv_dim256)
+        .map(|i| ((i * 29 + 3) % 83) as f32 * 0.02 - 0.82)
+        .collect();
+    let ropes256: Vec<[f32; 2]> = (0..m256 * rot_h256)
+        .map(|i| {
+            let ang = 0.023 * (i as f32 + 1.0);
+            [ang.sin(), ang.cos()]
+        })
+        .collect();
+
+    // Compare single-token `qk_prep256` on row 0 and batched `qk_prep_batch256` on all m256 rows.
+    let qg_b0 = buffer(qg_in.as_ptr().cast(), (n_h256 * 2 * hd256 * 4) as u64);
+    let k_b0 = buffer(k256_in.as_ptr().cast(), (kv_dim256 * 4) as u64);
+    let v_b0 = buffer(v256_in.as_ptr().cast(), (kv_dim256 * 4) as u64);
+    let cache256_0 = device.new_buffer(
+        (2 * cap256 * kv_dim256 * 2) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let q_out0 = device.new_buffer((q_dim256 * 4) as u64, MTLResourceOptions::StorageModeShared);
+    let g_out0 = device.new_buffer((q_dim256 * 4) as u64, MTLResourceOptions::StorageModeShared);
+    let a256_0 = QkPrep256Args {
+        n_heads: n_h256 as u32,
+        n_kv_heads: n_kv256 as u32,
+        kv_dim: kv_dim256 as u32,
+        eps,
+        pos: 3,
+        has_qk_norm: 1,
+        rot_dim: rot256 as u32,
+        gate_in_q: 1,
+        k_base: 0,
+        v_base: (cap256 * kv_dim256) as u64,
+        rope_norm: 1,
+        pad0: 0,
+    };
+
+    let qg_bm = buffer(qg_in.as_ptr().cast(), (qg_in.len() * 4) as u64);
+    let k_bm = buffer(k256_in.as_ptr().cast(), (k256_in.len() * 4) as u64);
+    let v_bm = buffer(v256_in.as_ptr().cast(), (v256_in.len() * 4) as u64);
+    let ropes256_b = buffer(ropes256.as_ptr().cast(), (ropes256.len() * 8) as u64);
+    let cache256_m = device.new_buffer(
+        (2 * cap256 * kv_dim256 * 2) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let q_outm = device.new_buffer(
+        (m256 * q_dim256 * 4) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let g_outm = device.new_buffer(
+        (m256 * q_dim256 * 4) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let a256_m = QkPrepBatch256Args {
+        n_heads: n_h256 as u32,
+        n_kv_heads: n_kv256 as u32,
+        kv_dim: kv_dim256 as u32,
+        eps,
+        base: 3,
+        has_qk_norm: 1,
+        rot_dim: rot256 as u32,
+        gate_in_q: 1,
+        k_base: 0,
+        v_base: (cap256 * kv_dim256) as u64,
+        rope_norm: 1,
+        pad0: 0,
+    };
+
+    let p256 = pipe("qk_prep256");
+    let pb256 = pipe("qk_prep_batch256");
+    let cmd = queue.new_command_buffer();
+    let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+    enc.set_compute_pipeline_state(&p256);
+    enc.set_buffer(0, Some(&qg_b0), 0);
+    enc.set_buffer(1, Some(&k_b0), 0);
+    enc.set_buffer(2, Some(&v_b0), 0);
+    enc.set_buffer(3, Some(&cache256_0), 0);
+    enc.set_bytes(
+        4,
+        std::mem::size_of::<QkPrep256Args>() as u64,
+        (&a256_0 as *const QkPrep256Args).cast(),
+    );
+    enc.set_bytes(5, (hd256 * 4) as u64, qw256.as_ptr().cast());
+    enc.set_bytes(6, (hd256 * 4) as u64, kw256.as_ptr().cast());
+    enc.set_bytes(7, (rot_h256 * 8) as u64, ropes256.as_ptr().cast());
+    enc.set_buffer(8, Some(&q_out0), 0);
+    enc.set_buffer(9, Some(&g_out0), 0);
+    enc.dispatch_thread_groups(
+        MTLSize::new((n_h256 + 2 * n_kv256) as u64, 1, 1),
+        MTLSize::new(32, 1, 1),
+    );
+
+    enc.set_compute_pipeline_state(&pb256);
+    enc.set_buffer(0, Some(&qg_bm), 0);
+    enc.set_buffer(1, Some(&k_bm), 0);
+    enc.set_buffer(2, Some(&v_bm), 0);
+    enc.set_buffer(3, Some(&cache256_m), 0);
+    enc.set_bytes(
+        4,
+        std::mem::size_of::<QkPrepBatch256Args>() as u64,
+        (&a256_m as *const QkPrepBatch256Args).cast(),
+    );
+    enc.set_bytes(5, (hd256 * 4) as u64, qw256.as_ptr().cast());
+    enc.set_bytes(6, (hd256 * 4) as u64, kw256.as_ptr().cast());
+    enc.set_buffer(7, Some(&ropes256_b), 0);
+    enc.set_buffer(8, Some(&q_outm), 0);
+    enc.set_buffer(9, Some(&g_outm), 0);
+    enc.dispatch_thread_groups(
+        MTLSize::new((n_h256 + 2 * n_kv256) as u64, m256 as u64, 1),
+        MTLSize::new(32, 1, 1),
+    );
+    enc.end_encoding();
+    cmd.commit();
+    cmd.wait_until_completed();
+    assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+    let q0_s = unsafe { std::slice::from_raw_parts(q_out0.contents().cast::<f32>(), q_dim256) };
+    let g0_s = unsafe { std::slice::from_raw_parts(g_out0.contents().cast::<f32>(), q_dim256) };
+    let qm_s =
+        unsafe { std::slice::from_raw_parts(q_outm.contents().cast::<f32>(), m256 * q_dim256) };
+    let gm_s =
+        unsafe { std::slice::from_raw_parts(g_outm.contents().cast::<f32>(), m256 * q_dim256) };
+    let c0_s = unsafe {
+        std::slice::from_raw_parts(cache256_0.contents().cast::<u16>(), 2 * cap256 * kv_dim256)
+    };
+    let cm_s = unsafe {
+        std::slice::from_raw_parts(cache256_m.contents().cast::<u16>(), 2 * cap256 * kv_dim256)
+    };
+
+    for r in 0..m256 {
+        let rope_r = &ropes256[r * rot_h256..(r + 1) * rot_h256];
+        for h in 0..n_h256 {
+            let src = &qg_in[(r * n_h256 + h) * 2 * hd256..];
+            let mut q_ref = src[..hd256].to_vec();
+            ops::rmsnorm(&mut q_ref, &qw256, eps);
+            ops::rope_norm_cached_from_array(&mut q_ref, rope_r);
+            let g_ref = &src[hd256..2 * hd256];
+            let q_got = &qm_s[r * q_dim256 + h * hd256..r * q_dim256 + (h + 1) * hd256];
+            let g_got = &gm_s[r * q_dim256 + h * hd256..r * q_dim256 + (h + 1) * hd256];
+            for d in 0..hd256 {
+                assert!(
+                    (q_got[d] - q_ref[d]).abs() < 2e-5,
+                    "qk_prep_batch256 r={r} h={h} d={d}: {} vs {}",
+                    q_got[d],
+                    q_ref[d]
+                );
+                assert_eq!(g_got[d].to_bits(), g_ref[d].to_bits());
+            }
+            if r == 0 {
+                for d in 0..hd256 {
+                    assert_eq!(q0_s[h * hd256 + d].to_bits(), q_got[d].to_bits());
+                    assert_eq!(g0_s[h * hd256 + d].to_bits(), g_got[d].to_bits());
+                }
+            }
+        }
+        let pos = 3 + r;
+        for kh in 0..n_kv256 {
+            let src = &k256_in[r * kv_dim256 + kh * hd256..r * kv_dim256 + (kh + 1) * hd256];
+            let mut k_ref = src.to_vec();
+            ops::rmsnorm(&mut k_ref, &kw256, eps);
+            ops::rope_norm_cached_from_array(&mut k_ref, rope_r);
+            for d in 0..hd256 {
+                let got_u16 = cm_s[pos * kv_dim256 + kh * hd256 + d];
+                let got = f16::to_f32(got_u16);
+                let want = f16::to_f32(f16::scalar_from_f32(k_ref[d]));
+                assert!(
+                    (got - want).abs() < 2e-3,
+                    "qk_prep_batch256 K r={r} kh={kh} d={d}: {got} vs {want}"
+                );
+                if r == 0 {
+                    assert_eq!(c0_s[pos * kv_dim256 + kh * hd256 + d], got_u16);
+                }
+            }
         }
     }
 }

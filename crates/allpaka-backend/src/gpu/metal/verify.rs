@@ -181,7 +181,8 @@ pub(super) fn encode_verify_tokens(
         .max()
         .unwrap_or(q_dim)
         .max(q_dim);
-    let mut max_ffn = 1usize;
+    let mut max_dense_ffn = 1usize;
+    let mut max_moe_ffn = 1usize;
     let mut max_slots = 1usize;
     let mut max_expert = 1usize;
     let (mut max_channels, mut max_value_dim, mut max_heads_v) = (0usize, 0usize, 1usize);
@@ -191,6 +192,9 @@ pub(super) fn encode_verify_tokens(
             max_value_dim = max_value_dim.max(g.value_dim);
             max_heads_v = max_heads_v.max(g.heads_v as usize);
         }
+        if let FfnRefs::Dense { ffn_dim, .. } = &l.ffn {
+            max_dense_ffn = max_dense_ffn.max(*ffn_dim);
+        }
         if let FfnRefs::Moe {
             expert_ffn,
             n_used,
@@ -199,11 +203,12 @@ pub(super) fn encode_verify_tokens(
             ..
         } = &l.ffn
         {
-            max_ffn = max_ffn.max(*expert_ffn);
+            max_moe_ffn = max_moe_ffn.max(*expert_ffn);
             max_slots = max_slots.max(*n_used + shared.is_some() as usize);
             max_expert = max_expert.max(*n_expert);
         }
     }
+    let max_ffn = max_moe_ffn;
     // The batched MoE below packs the per-row expert scratch contiguously
     // and the row-batched kernels index it by the global maxima, so every
     // MoE layer must share one expert shape; anything else declines (the
@@ -226,6 +231,7 @@ pub(super) fn encode_verify_tokens(
             }
         }
     }
+    let gate_span = (m * max_slots * max_ffn).max(max_dense_ffn);
     let x_at = 0usize;
     let delta_at = x_at + align(m * hidden);
     let h_at = delta_at + align(m * hidden);
@@ -247,8 +253,8 @@ pub(super) fn encode_verify_tokens(
     // live side by side, so the whole MoE half dispatches stage-by-stage
     // (one barrier per stage) instead of token-by-token.
     let gate_at = wts_at + align(m * max_slots);
-    let up_at = gate_at + align(m * max_slots * max_ffn);
-    let downo_at = up_at + align(m * max_slots * max_ffn);
+    let up_at = gate_at + align(gate_span);
+    let downo_at = up_at + align(gate_span);
     // The shared expert runs as plain TILE=m matvecs over ALL rows (one
     // weight pass), so it gets its own contiguous regions instead of a slot
     // in the per-row blocks.
@@ -607,6 +613,8 @@ pub(super) fn encode_verify_tokens(
                         gate_in_q: l.gate_in_q as u32,
                         k_base: l.k_off as u64,
                         v_base: l.v_off as u64,
+                        rope_norm: req.rope_norm as u32,
+                        pad0: 0,
                     };
                     enc.set_bytes(
                         4,
@@ -645,6 +653,8 @@ pub(super) fn encode_verify_tokens(
                                 gate_in_q: l.gate_in_q as u32,
                                 k_base: l.k_off as u64,
                                 v_base: l.v_off as u64,
+                                rope_norm: req.rope_norm as u32,
+                                pad0: 0,
                             };
                             enc.set_bytes(
                                 4,
@@ -685,7 +695,7 @@ pub(super) fn encode_verify_tokens(
                                 k_base: l.k_off as u64,
                                 v_base: l.v_off as u64,
                                 has_bias: refs.q_bias.is_some() as u32,
-                                pad2: 0,
+                                rope_norm: req.rope_norm as u32,
                             };
                             enc.set_bytes(
                                 4,

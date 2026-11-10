@@ -99,6 +99,7 @@ impl<'a> Model<'a> {
             scale: 1.0 / (c.head_dim as f32).sqrt(),
             rope: rope_table,
             rot_dim: c.rope_dim as usize,
+            rope_norm: matches!(c.rope_style, RopeStyle::Norm),
             eps: c.rms_eps,
             output_norm: self.output_norm_raw,
             output: (out_ty, out_bytes, self.output_head()?.n_out),
@@ -184,6 +185,7 @@ impl<'a> Model<'a> {
             scale: 1.0 / (c.head_dim as f32).sqrt(),
             rope: rope_table,
             rot_dim: c.rope_dim as usize,
+            rope_norm: matches!(c.rope_style, RopeStyle::Norm),
             eps: c.rms_eps,
             output_norm: self.output_norm_raw,
             output: (out_ty, out_bytes, self.output_head()?.n_out),
@@ -405,14 +407,10 @@ impl<'a> Model<'a> {
 
         // The whole token as ONE GPU command buffer: every layer's attention
         // and FFN (routing included, on the GPU), through to the vocabulary
-        // logits. Declines - non-NEOX rope, a norm that is not F32, no
-        // device, kill switches - fall through to the per-layer path below,
-        // which remains the reference this path is tested against.
-        if matches!(c.rope_style, RopeStyle::Neox)
-            && pos < s.kv.capacity()
-            && !cpu_attn_enabled()
-            && !no_tokenbuf_enabled()
-        {
+        // logits. Declines - a norm that is not F32, no device, kill switches -
+        // fall through to the per-layer path below, which remains the reference
+        // this path is tested against.
+        if pos < s.kv.capacity() && !cpu_attn_enabled() && !no_tokenbuf_enabled() {
             let dbg = tokenbuf_debug_enabled();
             if let Some(allpaka_backend::gpu::TokenOut::Logits(logits)) =
                 self.forward_token_gpu(token, s, pos, false)?
@@ -504,10 +502,8 @@ impl<'a> Model<'a> {
             // attention, output projection - as one GPU command buffer. By
             // the GPU's own clock, five short buffers cost more in driver
             // scheduling than in execution, so the win here is the merge
-            // itself. Declines (non-NEOX rope, no GPU) fall through to the
-            // step-by-step path below.
-            if matches!(c.rope_style, RopeStyle::Neox)
-                && !cpu_attn
+            // itself. Declines (no GPU) fall through to the step-by-step path below.
+            if !cpu_attn
                 && pos < s.kv.capacity()
                 && allpaka_backend::gpu::decode_attention_capacity_safe(s.kv.capacity())
             {
@@ -524,6 +520,7 @@ impl<'a> Model<'a> {
                             layer.q_norm.as_deref(),
                             layer.k_norm.as_deref(),
                             rope_pairs,
+                            matches!(c.rope_style, RopeStyle::Norm),
                             c.rms_eps,
                             cache,
                             (k_off, v_off),
@@ -624,7 +621,6 @@ impl<'a> Model<'a> {
         let c = &self.config;
         let pos = s.pos();
         if token < c.vocab
-            && matches!(c.rope_style, RopeStyle::Neox)
             && pos < s.kv.capacity()
             && !cpu_attn_enabled()
             && !no_tokenbuf_enabled()
@@ -673,7 +669,6 @@ impl<'a> Model<'a> {
         let c = &self.config;
         let pos = s.pos();
         if token >= c.vocab
-            || !matches!(c.rope_style, RopeStyle::Neox)
             || pos + n > s.kv.capacity()
             || cpu_attn_enabled()
             || no_tokenbuf_enabled()
@@ -726,6 +721,7 @@ impl<'a> Model<'a> {
             scale: 1.0 / (c.head_dim as f32).sqrt(),
             rope: rope_table,
             rot_dim: c.rope_dim as usize,
+            rope_norm: matches!(c.rope_style, RopeStyle::Norm),
             eps: c.rms_eps,
             output_norm: self.output_norm_raw,
             output: (out_ty, out_bytes, self.output_head()?.n_out),

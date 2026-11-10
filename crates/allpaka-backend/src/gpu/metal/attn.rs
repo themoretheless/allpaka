@@ -238,7 +238,7 @@ pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
             k_base: req.k_off as u64,
             v_base: req.v_off as u64,
             has_bias: 0,
-            pad2: 0,
+            rope_norm: req.rope_norm as u32,
         };
         enc.set_compute_pipeline_state(&gpu.pipelines[&("qk_prep", 1, 1)]);
         enc.set_buffer(0, Some(&gpu.y_arena), q_off as u64);

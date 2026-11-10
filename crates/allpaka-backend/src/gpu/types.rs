@@ -60,8 +60,10 @@ pub struct AttnBlockReq<'a> {
     pub x: &'a [f32],
     pub q_norm: Option<&'a [f32]>,
     pub k_norm: Option<&'a [f32]>,
-    /// `(sin, cos)` per NEOX pair, `head_dim / 2` entries.
+    /// `(sin, cos)` per rotary pair, `head_dim / 2` entries.
     pub rope: &'a [[f32; 2]],
+    /// `true` for adjacent-pair NORM RoPE (Llama 3.x), `false` for split-half NeoX.
+    pub rope_norm: bool,
     pub eps: f32,
     pub cache: &'a SharedRegion,
     pub k_off: usize,
@@ -178,6 +180,8 @@ pub struct TokenReq<'a> {
     /// Rotary dimensions per head (`<= head_dim`; partial RoPE leaves the
     /// tail `[rot_dim..head_dim]` unrotated).
     pub rot_dim: usize,
+    /// `true` for adjacent-pair NORM RoPE (Llama 3.x), `false` for split-half NeoX.
+    pub rope_norm: bool,
     pub eps: f32,
     pub cache: &'a SharedRegion,
     /// Total token slots in `cache` (`KvCache::capacity`).
@@ -300,6 +304,8 @@ pub struct PrefillAttnReq<'a> {
     /// Rotary width; `== head_dim` for full RoPE, smaller for GLM's partial,
     /// `64` for qwen35moe's 256-wide heads.
     pub rot_dim: usize,
+    /// `true` for adjacent-pair NORM RoPE (Llama 3.x), `false` for split-half NeoX.
+    pub rope_norm: bool,
     /// Qwen3.5-MoE: the sigmoid output gate rides inside the Q projection
     /// (`[q | gate]` per head, `wq.n_out == 2 * q_dim`); split and applied
     /// post-attention.

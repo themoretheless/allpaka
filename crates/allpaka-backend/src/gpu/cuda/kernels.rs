@@ -287,7 +287,8 @@ extern "C" __global__ void cast_f32_to_f16(
     if (i < n) dst[i] = f32_to_half_bits(src[i]);
 }
 
-// RoPE NeoX: pairs (x[i], x[i+half]) with table[i] = {sin, cos}.
+// RoPE: pairs (x[i], x[i+half]) when rope_norm == 0 (NeoX) or adjacent pairs
+// (x[2*i], x[2*i+1]) when rope_norm != 0 (NORM / Llama 3.x), with table[i] = {sin, cos}.
 // Applies to `heads` contiguous heads of dimension `head_dim`, only first
 // `rot_dim` elements of each head (partial rotary when rot_dim < head_dim).
 extern "C" __global__ void rope_neox(
@@ -295,7 +296,8 @@ extern "C" __global__ void rope_neox(
     const float* __restrict__ rope, // [heads, rot_dim/2, 2] as flat sin,cos
     unsigned heads,
     unsigned head_dim,
-    unsigned rot_dim)
+    unsigned rot_dim,
+    unsigned rope_norm)
 {
     unsigned h = blockIdx.x;
     if (h >= heads) return;
@@ -305,14 +307,16 @@ extern "C" __global__ void rope_neox(
     for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
         float sinv = rh[2 * i];
         float cosv = rh[2 * i + 1];
-        float a = xh[i];
-        float b = xh[i + half_n];
-        xh[i] = a * cosv - b * sinv;
-        xh[i + half_n] = a * sinv + b * cosv;
+        unsigned i0 = rope_norm ? (2 * i) : i;
+        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
+        float a = xh[i0];
+        float b = xh[i1];
+        xh[i0] = a * cosv - b * sinv;
+        xh[i1] = a * sinv + b * cosv;
     }
 }
 
-// Per-head RMSNorm (weight w[head_dim]) then NeoX RoPE. One block per head.
+// Per-head RMSNorm (weight w[head_dim]) then RoPE. One block per head.
 extern "C" __global__ void rmsnorm_rope_neox(
     float* __restrict__ x,
     const float* __restrict__ w,
@@ -320,7 +324,8 @@ extern "C" __global__ void rmsnorm_rope_neox(
     unsigned heads,
     unsigned head_dim,
     unsigned rot_dim,
-    float eps)
+    float eps,
+    unsigned rope_norm)
 {
     unsigned h = blockIdx.x;
     if (h >= heads) return;
@@ -347,14 +352,16 @@ extern "C" __global__ void rmsnorm_rope_neox(
     for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
         float sinv = rh[2 * i];
         float cosv = rh[2 * i + 1];
-        float a = xh[i];
-        float b = xh[i + half_n];
-        xh[i] = a * cosv - b * sinv;
-        xh[i + half_n] = a * sinv + b * cosv;
+        unsigned i0 = rope_norm ? (2 * i) : i;
+        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
+        float a = xh[i0];
+        float b = xh[i1];
+        xh[i0] = a * cosv - b * sinv;
+        xh[i1] = a * sinv + b * cosv;
     }
 }
 
-// Per-head RMSNorm + NeoX RoPE, then store this head's slice into KV cache (K path).
+// Per-head RMSNorm + RoPE, then store this head's slice into KV cache (K path).
 extern "C" __global__ void rmsnorm_rope_store_dpos(
     float* __restrict__ x,
     const float* __restrict__ w,
@@ -366,7 +373,8 @@ extern "C" __global__ void rmsnorm_rope_store_dpos(
     unsigned head_dim,
     unsigned rot_dim,
     unsigned kv_dim,
-    float eps)
+    float eps,
+    unsigned rope_norm)
 {
     unsigned h = blockIdx.x;
     if (h >= heads) return;
@@ -393,10 +401,12 @@ extern "C" __global__ void rmsnorm_rope_store_dpos(
     for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
         float sinv = rh[2 * i];
         float cosv = rh[2 * i + 1];
-        float a = xh[i];
-        float b = xh[i + half_n];
-        xh[i] = a * cosv - b * sinv;
-        xh[i + half_n] = a * sinv + b * cosv;
+        unsigned i0 = rope_norm ? (2 * i) : i;
+        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
+        float a = xh[i0];
+        float b = xh[i1];
+        xh[i0] = a * cosv - b * sinv;
+        xh[i1] = a * sinv + b * cosv;
     }
     __syncthreads();
     unsigned pos = d_pos[0];
@@ -406,7 +416,7 @@ extern "C" __global__ void rmsnorm_rope_store_dpos(
     }
 }
 
-// Per-head RMSNorm + NeoX RoPE. RoPE angles from inv_freq[i]*d_pos (no H2D table).
+// Per-head RMSNorm + RoPE. RoPE angles from inv_freq[i]*d_pos (no H2D table).
 extern "C" __global__ void rmsnorm_rope_freq_dpos(
     float* __restrict__ x,
     const float* __restrict__ w,
@@ -415,7 +425,8 @@ extern "C" __global__ void rmsnorm_rope_freq_dpos(
     unsigned heads,
     unsigned head_dim,
     unsigned rot_dim,
-    float eps)
+    float eps,
+    unsigned rope_norm)
 {
     unsigned h = blockIdx.x;
     if (h >= heads) return;
@@ -443,10 +454,12 @@ extern "C" __global__ void rmsnorm_rope_freq_dpos(
         float angle = pos * inv_freq[i];
         float sinv, cosv;
         __sincosf(angle, &sinv, &cosv);
-        float a = xh[i];
-        float b = xh[i + half_n];
-        xh[i] = a * cosv - b * sinv;
-        xh[i + half_n] = a * sinv + b * cosv;
+        unsigned i0 = rope_norm ? (2 * i) : i;
+        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
+        float a = xh[i0];
+        float b = xh[i1];
+        xh[i0] = a * cosv - b * sinv;
+        xh[i1] = a * sinv + b * cosv;
     }
 }
 
@@ -462,7 +475,8 @@ extern "C" __global__ void rmsnorm_rope_store_freq_dpos(
     unsigned head_dim,
     unsigned rot_dim,
     unsigned kv_dim,
-    float eps)
+    float eps,
+    unsigned rope_norm)
 {
     unsigned h = blockIdx.x;
     if (h >= heads) return;
@@ -490,10 +504,12 @@ extern "C" __global__ void rmsnorm_rope_store_freq_dpos(
         float angle = posf * inv_freq[i];
         float sinv, cosv;
         __sincosf(angle, &sinv, &cosv);
-        float a = xh[i];
-        float b = xh[i + half_n];
-        xh[i] = a * cosv - b * sinv;
-        xh[i + half_n] = a * sinv + b * cosv;
+        unsigned i0 = rope_norm ? (2 * i) : i;
+        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
+        float a = xh[i0];
+        float b = xh[i1];
+        xh[i0] = a * cosv - b * sinv;
+        xh[i1] = a * sinv + b * cosv;
     }
     __syncthreads();
     unsigned pos = d_pos[0];
@@ -531,7 +547,8 @@ extern "C" __global__ void rmsnorm_rope_qk_store_table_dpos(
     unsigned head_dim,
     unsigned rot_dim,
     unsigned kv_dim,
-    float eps)
+    float eps,
+    unsigned rope_norm)
 {
     unsigned gh = blockIdx.x;
     bool is_k = gh >= q_heads;
@@ -574,16 +591,18 @@ extern "C" __global__ void rmsnorm_rope_qk_store_table_dpos(
     for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
         float sinv = rope[2 * i];
         float cosv = rope[2 * i + 1];
-        float a = is_k ? kbuf[i] : xh[i];
-        float b = is_k ? kbuf[i + half_n] : xh[i + half_n];
+        unsigned i0 = rope_norm ? (2 * i) : i;
+        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
+        float a = is_k ? kbuf[i0] : xh[i0];
+        float b = is_k ? kbuf[i1] : xh[i1];
         float r0 = a * cosv - b * sinv;
         float r1 = a * sinv + b * cosv;
         if (is_k) {
-            cache[dst + i] = f32_to_half_bits(r0);
-            cache[dst + i + half_n] = f32_to_half_bits(r1);
+            cache[dst + i0] = f32_to_half_bits(r0);
+            cache[dst + i1] = f32_to_half_bits(r1);
         } else {
-            xh[i] = r0;
-            xh[i + half_n] = r1;
+            xh[i0] = r0;
+            xh[i1] = r1;
         }
     }
     if (is_k) {
@@ -599,7 +618,8 @@ extern "C" __global__ void rope_neox_freq_dpos(
     const unsigned* __restrict__ d_pos,
     unsigned heads,
     unsigned head_dim,
-    unsigned rot_dim)
+    unsigned rot_dim,
+    unsigned rope_norm)
 {
     unsigned h = blockIdx.x;
     if (h >= heads) return;
@@ -610,10 +630,12 @@ extern "C" __global__ void rope_neox_freq_dpos(
         float angle = pos * inv_freq[i];
         float sinv, cosv;
         __sincosf(angle, &sinv, &cosv);
-        float a = xh[i];
-        float b = xh[i + half_n];
-        xh[i] = a * cosv - b * sinv;
-        xh[i + half_n] = a * sinv + b * cosv;
+        unsigned i0 = rope_norm ? (2 * i) : i;
+        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
+        float a = xh[i0];
+        float b = xh[i1];
+        xh[i0] = a * cosv - b * sinv;
+        xh[i1] = a * sinv + b * cosv;
     }
 }
 
@@ -708,7 +730,7 @@ extern "C" __global__ void store_kv_batch_f16(
     cache[dst] = f32_to_half_bits(src[(size_t)row * kv_dim + i]);
 }
 
-// RoPE NeoX over a batch of tokens. x: [m, heads, head_dim];
+// RoPE over a batch of tokens. x: [m, heads, head_dim];
 // rope: [m, rot_dim] as interleaved sin,cos (same table for every head).
 extern "C" __global__ void rope_neox_batch(
     float* __restrict__ x,
@@ -716,7 +738,8 @@ extern "C" __global__ void rope_neox_batch(
     unsigned m,
     unsigned heads,
     unsigned head_dim,
-    unsigned rot_dim)
+    unsigned rot_dim,
+    unsigned rope_norm)
 {
     unsigned h = blockIdx.x;
     unsigned row = blockIdx.y;
@@ -727,10 +750,12 @@ extern "C" __global__ void rope_neox_batch(
     for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
         float sinv = rh[2 * i];
         float cosv = rh[2 * i + 1];
-        float a = xh[i];
-        float b = xh[i + half_n];
-        xh[i] = a * cosv - b * sinv;
-        xh[i + half_n] = a * sinv + b * cosv;
+        unsigned i0 = rope_norm ? (2 * i) : i;
+        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
+        float a = xh[i0];
+        float b = xh[i1];
+        xh[i0] = a * cosv - b * sinv;
+        xh[i1] = a * sinv + b * cosv;
     }
 }
 

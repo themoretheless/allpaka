@@ -1411,6 +1411,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                             gate_in_q: l.gate_in_q as u32,
                             k_base: l.k_off as u64,
                             v_base: l.v_off as u64,
+                            rope_norm: req.rope_norm as u32,
+                            pad0: 0,
                         };
                         enc.set_bytes(
                             4,
@@ -1508,7 +1510,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                             k_base: l.k_off as u64,
                             v_base: l.v_off as u64,
                             has_bias: refs.q_bias.is_some() as u32,
-                            pad2: 0,
+                            rope_norm: req.rope_norm as u32,
                         };
                         enc.set_bytes(
                             4,
@@ -2734,6 +2736,8 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
                         gate_in_q: l.gate_in_q as u32,
                         k_base: l.k_off as u64,
                         v_base: l.v_off as u64,
+                        rope_norm: req.rope_norm as u32,
+                        pad0: 0,
                     };
                     enc.set_bytes(
                         4,
@@ -2832,7 +2836,7 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
                         k_base: l.k_off as u64,
                         v_base: l.v_off as u64,
                         has_bias: refs.q_bias.is_some() as u32,
-                        pad2: 0,
+                        rope_norm: req.rope_norm as u32,
                     };
                     enc.set_bytes(
                         4,
