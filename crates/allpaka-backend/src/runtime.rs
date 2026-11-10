@@ -165,7 +165,9 @@ flags! {
     prefill_zero_copy: bool = true, env "ALLPAKA_PREFILL_ZERO_COPY", on;
     tokenbuf_debug: bool = false, env "ALLPAKA_TOKENBUF_DEBUG", present;
     decode_split: bool = false, env "ALLPAKA_DECODE_SPLIT", present;
-    cuda_graph: bool = false, env "ALLPAKA_CUDA_GRAPH", off;
+    // On by default: measured on RTX 5090 (docs/benchmarks/2026-11-10-allpaka-vs-llama-rtx5090.md).
+    cuda_graph: bool = true, env "ALLPAKA_CUDA_GRAPH", not_no;
+    cuda_ggml: bool = true, env "ALLPAKA_GGML", not_no;
     cuda_no_fuse: bool = false, env "ALLPAKA_CUDA_NO_FUSE", present;
     // CUDA decode/prefill switches, formerly read from the environment on
     // every launch.

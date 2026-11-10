@@ -1,4 +1,5 @@
-//! Optional ggml-cuda MMQ/MMVQ / flash-attn via `allpaka_ggml.dll` (ALLPAKA_GGML=1).
+//! ggml-cuda MMQ/MMVQ / flash-attn via `allpaka_ggml.dll`: on by default when
+//! the library is present, `ALLPAKA_GGML=0` turns it off.
 
 use cudarc::driver::CudaStream;
 use std::ffi::c_void;
@@ -221,11 +222,11 @@ fn load() -> Option<&'static Api> {
     .as_ref()
 }
 
+/// ggml kernels are used when allowed (on unless `ALLPAKA_GGML=0`) and the
+/// library actually loaded; without `allpaka_ggml.dll` every caller keeps
+/// the built-in kernels.
 pub fn enabled() -> bool {
-    match std::env::var("ALLPAKA_GGML") {
-        Ok(v) => v == "1" || v.eq_ignore_ascii_case("true"),
-        Err(_) => false,
-    }
+    crate::runtime::get().cuda_ggml && load().is_some()
 }
 
 pub fn fa_kv_floor() -> usize {

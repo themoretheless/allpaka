@@ -9,7 +9,7 @@ to rewrite this file. Every switch is read once per process.
 | `ALLPAKA_ATTN_MM` | `attend_mm` | on | on unless `=0` |
 | `ALLPAKA_ATTN_ZERO` | `attn_zero` | off | on when set to anything |
 | `ALLPAKA_CFUSE` | `cfuse` | off | off unless `=1` |
-| `ALLPAKA_CUDA_GRAPH` | `cuda_graph` | off | off unless `=1` |
+| `ALLPAKA_CUDA_GRAPH` | `cuda_graph` | on | on unless `=0` or `=false` |
 | `ALLPAKA_CUDA_NO_FUSE` | `cuda_no_fuse` | off | on when set to anything |
 | `ALLPAKA_DECODE_GUFUSE` | `gufuse` | off | off unless `=1` |
 | `ALLPAKA_DECODE_SERIAL` | `decode_serial` | off | off unless `=1` |
@@ -20,6 +20,7 @@ to rewrite this file. Every switch is read once per process.
 | `ALLPAKA_FFN_TIME` | `metal_ffn_time` | off | on when set to anything |
 | `ALLPAKA_FUSE_LOG` | `cuda_fuse_log` | off | off unless `=1` |
 | `ALLPAKA_GDN_ZERO` | `gdn_zero` | off | on when set to anything |
+| `ALLPAKA_GGML` | `cuda_ggml` | on | on unless `=0` or `=false` |
 | `ALLPAKA_GGML_DECODE` | `cuda_ggml_decode` | off | off unless `=1` or `=true` |
 | `ALLPAKA_GGML_GEMM` | `cuda_ggml_gemm` | on | on unless `=0` or `=false` |
 | `ALLPAKA_GGML_MMVQ` | `cuda_ggml_mmvq` | off | off unless `=1` or `=true` |

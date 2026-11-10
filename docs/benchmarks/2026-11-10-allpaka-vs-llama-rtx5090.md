@@ -20,3 +20,17 @@ Notes:
   - Prefill: parity on 7B, 97% of llama.cpp on 32B.
   - Decode: 96% of llama.cpp on both models.
 - **Not a quiet machine:** desktop applications were running during the runs.
+
+## Update: new defaults
+
+ggml kernels and CUDA graphs are now on by default whenever
+`allpaka_ggml.dll` is present; `ALLPAKA_GGML=0` and `ALLPAKA_CUDA_GRAPH=0`
+turn them off. Re-measured with no environment variables set:
+
+| Model | prefill tok/s | decode tok/s |
+|---|---|---|
+| Qwen2.5-7B Q4_K_M | 14 169–14 479 | 255.5–256.4 |
+| Qwen3-32B Q4_K_M | 3 389–3 404 | 66.8 |
+
+With both set to 0, 7B gives 273 prefill / 180 decode, the same as the old
+default.
