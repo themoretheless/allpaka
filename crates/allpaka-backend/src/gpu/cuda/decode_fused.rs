@@ -211,9 +211,6 @@ pub(super) fn decode_token_one_fused(
         q_dim,
         rope_pairs,
         ffn_dim,
-        vocab,
-        h_at,
-        out_logits_at,
         y_elems,
         x_elems,
         graph_key,
@@ -347,31 +344,7 @@ pub(super) fn decode_token_one_fused(
                             eprintln!("cuda: decode graph launch failed: {e}");
                         })
                         .ok()?;
-                    launches = 1;
-                    let enc = t0.elapsed().as_nanos() as u64;
-                    let t1 = Instant::now();
-                    gpu.sync()?;
-                    note_call(launches, enc, t1.elapsed().as_nanos() as u64);
-                    crate::gpu::cuda::ggml::mark_cudarc_dirty();
-                    let out = if req.m > 1 {
-                        let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
-                        let h = stream
-                            .clone_dtoh(&gpu.y_arena.slice(h_at..h_at + hidden))
-                            .ok()?;
-                        TokenOut::Rows {
-                            argmax: vec![idx[0]],
-                            hidden: h,
-                        }
-                    } else if req.argmax {
-                        let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
-                        TokenOut::Argmax(idx[0])
-                    } else {
-                        let logits = stream
-                            .clone_dtoh(&gpu.y_arena.slice(out_logits_at..out_logits_at + vocab))
-                            .ok()?;
-                        TokenOut::Logits(logits)
-                    };
-                    return Some(out);
+                    return ctx.finish_token(gpu, t0, 1);
                 }
             }
         } else if hybrid_fa {
@@ -384,63 +357,13 @@ pub(super) fn decode_token_one_fused(
             if gpu.decode_graph_key == graph_key {
                 if let Some(mega) = gpu.decode_graph.as_ref() {
                     if mega.launch().is_ok() {
-                        launches = 1;
-                        let enc = t0.elapsed().as_nanos() as u64;
-                        let t1 = Instant::now();
-                        gpu.sync()?;
-                        note_call(launches, enc, t1.elapsed().as_nanos() as u64);
-                        crate::gpu::cuda::ggml::mark_cudarc_dirty();
-                        let out = if req.m > 1 {
-                            let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
-                            let h = stream
-                                .clone_dtoh(&gpu.y_arena.slice(h_at..h_at + hidden))
-                                .ok()?;
-                            TokenOut::Rows {
-                                argmax: vec![idx[0]],
-                                hidden: h,
-                            }
-                        } else if req.argmax {
-                            let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
-                            TokenOut::Argmax(idx[0])
-                        } else {
-                            let logits = stream
-                                .clone_dtoh(
-                                    &gpu.y_arena.slice(out_logits_at..out_logits_at + vocab),
-                                )
-                                .ok()?;
-                            TokenOut::Logits(logits)
-                        };
-                        return Some(out);
+                        return ctx.finish_token(gpu, t0, 1);
                     }
                 }
             }
             let replay_ok = ctx.replay_hybrid_segments(gpu, d_pos_p);
             if replay_ok {
-                launches = (n_layers * 2 + 1) as u64;
-                let enc = t0.elapsed().as_nanos() as u64;
-                let t1 = Instant::now();
-                gpu.sync()?;
-                note_call(launches, enc, t1.elapsed().as_nanos() as u64);
-                crate::gpu::cuda::ggml::mark_cudarc_dirty();
-                let out = if req.m > 1 {
-                    let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
-                    let h = stream
-                        .clone_dtoh(&gpu.y_arena.slice(h_at..h_at + hidden))
-                        .ok()?;
-                    TokenOut::Rows {
-                        argmax: vec![idx[0]],
-                        hidden: h,
-                    }
-                } else if req.argmax {
-                    let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
-                    TokenOut::Argmax(idx[0])
-                } else {
-                    let logits = stream
-                        .clone_dtoh(&gpu.y_arena.slice(out_logits_at..out_logits_at + vocab))
-                        .ok()?;
-                    TokenOut::Logits(logits)
-                };
-                return Some(out);
+                return ctx.finish_token(gpu, t0, (n_layers * 2 + 1) as u64);
             }
             // Key mismatch or empty: fall through to segment capture.
             gpu.decode_fa_graphs = None;
@@ -522,14 +445,6 @@ pub(super) fn decode_token_one_fused(
             }
         }
 
-        let HybridCapture {
-            pre: fa_pre,
-            post: fa_post,
-            attn: fa_attn,
-            attn_ok: fa_attn_ok,
-            ..
-        } = hybrid;
-
         if capturing_hybrid {
             stream
                 .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
@@ -543,303 +458,19 @@ pub(super) fn decode_token_one_fused(
         // Final norm + LM head.
         ctx.launch_output_head(gpu, &mut launches)?;
 
-        let out = if req.argmax || req.m > 1 {
-            let f = gpu.func_owned("argmax_f32")?;
-            let n_u = vocab as u32;
-            let cfg = LaunchConfig {
-                grid_dim: (1, 1, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            let xp = ybase + (out_logits_at * 4) as u64;
-            unsafe {
-                stream
-                    .launch_builder_pdl(&f)
-                    .arg(&xp)
-                    .arg(&n_u)
-                    .arg(&mut gpu.d_argmax)
-                    .launch_pdl(cfg)
-            }
-            .ok()?;
+        if req.argmax || req.m > 1 {
+            ctx.launch_argmax(gpu)?;
             launches += 1;
-            if capturing_hybrid {
-                capture_guard.active = false;
-                match stream.end_capture(graph_flags) {
-                    Ok(Some(g)) => {
-                        g.launch().ok()?;
-                        let k_offs: Vec<i32> = req.layers.iter().map(|l| l.k_off as i32).collect();
-                        let v_offs: Vec<i32> = req.layers.iter().map(|l| l.v_off as i32).collect();
-                        if fa_attn_ok && fa_attn.len() == n_layers {
-                            // One parent graph: child launches of pre/FA/post/tail.
-                            // Collapses ~193 host launches/token down to 1.
-                            let mut mega: Option<cudarc::driver::CudaGraph> = None;
-                            if stream
-                                .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
-                                .is_ok()
-                            {
-                                let mut child_ok = true;
-                                for li in 0..n_layers {
-                                    if fa_pre[li].launch().is_err()
-                                        || fa_attn[li].launch().is_err()
-                                        || fa_post[li].launch().is_err()
-                                    {
-                                        child_ok = false;
-                                        break;
-                                    }
-                                }
-                                if child_ok {
-                                    child_ok = g.launch().is_ok();
-                                }
-                                match (child_ok, stream.end_capture(graph_flags)) {
-                                    (true, Ok(Some(m))) => {
-                                        let _ = m.upload();
-                                        mega = Some(m);
-                                    }
-                                    (_, Err(e)) => {
-                                        eprintln!(
-                                            "cuda: hybrid mega-graph capture failed ({e}); segment replay"
-                                        );
-                                    }
-                                    _ => {
-                                        eprintln!(
-                                            "cuda: hybrid mega-graph empty/failed; segment replay"
-                                        );
-                                    }
-                                }
-                            }
-                            if let Some(m) = mega {
-                                gpu.decode_graph = Some(m);
-                                gpu.decode_fa_attn = Some(fa_attn);
-                                gpu.decode_fa_graphs = Some((fa_pre, fa_post, g));
-                                gpu.decode_fa_kv_offs = Some((k_offs, v_offs));
-                                gpu.decode_fa_execs = None;
-                                gpu.decode_graph_key = graph_key;
-                                launches = 1;
-                                eprintln!(
-                                    "cuda: hybrid FA mega-graph captured ({} layers)",
-                                    n_layers
-                                );
-                            } else {
-                                gpu.decode_graph = None;
-                                for sg in fa_pre.iter().chain(fa_post.iter()).chain(fa_attn.iter())
-                                {
-                                    let _ = sg.upload();
-                                }
-                                let _ = g.upload();
-                                gpu.decode_fa_attn = Some(fa_attn);
-                                gpu.decode_fa_graphs = Some((fa_pre, fa_post, g));
-                                gpu.decode_fa_kv_offs = Some((k_offs, v_offs));
-                                gpu.decode_fa_execs = None;
-                                gpu.decode_graph_key = graph_key;
-                                launches = (n_layers * 2 + 1) as u64;
-                                eprintln!(
-                                    "cuda: hybrid FA graphs captured ({} layers, FA in-graph)",
-                                    n_layers
-                                );
-                            }
-                        } else {
-                            for sg in fa_pre.iter().chain(fa_post.iter()) {
-                                let _ = sg.upload();
-                            }
-                            let _ = g.upload();
-                            gpu.decode_fa_attn = None;
-                            gpu.decode_fa_graphs = Some((fa_pre, fa_post, g));
-                            gpu.decode_fa_kv_offs = Some((k_offs, v_offs));
-                            gpu.decode_fa_execs = None;
-                            gpu.decode_graph_key = graph_key;
-                            launches = (n_layers * 2 + 1) as u64;
-                            eprintln!("cuda: hybrid FA graphs captured ({} layers)", n_layers);
-                        }
-                    }
-                    Ok(None) => {
-                        eprintln!("cuda: hybrid tail graph empty");
-                        gpu.decode_fa_graphs = None;
-                        gpu.decode_fa_attn = None;
-                        return None;
-                    }
-                    Err(e) => {
-                        eprintln!("cuda: hybrid tail end_capture failed: {e}");
-                        gpu.decode_fa_graphs = None;
-                        gpu.decode_fa_attn = None;
-                        return None;
-                    }
-                }
-            } else if capturing {
-                capture_guard.active = false;
-                match stream.end_capture(graph_flags) {
-                    Ok(Some(g)) => {
-                        // Capture only records — must launch for this token.
-                        g.launch().ok()?;
-                        gpu.decode_graph = Some(g);
-                        gpu.decode_graph_key = graph_key;
-                        launches = 1;
-                    }
-                    Ok(None) => {
-                        eprintln!("cuda: decode graph capture produced empty graph");
-                        gpu.decode_graph = None;
-                        return None;
-                    }
-                    Err(e) => {
-                        eprintln!("cuda: decode graph end_capture failed: {e}");
-                        gpu.decode_graph = None;
-                        return None;
-                    }
-                }
-            }
-            drop(capture_guard);
-            let enc = t0.elapsed().as_nanos() as u64;
-            let t1 = Instant::now();
-            gpu.sync()?;
-            note_call(launches, enc, t1.elapsed().as_nanos() as u64);
-            crate::gpu::cuda::ggml::mark_cudarc_dirty();
-            let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
-            if req.m > 1 {
-                let h = stream
-                    .clone_dtoh(&gpu.y_arena.slice(h_at..h_at + hidden))
-                    .ok()?;
-                TokenOut::Rows {
-                    argmax: vec![idx[0]],
-                    hidden: h,
-                }
-            } else {
-                TokenOut::Argmax(idx[0])
-            }
-        } else {
-            if capturing_hybrid {
-                capture_guard.active = false;
-                match stream.end_capture(graph_flags) {
-                    Ok(Some(g)) => {
-                        g.launch().ok()?;
-                        let k_offs: Vec<i32> = req.layers.iter().map(|l| l.k_off as i32).collect();
-                        let v_offs: Vec<i32> = req.layers.iter().map(|l| l.v_off as i32).collect();
-                        if fa_attn_ok && fa_attn.len() == n_layers {
-                            // One parent graph: child launches of pre/FA/post/tail.
-                            // Collapses ~193 host launches/token down to 1.
-                            let mut mega: Option<cudarc::driver::CudaGraph> = None;
-                            if stream
-                                .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
-                                .is_ok()
-                            {
-                                let mut child_ok = true;
-                                for li in 0..n_layers {
-                                    if fa_pre[li].launch().is_err()
-                                        || fa_attn[li].launch().is_err()
-                                        || fa_post[li].launch().is_err()
-                                    {
-                                        child_ok = false;
-                                        break;
-                                    }
-                                }
-                                if child_ok {
-                                    child_ok = g.launch().is_ok();
-                                }
-                                match (child_ok, stream.end_capture(graph_flags)) {
-                                    (true, Ok(Some(m))) => {
-                                        let _ = m.upload();
-                                        mega = Some(m);
-                                    }
-                                    (_, Err(e)) => {
-                                        eprintln!(
-                                            "cuda: hybrid mega-graph capture failed ({e}); segment replay"
-                                        );
-                                    }
-                                    _ => {
-                                        eprintln!(
-                                            "cuda: hybrid mega-graph empty/failed; segment replay"
-                                        );
-                                    }
-                                }
-                            }
-                            if let Some(m) = mega {
-                                gpu.decode_graph = Some(m);
-                                gpu.decode_fa_attn = Some(fa_attn);
-                                gpu.decode_fa_graphs = Some((fa_pre, fa_post, g));
-                                gpu.decode_fa_kv_offs = Some((k_offs, v_offs));
-                                gpu.decode_fa_execs = None;
-                                gpu.decode_graph_key = graph_key;
-                                launches = 1;
-                                eprintln!(
-                                    "cuda: hybrid FA mega-graph captured ({} layers)",
-                                    n_layers
-                                );
-                            } else {
-                                gpu.decode_graph = None;
-                                for sg in fa_pre.iter().chain(fa_post.iter()).chain(fa_attn.iter())
-                                {
-                                    let _ = sg.upload();
-                                }
-                                let _ = g.upload();
-                                gpu.decode_fa_attn = Some(fa_attn);
-                                gpu.decode_fa_graphs = Some((fa_pre, fa_post, g));
-                                gpu.decode_fa_kv_offs = Some((k_offs, v_offs));
-                                gpu.decode_fa_execs = None;
-                                gpu.decode_graph_key = graph_key;
-                                launches = (n_layers * 2 + 1) as u64;
-                                eprintln!(
-                                    "cuda: hybrid FA graphs captured ({} layers, FA in-graph)",
-                                    n_layers
-                                );
-                            }
-                        } else {
-                            for sg in fa_pre.iter().chain(fa_post.iter()) {
-                                let _ = sg.upload();
-                            }
-                            let _ = g.upload();
-                            gpu.decode_fa_attn = None;
-                            gpu.decode_fa_graphs = Some((fa_pre, fa_post, g));
-                            gpu.decode_fa_kv_offs = Some((k_offs, v_offs));
-                            gpu.decode_fa_execs = None;
-                            gpu.decode_graph_key = graph_key;
-                            launches = (n_layers * 2 + 1) as u64;
-                            eprintln!("cuda: hybrid FA graphs captured ({} layers)", n_layers);
-                        }
-                    }
-                    Ok(None) => {
-                        eprintln!("cuda: hybrid tail graph empty");
-                        gpu.decode_fa_graphs = None;
-                        gpu.decode_fa_attn = None;
-                        return None;
-                    }
-                    Err(e) => {
-                        eprintln!("cuda: hybrid tail end_capture failed: {e}");
-                        gpu.decode_fa_graphs = None;
-                        gpu.decode_fa_attn = None;
-                        return None;
-                    }
-                }
-            } else if capturing {
-                capture_guard.active = false;
-                match stream.end_capture(graph_flags) {
-                    Ok(Some(g)) => {
-                        g.launch().ok()?;
-                        gpu.decode_graph = Some(g);
-                        gpu.decode_graph_key = graph_key;
-                        launches = 1;
-                    }
-                    Ok(None) => {
-                        eprintln!("cuda: decode graph capture produced empty graph");
-                        gpu.decode_graph = None;
-                        return None;
-                    }
-                    Err(e) => {
-                        eprintln!("cuda: decode graph end_capture failed: {e}");
-                        gpu.decode_graph = None;
-                        return None;
-                    }
-                }
-            }
-            drop(capture_guard);
-            let enc = t0.elapsed().as_nanos() as u64;
-            let t1 = Instant::now();
-            gpu.sync()?;
-            note_call(launches, enc, t1.elapsed().as_nanos() as u64);
-            crate::gpu::cuda::ggml::mark_cudarc_dirty();
-            let logits = stream
-                .clone_dtoh(&gpu.y_arena.slice(out_logits_at..out_logits_at + vocab))
-                .ok()?;
-            TokenOut::Logits(logits)
-        };
-        Some(out)
+        }
+        if capturing_hybrid {
+            capture_guard.active = false;
+            ctx.store_hybrid_graphs(gpu, hybrid, &mut launches)?;
+        } else if capturing {
+            capture_guard.active = false;
+            ctx.store_whole_graph(gpu, &mut launches)?;
+        }
+        drop(capture_guard);
+        ctx.finish_token(gpu, t0, launches)
     })
 }
 
@@ -2490,6 +2121,231 @@ impl FusedCtx<'_> {
             crate::gpu::cuda::ggml::prepare_for_cudarc();
         }
         Some(())
+    }
+
+    /// Reduce the logits to the argmax token id on the device.
+    fn launch_argmax(&self, gpu: &mut CudaGpu) -> Option<()> {
+        let FusedCtx {
+            stream,
+            ybase,
+            plan:
+                FusedPlan {
+                    vocab,
+                    out_logits_at,
+                    ..
+                },
+            ..
+        } = *self;
+        let f = gpu.func_owned("argmax_f32")?;
+        let n_u = vocab as u32;
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let xp = ybase + (out_logits_at * 4) as u64;
+        unsafe {
+            stream
+                .launch_builder_pdl(&f)
+                .arg(&xp)
+                .arg(&n_u)
+                .arg(&mut gpu.d_argmax)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        Some(())
+    }
+
+    /// Close the hybrid tail capture and keep the segment graphs for replay,
+    /// folded into one parent graph when FA was captured for every layer.
+    fn store_hybrid_graphs(
+        &self,
+        gpu: &mut CudaGpu,
+        hybrid: HybridCapture,
+        launches: &mut u64,
+    ) -> Option<()> {
+        let FusedCtx {
+            req,
+            stream,
+            n_layers,
+            graph_flags,
+            plan: FusedPlan { graph_key, .. },
+            ..
+        } = *self;
+        let HybridCapture {
+            pre: fa_pre,
+            post: fa_post,
+            attn: fa_attn,
+            attn_ok: fa_attn_ok,
+            ..
+        } = hybrid;
+        match stream.end_capture(graph_flags) {
+            Ok(Some(g)) => {
+                g.launch().ok()?;
+                let k_offs: Vec<i32> = req.layers.iter().map(|l| l.k_off as i32).collect();
+                let v_offs: Vec<i32> = req.layers.iter().map(|l| l.v_off as i32).collect();
+                if fa_attn_ok && fa_attn.len() == n_layers {
+                    // One parent graph: child launches of pre/FA/post/tail.
+                    // Collapses ~193 host launches/token down to 1.
+                    let mut mega: Option<cudarc::driver::CudaGraph> = None;
+                    if stream
+                        .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
+                        .is_ok()
+                    {
+                        let mut child_ok = true;
+                        for li in 0..n_layers {
+                            if fa_pre[li].launch().is_err()
+                                || fa_attn[li].launch().is_err()
+                                || fa_post[li].launch().is_err()
+                            {
+                                child_ok = false;
+                                break;
+                            }
+                        }
+                        if child_ok {
+                            child_ok = g.launch().is_ok();
+                        }
+                        match (child_ok, stream.end_capture(graph_flags)) {
+                            (true, Ok(Some(m))) => {
+                                let _ = m.upload();
+                                mega = Some(m);
+                            }
+                            (_, Err(e)) => {
+                                eprintln!(
+                                    "cuda: hybrid mega-graph capture failed ({e}); segment replay"
+                                );
+                            }
+                            _ => {
+                                eprintln!("cuda: hybrid mega-graph empty/failed; segment replay");
+                            }
+                        }
+                    }
+                    if let Some(m) = mega {
+                        gpu.decode_graph = Some(m);
+                        gpu.decode_fa_attn = Some(fa_attn);
+                        gpu.decode_fa_graphs = Some((fa_pre, fa_post, g));
+                        gpu.decode_fa_kv_offs = Some((k_offs, v_offs));
+                        gpu.decode_fa_execs = None;
+                        gpu.decode_graph_key = graph_key;
+                        *launches = 1;
+                        eprintln!("cuda: hybrid FA mega-graph captured ({} layers)", n_layers);
+                    } else {
+                        gpu.decode_graph = None;
+                        for sg in fa_pre.iter().chain(fa_post.iter()).chain(fa_attn.iter()) {
+                            let _ = sg.upload();
+                        }
+                        let _ = g.upload();
+                        gpu.decode_fa_attn = Some(fa_attn);
+                        gpu.decode_fa_graphs = Some((fa_pre, fa_post, g));
+                        gpu.decode_fa_kv_offs = Some((k_offs, v_offs));
+                        gpu.decode_fa_execs = None;
+                        gpu.decode_graph_key = graph_key;
+                        *launches = (n_layers * 2 + 1) as u64;
+                        eprintln!(
+                            "cuda: hybrid FA graphs captured ({} layers, FA in-graph)",
+                            n_layers
+                        );
+                    }
+                } else {
+                    for sg in fa_pre.iter().chain(fa_post.iter()) {
+                        let _ = sg.upload();
+                    }
+                    let _ = g.upload();
+                    gpu.decode_fa_attn = None;
+                    gpu.decode_fa_graphs = Some((fa_pre, fa_post, g));
+                    gpu.decode_fa_kv_offs = Some((k_offs, v_offs));
+                    gpu.decode_fa_execs = None;
+                    gpu.decode_graph_key = graph_key;
+                    *launches = (n_layers * 2 + 1) as u64;
+                    eprintln!("cuda: hybrid FA graphs captured ({} layers)", n_layers);
+                }
+            }
+            Ok(None) => {
+                eprintln!("cuda: hybrid tail graph empty");
+                gpu.decode_fa_graphs = None;
+                gpu.decode_fa_attn = None;
+                return None;
+            }
+            Err(e) => {
+                eprintln!("cuda: hybrid tail end_capture failed: {e}");
+                gpu.decode_fa_graphs = None;
+                gpu.decode_fa_attn = None;
+                return None;
+            }
+        }
+        Some(())
+    }
+
+    /// Close the whole-token capture, launch it for this token and keep it.
+    fn store_whole_graph(&self, gpu: &mut CudaGpu, launches: &mut u64) -> Option<()> {
+        let FusedCtx {
+            stream,
+            graph_flags,
+            plan: FusedPlan { graph_key, .. },
+            ..
+        } = *self;
+        match stream.end_capture(graph_flags) {
+            Ok(Some(g)) => {
+                // Capture only records — must launch for this token.
+                g.launch().ok()?;
+                gpu.decode_graph = Some(g);
+                gpu.decode_graph_key = graph_key;
+                *launches = 1;
+            }
+            Ok(None) => {
+                eprintln!("cuda: decode graph capture produced empty graph");
+                gpu.decode_graph = None;
+                return None;
+            }
+            Err(e) => {
+                eprintln!("cuda: decode graph end_capture failed: {e}");
+                gpu.decode_graph = None;
+                return None;
+            }
+        }
+        Some(())
+    }
+
+    /// Wait for the token, record its launch stats and read back what the
+    /// caller asked for: rows (argmax + hidden), the argmax id, or logits.
+    fn finish_token(&self, gpu: &mut CudaGpu, t0: Instant, launches: u64) -> Option<TokenOut> {
+        let FusedCtx {
+            req,
+            stream,
+            plan:
+                FusedPlan {
+                    hidden,
+                    vocab,
+                    h_at,
+                    out_logits_at,
+                    ..
+                },
+            ..
+        } = *self;
+        let enc = t0.elapsed().as_nanos() as u64;
+        let t1 = Instant::now();
+        gpu.sync()?;
+        note_call(launches, enc, t1.elapsed().as_nanos() as u64);
+        crate::gpu::cuda::ggml::mark_cudarc_dirty();
+        let out = if req.m > 1 {
+            let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
+            let h = stream
+                .clone_dtoh(&gpu.y_arena.slice(h_at..h_at + hidden))
+                .ok()?;
+            TokenOut::Rows {
+                argmax: vec![idx[0]],
+                hidden: h,
+            }
+        } else if req.argmax {
+            let idx = stream.clone_dtoh(&gpu.d_argmax).ok()?;
+            TokenOut::Argmax(idx[0])
+        } else {
+            let logits = stream
+                .clone_dtoh(&gpu.y_arena.slice(out_logits_at..out_logits_at + vocab))
+                .ok()?;
+            TokenOut::Logits(logits)
+        };
+        Some(out)
     }
 }
 
