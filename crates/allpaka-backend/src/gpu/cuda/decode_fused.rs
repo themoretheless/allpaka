@@ -211,8 +211,6 @@ pub(super) fn decode_token_one_fused(
         hd,
         q_dim,
         kv,
-        group,
-        rot_dim,
         rope_pairs,
         ffn_dim,
         vocab,
@@ -234,11 +232,10 @@ pub(super) fn decode_token_one_fused(
         per_layer_norms,
         x_elems,
         graph_key,
-        use_fa,
         fa_inline,
-        native_shallow,
         hybrid_fa,
         whole_graph,
+        ..
     } = plan;
     let rope = if rope_in.len() >= rope_pairs {
         &rope_in[..rope_pairs]
@@ -308,6 +305,24 @@ pub(super) fn decode_token_one_fused(
         let capturing_hybrid =
             hybrid_fa && (gpu.decode_fa_graphs.is_none() || gpu.decode_graph_key != graph_key);
         let capturing = capturing_whole; // CaptureGuard / end-of-token for whole-graph only
+
+        let use_qk_rope_table = !capturing_hybrid
+            && rope_freq_ptr.is_some()
+            && gpu.fns.contains_key("build_rope_freq_dpos")
+            && gpu.fns.contains_key("rmsnorm_rope_qk_store_table_dpos");
+        let ctx = FusedCtx {
+            req,
+            plan,
+            stream: &stream,
+            pos,
+            n_layers,
+            ybase,
+            xbase,
+            rope_freq_ptr,
+            q8_on,
+            capturing_whole,
+            use_qk_rope_table,
+        };
 
         if capturing_whole {
             gpu.decode_graph = None;
@@ -412,146 +427,7 @@ pub(super) fn decode_token_one_fused(
                     }
                 }
             }
-            let replay_ok = if gpu.decode_graph_key == graph_key {
-                if let (Some((pre, post, tail)), Some((k_offs, v_offs))) = (
-                    gpu.decode_fa_graphs.as_ref(),
-                    gpu.decode_fa_kv_offs.as_ref(),
-                ) {
-                    if pre.len() == n_layers && post.len() == n_layers && k_offs.len() == n_layers {
-                        let use_cpp = crate::runtime::get().cuda_hybrid_replay;
-                        if use_cpp {
-                            let (cache_p, cg) = DevicePtr::device_ptr(&req.cache.buf, &stream);
-                            drop(cg);
-                            let qp = ybase + (q_at * 4) as u64;
-                            let op = ybase + (attn_at * 4) as u64;
-                            let pre_e: Vec<*mut std::ffi::c_void> = pre
-                                .iter()
-                                .map(|g| g.cu_graph_exec() as *mut std::ffi::c_void)
-                                .collect();
-                            let post_e: Vec<*mut std::ffi::c_void> = post
-                                .iter()
-                                .map(|g| g.cu_graph_exec() as *mut std::ffi::c_void)
-                                .collect();
-                            crate::gpu::cuda::ggml::hybrid_replay(
-                                &stream,
-                                &HybridReplay {
-                                    pre_execs: &pre_e,
-                                    post_execs: &post_e,
-                                    tail_exec: tail.cu_graph_exec() as *mut std::ffi::c_void,
-                                    q: qp,
-                                    out: op,
-                                    cache_base: cache_p,
-                                    k_off: k_offs,
-                                    v_off: v_offs,
-                                    shape: FaShape {
-                                        head_dim: hd,
-                                        n_q_heads: req.n_heads,
-                                        n_kv_heads: req.n_kv_heads.max(1),
-                                        base: pos,
-                                        kv_dim: req.kv_dim,
-                                        scale: req.scale,
-                                    },
-                                    d_pos: d_pos_p,
-                                },
-                            )
-                        } else if stream.context().bind_to_thread().is_err() {
-                            false
-                        } else {
-                            let cu_stream = stream.cu_stream();
-                            let (cache_p, cg) = DevicePtr::device_ptr(&req.cache.buf, &stream);
-                            drop(cg);
-                            let qp = ybase + (q_at * 4) as u64;
-                            let op = ybase + (attn_at * 4) as u64;
-                            let shared = crate::gpu::cuda::ggml::shared_stream();
-                            let fa_graphs = gpu.decode_fa_attn.as_ref();
-                            let use_fa_graphs =
-                                fa_graphs.map(|g| g.len() == n_layers).unwrap_or(false);
-                            let mut ok = true;
-                            for li in 0..n_layers {
-                                if unsafe {
-                                    cudarc::driver::result::graph::launch(
-                                        pre[li].cu_graph_exec(),
-                                        cu_stream,
-                                    )
-                                }
-                                .is_err()
-                                {
-                                    ok = false;
-                                    break;
-                                }
-                                if use_fa_graphs {
-                                    if unsafe {
-                                        cudarc::driver::result::graph::launch(
-                                            fa_graphs.unwrap()[li].cu_graph_exec(),
-                                            cu_stream,
-                                        )
-                                    }
-                                    .is_err()
-                                    {
-                                        ok = false;
-                                        break;
-                                    }
-                                } else {
-                                    if !shared {
-                                        crate::gpu::cuda::ggml::prepare_from_cudarc(&stream);
-                                    }
-                                    let k_dev = cache_p + (k_offs[li] as u64) * 2;
-                                    let v_dev = cache_p + (v_offs[li] as u64) * 2;
-                                    if !crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
-                                        q: qp,
-                                        k: k_dev,
-                                        v: v_dev,
-                                        out: op,
-                                        m: 1,
-                                        shape: FaShape {
-                                            head_dim: hd,
-                                            n_q_heads: req.n_heads,
-                                            n_kv_heads: req.n_kv_heads.max(1),
-                                            base: pos,
-                                            kv_dim: req.kv_dim,
-                                            scale: req.scale,
-                                        },
-                                        d_pos: Some(d_pos_p),
-                                    }) {
-                                        ok = false;
-                                        break;
-                                    }
-                                }
-                                if unsafe {
-                                    cudarc::driver::result::graph::launch(
-                                        post[li].cu_graph_exec(),
-                                        cu_stream,
-                                    )
-                                }
-                                .is_err()
-                                {
-                                    ok = false;
-                                    break;
-                                }
-                            }
-                            if ok {
-                                ok = unsafe {
-                                    cudarc::driver::result::graph::launch(
-                                        tail.cu_graph_exec(),
-                                        cu_stream,
-                                    )
-                                }
-                                .is_ok();
-                            }
-                            if ok && !shared {
-                                crate::gpu::cuda::ggml::mark_cudarc_dirty();
-                            }
-                            ok
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
+            let replay_ok = ctx.replay_hybrid_segments(gpu, d_pos_p);
             if replay_ok {
                 launches = (n_layers * 2 + 1) as u64;
                 let enc = t0.elapsed().as_nanos() as u64;
@@ -607,569 +483,7 @@ pub(super) fn decode_token_one_fused(
             flags: graph_flags,
         };
 
-        let launch_rms_into = |gpu: &mut CudaGpu,
-                               dst: usize,
-                               src: usize,
-                               w_off: usize,
-                               n: usize,
-                               rows: usize|
-         -> Option<()> {
-            let dst_p = ybase + (dst * 4) as u64;
-            let src_p = ybase + (src * 4) as u64;
-            let w_p = xbase + (w_off * 4) as u64;
-            let n_u = n as u32;
-            let rows_u = rows as u32;
-            let eps = req.eps;
-            let cfg = LaunchConfig {
-                grid_dim: (rows_u, 1, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            // Fuse Q8 pack when decode mmvq is on and n is Q4_K-friendly.
-            if q8_on && n % 256 == 0 {
-                gpu.ensure_q8(n, rows)?;
-                let f = gpu.func_owned("rmsnorm_into_f32_q8")?;
-                let mut q = gpu.q8_q.slice_mut(0..(n / 32) * 44 * rows);
-                unsafe {
-                    stream
-                        .launch_builder_pdl(&f)
-                        .arg(&dst_p)
-                        .arg(&src_p)
-                        .arg(&w_p)
-                        .arg(&mut q)
-                        .arg(&n_u)
-                        .arg(&eps)
-                        .arg(&rows_u)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-                gpu.q8_src = dst_p;
-                gpu.q8_src_n = n;
-                gpu.q8_src_m = rows;
-                gpu.q8_off = 0;
-                return Some(());
-            }
-            let f = gpu.func_owned("rmsnorm_into_f32")?;
-            unsafe {
-                stream
-                    .launch_builder_pdl(&f)
-                    .arg(&dst_p)
-                    .arg(&src_p)
-                    .arg(&w_p)
-                    .arg(&n_u)
-                    .arg(&eps)
-                    .arg(&rows_u)
-                    .launch_pdl(cfg)
-            }
-            .ok()?;
-            gpu.invalidate_q8();
-            Some(())
-        };
-
-        let launch_rms_inplace =
-            |gpu: &mut CudaGpu, x_off: usize, w_off: usize, n: usize, rows: usize| -> Option<()> {
-                let f = gpu.func_owned("rmsnorm_f32")?;
-                let n_u = n as u32;
-                let rows_u = rows as u32;
-                let eps = req.eps;
-                let cfg = LaunchConfig {
-                    grid_dim: (rows_u, 1, 1),
-                    block_dim: (256, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                let xp = ybase + (x_off * 4) as u64;
-                let wp = xbase + (w_off * 4) as u64;
-                unsafe {
-                    stream
-                        .launch_builder_pdl(&f)
-                        .arg(&xp)
-                        .arg(&wp)
-                        .arg(&n_u)
-                        .arg(&eps)
-                        .arg(&rows_u)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-                Some(())
-            };
-
-        let launch_add_bias =
-            |gpu: &mut CudaGpu, x_off: usize, bias_off: usize, n: usize| -> Option<()> {
-                let f = gpu.func_owned("add_bias_f32")?;
-                let n_u = n as u32;
-                let cfg = CudaGpu::cfg_1d(n_u, 256);
-                let xp = ybase + (x_off * 4) as u64;
-                let bp = xbase + (bias_off * 4) as u64;
-                unsafe {
-                    stream
-                        .launch_builder_pdl(&f)
-                        .arg(&xp)
-                        .arg(&bp)
-                        .arg(&n_u)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-                Some(())
-            };
-
-        let _launch_add = |gpu: &mut CudaGpu, a: usize, b: usize, n: usize| -> Option<()> {
-            let f = gpu.func_owned("residual_add")?;
-            let n_u = n as u32;
-            let cfg = CudaGpu::cfg_1d(n_u, 256);
-            let ap = ybase + (a * 4) as u64;
-            let bp = ybase + (b * 4) as u64;
-            unsafe {
-                stream
-                    .launch_builder_pdl(&f)
-                    .arg(&ap)
-                    .arg(&bp)
-                    .arg(&n_u)
-                    .launch_pdl(cfg)
-            }
-            .ok()?;
-            Some(())
-        };
-
-        let launch_swiglu = |gpu: &mut CudaGpu, gate: usize, up: usize, n: usize| -> Option<bool> {
-            let gp = ybase + (gate * 4) as u64;
-            let up_p = ybase + (up * 4) as u64;
-            // Fuse Q8 pack for the following down mmvq when enabled.
-            if crate::gpu::cuda::runtime::q8_decode_enabled() && n % 32 == 0 {
-                gpu.ensure_q8(n, 1)?;
-                let f = gpu.func_owned("swiglu_into_q8")?;
-                let n_u = n as u32;
-                let rows_u = 1u32;
-                let cfg = LaunchConfig {
-                    grid_dim: (n_u / 32, 1, 1),
-                    block_dim: (32, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                let mut q = gpu.q8_q.slice_mut(0..(n / 32) * 36);
-                unsafe {
-                    stream
-                        .launch_builder_pdl(&f)
-                        .arg(&gp)
-                        .arg(&up_p)
-                        .arg(&mut q)
-                        .arg(&n_u)
-                        .arg(&rows_u)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-                gpu.q8_src = gp;
-                gpu.q8_src_n = n;
-                gpu.q8_src_m = 1;
-                gpu.q8_off = 0;
-                return Some(true);
-            }
-            let f = gpu.func_owned("swiglu")?;
-            let n_u = n as u32;
-            let cfg = CudaGpu::cfg_1d(n_u, 256);
-            unsafe {
-                stream
-                    .launch_builder_pdl(&f)
-                    .arg(&gp)
-                    .arg(&up_p)
-                    .arg(&n_u)
-                    .launch_pdl(cfg)
-            }
-            .ok()?;
-            Some(false)
-        };
-
-        let launch_rms_rope = |gpu: &mut CudaGpu,
-                               x_off: usize,
-                               w_off: usize,
-                               rope_off: usize,
-                               heads: usize|
-         -> Option<()> {
-            let heads_u = heads as u32;
-            let hd_u = hd as u32;
-            let rot_u = rot_dim as u32;
-            let eps = req.eps;
-            let cfg = LaunchConfig {
-                grid_dim: (heads_u, 1, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            let xp = ybase + (x_off * 4) as u64;
-            let wp = xbase + (w_off * 4) as u64;
-            if let Some(fp) = rope_freq_ptr {
-                let f = gpu.func_owned("rmsnorm_rope_freq_dpos")?;
-                unsafe {
-                    stream
-                        .launch_builder_pdl(&f)
-                        .arg(&xp)
-                        .arg(&wp)
-                        .arg(&fp)
-                        .arg(&gpu.d_pos)
-                        .arg(&heads_u)
-                        .arg(&hd_u)
-                        .arg(&rot_u)
-                        .arg(&eps)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-            } else {
-                let f = gpu.func_owned("rmsnorm_rope_neox")?;
-                let rp = xbase + (rope_off * 4) as u64;
-                unsafe {
-                    stream
-                        .launch_builder_pdl(&f)
-                        .arg(&xp)
-                        .arg(&wp)
-                        .arg(&rp)
-                        .arg(&heads_u)
-                        .arg(&hd_u)
-                        .arg(&rot_u)
-                        .arg(&eps)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-            }
-            Some(())
-        };
-
         // RMSNorm + NeoX RoPE + store K into f16 cache (skips a separate store launch).
-        let launch_rms_rope_store = |gpu: &mut CudaGpu,
-                                     x_off: usize,
-                                     w_off: usize,
-                                     rope_off: usize,
-                                     k_cache_off: usize,
-                                     heads: usize|
-         -> Option<()> {
-            let heads_u = heads as u32;
-            let hd_u = hd as u32;
-            let rot_u = rot_dim as u32;
-            let kv_dim_u = req.kv_dim as u32;
-            let base_off = k_cache_off as u64;
-            let eps = req.eps;
-            let cfg = LaunchConfig {
-                grid_dim: (heads_u, 1, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            let xp = ybase + (x_off * 4) as u64;
-            let wp = xbase + (w_off * 4) as u64;
-            if let Some(fp) = rope_freq_ptr {
-                let f = gpu.func_owned("rmsnorm_rope_store_freq_dpos")?;
-                unsafe {
-                    stream
-                        .launch_builder_pdl(&f)
-                        .arg(&xp)
-                        .arg(&wp)
-                        .arg(&fp)
-                        .arg(&req.cache.buf)
-                        .arg(&base_off)
-                        .arg(&gpu.d_pos)
-                        .arg(&heads_u)
-                        .arg(&hd_u)
-                        .arg(&rot_u)
-                        .arg(&kv_dim_u)
-                        .arg(&eps)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-            } else {
-                let f = gpu.func_owned("rmsnorm_rope_store_dpos")?;
-                let rp = xbase + (rope_off * 4) as u64;
-                unsafe {
-                    stream
-                        .launch_builder_pdl(&f)
-                        .arg(&xp)
-                        .arg(&wp)
-                        .arg(&rp)
-                        .arg(&req.cache.buf)
-                        .arg(&base_off)
-                        .arg(&gpu.d_pos)
-                        .arg(&heads_u)
-                        .arg(&hd_u)
-                        .arg(&rot_u)
-                        .arg(&kv_dim_u)
-                        .arg(&eps)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-            }
-            Some(())
-        };
-
-        let use_qk_rope_table = !capturing_hybrid
-            && rope_freq_ptr.is_some()
-            && gpu.fns.contains_key("build_rope_freq_dpos")
-            && gpu.fns.contains_key("rmsnorm_rope_qk_store_table_dpos");
-        let launch_rms_rope_qk_store = |gpu: &mut CudaGpu,
-                                        q_off: usize,
-                                        k_off: usize,
-                                        qw_off: usize,
-                                        kw_off: usize,
-                                        k_cache_off: usize|
-         -> Option<()> {
-            if !use_qk_rope_table {
-                return None;
-            }
-            let f = gpu.func_owned("rmsnorm_rope_qk_store_table_dpos")?;
-            let q_heads_u = req.n_heads as u32;
-            let kv_heads_u = req.n_kv_heads as u32;
-            let hd_u = hd as u32;
-            let rot_u = rot_dim as u32;
-            let kv_dim_u = req.kv_dim as u32;
-            let base_off = k_cache_off as u64;
-            let eps = req.eps;
-            let qp = ybase + (q_off * 4) as u64;
-            let kp = ybase + (k_off * 4) as u64;
-            let qwp = xbase + (qw_off * 4) as u64;
-            let kwp = xbase + (kw_off * 4) as u64;
-            let ropep = xbase + (rope_q_at * 4) as u64;
-            let cfg = LaunchConfig {
-                grid_dim: (q_heads_u + kv_heads_u, 1, 1),
-                block_dim: (hd.next_power_of_two().clamp(32, 256) as u32, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            unsafe {
-                stream
-                    .launch_builder_pdl(&f)
-                    .arg(&qp)
-                    .arg(&kp)
-                    .arg(&qwp)
-                    .arg(&kwp)
-                    .arg(&ropep)
-                    .arg(&req.cache.buf)
-                    .arg(&base_off)
-                    .arg(&gpu.d_pos)
-                    .arg(&q_heads_u)
-                    .arg(&kv_heads_u)
-                    .arg(&hd_u)
-                    .arg(&rot_u)
-                    .arg(&kv_dim_u)
-                    .arg(&eps)
-                    .launch_pdl(cfg)
-            }
-            .ok()?;
-            Some(())
-        };
-
-        let launch_rope =
-            |gpu: &mut CudaGpu, x_off: usize, rope_off: usize, heads: usize| -> Option<()> {
-                let heads_u = heads as u32;
-                let hd_u = hd as u32;
-                let rot_u = rot_dim as u32;
-                let cfg = LaunchConfig {
-                    grid_dim: (heads_u, 1, 1),
-                    block_dim: (256, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                let xp = ybase + (x_off * 4) as u64;
-                if let Some(fp) = rope_freq_ptr {
-                    let f = gpu.func_owned("rope_neox_freq_dpos")?;
-                    unsafe {
-                        stream
-                            .launch_builder_pdl(&f)
-                            .arg(&xp)
-                            .arg(&fp)
-                            .arg(&gpu.d_pos)
-                            .arg(&heads_u)
-                            .arg(&hd_u)
-                            .arg(&rot_u)
-                            .launch_pdl(cfg)
-                    }
-                    .ok()?;
-                } else {
-                    let f = gpu.func_owned("rope_neox")?;
-                    let rp = xbase + (rope_off * 4) as u64;
-                    unsafe {
-                        stream
-                            .launch_builder_pdl(&f)
-                            .arg(&xp)
-                            .arg(&rp)
-                            .arg(&heads_u)
-                            .arg(&hd_u)
-                            .arg(&rot_u)
-                            .launch_pdl(cfg)
-                    }
-                    .ok()?;
-                }
-                Some(())
-            };
-
-        let launch_store = |gpu: &mut CudaGpu, src: usize, off: usize, n: usize| -> Option<()> {
-            let f = gpu.func_owned("store_kv_f16_dpos")?;
-            let n_u = n as u32;
-            let base_off = off as u64;
-            let kv_dim_u = req.kv_dim as u32;
-            let cfg = CudaGpu::cfg_1d(n_u, 256);
-            let sp = ybase + (src * 4) as u64;
-            unsafe {
-                stream
-                    .launch_builder_pdl(&f)
-                    .arg(&req.cache.buf)
-                    .arg(&sp)
-                    .arg(&base_off)
-                    .arg(&gpu.d_pos)
-                    .arg(&kv_dim_u)
-                    .arg(&n_u)
-                    .launch_pdl(cfg)
-            }
-            .ok()?;
-            Some(())
-        };
-
-        let launch_store_pair = |gpu: &mut CudaGpu,
-                                 k_src: usize,
-                                 v_src: usize,
-                                 k_off: usize,
-                                 v_off: usize,
-                                 n: usize|
-         -> Option<()> {
-            if let Some(f) = gpu.func_owned("store_kv_pair_f16_dpos") {
-                let n_u = n as u32;
-                let k_off_u = k_off as u64;
-                let v_off_u = v_off as u64;
-                let kv_dim_u = req.kv_dim as u32;
-                let cfg = CudaGpu::cfg_1d(n_u, 256);
-                let kp = ybase + (k_src * 4) as u64;
-                let vp = ybase + (v_src * 4) as u64;
-                unsafe {
-                    stream
-                        .launch_builder_pdl(&f)
-                        .arg(&req.cache.buf)
-                        .arg(&kp)
-                        .arg(&vp)
-                        .arg(&k_off_u)
-                        .arg(&v_off_u)
-                        .arg(&gpu.d_pos)
-                        .arg(&kv_dim_u)
-                        .arg(&n_u)
-                        .launch_pdl(cfg)
-                }
-                .ok()?;
-                return Some(());
-            }
-            launch_store(gpu, k_src, k_off, n)?;
-            launch_store(gpu, v_src, v_off, n)?;
-            Some(())
-        };
-
-        let launch_attend = |gpu: &mut CudaGpu,
-                             q_off: usize,
-                             out_off: usize,
-                             k_off: usize,
-                             v_off: usize,
-                             q8_only: bool|
-         -> Option<()> {
-            // ggml FA when available. Skip during whole-token graph capture
-            // unless ALLPAKA_FA_INLINE (direct fattn is stream-capturable).
-            // ALLPAKA_NATIVE_ATTEND forces native dpos attend (better at short KV).
-            if use_fa && !native_shallow && (!capturing_whole || fa_inline) {
-                crate::gpu::cuda::ggml::prepare_from_cudarc(&stream);
-                let (cache_p, cg) = DevicePtr::device_ptr(&req.cache.buf, &stream);
-                drop(cg);
-                let qp = ybase + (q_off * 4) as u64;
-                let op = ybase + (out_off * 4) as u64;
-                let k_dev = cache_p + (k_off as u64) * 2;
-                let v_dev = cache_p + (v_off as u64) * 2;
-                let q_n = hd * req.n_heads;
-                let q8_only = q8_only && gpu.fns.contains_key("permute_q8_m1_qonly");
-                let fuse_q8 = q8_only || gpu.fns.contains_key("permute_q8_m1");
-                if fuse_q8 {
-                    gpu.ensure_q8(q_n, 1)?;
-                    // Non-null flag: DLL skips permute; NVRTC does permute+Q8.
-                    crate::gpu::cuda::ggml::fa_set_q8(1);
-                }
-                if crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
-                    q: qp,
-                    k: k_dev,
-                    v: v_dev,
-                    out: op,
-                    m: 1,
-                    shape: FaShape {
-                        head_dim: hd,
-                        n_q_heads: req.n_heads,
-                        n_kv_heads: req.n_kv_heads.max(1),
-                        base: pos,
-                        kv_dim: req.kv_dim,
-                        scale: req.scale,
-                    },
-                    d_pos: {
-                        let (p, g) = DevicePtr::device_ptr(&gpu.d_pos, &stream);
-                        drop(g);
-                        Some(p)
-                    },
-                }) {
-                    if fuse_q8 && crate::gpu::cuda::ggml::fa_q8_consumed() {
-                        {
-                            let fa = crate::gpu::cuda::ggml::fa_last_src()?;
-                            let wo_fa_q8 =
-                                q8_only && crate::runtime::get().cuda_wo_fa_q8 && q_n == 8192;
-                            if wo_fa_q8 {
-                                // Skip permute_q8_m1_qonly; WO mmvq packs from FA buffer.
-                                gpu.wo_fa_x = fa;
-                            } else if q8_only {
-                                crate::gpu::cuda::runtime::launch_permute_q8_m1_qonly(
-                                    gpu,
-                                    fa,
-                                    op,
-                                    hd,
-                                    req.n_heads,
-                                )?;
-                            } else {
-                                crate::gpu::cuda::runtime::launch_permute_q8_m1(
-                                    gpu,
-                                    fa,
-                                    op,
-                                    hd,
-                                    req.n_heads,
-                                )?;
-                            }
-                        }
-                    }
-                    crate::gpu::cuda::ggml::mark_cudarc_dirty();
-                    return Some(());
-                }
-            }
-            let f = if attend_use_kv_fused(hd, group) {
-                gpu.func_owned("attend_gqa_dpos_kv")?
-            } else {
-                gpu.func_owned("attend_gqa_dpos")?
-            };
-            let k_off_u = k_off as u64;
-            let v_off_u = v_off as u64;
-            let kv_dim_u = req.kv_dim as u32;
-            let head_dim_u = hd as u32;
-            let n_q = req.n_heads as u32;
-            let group_u = group as u32;
-            let scale = req.scale;
-            let grid_x = if attend_use_kv_fused(hd, group) {
-                n_q / group_u
-            } else {
-                n_q
-            };
-            let cfg = if attend_use_kv_fused(hd, group) {
-                attend_gqa_kv_launch_cfg(grid_x, 1, group_u, head_dim_u)
-            } else {
-                attend_gqa_launch_cfg(grid_x, 1)
-            };
-            let qp = ybase + (q_off * 4) as u64;
-            let op = ybase + (out_off * 4) as u64;
-            unsafe {
-                stream
-                    .launch_builder_pdl(&f)
-                    .arg(&qp)
-                    .arg(&req.cache.buf)
-                    .arg(&op)
-                    .arg(&k_off_u)
-                    .arg(&v_off_u)
-                    .arg(&kv_dim_u)
-                    .arg(&head_dim_u)
-                    .arg(&n_q)
-                    .arg(&group_u)
-                    .arg(&gpu.d_pos)
-                    .arg(&scale)
-                    .launch_pdl(cfg)
-            }
-            .ok()?;
-            Some(())
-        };
 
         let mut fa_pre: Vec<cudarc::driver::CudaGraph> = Vec::new();
         let mut fa_post: Vec<cudarc::driver::CudaGraph> = Vec::new();
@@ -1217,7 +531,7 @@ pub(super) fn decode_token_one_fused(
                     .ok()?;
             }
 
-            launch_rms_into(gpu, h_at, x_at, attn_norm_at, hidden, 1)?;
+            ctx.launch_rms_into(gpu, h_at, x_at, attn_norm_at, hidden, 1)?;
             launches += 1;
 
             let (wq_c, wq_o) = resolve_w(gpu, layer.wq.1)?;
@@ -1355,15 +669,15 @@ pub(super) fn decode_token_one_fused(
                 let kb_at = qb_at + q_dim;
                 let vb_at = kb_at + kv;
                 if layer.q_bias.is_some() {
-                    launch_add_bias(gpu, q_at, qb_at, q_dim)?;
+                    ctx.launch_add_bias(gpu, q_at, qb_at, q_dim)?;
                     launches += 1;
                 }
                 if layer.k_bias.is_some() {
-                    launch_add_bias(gpu, k_at, kb_at, kv)?;
+                    ctx.launch_add_bias(gpu, k_at, kb_at, kv)?;
                     launches += 1;
                 }
                 if layer.v_bias.is_some() {
-                    launch_add_bias(gpu, v_at, vb_at, kv)?;
+                    ctx.launch_add_bias(gpu, v_at, vb_at, kv)?;
                     launches += 1;
                 }
             }
@@ -1371,7 +685,7 @@ pub(super) fn decode_token_one_fused(
             let can_fuse_qk_post =
                 qkv_fused && layer.q_norm.is_some() && layer.k_norm.is_some() && use_qk_rope_table;
             let qk_post_fused = if can_fuse_qk_post {
-                launch_rms_rope_qk_store(gpu, q_at, k_at, q_norm_at, k_norm_at, layer.k_off)?;
+                ctx.launch_rms_rope_qk_store(gpu, q_at, k_at, q_norm_at, k_norm_at, layer.k_off)?;
                 true
             } else {
                 false
@@ -1379,14 +693,14 @@ pub(super) fn decode_token_one_fused(
             if qk_post_fused {
                 launches += 1;
             } else if layer.q_norm.is_some() && gpu.fns.contains_key("rmsnorm_rope_neox") {
-                launch_rms_rope(gpu, q_at, q_norm_at, rope_q_at, req.n_heads)?;
+                ctx.launch_rms_rope(gpu, q_at, q_norm_at, rope_q_at, req.n_heads)?;
                 launches += 1;
             } else {
                 if layer.q_norm.is_some() {
-                    launch_rms_inplace(gpu, q_at, q_norm_at, hd, req.n_heads)?;
+                    ctx.launch_rms_inplace(gpu, q_at, q_norm_at, hd, req.n_heads)?;
                     launches += 1;
                 }
-                launch_rope(gpu, q_at, rope_q_at, req.n_heads)?;
+                ctx.launch_rope(gpu, q_at, rope_q_at, req.n_heads)?;
                 launches += 1;
             }
 
@@ -1397,7 +711,7 @@ pub(super) fn decode_token_one_fused(
                 && layer.k_norm.is_some()
                 && gpu.fns.contains_key("rmsnorm_rope_store_dpos")
             {
-                launch_rms_rope_store(
+                ctx.launch_rms_rope_store(
                     gpu,
                     k_at,
                     k_norm_at,
@@ -1409,14 +723,14 @@ pub(super) fn decode_token_one_fused(
                 true
             } else {
                 if layer.k_norm.is_some() && gpu.fns.contains_key("rmsnorm_rope_neox") {
-                    launch_rms_rope(gpu, k_at, k_norm_at, rope_k_at, req.n_kv_heads)?;
+                    ctx.launch_rms_rope(gpu, k_at, k_norm_at, rope_k_at, req.n_kv_heads)?;
                     launches += 1;
                 } else {
                     if layer.k_norm.is_some() {
-                        launch_rms_inplace(gpu, k_at, k_norm_at, hd, req.n_kv_heads)?;
+                        ctx.launch_rms_inplace(gpu, k_at, k_norm_at, hd, req.n_kv_heads)?;
                         launches += 1;
                     }
-                    launch_rope(gpu, k_at, rope_k_at, req.n_kv_heads)?;
+                    ctx.launch_rope(gpu, k_at, rope_k_at, req.n_kv_heads)?;
                     launches += 1;
                 }
                 false
@@ -1425,14 +739,14 @@ pub(super) fn decode_token_one_fused(
             if qkv_fused && k_stored && write_v_cache {
                 // V already in cache from QKV; K stored by rmsnorm_rope_store_dpos.
             } else if qkv_fused && write_v_cache {
-                launch_store(gpu, k_at, layer.k_off, kv)?;
+                ctx.launch_store(gpu, k_at, layer.k_off, kv)?;
                 launches += 1;
             } else if qkv_fused && k_stored {
                 // K fused into cache; V stayed in arena (bias) — store V only.
-                launch_store(gpu, v_at, layer.v_off, kv)?;
+                ctx.launch_store(gpu, v_at, layer.v_off, kv)?;
                 launches += 1;
             } else {
-                launch_store_pair(gpu, k_at, v_at, layer.k_off, layer.v_off, kv)?;
+                ctx.launch_store_pair(gpu, k_at, v_at, layer.k_off, layer.v_off, kv)?;
                 launches += 1;
             }
 
@@ -1456,7 +770,7 @@ pub(super) fn decode_token_one_fused(
                 if fa_attn_ok {
                     if !fa_warmed {
                         // First FA outside capture so ggml/fattn cudaMalloc is done.
-                        launch_attend(
+                        ctx.launch_attend(
                             gpu,
                             q_at,
                             attn_at,
@@ -1521,7 +835,7 @@ pub(super) fn decode_token_one_fused(
                     }
                 }
                 if !captured_fa {
-                    launch_attend(
+                    ctx.launch_attend(
                         gpu,
                         q_at,
                         attn_at,
@@ -1533,7 +847,7 @@ pub(super) fn decode_token_one_fused(
                     launches += 3;
                 }
             } else {
-                launch_attend(
+                ctx.launch_attend(
                     gpu,
                     q_at,
                     attn_at,
@@ -1575,7 +889,7 @@ pub(super) fn decode_token_one_fused(
             )?;
             launches += 1;
 
-            launch_rms_into(gpu, h_at, x_at, ffn_norm_at, hidden, 1)?;
+            ctx.launch_rms_into(gpu, h_at, x_at, ffn_norm_at, hidden, 1)?;
             launches += 1;
 
             let TokenFfn::Dense { gate, up, down } = &layer.ffn else {
@@ -1653,7 +967,7 @@ pub(super) fn decode_token_one_fused(
                 if ggml_decode {
                     crate::gpu::cuda::ggml::prepare_for_cudarc();
                 }
-                let q8_primed = launch_swiglu(gpu, gate_at, up_at, gate.2)?;
+                let q8_primed = ctx.launch_swiglu(gpu, gate_at, up_at, gate.2)?;
                 if !q8_primed {
                     gpu.invalidate_q8();
                 }
@@ -1730,7 +1044,7 @@ pub(super) fn decode_token_one_fused(
         }
 
         // Final norm + LM head.
-        launch_rms_into(gpu, h_at, x_at, out_norm_at, hidden, 1)?;
+        ctx.launch_rms_into(gpu, h_at, x_at, out_norm_at, hidden, 1)?;
         let (o_c, o_o) = resolve_w(gpu, req.output.1)?;
         launch_matvec_y_ptr(
             gpu,
@@ -2209,4 +1523,851 @@ fn refresh_layer_norms(
     gpu.decode_fa_execs = None;
     gpu.decode_graph_key = 0;
     Some(())
+}
+
+/// Per-call state of one fused decode token shared by every launch: the plan,
+/// stream, arena base addresses and the flags fixed before the first launch.
+#[derive(Clone, Copy)]
+struct FusedCtx<'a> {
+    req: &'a TokenReq<'a>,
+    plan: FusedPlan,
+    stream: &'a Arc<cudarc::driver::CudaStream>,
+    pos: usize,
+    n_layers: usize,
+    /// Device base of `y_arena` (activations) and `x_arena` (norms, rope).
+    ybase: u64,
+    xbase: u64,
+    /// Device RoPE frequency table, when the dpos kernels compute sin/cos.
+    rope_freq_ptr: Option<u64>,
+    q8_on: bool,
+    capturing_whole: bool,
+    use_qk_rope_table: bool,
+}
+
+impl FusedCtx<'_> {
+    fn launch_rms_into(
+        &self,
+        gpu: &mut CudaGpu,
+        dst: usize,
+        src: usize,
+        w_off: usize,
+        n: usize,
+        rows: usize,
+    ) -> Option<()> {
+        let FusedCtx {
+            req,
+            stream,
+            ybase,
+            xbase,
+            q8_on,
+            ..
+        } = *self;
+
+        let dst_p = ybase + (dst * 4) as u64;
+        let src_p = ybase + (src * 4) as u64;
+        let w_p = xbase + (w_off * 4) as u64;
+        let n_u = n as u32;
+        let rows_u = rows as u32;
+        let eps = req.eps;
+        let cfg = LaunchConfig {
+            grid_dim: (rows_u, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        // Fuse Q8 pack when decode mmvq is on and n is Q4_K-friendly.
+        if q8_on && n % 256 == 0 {
+            gpu.ensure_q8(n, rows)?;
+            let f = gpu.func_owned("rmsnorm_into_f32_q8")?;
+            let mut q = gpu.q8_q.slice_mut(0..(n / 32) * 44 * rows);
+            unsafe {
+                stream
+                    .launch_builder_pdl(&f)
+                    .arg(&dst_p)
+                    .arg(&src_p)
+                    .arg(&w_p)
+                    .arg(&mut q)
+                    .arg(&n_u)
+                    .arg(&eps)
+                    .arg(&rows_u)
+                    .launch_pdl(cfg)
+            }
+            .ok()?;
+            gpu.q8_src = dst_p;
+            gpu.q8_src_n = n;
+            gpu.q8_src_m = rows;
+            gpu.q8_off = 0;
+            return Some(());
+        }
+        let f = gpu.func_owned("rmsnorm_into_f32")?;
+        unsafe {
+            stream
+                .launch_builder_pdl(&f)
+                .arg(&dst_p)
+                .arg(&src_p)
+                .arg(&w_p)
+                .arg(&n_u)
+                .arg(&eps)
+                .arg(&rows_u)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        gpu.invalidate_q8();
+        Some(())
+    }
+
+    fn launch_rms_inplace(
+        &self,
+        gpu: &mut CudaGpu,
+        x_off: usize,
+        w_off: usize,
+        n: usize,
+        rows: usize,
+    ) -> Option<()> {
+        let FusedCtx {
+            req,
+            stream,
+            ybase,
+            xbase,
+            ..
+        } = *self;
+
+        let f = gpu.func_owned("rmsnorm_f32")?;
+        let n_u = n as u32;
+        let rows_u = rows as u32;
+        let eps = req.eps;
+        let cfg = LaunchConfig {
+            grid_dim: (rows_u, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let xp = ybase + (x_off * 4) as u64;
+        let wp = xbase + (w_off * 4) as u64;
+        unsafe {
+            stream
+                .launch_builder_pdl(&f)
+                .arg(&xp)
+                .arg(&wp)
+                .arg(&n_u)
+                .arg(&eps)
+                .arg(&rows_u)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        Some(())
+    }
+
+    fn launch_add_bias(
+        &self,
+        gpu: &mut CudaGpu,
+        x_off: usize,
+        bias_off: usize,
+        n: usize,
+    ) -> Option<()> {
+        let FusedCtx {
+            stream,
+            ybase,
+            xbase,
+            ..
+        } = *self;
+
+        let f = gpu.func_owned("add_bias_f32")?;
+        let n_u = n as u32;
+        let cfg = CudaGpu::cfg_1d(n_u, 256);
+        let xp = ybase + (x_off * 4) as u64;
+        let bp = xbase + (bias_off * 4) as u64;
+        unsafe {
+            stream
+                .launch_builder_pdl(&f)
+                .arg(&xp)
+                .arg(&bp)
+                .arg(&n_u)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        Some(())
+    }
+
+    fn launch_swiglu(&self, gpu: &mut CudaGpu, gate: usize, up: usize, n: usize) -> Option<bool> {
+        let FusedCtx { stream, ybase, .. } = *self;
+
+        let gp = ybase + (gate * 4) as u64;
+        let up_p = ybase + (up * 4) as u64;
+        // Fuse Q8 pack for the following down mmvq when enabled.
+        if crate::gpu::cuda::runtime::q8_decode_enabled() && n % 32 == 0 {
+            gpu.ensure_q8(n, 1)?;
+            let f = gpu.func_owned("swiglu_into_q8")?;
+            let n_u = n as u32;
+            let rows_u = 1u32;
+            let cfg = LaunchConfig {
+                grid_dim: (n_u / 32, 1, 1),
+                block_dim: (32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut q = gpu.q8_q.slice_mut(0..(n / 32) * 36);
+            unsafe {
+                stream
+                    .launch_builder_pdl(&f)
+                    .arg(&gp)
+                    .arg(&up_p)
+                    .arg(&mut q)
+                    .arg(&n_u)
+                    .arg(&rows_u)
+                    .launch_pdl(cfg)
+            }
+            .ok()?;
+            gpu.q8_src = gp;
+            gpu.q8_src_n = n;
+            gpu.q8_src_m = 1;
+            gpu.q8_off = 0;
+            return Some(true);
+        }
+        let f = gpu.func_owned("swiglu")?;
+        let n_u = n as u32;
+        let cfg = CudaGpu::cfg_1d(n_u, 256);
+        unsafe {
+            stream
+                .launch_builder_pdl(&f)
+                .arg(&gp)
+                .arg(&up_p)
+                .arg(&n_u)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        Some(false)
+    }
+
+    fn launch_rms_rope(
+        &self,
+        gpu: &mut CudaGpu,
+        x_off: usize,
+        w_off: usize,
+        rope_off: usize,
+        heads: usize,
+    ) -> Option<()> {
+        let FusedCtx {
+            req,
+            stream,
+            ybase,
+            xbase,
+            rope_freq_ptr,
+            plan: FusedPlan { hd, rot_dim, .. },
+            ..
+        } = *self;
+
+        let heads_u = heads as u32;
+        let hd_u = hd as u32;
+        let rot_u = rot_dim as u32;
+        let eps = req.eps;
+        let cfg = LaunchConfig {
+            grid_dim: (heads_u, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let xp = ybase + (x_off * 4) as u64;
+        let wp = xbase + (w_off * 4) as u64;
+        if let Some(fp) = rope_freq_ptr {
+            let f = gpu.func_owned("rmsnorm_rope_freq_dpos")?;
+            unsafe {
+                stream
+                    .launch_builder_pdl(&f)
+                    .arg(&xp)
+                    .arg(&wp)
+                    .arg(&fp)
+                    .arg(&gpu.d_pos)
+                    .arg(&heads_u)
+                    .arg(&hd_u)
+                    .arg(&rot_u)
+                    .arg(&eps)
+                    .launch_pdl(cfg)
+            }
+            .ok()?;
+        } else {
+            let f = gpu.func_owned("rmsnorm_rope_neox")?;
+            let rp = xbase + (rope_off * 4) as u64;
+            unsafe {
+                stream
+                    .launch_builder_pdl(&f)
+                    .arg(&xp)
+                    .arg(&wp)
+                    .arg(&rp)
+                    .arg(&heads_u)
+                    .arg(&hd_u)
+                    .arg(&rot_u)
+                    .arg(&eps)
+                    .launch_pdl(cfg)
+            }
+            .ok()?;
+        }
+        Some(())
+    }
+
+    fn launch_rms_rope_store(
+        &self,
+        gpu: &mut CudaGpu,
+        x_off: usize,
+        w_off: usize,
+        rope_off: usize,
+        k_cache_off: usize,
+        heads: usize,
+    ) -> Option<()> {
+        let FusedCtx {
+            req,
+            stream,
+            ybase,
+            xbase,
+            rope_freq_ptr,
+            plan: FusedPlan { hd, rot_dim, .. },
+            ..
+        } = *self;
+
+        let heads_u = heads as u32;
+        let hd_u = hd as u32;
+        let rot_u = rot_dim as u32;
+        let kv_dim_u = req.kv_dim as u32;
+        let base_off = k_cache_off as u64;
+        let eps = req.eps;
+        let cfg = LaunchConfig {
+            grid_dim: (heads_u, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let xp = ybase + (x_off * 4) as u64;
+        let wp = xbase + (w_off * 4) as u64;
+        if let Some(fp) = rope_freq_ptr {
+            let f = gpu.func_owned("rmsnorm_rope_store_freq_dpos")?;
+            unsafe {
+                stream
+                    .launch_builder_pdl(&f)
+                    .arg(&xp)
+                    .arg(&wp)
+                    .arg(&fp)
+                    .arg(&req.cache.buf)
+                    .arg(&base_off)
+                    .arg(&gpu.d_pos)
+                    .arg(&heads_u)
+                    .arg(&hd_u)
+                    .arg(&rot_u)
+                    .arg(&kv_dim_u)
+                    .arg(&eps)
+                    .launch_pdl(cfg)
+            }
+            .ok()?;
+        } else {
+            let f = gpu.func_owned("rmsnorm_rope_store_dpos")?;
+            let rp = xbase + (rope_off * 4) as u64;
+            unsafe {
+                stream
+                    .launch_builder_pdl(&f)
+                    .arg(&xp)
+                    .arg(&wp)
+                    .arg(&rp)
+                    .arg(&req.cache.buf)
+                    .arg(&base_off)
+                    .arg(&gpu.d_pos)
+                    .arg(&heads_u)
+                    .arg(&hd_u)
+                    .arg(&rot_u)
+                    .arg(&kv_dim_u)
+                    .arg(&eps)
+                    .launch_pdl(cfg)
+            }
+            .ok()?;
+        }
+        Some(())
+    }
+
+    fn launch_rms_rope_qk_store(
+        &self,
+        gpu: &mut CudaGpu,
+        q_off: usize,
+        k_off: usize,
+        qw_off: usize,
+        kw_off: usize,
+        k_cache_off: usize,
+    ) -> Option<()> {
+        let FusedCtx {
+            req,
+            stream,
+            ybase,
+            xbase,
+            use_qk_rope_table,
+            plan:
+                FusedPlan {
+                    hd,
+                    rot_dim,
+                    rope_q_at,
+                    ..
+                },
+            ..
+        } = *self;
+
+        if !use_qk_rope_table {
+            return None;
+        }
+        let f = gpu.func_owned("rmsnorm_rope_qk_store_table_dpos")?;
+        let q_heads_u = req.n_heads as u32;
+        let kv_heads_u = req.n_kv_heads as u32;
+        let hd_u = hd as u32;
+        let rot_u = rot_dim as u32;
+        let kv_dim_u = req.kv_dim as u32;
+        let base_off = k_cache_off as u64;
+        let eps = req.eps;
+        let qp = ybase + (q_off * 4) as u64;
+        let kp = ybase + (k_off * 4) as u64;
+        let qwp = xbase + (qw_off * 4) as u64;
+        let kwp = xbase + (kw_off * 4) as u64;
+        let ropep = xbase + (rope_q_at * 4) as u64;
+        let cfg = LaunchConfig {
+            grid_dim: (q_heads_u + kv_heads_u, 1, 1),
+            block_dim: (hd.next_power_of_two().clamp(32, 256) as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            stream
+                .launch_builder_pdl(&f)
+                .arg(&qp)
+                .arg(&kp)
+                .arg(&qwp)
+                .arg(&kwp)
+                .arg(&ropep)
+                .arg(&req.cache.buf)
+                .arg(&base_off)
+                .arg(&gpu.d_pos)
+                .arg(&q_heads_u)
+                .arg(&kv_heads_u)
+                .arg(&hd_u)
+                .arg(&rot_u)
+                .arg(&kv_dim_u)
+                .arg(&eps)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        Some(())
+    }
+
+    fn launch_rope(
+        &self,
+        gpu: &mut CudaGpu,
+        x_off: usize,
+        rope_off: usize,
+        heads: usize,
+    ) -> Option<()> {
+        let FusedCtx {
+            stream,
+            ybase,
+            xbase,
+            rope_freq_ptr,
+            plan: FusedPlan { hd, rot_dim, .. },
+            ..
+        } = *self;
+
+        let heads_u = heads as u32;
+        let hd_u = hd as u32;
+        let rot_u = rot_dim as u32;
+        let cfg = LaunchConfig {
+            grid_dim: (heads_u, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let xp = ybase + (x_off * 4) as u64;
+        if let Some(fp) = rope_freq_ptr {
+            let f = gpu.func_owned("rope_neox_freq_dpos")?;
+            unsafe {
+                stream
+                    .launch_builder_pdl(&f)
+                    .arg(&xp)
+                    .arg(&fp)
+                    .arg(&gpu.d_pos)
+                    .arg(&heads_u)
+                    .arg(&hd_u)
+                    .arg(&rot_u)
+                    .launch_pdl(cfg)
+            }
+            .ok()?;
+        } else {
+            let f = gpu.func_owned("rope_neox")?;
+            let rp = xbase + (rope_off * 4) as u64;
+            unsafe {
+                stream
+                    .launch_builder_pdl(&f)
+                    .arg(&xp)
+                    .arg(&rp)
+                    .arg(&heads_u)
+                    .arg(&hd_u)
+                    .arg(&rot_u)
+                    .launch_pdl(cfg)
+            }
+            .ok()?;
+        }
+        Some(())
+    }
+
+    fn launch_store(&self, gpu: &mut CudaGpu, src: usize, off: usize, n: usize) -> Option<()> {
+        let FusedCtx {
+            req, stream, ybase, ..
+        } = *self;
+
+        let f = gpu.func_owned("store_kv_f16_dpos")?;
+        let n_u = n as u32;
+        let base_off = off as u64;
+        let kv_dim_u = req.kv_dim as u32;
+        let cfg = CudaGpu::cfg_1d(n_u, 256);
+        let sp = ybase + (src * 4) as u64;
+        unsafe {
+            stream
+                .launch_builder_pdl(&f)
+                .arg(&req.cache.buf)
+                .arg(&sp)
+                .arg(&base_off)
+                .arg(&gpu.d_pos)
+                .arg(&kv_dim_u)
+                .arg(&n_u)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        Some(())
+    }
+
+    fn launch_store_pair(
+        &self,
+        gpu: &mut CudaGpu,
+        k_src: usize,
+        v_src: usize,
+        k_off: usize,
+        v_off: usize,
+        n: usize,
+    ) -> Option<()> {
+        let FusedCtx {
+            req, stream, ybase, ..
+        } = *self;
+
+        if let Some(f) = gpu.func_owned("store_kv_pair_f16_dpos") {
+            let n_u = n as u32;
+            let k_off_u = k_off as u64;
+            let v_off_u = v_off as u64;
+            let kv_dim_u = req.kv_dim as u32;
+            let cfg = CudaGpu::cfg_1d(n_u, 256);
+            let kp = ybase + (k_src * 4) as u64;
+            let vp = ybase + (v_src * 4) as u64;
+            unsafe {
+                stream
+                    .launch_builder_pdl(&f)
+                    .arg(&req.cache.buf)
+                    .arg(&kp)
+                    .arg(&vp)
+                    .arg(&k_off_u)
+                    .arg(&v_off_u)
+                    .arg(&gpu.d_pos)
+                    .arg(&kv_dim_u)
+                    .arg(&n_u)
+                    .launch_pdl(cfg)
+            }
+            .ok()?;
+            return Some(());
+        }
+        self.launch_store(gpu, k_src, k_off, n)?;
+        self.launch_store(gpu, v_src, v_off, n)?;
+        Some(())
+    }
+
+    fn launch_attend(
+        &self,
+        gpu: &mut CudaGpu,
+        q_off: usize,
+        out_off: usize,
+        k_off: usize,
+        v_off: usize,
+        q8_only: bool,
+    ) -> Option<()> {
+        let FusedCtx {
+            req,
+            stream,
+            pos,
+            ybase,
+            capturing_whole,
+            plan:
+                FusedPlan {
+                    hd,
+                    group,
+                    use_fa,
+                    fa_inline,
+                    native_shallow,
+                    ..
+                },
+            ..
+        } = *self;
+
+        // ggml FA when available. Skip during whole-token graph capture
+        // unless ALLPAKA_FA_INLINE (direct fattn is stream-capturable).
+        // ALLPAKA_NATIVE_ATTEND forces native dpos attend (better at short KV).
+        if use_fa && !native_shallow && (!capturing_whole || fa_inline) {
+            crate::gpu::cuda::ggml::prepare_from_cudarc(stream);
+            let (cache_p, cg) = DevicePtr::device_ptr(&req.cache.buf, stream);
+            drop(cg);
+            let qp = ybase + (q_off * 4) as u64;
+            let op = ybase + (out_off * 4) as u64;
+            let k_dev = cache_p + (k_off as u64) * 2;
+            let v_dev = cache_p + (v_off as u64) * 2;
+            let q_n = hd * req.n_heads;
+            let q8_only = q8_only && gpu.fns.contains_key("permute_q8_m1_qonly");
+            let fuse_q8 = q8_only || gpu.fns.contains_key("permute_q8_m1");
+            if fuse_q8 {
+                gpu.ensure_q8(q_n, 1)?;
+                // Non-null flag: DLL skips permute; NVRTC does permute+Q8.
+                crate::gpu::cuda::ggml::fa_set_q8(1);
+            }
+            if crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
+                q: qp,
+                k: k_dev,
+                v: v_dev,
+                out: op,
+                m: 1,
+                shape: FaShape {
+                    head_dim: hd,
+                    n_q_heads: req.n_heads,
+                    n_kv_heads: req.n_kv_heads.max(1),
+                    base: pos,
+                    kv_dim: req.kv_dim,
+                    scale: req.scale,
+                },
+                d_pos: {
+                    let (p, g) = DevicePtr::device_ptr(&gpu.d_pos, stream);
+                    drop(g);
+                    Some(p)
+                },
+            }) {
+                if fuse_q8 && crate::gpu::cuda::ggml::fa_q8_consumed() {
+                    {
+                        let fa = crate::gpu::cuda::ggml::fa_last_src()?;
+                        let wo_fa_q8 =
+                            q8_only && crate::runtime::get().cuda_wo_fa_q8 && q_n == 8192;
+                        if wo_fa_q8 {
+                            // Skip permute_q8_m1_qonly; WO mmvq packs from FA buffer.
+                            gpu.wo_fa_x = fa;
+                        } else if q8_only {
+                            crate::gpu::cuda::runtime::launch_permute_q8_m1_qonly(
+                                gpu,
+                                fa,
+                                op,
+                                hd,
+                                req.n_heads,
+                            )?;
+                        } else {
+                            crate::gpu::cuda::runtime::launch_permute_q8_m1(
+                                gpu,
+                                fa,
+                                op,
+                                hd,
+                                req.n_heads,
+                            )?;
+                        }
+                    }
+                }
+                crate::gpu::cuda::ggml::mark_cudarc_dirty();
+                return Some(());
+            }
+        }
+        let f = if attend_use_kv_fused(hd, group) {
+            gpu.func_owned("attend_gqa_dpos_kv")?
+        } else {
+            gpu.func_owned("attend_gqa_dpos")?
+        };
+        let k_off_u = k_off as u64;
+        let v_off_u = v_off as u64;
+        let kv_dim_u = req.kv_dim as u32;
+        let head_dim_u = hd as u32;
+        let n_q = req.n_heads as u32;
+        let group_u = group as u32;
+        let scale = req.scale;
+        let grid_x = if attend_use_kv_fused(hd, group) {
+            n_q / group_u
+        } else {
+            n_q
+        };
+        let cfg = if attend_use_kv_fused(hd, group) {
+            attend_gqa_kv_launch_cfg(grid_x, 1, group_u, head_dim_u)
+        } else {
+            attend_gqa_launch_cfg(grid_x, 1)
+        };
+        let qp = ybase + (q_off * 4) as u64;
+        let op = ybase + (out_off * 4) as u64;
+        unsafe {
+            stream
+                .launch_builder_pdl(&f)
+                .arg(&qp)
+                .arg(&req.cache.buf)
+                .arg(&op)
+                .arg(&k_off_u)
+                .arg(&v_off_u)
+                .arg(&kv_dim_u)
+                .arg(&head_dim_u)
+                .arg(&n_q)
+                .arg(&group_u)
+                .arg(&gpu.d_pos)
+                .arg(&scale)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        Some(())
+    }
+
+    /// Replay last token's hybrid segment graphs (pre / FA / post per layer,
+    /// then the tail) when they match this token's graph key.
+    fn replay_hybrid_segments(&self, gpu: &CudaGpu, d_pos_p: u64) -> bool {
+        let FusedCtx {
+            req,
+            stream,
+            pos,
+            n_layers,
+            ybase,
+            plan:
+                FusedPlan {
+                    hd,
+                    q_at,
+                    attn_at,
+                    graph_key,
+                    ..
+                },
+            ..
+        } = *self;
+        if gpu.decode_graph_key == graph_key {
+            if let (Some((pre, post, tail)), Some((k_offs, v_offs))) = (
+                gpu.decode_fa_graphs.as_ref(),
+                gpu.decode_fa_kv_offs.as_ref(),
+            ) {
+                if pre.len() == n_layers && post.len() == n_layers && k_offs.len() == n_layers {
+                    let use_cpp = crate::runtime::get().cuda_hybrid_replay;
+                    if use_cpp {
+                        let (cache_p, cg) = DevicePtr::device_ptr(&req.cache.buf, stream);
+                        drop(cg);
+                        let qp = ybase + (q_at * 4) as u64;
+                        let op = ybase + (attn_at * 4) as u64;
+                        let pre_e: Vec<*mut std::ffi::c_void> = pre
+                            .iter()
+                            .map(|g| g.cu_graph_exec() as *mut std::ffi::c_void)
+                            .collect();
+                        let post_e: Vec<*mut std::ffi::c_void> = post
+                            .iter()
+                            .map(|g| g.cu_graph_exec() as *mut std::ffi::c_void)
+                            .collect();
+                        crate::gpu::cuda::ggml::hybrid_replay(
+                            stream,
+                            &HybridReplay {
+                                pre_execs: &pre_e,
+                                post_execs: &post_e,
+                                tail_exec: tail.cu_graph_exec() as *mut std::ffi::c_void,
+                                q: qp,
+                                out: op,
+                                cache_base: cache_p,
+                                k_off: k_offs,
+                                v_off: v_offs,
+                                shape: FaShape {
+                                    head_dim: hd,
+                                    n_q_heads: req.n_heads,
+                                    n_kv_heads: req.n_kv_heads.max(1),
+                                    base: pos,
+                                    kv_dim: req.kv_dim,
+                                    scale: req.scale,
+                                },
+                                d_pos: d_pos_p,
+                            },
+                        )
+                    } else if stream.context().bind_to_thread().is_err() {
+                        false
+                    } else {
+                        let cu_stream = stream.cu_stream();
+                        let (cache_p, cg) = DevicePtr::device_ptr(&req.cache.buf, stream);
+                        drop(cg);
+                        let qp = ybase + (q_at * 4) as u64;
+                        let op = ybase + (attn_at * 4) as u64;
+                        let shared = crate::gpu::cuda::ggml::shared_stream();
+                        let fa_graphs = gpu.decode_fa_attn.as_ref();
+                        let use_fa_graphs = fa_graphs.map(|g| g.len() == n_layers).unwrap_or(false);
+                        let mut ok = true;
+                        for li in 0..n_layers {
+                            if unsafe {
+                                cudarc::driver::result::graph::launch(
+                                    pre[li].cu_graph_exec(),
+                                    cu_stream,
+                                )
+                            }
+                            .is_err()
+                            {
+                                ok = false;
+                                break;
+                            }
+                            if use_fa_graphs {
+                                if unsafe {
+                                    cudarc::driver::result::graph::launch(
+                                        fa_graphs.unwrap()[li].cu_graph_exec(),
+                                        cu_stream,
+                                    )
+                                }
+                                .is_err()
+                                {
+                                    ok = false;
+                                    break;
+                                }
+                            } else {
+                                if !shared {
+                                    crate::gpu::cuda::ggml::prepare_from_cudarc(stream);
+                                }
+                                let k_dev = cache_p + (k_offs[li] as u64) * 2;
+                                let v_dev = cache_p + (v_offs[li] as u64) * 2;
+                                if !crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
+                                    q: qp,
+                                    k: k_dev,
+                                    v: v_dev,
+                                    out: op,
+                                    m: 1,
+                                    shape: FaShape {
+                                        head_dim: hd,
+                                        n_q_heads: req.n_heads,
+                                        n_kv_heads: req.n_kv_heads.max(1),
+                                        base: pos,
+                                        kv_dim: req.kv_dim,
+                                        scale: req.scale,
+                                    },
+                                    d_pos: Some(d_pos_p),
+                                }) {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                            if unsafe {
+                                cudarc::driver::result::graph::launch(
+                                    post[li].cu_graph_exec(),
+                                    cu_stream,
+                                )
+                            }
+                            .is_err()
+                            {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok {
+                            ok = unsafe {
+                                cudarc::driver::result::graph::launch(
+                                    tail.cu_graph_exec(),
+                                    cu_stream,
+                                )
+                            }
+                            .is_ok();
+                        }
+                        if ok && !shared {
+                            crate::gpu::cuda::ggml::mark_cudarc_dirty();
+                        }
+                        ok
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
 }
