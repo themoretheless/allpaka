@@ -1,8 +1,9 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 class Element{constructor(){this.value='';this.children=[];this.hidden=false;}replaceChildren(...rows){this.children=rows;}}
 const ids=['background-launcher','background-name','background-command','background-follow-up','background-timeout','background-start','background-start-result'];const elements=Object.fromEntries(ids.map(id=>[id,new Element()]));const calls=[];
 const context={$:id=>elements[id],node:(_,text)=>({textContent:text}),TextEncoder,active:'one',current:{id:'one',folder:'active',settings:{mode:'auto'}},poll:async()=>{},api:async(path,body)=>{calls.push({path,body});return {id:'bg-1'};}};
-vm.createContext(context);const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('let backgroundLauncherSession='),source.indexOf("let lastBackground = ''")),context);
+vm.createContext(context);const source=appSource();vm.runInContext(between(source,'let backgroundLauncherSession=',"let lastBackground = ''"),context);
 (async()=>{
 context.renderBackgroundLauncher(context.current);assert(!elements['background-launcher'].hidden);
 elements['background-name'].value='Сборка';elements['background-command'].value='printf done';elements['background-follow-up'].value='Inspect output.';elements['background-timeout'].value='10';await elements['background-start'].onclick();assert.equal(calls[0].path,'sessions/one/background');assert.equal(calls[0].body.follow_up,'Inspect output.');assert.equal(calls[0].body.name,'Сборка');assert.equal(elements['background-name'].value,'');assert.equal(elements['background-command'].value,'');

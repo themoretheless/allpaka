@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 const start=source.indexOf('let datasetVersionsEpoch='),end=source.indexOf('let datasetCompareEpoch=',start);
 const pending=[],requests=[],el=()=>({children:[],append(...x){this.children.push(...x)},replaceChildren(...x){this.children=x}});
 const panel=el(),elements={project:{value:'p'},'evaluation-dialog':{open:true},'evaluation-dataset':{value:'d'},'dataset-versions-result':panel,'dataset-versions-show':{},'evaluation-version':{}};

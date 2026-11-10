@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),start=source.indexOf('function collectPromptMessages('),end=source.indexOf('function showPrompt(',start);
+const source=appSource(),start=source.indexOf('function collectPromptMessages('),end=source.indexOf('function showPrompt(',start);
 function element(tag,text){return {tag,text,children:[],append(...rows){this.children.push(...rows)},replaceChildren(...rows){this.children=rows},querySelector(tag){for(const child of this.children){if(child.tag===tag)return child;const found=child.querySelector?.(tag);if(found)return found;}return null;}}}
 const elements={'prompt-messages-list':element('div'),'prompt-format':{value:'messages'},'prompt-messages-editor':{},'evaluation-prompt':{},'prompt-messages-add-pair':{}},notices=[];
 const context={$:id=>elements[id],node:element,notify:text=>notices.push(text)};vm.createContext(context);vm.runInContext(source.slice(start,end),context);

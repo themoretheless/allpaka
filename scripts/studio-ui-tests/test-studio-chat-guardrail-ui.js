@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 const fn=source.split('\n').find(line=>line.startsWith('function settings()'));
 const elements={};const context={$:id=>elements[id]||(elements[id]={value:'',checked:false}),collectSwarm:()=>({})};vm.createContext(context);vm.runInContext(fn,context);
 assert.equal(context.settings().guardrails,null);

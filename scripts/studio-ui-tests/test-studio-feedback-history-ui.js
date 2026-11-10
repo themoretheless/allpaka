@@ -1,8 +1,9 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),pending=[],opened=[];
+const source=appSource(),pending=[],opened=[];
 function node(tag,text){return {tag,text,children:[],append(...x){this.children.push(...x)},replaceChildren(...x){this.children=x}};}
 const context={node,encodeURIComponent,api:path=>new Promise((resolve,reject)=>pending.push({path,resolve,reject}))};vm.createContext(context);
-vm.runInContext(source.slice(source.indexOf('function feedbackHistoryPanel('),source.indexOf('function feedbackPanel(')),context);
+vm.runInContext(between(source,'function feedbackHistoryPanel(','function feedbackPanel('),context);
 const receipt=(offset,total=21)=>({kind:'feedback_history',trace_id:'trace-test',order:'version_desc',provider_calls:0,offset,limit:20,total,latest_version:total,has_more:offset+Math.min(20,Math.max(0,total-offset))<total,versions:Array.from({length:Math.min(20,Math.max(0,total-offset))},(_,i)=>({version:total-offset-i,saved_ms:1000,annotation_count:3,active_count:2}))});
 (async()=>{
  let current=true;const panel=context.feedbackHistoryPanel('trace-test',()=>current,async(version,active)=>{if(active())opened.push(version)}),load=panel.children[1],body=panel.children[2];

@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),start=source.indexOf('let promptPlaygroundStarting='),end=source.indexOf('async function loadPrompts(',start),pending=[],shown=[],notices=[];
+const source=appSource(),start=source.indexOf('let promptPlaygroundStarting='),end=source.indexOf('async function loadPrompts(',start),pending=[],shown=[],notices=[];
 const panel={replaceChildren(...rows){this.children=rows}},elements={project:{value:'p'},'evaluation-dialog':{open:true},'prompt-preview-input':{value:'Question'},'prompt-preview-contexts':{value:'One\n\nTwo'},'prompt-playground-result':panel,'prompt-playground-start':{}};
 for(const id of ['playground-has-reference','playground-exact','playground-contains','playground-token-f1','playground-bigram-f1','playground-json','playground-json-equals'])elements[id]={checked:false};elements['playground-reference']={value:''};
 const prompt={id:'prompt',version:2,project_id:'p',sha256:'a'.repeat(64)},context={evaluationPrompt:prompt,evaluationProject:'p',evaluationSelectedRun:null,$:id=>elements[id],settings:()=>({provider:'local',model:'mock',mode:'agent',allow_writes:true}),node:(tag,text)=>({tag,text}),api:(path,body)=>new Promise(resolve=>pending.push({path,body,resolve})),showEvaluationRun:run=>shown.push(run),loadEvaluationRuns:async()=>{},notify:text=>notices.push(text)};vm.createContext(context);vm.runInContext(source.slice(start,end),context);

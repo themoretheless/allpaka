@@ -1,8 +1,9 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 class Element{constructor(text){this.textContent=text;this.value='';this.children=[];}append(...items){this.children.push(...items);}replaceChildren(...items){this.children=items;}setAttribute(){}scrollIntoView(){}}
 const run={id:'run',project_id:'project',dataset_id:'data',dataset_version:1,dataset_sha256:'hash'},errors=[],opened=[];let calls=0;
 const context={evaluationProject:'project',evaluationSelectedRun:null,metricLabels:{},$:()=>new Element(),node:(_,text)=>new Element(text),api:async()=>{calls++;return run;},showEvaluationRun:value=>opened.push(value),fail:error=>errors.push(error.message)};
-vm.createContext(context);const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('function matrixVariantPairsPanel('),source.indexOf('let matrixCatalogRequest=')),context);
+vm.createContext(context);const source=appSource();vm.runInContext(between(source,'function matrixVariantPairsPanel(','let matrixCatalogRequest='),context);
 (async()=>{
 const variant={label:'Candidate',model:'model',run_id:'run',mean_scores:{exact_match:0},comparison:{regressions:45,improvements:0,pairs:Array.from({length:45},(_,index)=>({sample_id:'item-'+index,metric:'exact_match',baseline:1,candidate:0,delta:-1}))}};
 const panel=context.matrixVariantPairsPanel(variant),filter=panel.children[0],body=panel.children[1];assert.equal(filter.value,'regressions');assert.equal(body.children.length,22);body.children.at(-1).onclick();assert(body.children[1].textContent.includes('item-20'));body.children.at(-1).onclick();assert(body.children[1].textContent.includes('item-40'));body.children.at(-1).onclick();assert(body.children[1].textContent.includes('item-20'));

@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 const start=source.indexOf('    if(result.conversations?.length){');
 const end=source.indexOf("    rows.push(node('h3','Сообщённая стоимость'));",start);
 assert(start>=0&&end>start);

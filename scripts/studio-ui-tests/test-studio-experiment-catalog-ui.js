@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),start=source.indexOf('let evaluationRunCatalogEpoch='),end=source.indexOf("$('evaluation-run').onclick",start),pending=[],shown=[],failures=[];
+const source=appSource(),start=source.indexOf('let evaluationRunCatalogEpoch='),end=source.indexOf("$('evaluation-run').onclick",start),pending=[],shown=[],failures=[];
 function node(tag,text){return {tag,text,children:[],value:'',append(...x){this.children.push(...x)},replaceChildren(...x){this.children=x},get options(){return this.children;}}}
 const elements={project:{value:'p'},provider:{value:'local'},'evaluation-dialog':{open:true},'evaluation-dataset':{value:'cases'},'evaluation-runs-status':{value:''},'evaluation-runs-model':{value:''},'evaluation-runs-kind':{value:''},'evaluation-runs-dataset':{checked:false},'evaluation-runs-provider':{checked:false},'evaluation-runs':node('div'),'evaluation-baseline':node('select'),'evaluation-candidate':node('select'),'evaluation-refresh':{}};
 const rows=Array.from({length:21},(_,i)=>({id:'abc-'+(21-i).toString(16).padStart(2,'0'),project_id:'p',dataset_id:'cases',dataset_sha256:'a'.repeat(64),model:'mock',provider:'local',status:'completed',strict_quality:true,playground:false}));

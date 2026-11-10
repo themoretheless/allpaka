@@ -1,8 +1,9 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 class Element{constructor(text){this.textContent=text;this.children=[];this.value='';}append(...items){this.children.push(...items);}replaceChildren(...items){this.children=items;}setAttribute(){}click(){downloads.push(this.download);}}
 const calls=[],downloads=[],blobs=[];let reject=false;
 const context={Blob,URL:{createObjectURL:blob=>{blobs.push(blob);return 'blob:fixture';},revokeObjectURL:()=>{}},setTimeout:fn=>fn(),fail:error=>{throw error;},node:(_,text)=>new Element(text),metricLabels:{},api:async path=>{calls.push(path);if(path.startsWith('evaluation/comparisons/'))return receipt;if(reject)throw new Error('offline');return {id:path.endsWith('base')?'base':'next',items:[{sample_id:'bad',output:path.endsWith('base')?'<script>old</script>':'Новый ответ'},{sample_id:'good',output:'other'}]};}};
-vm.createContext(context);const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('function comparisonExportCsv('),source.indexOf("$('evaluation-compare').onclick=")),context);
+vm.createContext(context);const source=appSource();vm.runInContext(between(source,'function comparisonExportCsv(',"$('evaluation-compare').onclick="),context);
 const receipt={id:'comparison',baseline_id:'base',candidate_id:'next',eligible:false,regressions:1,improvements:1,pairs:[{sample_id:'bad',metric:'exact_match',baseline:1,candidate:0,delta:-1},{sample_id:'good',metric:'exact_match',baseline:0,candidate:1,delta:1},{sample_id:'same',metric:'exact_match',baseline:1,candidate:1,delta:0}]};
 (async()=>{
 const panel=context.experimentComparisonPanel(receipt),filter=panel.children[3],count=panel.children[4],pairs=panel.children[5];assert.equal(filter.value,'regressions');assert.equal(pairs.children.length,1);assert.equal(calls.length,0,'answers require explicit action');

@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 const begin=source.indexOf('function guardrailReceiptRows('),end=source.indexOf('let traceSummaryEpoch=',begin);
 class Element{constructor(text=''){this.text=text;this.textContent=text;this.children=[];this.style={};}append(...rows){this.children.push(...rows);}prepend(...rows){this.children.unshift(...rows);}replaceChildren(...rows){this.children=rows;}}
 const calls=[],project={value:'default'};let feedbackCalls=0;

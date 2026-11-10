@@ -1,10 +1,11 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 class Element {constructor(text=''){this.textContent=text;this.children=[];this.hidden=false;}append(...children){this.children.push(...children);}replaceChildren(...children){this.children=children;}click(){downloads.push(this.download);}}
 const panel=new Element(),calls=[],downloads=[],packets=[];
 const context={Blob,URL:{createObjectURL:blob=>{packets.push(blob);return 'blob:fixture';},revokeObjectURL:()=>{}},setTimeout:fn=>fn(),$:()=>panel,node:(_,text)=>new Element(text),fail:error=>{throw error;},api:async(path,body)=>{calls.push({path,body});return {stdout:'<script>literal</script>',stderr:'diagnostic'};}};
 vm.createContext(context);
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
-vm.runInContext(source.slice(source.indexOf("let lastBackground = ''"),source.indexOf('let bookmarkEditing=')),context);
+const source=appSource();
+vm.runInContext(between(source,"let lastBackground = ''",'let bookmarkEditing='),context);
 (async()=>{
 context.renderBackground({id:'session',background:{tasks:[{id:'done',name:'<b>Сборка</b>',status:'completed',duration_ms:1250},{id:'orphan',status:'interrupted',duration_ms:null},{id:'live',status:'running',duration_ms:null}]}});
 assert(panel.children[1].children[0].textContent.includes('1.25 с'));assert(panel.children[1].children[0].textContent.includes('<b>Сборка</b>'));
