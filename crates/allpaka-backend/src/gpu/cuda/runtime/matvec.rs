@@ -294,6 +294,11 @@ pub fn run_matvec(
     gpu.stream
         .memcpy_htod(x, &mut gpu.x_arena.slice_mut(0..m * n_in))
         .ok()?;
+    // x_arena now holds new values at the same device address. The Q8 cache
+    // is keyed by (pointer, n_in, m), so without this a previous matvec of the
+    // same shape (Qwen2.5-7B: ffn gate/up and wo both read 3584-wide rows)
+    // would feed the stale quantised x into this one.
+    gpu.invalidate_q8();
 
     let t0 = Instant::now();
     if matches!(ty, GgmlType::Q4K | GgmlType::Q6K) && n_in % 256 == 0 && q8_decode_enabled() {
