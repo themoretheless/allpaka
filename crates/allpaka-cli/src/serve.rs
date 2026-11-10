@@ -67,9 +67,11 @@ struct CompletionResult {
     decode_secs: f64,
 }
 
+use self::router::ModelRoute;
+
 struct QueuedConnection {
     stream: TcpStream,
-    request_line: String,
+    route: router::QueuedRoute,
     request: Value,
     control: RequestControl,
 }
@@ -283,101 +285,98 @@ pub fn prewarm(mapping: &[u8]) {
 
 fn handle(
     mut stream: TcpStream,
-    request_line: String,
+    route: ModelRoute,
     req: Value,
     mut context: ServeRequestContext<'_>,
 ) -> Result<()> {
     let model_name = context.model_name;
     let rag = context.rag;
-    // Answered after the model lock is taken, so this reflects the live
+    // Answered after the model lock is taken, so `/stats` reflects the live
     // context and queues behind an in-flight generation. `/resources` is
     // served before the queue and reports the context as of the last
     // completed generation -- the two endpoints share `context_used` and
     // `context_capacity` with different freshness, which is why the chat
     // page reads each pair from one of them only.
-    //
-    // Prefix match, deliberately: `/stats?ts=...` is a normal request from a
-    // polling client. Tightening it to an exact line is a separate call.
-    if request_line.starts_with("GET /stats") {
-        return respond(
-            &mut stream,
-            200,
-            &json!({
-                "model": model_name,
-                "architecture": context.inference.model.config.architecture,
-                "context_used": context.inference.chat.tokens.len(),
-                "context_capacity": context.inference.chat.session.capacity(),
-                "n_layers": context.inference.model.config.n_layers,
-                "moe": context.inference.model.config.moe.is_some(),
-                "prefix_cache_entries": context.inference.prefixes.len(),
-                "prefix_cache_bytes": context.inference.prefixes.resident_bytes(),
-                "prefix_cache_allocated_bytes": context.inference.prefixes.allocated_bytes(),
-                "prefix_cache_hits": context.inference.prefixes.hits(),
-                "prefix_cache_misses": context.inference.prefixes.misses(),
-                "prefix_cache_reused_tokens": context.inference.prefixes.reused_tokens(),
-                "memory_admission": memory::snapshot(&context.inference.chat.memory.budget()),
-                "prefix_cache_pinned_bytes": context.inference.prefixes.pinned_bytes(),
-                "batching_mode": "model-aware-admission",
-                "kernel_batching": false,
-                "gpu_fallback": "runtime-policy-controlled",
-            }),
-        );
-    }
-    if request_line.starts_with("GET / ") || request_line.starts_with("GET /index") {
-        return respond_html(&mut stream, CHAT_PAGE);
-    }
-    if request_line.starts_with("OPTIONS ") {
-        return respond(&mut stream, 200, &json!({}));
-    }
-    if request_line.starts_with("POST /v1/prompt/predict") {
-        let draft = req["draft"].as_str().unwrap_or("");
-        let max_k = req["max_tokens"].as_u64().unwrap_or(12).clamp(1, 64) as usize;
-        let raw_messages = req["messages"].as_array().map_or(&[][..], Vec::as_slice);
-        let completion = predict_prompt_continuation(
-            context.inference.tok,
-            &context.inference.chat.tokens,
-            raw_messages,
-            draft,
-            max_k,
-        );
-        let suggestions = predict_followup_prompts(raw_messages);
-        return respond(
-            &mut stream,
-            200,
-            &json!({
-                "completion": completion,
-                "suggestions": suggestions,
-            }),
-        );
-    }
-    if request_line.starts_with("POST /v1/prompt/prewarm") {
-        let raw_messages = req["messages"].as_array().map_or(&[][..], Vec::as_slice);
-        let draft = req["draft"].as_str().unwrap_or("").trim();
-        let reserve_tokens = req["max_tokens"].as_u64().unwrap_or(1024) as usize;
-        let mut turns = render_messages(raw_messages, None);
-        if !draft.is_empty() {
-            turns.push(("user".into(), draft.to_string()));
-        }
-        if turns.is_empty() {
+    match route {
+        ModelRoute::Stats => {
             return respond(
                 &mut stream,
                 200,
-                &json!({"prewarmed_tokens": 0, "cached_tokens": 0}),
+                &json!({
+                    "model": model_name,
+                    "architecture": context.inference.model.config.architecture,
+                    "context_used": context.inference.chat.tokens.len(),
+                    "context_capacity": context.inference.chat.session.capacity(),
+                    "n_layers": context.inference.model.config.n_layers,
+                    "moe": context.inference.model.config.moe.is_some(),
+                    "prefix_cache_entries": context.inference.prefixes.len(),
+                    "prefix_cache_bytes": context.inference.prefixes.resident_bytes(),
+                    "prefix_cache_allocated_bytes": context.inference.prefixes.allocated_bytes(),
+                    "prefix_cache_hits": context.inference.prefixes.hits(),
+                    "prefix_cache_misses": context.inference.prefixes.misses(),
+                    "prefix_cache_reused_tokens": context.inference.prefixes.reused_tokens(),
+                    "memory_admission": memory::snapshot(&context.inference.chat.memory.budget()),
+                    "prefix_cache_pinned_bytes": context.inference.prefixes.pinned_bytes(),
+                    "batching_mode": "model-aware-admission",
+                    "kernel_batching": false,
+                    "gpu_fallback": "runtime-policy-controlled",
+                }),
             );
         }
-        let (prewarmed, cached) = prewarm_prompt(&mut context.inference, &turns, reserve_tokens)?;
-        return respond(
-            &mut stream,
-            200,
-            &json!({
-                "prewarmed_tokens": prewarmed,
-                "cached_tokens": cached,
-                "context_used": context.inference.chat.tokens.len(),
-            }),
-        );
-    }
-    if !request_line.starts_with("POST /v1/chat/completions") {
-        return respond(&mut stream, 404, &json!({"error": "unknown route"}));
+        ModelRoute::ChatPage => return respond_html(&mut stream, CHAT_PAGE),
+        ModelRoute::CorsOptions => return respond(&mut stream, 200, &json!({})),
+        ModelRoute::PromptPredict => {
+            let draft = req["draft"].as_str().unwrap_or("");
+            let max_k = req["max_tokens"].as_u64().unwrap_or(12).clamp(1, 64) as usize;
+            let raw_messages = req["messages"].as_array().map_or(&[][..], Vec::as_slice);
+            let completion = predict_prompt_continuation(
+                context.inference.tok,
+                &context.inference.chat.tokens,
+                raw_messages,
+                draft,
+                max_k,
+            );
+            let suggestions = predict_followup_prompts(raw_messages);
+            return respond(
+                &mut stream,
+                200,
+                &json!({
+                    "completion": completion,
+                    "suggestions": suggestions,
+                }),
+            );
+        }
+        ModelRoute::PromptPrewarm => {
+            let raw_messages = req["messages"].as_array().map_or(&[][..], Vec::as_slice);
+            let draft = req["draft"].as_str().unwrap_or("").trim();
+            let reserve_tokens = req["max_tokens"].as_u64().unwrap_or(1024) as usize;
+            let mut turns = render_messages(raw_messages, None);
+            if !draft.is_empty() {
+                turns.push(("user".into(), draft.to_string()));
+            }
+            if turns.is_empty() {
+                return respond(
+                    &mut stream,
+                    200,
+                    &json!({"prewarmed_tokens": 0, "cached_tokens": 0}),
+                );
+            }
+            let (prewarmed, cached) =
+                prewarm_prompt(&mut context.inference, &turns, reserve_tokens)?;
+            return respond(
+                &mut stream,
+                200,
+                &json!({
+                    "prewarmed_tokens": prewarmed,
+                    "cached_tokens": cached,
+                    "context_used": context.inference.chat.tokens.len(),
+                }),
+            );
+        }
+        ModelRoute::Unknown => {
+            return respond(&mut stream, 404, &json!({"error": "unknown route"}));
+        }
+        ModelRoute::ChatCompletions => {}
     }
 
     let Some(raw_messages) = req["messages"].as_array() else {
