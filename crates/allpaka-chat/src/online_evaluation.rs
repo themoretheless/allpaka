@@ -4,6 +4,28 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// How a job, or one assessment inside it, ended. Packets stay `Value`s
+/// because they are hash-pinned as written; this names the words they hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Outcome {
+    Completed,
+    Failed,
+}
+/// Why an outcome is `failed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ErrorCode {
+    EvaluatorFailed,
+    AssessmentRejected,
+    EvaluatorUnavailable,
+}
+/// The word in `value`, if it is one of `T`'s; anything else, including a
+/// non-string, is `None`.
+fn word<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Option<T> {
+    serde_json::from_value(value.clone()).ok()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Rule {
@@ -369,12 +391,13 @@ impl Store {
                 .remove("result_sha256")
                 .ok_or_else(|| anyhow::anyhow!("Missing result digest"))?;
             let expected = crate::storage::hex_sha256(&serde_json::to_vec(&result)?);
+            let status = word::<Outcome>(&result["status"]);
             if result.as_object().map(|v| v.len()) != Some(9)
                 || hash != expected
                 || result["kind"] != "online_evaluation_job_result"
                 || result["job_sha256"] != job_hash
                 || result["selection_sha256"] != key
-                || !matches!(result["status"].as_str(), Some("completed" | "failed"))
+                || status.is_none()
             {
                 bail!("Job result integrity mismatch");
             }
@@ -384,11 +407,11 @@ impl Store {
             {
                 bail!("Invalid completed job result");
             }
-            if (result["status"] == "completed" && !result["error_code"].is_null())
-                || (result["status"] == "failed"
+            if (status == Some(Outcome::Completed) && !result["error_code"].is_null())
+                || (status == Some(Outcome::Failed)
                     && !matches!(
-                        result["error_code"].as_str(),
-                        Some("evaluator_failed" | "assessment_rejected")
+                        word(&result["error_code"]),
+                        Some(ErrorCode::EvaluatorFailed | ErrorCode::AssessmentRejected)
                     ))
             {
                 bail!("Invalid job outcome");
@@ -416,7 +439,7 @@ impl Store {
                 if hash != actual {
                     bail!("Retained assessment evidence mismatch");
                 }
-            } else if result["status"] == "completed" {
+            } else if status == Some(Outcome::Completed) {
                 bail!("Completed job lacks assessment evidence");
             }
             return Ok(None);
@@ -444,25 +467,25 @@ impl Store {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .all(|item| item["status"] == "completed");
+                    .all(|item| word(&item["status"]) == Some(Outcome::Completed));
                 let hash = crate::storage::hex_sha256(&serde_json::to_vec(&assessment)?);
                 (
                     success,
                     if success {
                         serde_json::Value::Null
                     } else {
-                        serde_json::json!("evaluator_failed")
+                        serde_json::json!(ErrorCode::EvaluatorFailed)
                     },
                     serde_json::json!(hash),
                 )
             }
             Err(_) => (
                 false,
-                serde_json::json!("assessment_rejected"),
+                serde_json::json!(ErrorCode::AssessmentRejected),
                 serde_json::Value::Null,
             ),
         };
-        let mut result = serde_json::json!({"kind":"online_evaluation_job_result","schema_version":1,"selection_sha256":key,"job_sha256":job_hash,"status":if success{"completed"}else{"failed"},"error_code":error,"assessment_sha256":assessment_hash,"provider_calls":0,"automatic_execution":automatic});
+        let mut result = serde_json::json!({"kind":"online_evaluation_job_result","schema_version":1,"selection_sha256":key,"job_sha256":job_hash,"status":if success{Outcome::Completed}else{Outcome::Failed},"error_code":error,"assessment_sha256":assessment_hash,"provider_calls":0,"automatic_execution":automatic});
         result["result_sha256"] =
             serde_json::json!(crate::storage::hex_sha256(&serde_json::to_vec(&result)?));
         crate::evaluation::commit_new(&result_path, &result)?;
@@ -588,7 +611,7 @@ impl Store {
             }
             let supported = snapshot.rule.evaluator_id == "trace_health"
                 && snapshot.rule.evaluator_version == 1;
-            assessments.push(serde_json::json!({"rule_id":binding.rule_id,"rule_sha256":binding.rule_sha256,"binding_sha256":binding.binding_sha256,"binding_version":binding.version,"evaluator_id":snapshot.rule.evaluator_id,"evaluator_version":snapshot.rule.evaluator_version,"status":if supported{"completed"}else{"failed"},"scores":if supported{serde_json::json!({"span_success_rate":health})}else{serde_json::json!({})},"error_code":if supported{serde_json::Value::Null}else{serde_json::json!("evaluator_unavailable")}}));
+            assessments.push(serde_json::json!({"rule_id":binding.rule_id,"rule_sha256":binding.rule_sha256,"binding_sha256":binding.binding_sha256,"binding_version":binding.version,"evaluator_id":snapshot.rule.evaluator_id,"evaluator_version":snapshot.rule.evaluator_version,"status":if supported{Outcome::Completed}else{Outcome::Failed},"scores":if supported{serde_json::json!({"span_success_rate":health})}else{serde_json::json!({})},"error_code":if supported{serde_json::Value::Null}else{serde_json::json!(ErrorCode::EvaluatorUnavailable)}}));
         }
         let mut packet = serde_json::json!({"kind":"online_evaluation_assessments","schema_version":1,"project_id":project,"trace_id":trace,"trace_sha256":trace_hash,"selection_sha256":selection["selection_sha256"],"assessments":assessments,"assessment_source":"native_trace_metadata","provider_calls":0,"automatic_execution":automatic});
         if serde_json::to_vec(&packet)?.len() > 1024 * 1024 {
@@ -1302,6 +1325,28 @@ pub(crate) fn enqueue_completed(data: &std::path::Path, project: &str, trace: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn outcome_words_are_the_packet_words() {
+        use serde_json::{json, Value};
+        for (outcome, text) in [
+            (Outcome::Completed, "completed"),
+            (Outcome::Failed, "failed"),
+        ] {
+            assert_eq!(json!(outcome), text);
+            assert_eq!(word(&json!(text)), Some(outcome));
+        }
+        for (code, text) in [
+            (ErrorCode::EvaluatorFailed, "evaluator_failed"),
+            (ErrorCode::AssessmentRejected, "assessment_rejected"),
+            (ErrorCode::EvaluatorUnavailable, "evaluator_unavailable"),
+        ] {
+            assert_eq!(json!(code), text);
+            assert_eq!(word(&json!(text)), Some(code));
+        }
+        for other in [json!("pending"), json!("Completed"), json!(1), Value::Null] {
+            assert_eq!(word::<Outcome>(&other), None);
+        }
+    }
     fn rule() -> Rule {
         Rule {
             id: "quality".into(),
