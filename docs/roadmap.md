@@ -216,13 +216,22 @@ streamable-HTTP клиент к локальному `rag-mcp` (префикс `
 **DoD:** CI покрывает GPU-кернелы и smoke-тесты с настоящими моделями, а не
 только CPU-часть.
 
-### D3. Распил `crates/allpaka-backend/src/gpu/`
+### D3. Распил `crates/allpaka-backend/src/gpu/` — сделано
+
+Статус (2026-11-10): `gpu/metal.rs` разнесён по `metal/{device,region,pipelines,
+select,telemetry,matvec,attn,args,ffn_grouped,decode,verify,prefill,mega}`,
+CUDA — по `cuda/{region,attn,decode,decode_fused,prefill,ffn_grouped}` и
+`cuda/runtime/*`, общее вынесено в `gpu/common.rs` (PLAN 2.1–2.4).
 
 `metal.rs` → device/memory, реестр pipeline, пути исполнения, диагностика, без
 изменения измеренного поведения. **DoD:** существующие parity-тесты зелёные,
 цифры бенчмарка не сдвинулись за пределы дрейфа.
 
 ### D4. Clippy-долг backend/model
+
+Статус (2026-11-10): на macOS (Metal) `clippy --workspace --all-targets` чист
+(PLAN 1.6). CUDA-путь собирается только вне macOS, и его долг виден лишь там;
+см. PLAN, раздел «Что осталось».
 
 Objective-C macro `cfg` expansion и старые internals. **DoD:**
 `cargo clippy --workspace --all-targets -- -D warnings` проходит, после чего
@@ -237,7 +246,10 @@ Objective-C macro `cfg` expansion и старые internals. **DoD:**
 
 ---
 
-### D6. Оставшийся stringly-статус: `PlanItem.status`
+### D6. Оставшийся stringly-статус: `PlanItem.status` — сделано
+
+Статус (2026-11-10): `PlanItem.status` — `types::PlanStatus` с прежними словами
+на проводе; списки строк в `lib.rs` и `tools.rs` убраны.
 
 `Session.status` и `SwarmReport.status` закрыты enum'ами (`types.rs`), третья
 строка того же семейства осталась: `PlanItem.status` принимает
