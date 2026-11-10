@@ -108,7 +108,7 @@ CUDA-графах, устаревшие веса в VRAM, NaN в сортиро�
 | Что | До захода | После |
 |---|---|---|
 | `cargo test --workspace` (Windows, CUDA) | не собирается | зелёный |
-| `clippy --workspace --all-targets` (CUDA) | ~50 предупреждений | только `too_many_arguments` (3.27) |
+| `clippy --workspace --all-targets` (CUDA) | ~50 предупреждений | 0 |
 | Тесты chat (lib) | 194, 12 падают на Windows | 219 |
 | Тесты model | 47 в `lib.rs` | 53 unit + 4 файла `tests/` |
 | Неиспользуемые CUDA-лаунчеры | 5 | 0 |
@@ -144,7 +144,7 @@ A/B горячих правок (1.5, 3.20–3.23) на Qwen2.5-7B, pp512/tg128,
 |---|---:|---:|
 | Самый большой `.rs` файл (без тестов и текста ядер) | 10 236 (`gpu/metal.rs`) | 3 250 (`gpu/metal/decode.rs`) |
 | `gpu/metal`: файлов / максимум строк | 1 / 10 236 | 13 / 3 250 |
-| `gpu/cuda/mod.rs` | 4 914 | 254 (+6 модулей, максимум 1 914 в `decode_fused.rs`) |
+| `gpu/cuda/mod.rs` | 4 914 | 254 (+6 модулей; `decode_token_one_fused` 1 885 → ~255 строк) |
 | `gpu/cuda/runtime.rs` | 2 355 | 41 (+7 модулей, максимум 827) |
 | `allpaka-chat/src/lib.rs` | 2 350 | 348 |
 | `allpaka-chat/src/observability.rs` | 2 845 | 8 модулей, максимум 526 (тесты 1 053) |

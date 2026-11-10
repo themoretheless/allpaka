@@ -8,7 +8,7 @@
 Заход шёл на Windows 11 с RTX 5090: CUDA-путь собирается, тестируется и
 меряется; Metal только проверяется компилятором (`--target aarch64-apple-darwin`).
 `cargo test --workspace` зелёный на Windows/CUDA, `clippy --workspace
---all-targets` чист, кроме длинных лаунчеров CUDA (3.27).
+--all-targets` — 0 предупреждений.
 
 **Нужна Apple Silicon (Metal нельзя ни запустить, ни измерить отсюда):**
 - 0.2: сравнение с llama.cpp на 8B/30B, `verify --decode`, перемер BASELINE на
@@ -37,6 +37,9 @@
 - `tests/gpu_parity.rs`: запись через `&mut` поверх общего `&'static` среза
   при параллельных тестах (FIXME(soundness)).
 - `gpu/shaders/kernels.metal` — неиспользуемая копия `metal_kernels.rs`.
+- CUDA prefill при pp128 в режиме по умолчанию (без ggml) недетерминирован от
+  запуска к запуску (разный хэш логитов и argmax); при pp512 стабилен, decode
+  стабилен. Было и до этого захода; не расследовано.
 - 4.3: не-Neox RoPE (Llama, Mistral) закрыта от быстрых путей пятью
   проверками `RopeStyle::Neox` в model (whole-token decode, greedy,
   greedy-chain, fused prefill, attn_block); GPU-ядра реализуют только Neox.
@@ -71,7 +74,7 @@
 | 1.3 | B3: `total_cmp` вместо `partial_cmp().unwrap()` | S | низкий | done (`704972c`); CUDA-путь догнан (`a86bfb4`) |
 | 1.4 | B4: именованные таблицы `dq_fmt` и тест | S | низкий | done (`ff0d2eb`): CUDA сверяется с `// fmt:` ядра и GEMM-прогоном по всем форматам; Metal — с ветками `embed_row_f32_dtoken` |
 | 1.5 | B5 и некэшированные чтения env → `RuntimePolicy` | M | низкий | done (`1038c57`): CUDA и Metal читают флаги один раз; оставлены только init-время, уже кэшированные `OnceLock` и `SWFUSE`/`GPU_WINDOW_GIB`, которые тесты меняют на лету |
-| 1.6 | Предупреждения clippy | S | низкий | done для Metal (`9bd193d`) и CUDA (`eaa7dd4`, `b6304eb`), кроме 3.27 |
+| 1.6 | Предупреждения clippy | S | низкий | done для Metal (`9bd193d`) и CUDA (`eaa7dd4`, `b6304eb`, 3.27) |
 | 1.7 | `cargo fmt --all` | S | — | done |
 | 1.8 | `// SAFETY:` для `unsafe impl` и срезов из сырых указателей | M | — | done: 173 комментария (`671a278`, `192f2e5`, `f63e0ef`); по дороге исправлены длины в `ops` (`111701a`), неинициализированные регионы KV (`8ca95db`), алиасинг в откате GDN (`f70afe9`); оставшееся — FIXME(soundness), см. «Открытые находки» |
 
@@ -121,8 +124,8 @@
 | 3.23 | model: `GpuEligibility` при загрузке | M | средний | done (`90a0f5e`): `token_path_decline` |
 | 3.24 | model: `enum Mixer`, `RoutingPolicy` | L | средний | done (`2356388`); `Norm`/общий `Block` с MTP не вводились: у MTP нет raw-норм и bias, общий тип дал бы пустые поля |
 | 3.25 | backend: Metal `decode_token` → стадии | L | средний | todo, нужен Mac |
-| 3.26 | backend: CUDA `decode_token_one_fused` → контекстная структура | L | средний | wip |
-| 3.27 | backend: request-структуры вместо 13–19 параметров | M | низкий | wip (CUDA-лаунчеры) |
+| 3.26 | backend: CUDA `decode_token_one_fused` → контекстная структура | L | средний | done (`dca20b9`..`1c20680`): 1 885 → ~255 строк; `FusedPlan`, `FusedCtx` со стадиями слоя, общий выход токена; границы захвата CUDA-графов оставлены в одном месте. A/B: логиты prefill совпали 6/6, greedy-токены decode совпали в 7 режимах (graph, ggml, FA inline, hybrid) |
+| 3.27 | backend: request-структуры вместо 13–19 параметров | M | низкий | done для CUDA (`e651e0b`): `DevWeight`, `MatvecPtrs`, `GemmReq`, `QkvReq`, `FlashAttnReq` и др.; clippy по workspace — 0 предупреждений без `allow`. Metal-лаунчеры — вместе с 3.25 |
 
 ## Волна 4. Оптимизация по замерам
 
