@@ -476,6 +476,11 @@ impl<'a> QuantMat<'a> {
         (self.ty, self.data)
     }
 
+    /// `(type, bytes, rows)`: what a GPU request needs to name this matrix.
+    pub fn desc(&self) -> (GgmlType, &[u8], usize) {
+        (self.ty, self.data, self.n_out)
+    }
+
     /// One decode layer's whole attention half in one command buffer; see
     /// `gpu::attn_block`. The four matrices are `self`-less because the call
     /// spans all of them equally.

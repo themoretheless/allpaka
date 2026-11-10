@@ -1,5 +1,6 @@
 //! Single-token decode, multi-token GPU verification, and greedy chain execution.
 
+use super::attention::{AttnInputs, AttnLayer, AttnMode};
 use super::{
     attn_zero_enabled, cpu_attn_enabled, greedy_chain_enabled, moe::Ffn, moe_zero_enabled,
     no_argmax_enabled, no_tokenbuf_enabled, skip_host_rope_enabled, tokenbuf_debug_enabled, Model,
@@ -252,16 +253,11 @@ impl<'a> Model<'a> {
                     w_gate,
                     w_up,
                     w_down,
-                } => {
-                    let (gt, gb) = w_gate.raw();
-                    let (ut, ub) = w_up.raw();
-                    let (dt, db) = w_down.raw();
-                    TokenFfn::Dense {
-                        gate: (gt, gb, w_gate.n_out),
-                        up: (ut, ub, w_up.n_out),
-                        down: (dt, db, w_down.n_out),
-                    }
-                }
+                } => TokenFfn::Dense {
+                    gate: w_gate.desc(),
+                    up: w_up.desc(),
+                    down: w_down.desc(),
+                },
                 Ffn::Moe {
                     router,
                     router_bias,
@@ -276,7 +272,6 @@ impl<'a> Model<'a> {
                     n_used,
                     ..
                 } => {
-                    let (rt, rb) = router.raw();
                     let (gt, gb) = gate_exps.raw();
                     let (ut, ub) = up_exps.raw();
                     let (dt, db) = down_exps.raw();
@@ -300,18 +295,11 @@ impl<'a> Model<'a> {
                                 debug_assert_eq!(t, allpaka_gguf::GgmlType::F32);
                                 b
                             });
-                    let shared = shared.as_ref().map(|sh| {
-                        let (gt, gb) = sh.gate.raw();
-                        let (ut, ub) = sh.up.raw();
-                        let (dt, db) = sh.down.raw();
-                        [
-                            (gt, gb, sh.gate.n_out),
-                            (ut, ub, sh.up.n_out),
-                            (dt, db, sh.down.n_out),
-                        ]
-                    });
+                    let shared = shared
+                        .as_ref()
+                        .map(|sh| [sh.gate.desc(), sh.up.desc(), sh.down.desc()]);
                     TokenFfn::Moe {
-                        router: (rt, rb, router.n_out),
+                        router: router.desc(),
                         router_bias: router_bias.as_ref().map(|b| b.1),
                         gate: (gt, gb),
                         up: (ut, ub),
@@ -325,47 +313,34 @@ impl<'a> Model<'a> {
                 }
             };
             let gdn = layer.gdn.as_ref().map(|g| {
-                let (qt, qb) = g.wqkv.raw();
-                let (zt, zb) = g.zgate.raw();
                 let (at, ab) = g.alpha.raw();
                 let (bt, bb) = g.beta.raw();
-                let (ot, ob) = g.ssm_out.raw();
                 debug_assert_eq!(at, allpaka_gguf::GgmlType::F32);
                 debug_assert_eq!(bt, allpaka_gguf::GgmlType::F32);
                 let _ = (at, bt);
                 let (conv_off, state_off) =
                     ssm_offsets.as_ref().expect("gdn layer without ssm cache")[li];
+                let ssm = c.ssm.as_ref().expect("gdn arch");
                 TokenGdn {
-                    wqkv: (qt, qb, g.wqkv.n_out),
-                    zgate: (zt, zb, g.zgate.n_out),
+                    wqkv: g.wqkv.desc(),
+                    zgate: g.zgate.desc(),
                     alpha: ab,
                     beta: bb,
                     conv1d: g.conv1d_raw,
                     a: &g.a,
                     dt: &g.dt,
                     ssm_norm: &g.ssm_norm,
-                    ssm_out: (ot, ob, g.ssm_out.n_out),
-                    heads_k: c.ssm.as_ref().expect("gdn arch").n_group as usize,
-                    heads_v: c.ssm.as_ref().expect("gdn arch").dt_rank as usize,
-                    d: c.ssm.as_ref().expect("gdn arch").d_state as usize,
-                    d_conv: c.ssm.as_ref().expect("gdn arch").d_conv as usize,
+                    ssm_out: g.ssm_out.desc(),
+                    heads_k: ssm.n_group as usize,
+                    heads_v: ssm.dt_rank as usize,
+                    d: ssm.d_state as usize,
+                    d_conv: ssm.d_conv as usize,
                     conv_off,
                     state_off,
                 }
             });
             let (wq, wk, wv, wo) = match &layer.attn {
-                Some(aw) => {
-                    let (qt, qb) = aw.wq.raw();
-                    let (kt, kb) = aw.wk.raw();
-                    let (vt, vb) = aw.wv.raw();
-                    let (ot, ob) = aw.wo.raw();
-                    (
-                        (qt, qb, aw.wq.n_out),
-                        (kt, kb, aw.wk.n_out),
-                        (vt, vb, aw.wv.n_out),
-                        (ot, ob, aw.wo.n_out),
-                    )
-                }
+                Some(aw) => (aw.wq.desc(), aw.wk.desc(), aw.wv.desc(), aw.wo.desc()),
                 None => (
                     (allpaka_gguf::GgmlType::F32, &[][..], 0),
                     (allpaka_gguf::GgmlType::F32, &[][..], 0),
@@ -484,13 +459,7 @@ impl<'a> Model<'a> {
             if let Some(g) = &layer.gdn {
                 let projected = self.gdn_forward(li, g, &h, 1, s)?;
                 ops::add_assign_slice(&mut x, &projected);
-                {
-                    let _s = profile::span(profile::Phase::FfnNorm);
-                    ops::rmsnorm_into(&mut h, &x, &layer.ffn_norm, c.rms_eps);
-                }
-                let down = layer.ffn.forward(&h)?;
-                let _s = profile::span(profile::Phase::FfnCombine);
-                ops::add_assign_slice(&mut x, &down);
+                ffn_residual(layer, &mut x, &mut h, c.rms_eps, false)?;
                 continue;
             }
             let aw = layer
@@ -540,13 +509,7 @@ impl<'a> Model<'a> {
                 };
                 if let Some(projected) = blocked {
                     ops::add_assign_slice(&mut x, &projected);
-                    {
-                        let _s = profile::span(profile::Phase::FfnNorm);
-                        ops::rmsnorm_into(&mut h, &x, &layer.ffn_norm, c.rms_eps);
-                    }
-                    let down = layer.ffn.forward(&h)?;
-                    let _s = profile::span(profile::Phase::FfnCombine);
-                    ops::add_assign_slice(&mut x, &down);
+                    ffn_residual(layer, &mut x, &mut h, c.rms_eps, false)?;
                     continue;
                 }
             }
@@ -564,21 +527,23 @@ impl<'a> Model<'a> {
             let q = qkv.pop().expect("q");
 
             let mut projected = self.run_cpu_attention_from_qkv(
-                aw,
-                layer.q_norm.as_deref(),
-                layer.k_norm.as_deref(),
-                layer.bias.as_ref(),
-                q,
-                k,
-                v,
-                1,
-                pos,
-                rope_pairs,
+                AttnLayer {
+                    aw,
+                    q_norm: layer.q_norm.as_deref(),
+                    k_norm: layer.k_norm.as_deref(),
+                    bias: layer.bias.as_ref(),
+                },
+                AttnInputs {
+                    q,
+                    k,
+                    v,
+                    m: 1,
+                    base_pos: pos,
+                    rope_flat: rope_pairs,
+                },
                 &mut s.kv,
                 li,
-                false,
-                true,
-                None,
+                AttnMode::Trunk { trace_layer: None },
             )?;
             if attn_zero_enabled() {
                 projected.iter_mut().for_each(|v| *v = 0.0);
@@ -586,19 +551,7 @@ impl<'a> Model<'a> {
             ops::add_assign_slice(&mut x, &projected);
 
             // Feed-forward, dense or routed.
-            {
-                let _s = profile::span(profile::Phase::FfnNorm);
-                ops::rmsnorm_into(&mut h, &x, &layer.ffn_norm, c.rms_eps);
-            };
-            let down = if moe_zero_enabled() {
-                vec![0f32; h.len()]
-            } else {
-                layer.ffn.forward(&h)?
-            };
-            {
-                let _s = profile::span(profile::Phase::FfnCombine);
-                ops::add_assign_slice(&mut x, &down);
-            }
+            ffn_residual(layer, &mut x, &mut h, c.rms_eps, moe_zero_enabled())?;
         }
         s.kv.advance();
         Ok(x)
@@ -759,4 +712,28 @@ impl<'a> Model<'a> {
             }
         }
     }
+}
+
+/// The second half of a decoder block: `x += ffn(rmsnorm(x))`, with `h` as
+/// the normed scratch. `zero_ffn` replaces the FFN output with zeros (the
+/// ALLPAKA_MOE_ZERO diagnostic) while keeping the norm and the add.
+fn ffn_residual(
+    layer: &super::Layer<'_>,
+    x: &mut [f32],
+    h: &mut [f32],
+    eps: f32,
+    zero_ffn: bool,
+) -> Result<()> {
+    {
+        let _s = profile::span(profile::Phase::FfnNorm);
+        ops::rmsnorm_into(h, x, &layer.ffn_norm, eps);
+    }
+    let down = if zero_ffn {
+        vec![0f32; h.len()]
+    } else {
+        layer.ffn.forward(h)?
+    };
+    let _s = profile::span(profile::Phase::FfnCombine);
+    ops::add_assign_slice(x, &down);
+    Ok(())
 }

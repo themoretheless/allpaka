@@ -1,5 +1,6 @@
 //! Batched prompt prefill and speculative verification passes.
 
+use super::attention::{AttnInputs, AttnLayer, AttnMode};
 use super::{
     attn_zero_enabled, cpu_attn_enabled,
     moe::{route_gated_into_slice, Ffn},
@@ -226,21 +227,25 @@ impl<'a> Model<'a> {
             let q = qkv.pop().expect("q");
 
             let mut projected = self.run_cpu_attention_from_qkv(
-                aw,
-                layer.q_norm.as_deref(),
-                layer.k_norm.as_deref(),
-                layer.bias.as_ref(),
-                q,
-                k,
-                v,
-                m,
-                base,
-                rope_flat,
+                AttnLayer {
+                    aw,
+                    q_norm: layer.q_norm.as_deref(),
+                    k_norm: layer.k_norm.as_deref(),
+                    bias: layer.bias.as_ref(),
+                },
+                AttnInputs {
+                    q,
+                    k,
+                    v,
+                    m,
+                    base_pos: base,
+                    rope_flat,
+                },
                 &mut s.kv,
                 li,
-                false,
-                true,
-                Some(li),
+                AttnMode::Trunk {
+                    trace_layer: Some(li),
+                },
             )?;
             if attn_zero_enabled() {
                 projected.iter_mut().for_each(|v| *v = 0.0);

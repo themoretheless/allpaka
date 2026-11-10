@@ -1,5 +1,6 @@
 //! Multi-Token Prediction (`MTP` / `nextn`) speculative draft block (`qwen35moe`).
 
+use super::attention::{AttnInputs, AttnLayer, AttnMode};
 use super::{moe::Ffn, AttnWeights, Model, Session};
 use allpaka_backend::{ops, quantmat::QuantMat};
 use anyhow::{bail, Result};
@@ -81,21 +82,23 @@ impl<'a> Model<'a> {
         let rope_pairs = &s.rope_cache[pos * s.rope_cache_pairs..(pos + 1) * s.rope_cache_pairs];
         let li = c.n_layers as usize;
         let projected = self.run_cpu_attention_from_qkv(
-            aw,
-            m.q_norm.as_deref(),
-            m.k_norm.as_deref(),
-            None,
-            q,
-            k,
-            v,
-            1,
-            pos,
-            rope_pairs,
+            AttnLayer {
+                aw,
+                q_norm: m.q_norm.as_deref(),
+                k_norm: m.k_norm.as_deref(),
+                bias: None,
+            },
+            AttnInputs {
+                q,
+                k,
+                v,
+                m: 1,
+                base_pos: pos,
+                rope_flat: rope_pairs,
+            },
             &mut s.kv,
             li,
-            true,
-            false,
-            None,
+            AttnMode::Mtp,
         )?;
         ops::add_assign_slice(&mut x, &projected);
 
