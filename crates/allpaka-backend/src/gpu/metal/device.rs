@@ -319,7 +319,9 @@ pub(super) fn init_device() -> Option<Gpu> {
         "attend_rows_t4",
         "attend_rows_t8",
         "attend_mm",
+        "attend_mm_db",
         "attend_mm_fq",
+        "attend_mm_fq_db",
         "residual_norm",
         "residual_norm_sig",
         "norm_rows",
@@ -369,6 +371,7 @@ pub(super) fn init_device() -> Option<Gpu> {
         "qk_prep_batch256",
         "attend_rows256",
         "attend_mm256",
+        "attend_mm256_db",
         "route_patch_shared_w",
     ] {
         let f = library

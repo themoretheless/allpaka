@@ -1067,3 +1067,231 @@ fn matvec_qkv_q4k_q6k_matches_separate() {
         );
     }
 }
+
+/// Inner-loop pipelined FlashAttention (`attend_mm_db`, `attend_mm_fq_db`,
+/// `attend_mm256_db`) preserves per-accumulator reduction order, so outputs
+/// must be bit-identical to the single-chain kernels.
+#[test]
+fn attend_mm_db_variants_are_bit_identical() {
+    #[repr(C)]
+    struct FqPrepArgs {
+        eps: f32,
+        has_qk_norm: u32,
+        rot_dim: u32,
+        has_bias: u32,
+        n_kv_heads: u32,
+        wait_base: u32,
+    }
+
+    let Some(device) = Device::system_default() else {
+        return;
+    };
+    let queue = device.new_command_queue();
+    let lib = device
+        .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
+        .unwrap();
+    let pipe = |name: &str| {
+        let f = lib.get_function(name, None).unwrap();
+        device.new_compute_pipeline_state_with_function(&f).unwrap()
+    };
+    let buffer = |p, n| device.new_buffer_with_data(p, n, MTLResourceOptions::StorageModeShared);
+
+    // 1. attend_mm vs attend_mm_db (hd=128) and attend_mm256 vs attend_mm256_db (hd=256)
+    for (hd, k0, k1) in [
+        (128usize, "attend_mm", "attend_mm_db"),
+        (256usize, "attend_mm256", "attend_mm256_db"),
+    ] {
+        let n_q_heads = 8usize;
+        let n_kv_heads = 2usize;
+        let group = (n_q_heads / n_kv_heads) as u32;
+        let base = 19usize;
+        let n_rows = 77usize; // spans >1 64-position tile + partial tail row
+        let total_pos = base + n_rows;
+        let kv_dim = n_kv_heads * hd;
+        let q_dim = n_q_heads * hd;
+        let scale = 1.0f32 / (hd as f32).sqrt();
+
+        let kv_f32: Vec<f32> = (0..total_pos * kv_dim * 2)
+            .map(|i| ((i * 31 + 7) % 113) as f32 * 0.015 - 0.8)
+            .collect();
+        let mut kv_f16 = vec![0u16; kv_f32.len()];
+        allpaka_dtype::f32_to_f16_slice(&kv_f32, &mut kv_f16);
+        let q_f32: Vec<f32> = (0..n_rows * q_dim)
+            .map(|i| ((i * 19 + 11) % 101) as f32 * 0.018 - 0.9)
+            .collect();
+
+        let kv_buf = buffer(kv_f16.as_ptr().cast(), (kv_f16.len() * 2) as u64);
+        let q_buf = buffer(q_f32.as_ptr().cast(), (q_f32.len() * 4) as u64);
+        let k_base = 0u64;
+        let v_base = (total_pos * kv_dim) as u64;
+        let kv_dim32 = kv_dim as u32;
+        let hd32 = hd as u32;
+        let base32 = base as u32;
+        let heads32 = n_q_heads as u32;
+        let rows32 = n_rows as u32;
+
+        let outputs = [k0, k1].map(|kname| {
+            let out = device.new_buffer(
+                (n_rows * q_dim * 4) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let p = pipe(kname);
+            let cmd = queue.new_command_buffer();
+            let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+            enc.set_compute_pipeline_state(&p);
+            enc.set_buffer(0, Some(&kv_buf), 0);
+            enc.set_buffer(1, Some(&kv_buf), 0);
+            enc.set_buffer(2, Some(&q_buf), 0);
+            enc.set_buffer(3, Some(&out), 0);
+            enc.set_bytes(4, 4, (&kv_dim32 as *const u32).cast());
+            enc.set_bytes(5, 4, (&hd32 as *const u32).cast());
+            enc.set_bytes(6, 4, (&base32 as *const u32).cast());
+            enc.set_bytes(7, 4, (&group as *const u32).cast());
+            enc.set_bytes(8, 4, (&scale as *const f32).cast());
+            enc.set_bytes(9, 8, (&k_base as *const u64).cast());
+            enc.set_bytes(10, 8, (&v_base as *const u64).cast());
+            enc.set_bytes(11, 4, (&heads32 as *const u32).cast());
+            enc.set_bytes(12, 4, (&rows32 as *const u32).cast());
+            enc.dispatch_thread_groups(
+                MTLSize::new(n_q_heads as u64, (n_rows as u64).div_ceil(8), 1),
+                MTLSize::new(128, 1, 1),
+            );
+            enc.end_encoding();
+            cmd.commit();
+            cmd.wait_until_completed();
+            assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{kname}");
+            out
+        });
+
+        let a_slice = unsafe {
+            std::slice::from_raw_parts(outputs[0].contents().cast::<f32>(), n_rows * q_dim)
+        };
+        let b_slice = unsafe {
+            std::slice::from_raw_parts(outputs[1].contents().cast::<f32>(), n_rows * q_dim)
+        };
+        for (i, (&a, &b)) in a_slice.iter().zip(b_slice).enumerate() {
+            assert!(
+                a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
+                "{k1} vs {k0} [{i}]: {b} != {a}"
+            );
+        }
+    }
+
+    // 2. attend_mm_fq vs attend_mm_fq_db (hd=128 with qk-norm + rope + producer/consumer sync)
+    let hd = 128usize;
+    let n_q_heads = 8usize;
+    let n_kv_heads = 2usize;
+    let group = (n_q_heads / n_kv_heads) as u32;
+    let base = 16usize;
+    let n_rows = 75usize;
+    let total_pos = base + n_rows;
+    let kv_dim = n_kv_heads * hd;
+    let q_dim = n_q_heads * hd;
+    let scale = 1.0f32 / (hd as f32).sqrt();
+
+    let kv_init_f32: Vec<f32> = (0..total_pos * kv_dim * 2)
+        .map(|i| ((i * 29 + 5) % 109) as f32 * 0.014 - 0.7)
+        .collect();
+    let mut kv_init_f16 = vec![0u16; kv_init_f32.len()];
+    allpaka_dtype::f32_to_f16_slice(&kv_init_f32, &mut kv_init_f16);
+    let q_in: Vec<f32> = (0..n_rows * q_dim)
+        .map(|i| ((i * 23 + 3) % 97) as f32 * 0.02 - 0.9)
+        .collect();
+    let k_in: Vec<f32> = (0..n_rows * kv_dim)
+        .map(|i| ((i * 41 + 9) % 89) as f32 * 0.019 - 0.8)
+        .collect();
+    let v_in: Vec<f32> = (0..n_rows * kv_dim)
+        .map(|i| ((i * 37 + 13) % 83) as f32 * 0.017 - 0.7)
+        .collect();
+    let qw: Vec<f32> = (0..hd).map(|i| 0.85 + (i as f32) * 0.002).collect();
+    let kw: Vec<f32> = (0..hd).map(|i| 0.9 + (i as f32) * 0.0015).collect();
+    let ropes: Vec<[f32; 2]> = (0..n_rows * (hd / 2))
+        .map(|i| {
+            let ang = (i as f32) * 0.013;
+            [ang.sin(), ang.cos()]
+        })
+        .collect();
+
+    let q_buf = buffer(q_in.as_ptr().cast(), (q_in.len() * 4) as u64);
+    let k_in_buf = buffer(k_in.as_ptr().cast(), (k_in.len() * 4) as u64);
+    let v_in_buf = buffer(v_in.as_ptr().cast(), (v_in.len() * 4) as u64);
+    let ropes_buf = buffer(ropes.as_ptr().cast(), (ropes.len() * 8) as u64);
+    let pa = FqPrepArgs {
+        eps: 1e-6,
+        has_qk_norm: 1,
+        rot_dim: hd as u32,
+        has_bias: 0,
+        n_kv_heads: n_kv_heads as u32,
+        wait_base: 0,
+    };
+    let k_base = 0u64;
+    let v_base = (total_pos * kv_dim) as u64;
+    let kv_dim32 = kv_dim as u32;
+    let hd32 = hd as u32;
+    let base32 = base as u32;
+    let heads32 = n_q_heads as u32;
+    let rows32 = n_rows as u32;
+
+    let fq_outputs = ["attend_mm_fq", "attend_mm_fq_db"].map(|kname| {
+        let kv_buf = buffer(kv_init_f16.as_ptr().cast(), (kv_init_f16.len() * 2) as u64);
+        let sync = device.new_buffer(256, MTLResourceOptions::StorageModeShared);
+        unsafe { std::ptr::write_bytes(sync.contents().cast::<u8>(), 0, 256) };
+        let out = device.new_buffer(
+            (n_rows * q_dim * 4) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let p = pipe(kname);
+        let cmd = queue.new_command_buffer();
+        let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+        enc.set_compute_pipeline_state(&p);
+        enc.set_buffer(0, Some(&kv_buf), 0);
+        enc.set_buffer(1, Some(&kv_buf), 0);
+        enc.set_buffer(2, Some(&q_buf), 0);
+        enc.set_buffer(3, Some(&out), 0);
+        enc.set_bytes(4, 4, (&kv_dim32 as *const u32).cast());
+        enc.set_bytes(5, 4, (&hd32 as *const u32).cast());
+        enc.set_bytes(6, 4, (&base32 as *const u32).cast());
+        enc.set_bytes(7, 4, (&group as *const u32).cast());
+        enc.set_bytes(8, 4, (&scale as *const f32).cast());
+        enc.set_bytes(9, 8, (&k_base as *const u64).cast());
+        enc.set_bytes(10, 8, (&v_base as *const u64).cast());
+        enc.set_bytes(11, 4, (&heads32 as *const u32).cast());
+        enc.set_bytes(12, 4, (&rows32 as *const u32).cast());
+        enc.set_buffer(13, Some(&k_in_buf), 0);
+        enc.set_buffer(14, Some(&v_in_buf), 0);
+        enc.set_bytes(
+            15,
+            std::mem::size_of::<FqPrepArgs>() as u64,
+            (&pa as *const FqPrepArgs).cast(),
+        );
+        enc.set_bytes(16, (hd * 4) as u64, qw.as_ptr().cast());
+        enc.set_bytes(17, (hd * 4) as u64, kw.as_ptr().cast());
+        enc.set_buffer(18, Some(&ropes_buf), 0);
+        enc.set_buffer(19, Some(&kv_buf), 0);
+        enc.set_buffer(20, Some(&kv_buf), 0);
+        enc.set_buffer(21, Some(&kv_buf), 0);
+        enc.set_buffer(22, Some(&sync), 0);
+        enc.dispatch_thread_groups(
+            MTLSize::new(n_q_heads as u64, (n_rows as u64).div_ceil(8), 1),
+            MTLSize::new(128, 1, 1),
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{kname}");
+        out
+    });
+
+    let fq_a = unsafe {
+        std::slice::from_raw_parts(fq_outputs[0].contents().cast::<f32>(), n_rows * q_dim)
+    };
+    let fq_b = unsafe {
+        std::slice::from_raw_parts(fq_outputs[1].contents().cast::<f32>(), n_rows * q_dim)
+    };
+    for (i, (&a, &b)) in fq_a.iter().zip(fq_b).enumerate() {
+        assert!(
+            a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
+            "attend_mm_fq_db vs attend_mm_fq [{i}]: {b} != {a}"
+        );
+    }
+}

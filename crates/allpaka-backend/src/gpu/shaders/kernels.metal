@@ -1046,7 +1046,7 @@ kernel void matvec_q3_k_mv(
         device const uchar* dh = blk + 108;
 
         #pragma clang loop unroll(full)
-        for (short row = 0; row < 2; ++row) {
+        for (uint row = 0; row < 2; ++row) {
             const float d_all = half_at(dh);
 
             scales16[0] = a[4];
@@ -2982,7 +2982,7 @@ inline void q3k_two_rows(
         device const ushort* a = (device const ushort*)(blk + 96);
         device const uchar* dh = blk + 108;
         #pragma clang loop unroll(full)
-        for (short row = 0; row < 2; ++row) {
+        for (uint row = 0; row < 2; ++row) {
             const float d_all = half_at(dh);
             scales16[0] = a[4];
             scales16[1] = a[5];
@@ -7316,28 +7316,33 @@ kernel void attend_merge(
 // tied attend_rows_t8 standalone (0.78 vs 0.81 ms at m=480) and lost
 // in-model: the staging and the K re-read cost what the MMAs saved.
 // head_dim is fixed at 128 (the ATTN_HEAD_DIM the prefill path assumes).
-kernel void attend_mm(
-    device const half* k [[buffer(0)]],
-    device const half* v [[buffer(1)]],
-    device const float* q [[buffer(2)]],
-    device float* out [[buffer(3)]],
-    constant uint& kv_dim [[buffer(4)]],
-    constant uint& head_dim [[buffer(5)]],
-    constant uint& base [[buffer(6)]],
-    constant uint& group [[buffer(7)]],
-    constant float& scale [[buffer(8)]],
-    constant ulong& k_base [[buffer(9)]],
-    constant ulong& v_base [[buffer(10)]],
-    constant uint& n_q_heads [[buffer(11)]],
-    constant uint& n_rows [[buffer(12)]],
-    uint2 tg [[threadgroup_position_in_grid]],
-    ushort tiitg [[thread_index_in_threadgroup]],
-    ushort lane [[thread_index_in_simdgroup]],
-    ushort sgitg [[simdgroup_index_in_threadgroup]])
+// DB selects the inner-loop pipelining: 0 = single load->MMA chains, 1 =
+// llama fa_f16 shape (QK two dim-blocks in flight, PV four V loads in
+// flight). Per-accumulator accumulate order is unchanged, so both are
+// bit-identical; the host picks via ALLPAKA_FA_DB.
+template<int DB>
+inline void attend_mm_impl(
+    device const half* k,
+    device const half* v,
+    device const float* q,
+    device float* out,
+    constant uint& kv_dim,
+    constant uint& head_dim,
+    constant uint& base,
+    constant uint& group,
+    constant float& scale,
+    constant ulong& k_base,
+    constant ulong& v_base,
+    constant uint& n_q_heads,
+    constant uint& n_rows,
+    uint2 tg,
+    ushort tiitg,
+    ushort lane,
+    ushort sgitg,
+    threadgroup half* sq,
+    threadgroup float* so,
+    threadgroup float* ss)
 {
-    threadgroup half sq[8 * 128];
-    threadgroup float so[8 * 128];
-    threadgroup float ss[8 * 64];    // raw scores, then P in place (float)
     const uint qh = tg.x;
     const uint row0 = tg.y * 8;
     const uint kv_head = qh / group;
@@ -7377,12 +7382,28 @@ kernel void attend_mm(
             device const half* pk =
                 k + k_base + p0 * kv_dim + (ulong)kv_head * head_dim;
             simdgroup_float8x8 mqk = make_filled_simdgroup_matrix<float, 8>(0.0f);
-            for (ushort i = 0; i < 16; i++) {
-                simdgroup_half8x8 mq;
-                simdgroup_half8x8 mk;
-                simdgroup_load(mq, sq + 8 * i, 128, 0, false);
-                simdgroup_load(mk, pk + 8 * i, kv_dim, 0, true); // dims x pos
-                simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
+            if (DB >= 1) {
+                // Two dim-blocks in flight: the device K load latency hides
+                // behind the first MMA. Same accumulate order (i ascending)
+                // as the single chain, so bit-identical.
+                #pragma unroll
+                for (ushort i = 0; i < 8; i++) {
+                    simdgroup_half8x8 mq0, mq1, mk0, mk1;
+                    simdgroup_load(mq0, sq + 16 * i, 128, 0, false);
+                    simdgroup_load(mq1, sq + 16 * i + 8, 128, 0, false);
+                    simdgroup_load(mk0, pk + 16 * i, kv_dim, 0, true); // dims x pos
+                    simdgroup_load(mk1, pk + 16 * i + 8, kv_dim, 0, true);
+                    simdgroup_multiply_accumulate(mqk, mq0, mk0, mqk);
+                    simdgroup_multiply_accumulate(mqk, mq1, mk1, mqk);
+                }
+            } else {
+                for (ushort i = 0; i < 16; i++) {
+                    simdgroup_half8x8 mq;
+                    simdgroup_half8x8 mk;
+                    simdgroup_load(mq, sq + 8 * i, 128, 0, false);
+                    simdgroup_load(mk, pk + 8 * i, kv_dim, 0, true); // dims x pos
+                    simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
+                }
             }
             simdgroup_store(mqk, ss + pb * 8, 64, 0, false);
         }
@@ -7418,17 +7439,49 @@ kernel void attend_mm(
         for (ushort ii = 0; ii < 4; ii++) {
             simdgroup_load(lo[ii], so + sgitg * 32 + ii * 8, 128, 0, false);
         }
-        for (ushort cc = 0; cc < 8; cc++) {
-            uint pstart = ic + cc * 8;
-            ulong p0 = pstart < max_pos ? pstart : min(pstart, span8);
-            device const half* pv = v + v_base + p0 * kv_dim
-                + (ulong)kv_head * head_dim + sgitg * 32;
-            simdgroup_float8x8 pa;
-            simdgroup_load(pa, ss + cc * 8, 64, 0, false);
-            for (ushort ii = 0; ii < 4; ii++) {
-                simdgroup_half8x8 mv;
-                simdgroup_load(mv, pv + ii * 8, kv_dim, 0, false);
-                simdgroup_multiply_accumulate(lo[ii], pa, mv, lo[ii]);
+        if (DB >= 1) {
+            // llama fa_f16 DV>64 shape: per pair of position-strips, four V
+            // loads in flight (2 dims x 2 strips), then four MMAs. Each
+            // accumulator still sees cc ascending, so bit-identical.
+            #pragma unroll
+            for (ushort cc2 = 0; cc2 < 4; cc2++) {
+                uint pa0 = ic + cc2 * 16;
+                uint pb0 = pa0 + 8;
+                ulong q0 = pa0 < max_pos ? pa0 : min(pa0, span8);
+                ulong q1 = pb0 < max_pos ? pb0 : min(pb0, span8);
+                device const half* pv0 = v + v_base + q0 * kv_dim
+                    + (ulong)kv_head * head_dim + sgitg * 32;
+                device const half* pv1 = v + v_base + q1 * kv_dim
+                    + (ulong)kv_head * head_dim + sgitg * 32;
+                simdgroup_float8x8 pa_0, pa_1;
+                simdgroup_load(pa_0, ss + cc2 * 16, 64, 0, false);
+                simdgroup_load(pa_1, ss + cc2 * 16 + 8, 64, 0, false);
+                #pragma unroll
+                for (ushort ii2 = 0; ii2 < 2; ii2++) {
+                    simdgroup_half8x8 mv0, mv1, mv2, mv3;
+                    simdgroup_load(mv0, pv0 + (2 * ii2) * 8, kv_dim, 0, false);
+                    simdgroup_load(mv1, pv0 + (2 * ii2 + 1) * 8, kv_dim, 0, false);
+                    simdgroup_load(mv2, pv1 + (2 * ii2) * 8, kv_dim, 0, false);
+                    simdgroup_load(mv3, pv1 + (2 * ii2 + 1) * 8, kv_dim, 0, false);
+                    simdgroup_multiply_accumulate(lo[2 * ii2], pa_0, mv0, lo[2 * ii2]);
+                    simdgroup_multiply_accumulate(lo[2 * ii2 + 1], pa_0, mv1, lo[2 * ii2 + 1]);
+                    simdgroup_multiply_accumulate(lo[2 * ii2], pa_1, mv2, lo[2 * ii2]);
+                    simdgroup_multiply_accumulate(lo[2 * ii2 + 1], pa_1, mv3, lo[2 * ii2 + 1]);
+                }
+            }
+        } else {
+            for (ushort cc = 0; cc < 8; cc++) {
+                uint pstart = ic + cc * 8;
+                ulong p0 = pstart < max_pos ? pstart : min(pstart, span8);
+                device const half* pv = v + v_base + p0 * kv_dim
+                    + (ulong)kv_head * head_dim + sgitg * 32;
+                simdgroup_float8x8 pa;
+                simdgroup_load(pa, ss + cc * 8, 64, 0, false);
+                for (ushort ii = 0; ii < 4; ii++) {
+                    simdgroup_half8x8 mv;
+                    simdgroup_load(mv, pv + ii * 8, kv_dim, 0, false);
+                    simdgroup_multiply_accumulate(lo[ii], pa, mv, lo[ii]);
+                }
             }
         }
         for (ushort ii = 0; ii < 4; ii++) {
@@ -7452,6 +7505,45 @@ kernel void attend_mm(
     }
 }
 
+#define ATTEND_MM_ARGS \
+    device const half* k [[buffer(0)]], \
+    device const half* v [[buffer(1)]], \
+    device const float* q [[buffer(2)]], \
+    device float* out [[buffer(3)]], \
+    constant uint& kv_dim [[buffer(4)]], \
+    constant uint& head_dim [[buffer(5)]], \
+    constant uint& base [[buffer(6)]], \
+    constant uint& group [[buffer(7)]], \
+    constant float& scale [[buffer(8)]], \
+    constant ulong& k_base [[buffer(9)]], \
+    constant ulong& v_base [[buffer(10)]], \
+    constant uint& n_q_heads [[buffer(11)]], \
+    constant uint& n_rows [[buffer(12)]], \
+    uint2 tg [[threadgroup_position_in_grid]], \
+    ushort tiitg [[thread_index_in_threadgroup]], \
+    ushort lane [[thread_index_in_simdgroup]], \
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
+
+#define ATTEND_MM_FWD \
+    k, v, q, out, kv_dim, head_dim, base, group, scale, k_base, v_base, \
+    n_q_heads, n_rows, tg, tiitg, lane, sgitg
+
+kernel void attend_mm(ATTEND_MM_ARGS)
+{
+    threadgroup half sq[8 * 128];
+    threadgroup float so[8 * 128];
+    threadgroup float ss[8 * 64];
+    attend_mm_impl<0>(ATTEND_MM_FWD, sq, so, ss);
+}
+
+kernel void attend_mm_db(ATTEND_MM_ARGS)
+{
+    threadgroup half sq[8 * 128];
+    threadgroup float so[8 * 128];
+    threadgroup float ss[8 * 64];
+    attend_mm_impl<1>(ATTEND_MM_FWD, sq, so, ss);
+}
+
 struct FqPrepArgs {
     float eps;
     uint has_qk_norm;
@@ -7471,38 +7563,39 @@ struct FqPrepArgs {
 // earlier and are already resident or done. Q norm+rope folds into the sq
 // staging, so nothing of qk_prep remains. ALLPAKA_PF_FQK=0 keeps the old
 // two-dispatch path.
-kernel void attend_mm_fq(
-    device half* kc [[buffer(0)]],
-    device half* vc [[buffer(1)]],
-    device const float* q [[buffer(2)]],
-    device float* out [[buffer(3)]],
-    constant uint& kv_dim [[buffer(4)]],
-    constant uint& head_dim [[buffer(5)]],
-    constant uint& base [[buffer(6)]],
-    constant uint& group [[buffer(7)]],
-    constant float& scale [[buffer(8)]],
-    constant ulong& k_base [[buffer(9)]],
-    constant ulong& v_base [[buffer(10)]],
-    constant uint& n_q_heads [[buffer(11)]],
-    constant uint& n_rows [[buffer(12)]],
-    device const float* k_in [[buffer(13)]],
-    device const float* v_in [[buffer(14)]],
-    constant FqPrepArgs& pa [[buffer(15)]],
-    constant float* qw [[buffer(16)]],
-    constant float* kw [[buffer(17)]],
-    device const float2* ropes [[buffer(18)]],
-    device const float* qb [[buffer(19)]],
-    device const float* kb [[buffer(20)]],
-    device const float* vb [[buffer(21)]],
-    device atomic_uint* sync [[buffer(22)]],
-    uint2 tg [[threadgroup_position_in_grid]],
-    ushort tiitg [[thread_index_in_threadgroup]],
-    ushort lane [[thread_index_in_simdgroup]],
-    ushort sgitg [[simdgroup_index_in_threadgroup]])
+template<int DB>
+inline void attend_mm_fq_impl(
+    device half* kc,
+    device half* vc,
+    device const float* q,
+    device float* out,
+    constant uint& kv_dim,
+    constant uint& head_dim,
+    constant uint& base,
+    constant uint& group,
+    constant float& scale,
+    constant ulong& k_base,
+    constant ulong& v_base,
+    constant uint& n_q_heads,
+    constant uint& n_rows,
+    device const float* k_in,
+    device const float* v_in,
+    constant FqPrepArgs& pa,
+    constant float* qw,
+    constant float* kw,
+    device const float2* ropes,
+    device const float* qb,
+    device const float* kb,
+    device const float* vb,
+    device atomic_uint* sync,
+    uint2 tg,
+    ushort tiitg,
+    ushort lane,
+    ushort sgitg,
+    threadgroup half* sq,
+    threadgroup float* so,
+    threadgroup float* ss)
 {
-    threadgroup half sq[8 * 128];
-    threadgroup float so[8 * 128];
-    threadgroup float ss[8 * 64];    // raw scores, then P in place (float)
     const uint qh = tg.x;
     const uint row0 = tg.y * 8;
     const uint kv_head = qh / group;
@@ -7653,12 +7746,27 @@ kernel void attend_mm_fq(
             device const half* pk =
                 kc + k_base + p0 * kv_dim + (ulong)kv_head * head_dim;
             simdgroup_float8x8 mqk = make_filled_simdgroup_matrix<float, 8>(0.0f);
-            for (ushort i = 0; i < 16; i++) {
-                simdgroup_half8x8 mq;
-                simdgroup_half8x8 mk;
-                simdgroup_load(mq, sq + 8 * i, 128, 0, false);
-                simdgroup_load(mk, pk + 8 * i, kv_dim, 0, true); // dims x pos
-                simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
+            if (DB >= 1) {
+                // Two dim-blocks in flight, same accumulate order as the
+                // single chain (i ascending) - bit-identical.
+                #pragma unroll
+                for (ushort i = 0; i < 8; i++) {
+                    simdgroup_half8x8 mq0, mq1, mk0, mk1;
+                    simdgroup_load(mq0, sq + 16 * i, 128, 0, false);
+                    simdgroup_load(mq1, sq + 16 * i + 8, 128, 0, false);
+                    simdgroup_load(mk0, pk + 16 * i, kv_dim, 0, true); // dims x pos
+                    simdgroup_load(mk1, pk + 16 * i + 8, kv_dim, 0, true);
+                    simdgroup_multiply_accumulate(mqk, mq0, mk0, mqk);
+                    simdgroup_multiply_accumulate(mqk, mq1, mk1, mqk);
+                }
+            } else {
+                for (ushort i = 0; i < 16; i++) {
+                    simdgroup_half8x8 mq;
+                    simdgroup_half8x8 mk;
+                    simdgroup_load(mq, sq + 8 * i, 128, 0, false);
+                    simdgroup_load(mk, pk + 8 * i, kv_dim, 0, true); // dims x pos
+                    simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
+                }
             }
             simdgroup_store(mqk, ss + pb * 8, 64, 0, false);
         }
@@ -7694,17 +7802,49 @@ kernel void attend_mm_fq(
         for (ushort ii = 0; ii < 4; ii++) {
             simdgroup_load(lo[ii], so + sgitg * 32 + ii * 8, 128, 0, false);
         }
-        for (ushort cc = 0; cc < 8; cc++) {
-            uint pstart = ic + cc * 8;
-            ulong p0 = pstart < max_pos ? pstart : min(pstart, span8);
-            device const half* pv = vc + v_base + p0 * kv_dim
-                + (ulong)kv_head * head_dim + sgitg * 32;
-            simdgroup_float8x8 pa2;
-            simdgroup_load(pa2, ss + cc * 8, 64, 0, false);
-            for (ushort ii = 0; ii < 4; ii++) {
-                simdgroup_half8x8 mv;
-                simdgroup_load(mv, pv + ii * 8, kv_dim, 0, false);
-                simdgroup_multiply_accumulate(lo[ii], pa2, mv, lo[ii]);
+        if (DB >= 1) {
+            // llama fa_f16 DV>64 shape: per pair of position-strips, four V
+            // loads in flight (2 dims x 2 strips), then four MMAs. Each
+            // accumulator still sees cc ascending, so bit-identical.
+            #pragma unroll
+            for (ushort cc2 = 0; cc2 < 4; cc2++) {
+                uint pa0 = ic + cc2 * 16;
+                uint pb0 = pa0 + 8;
+                ulong q0 = pa0 < max_pos ? pa0 : min(pa0, span8);
+                ulong q1 = pb0 < max_pos ? pb0 : min(pb0, span8);
+                device const half* pv0 = vc + v_base + q0 * kv_dim
+                    + (ulong)kv_head * head_dim + sgitg * 32;
+                device const half* pv1 = vc + v_base + q1 * kv_dim
+                    + (ulong)kv_head * head_dim + sgitg * 32;
+                simdgroup_float8x8 pa_0, pa_1;
+                simdgroup_load(pa_0, ss + cc2 * 16, 64, 0, false);
+                simdgroup_load(pa_1, ss + cc2 * 16 + 8, 64, 0, false);
+                #pragma unroll
+                for (ushort ii2 = 0; ii2 < 2; ii2++) {
+                    simdgroup_half8x8 mv0, mv1, mv2, mv3;
+                    simdgroup_load(mv0, pv0 + (2 * ii2) * 8, kv_dim, 0, false);
+                    simdgroup_load(mv1, pv0 + (2 * ii2 + 1) * 8, kv_dim, 0, false);
+                    simdgroup_load(mv2, pv1 + (2 * ii2) * 8, kv_dim, 0, false);
+                    simdgroup_load(mv3, pv1 + (2 * ii2 + 1) * 8, kv_dim, 0, false);
+                    simdgroup_multiply_accumulate(lo[2 * ii2], pa_0, mv0, lo[2 * ii2]);
+                    simdgroup_multiply_accumulate(lo[2 * ii2 + 1], pa_0, mv1, lo[2 * ii2 + 1]);
+                    simdgroup_multiply_accumulate(lo[2 * ii2], pa_1, mv2, lo[2 * ii2]);
+                    simdgroup_multiply_accumulate(lo[2 * ii2 + 1], pa_1, mv3, lo[2 * ii2 + 1]);
+                }
+            }
+        } else {
+            for (ushort cc = 0; cc < 8; cc++) {
+                uint pstart = ic + cc * 8;
+                ulong p0 = pstart < max_pos ? pstart : min(pstart, span8);
+                device const half* pv = vc + v_base + p0 * kv_dim
+                    + (ulong)kv_head * head_dim + sgitg * 32;
+                simdgroup_float8x8 pa2;
+                simdgroup_load(pa2, ss + cc * 8, 64, 0, false);
+                for (ushort ii = 0; ii < 4; ii++) {
+                    simdgroup_half8x8 mv;
+                    simdgroup_load(mv, pv + ii * 8, kv_dim, 0, false);
+                    simdgroup_multiply_accumulate(lo[ii], pa2, mv, lo[ii]);
+                }
             }
         }
         for (ushort ii = 0; ii < 4; ii++) {
@@ -7728,33 +7868,84 @@ kernel void attend_mm_fq(
     }
 }
 
+#define ATTEND_MM_FQ_ARGS \
+    device half* kc [[buffer(0)]], \
+    device half* vc [[buffer(1)]], \
+    device const float* q [[buffer(2)]], \
+    device float* out [[buffer(3)]], \
+    constant uint& kv_dim [[buffer(4)]], \
+    constant uint& head_dim [[buffer(5)]], \
+    constant uint& base [[buffer(6)]], \
+    constant uint& group [[buffer(7)]], \
+    constant float& scale [[buffer(8)]], \
+    constant ulong& k_base [[buffer(9)]], \
+    constant ulong& v_base [[buffer(10)]], \
+    constant uint& n_q_heads [[buffer(11)]], \
+    constant uint& n_rows [[buffer(12)]], \
+    device const float* k_in [[buffer(13)]], \
+    device const float* v_in [[buffer(14)]], \
+    constant FqPrepArgs& pa [[buffer(15)]], \
+    constant float* qw [[buffer(16)]], \
+    constant float* kw [[buffer(17)]], \
+    device const float2* ropes [[buffer(18)]], \
+    device const float* qb [[buffer(19)]], \
+    device const float* kb [[buffer(20)]], \
+    device const float* vb [[buffer(21)]], \
+    device atomic_uint* sync [[buffer(22)]], \
+    uint2 tg [[threadgroup_position_in_grid]], \
+    ushort tiitg [[thread_index_in_threadgroup]], \
+    ushort lane [[thread_index_in_simdgroup]], \
+    ushort sgitg [[simdgroup_index_in_threadgroup]]
+
+#define ATTEND_MM_FQ_FWD \
+    kc, vc, q, out, kv_dim, head_dim, base, group, scale, k_base, v_base, \
+    n_q_heads, n_rows, k_in, v_in, pa, qw, kw, ropes, qb, kb, vb, sync, \
+    tg, tiitg, lane, sgitg
+
+kernel void attend_mm_fq(ATTEND_MM_FQ_ARGS)
+{
+    threadgroup half sq[8 * 128];
+    threadgroup float so[8 * 128];
+    threadgroup float ss[8 * 64];
+    attend_mm_fq_impl<0>(ATTEND_MM_FQ_FWD, sq, so, ss);
+}
+
+kernel void attend_mm_fq_db(ATTEND_MM_FQ_ARGS)
+{
+    threadgroup half sq[8 * 128];
+    threadgroup float so[8 * 128];
+    threadgroup float ss[8 * 64];
+    attend_mm_fq_impl<1>(ATTEND_MM_FQ_FWD, sq, so, ss);
+}
+
 // attend_mm for head_dim 256 (qwen35moe): same structure - 8 query rows per
 // threadgroup, K/V in 64-position tiles read directly from device memory,
 // scores in threadgroup f32, online softmax per row, O in threadgroup with
 // a per-tile rescale. The 256-wide head doubles the QK tile count and the
 // V strips (4 simdgroups own 64 dims each); threadgroup memory is 14 KB.
-kernel void attend_mm256(
-    device const half* k [[buffer(0)]],
-    device const half* v [[buffer(1)]],
-    device const float* q [[buffer(2)]],
-    device float* out [[buffer(3)]],
-    constant uint& kv_dim [[buffer(4)]],
-    constant uint& head_dim [[buffer(5)]],
-    constant uint& base [[buffer(6)]],
-    constant uint& group [[buffer(7)]],
-    constant float& scale [[buffer(8)]],
-    constant ulong& k_base [[buffer(9)]],
-    constant ulong& v_base [[buffer(10)]],
-    constant uint& n_q_heads [[buffer(11)]],
-    constant uint& n_rows [[buffer(12)]],
-    uint2 tg [[threadgroup_position_in_grid]],
-    ushort tiitg [[thread_index_in_threadgroup]],
-    ushort lane [[thread_index_in_simdgroup]],
-    ushort sgitg [[simdgroup_index_in_threadgroup]])
+template<int DB>
+inline void attend_mm256_impl(
+    device const half* k,
+    device const half* v,
+    device const float* q,
+    device float* out,
+    constant uint& kv_dim,
+    constant uint& head_dim,
+    constant uint& base,
+    constant uint& group,
+    constant float& scale,
+    constant ulong& k_base,
+    constant ulong& v_base,
+    constant uint& n_q_heads,
+    constant uint& n_rows,
+    uint2 tg,
+    ushort tiitg,
+    ushort lane,
+    ushort sgitg,
+    threadgroup half* sq,
+    threadgroup float* so,
+    threadgroup float* ss)
 {
-    threadgroup half sq[8 * 256];
-    threadgroup float so[8 * 256];
-    threadgroup float ss[8 * 64];    // raw scores, then P in place (float)
     const uint qh = tg.x;
     const uint row0 = tg.y * 8;
     const uint kv_head = qh / group;
@@ -7794,12 +7985,25 @@ kernel void attend_mm256(
             device const half* pk =
                 k + k_base + p0 * kv_dim + (ulong)kv_head * head_dim;
             simdgroup_float8x8 mqk = make_filled_simdgroup_matrix<float, 8>(0.0f);
-            for (ushort i = 0; i < 32; i++) {
-                simdgroup_half8x8 mq;
-                simdgroup_half8x8 mk;
-                simdgroup_load(mq, sq + 8 * i, 256, 0, false);
-                simdgroup_load(mk, pk + 8 * i, kv_dim, 0, true); // dims x pos
-                simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
+            if (DB >= 1) {
+                #pragma unroll
+                for (ushort i = 0; i < 16; i++) {
+                    simdgroup_half8x8 mq0, mq1, mk0, mk1;
+                    simdgroup_load(mq0, sq + 16 * i, 256, 0, false);
+                    simdgroup_load(mq1, sq + 16 * i + 8, 256, 0, false);
+                    simdgroup_load(mk0, pk + 16 * i, kv_dim, 0, true); // dims x pos
+                    simdgroup_load(mk1, pk + 16 * i + 8, kv_dim, 0, true);
+                    simdgroup_multiply_accumulate(mqk, mq0, mk0, mqk);
+                    simdgroup_multiply_accumulate(mqk, mq1, mk1, mqk);
+                }
+            } else {
+                for (ushort i = 0; i < 32; i++) {
+                    simdgroup_half8x8 mq;
+                    simdgroup_half8x8 mk;
+                    simdgroup_load(mq, sq + 8 * i, 256, 0, false);
+                    simdgroup_load(mk, pk + 8 * i, kv_dim, 0, true); // dims x pos
+                    simdgroup_multiply_accumulate(mqk, mq, mk, mqk);
+                }
             }
             simdgroup_store(mqk, ss + pb * 8, 64, 0, false);
         }
@@ -7836,17 +8040,46 @@ kernel void attend_mm256(
         for (ushort ii = 0; ii < 8; ii++) {
             simdgroup_load(lo[ii], so + sgitg * 64 + ii * 8, 256, 0, false);
         }
-        for (ushort cc = 0; cc < 8; cc++) {
-            uint pstart = ic + cc * 8;
-            ulong p0 = pstart < max_pos ? pstart : min(pstart, span8);
-            device const half* pv = v + v_base + p0 * kv_dim
-                + (ulong)kv_head * head_dim + sgitg * 64;
-            simdgroup_float8x8 pa;
-            simdgroup_load(pa, ss + cc * 8, 64, 0, false);
-            for (ushort ii = 0; ii < 8; ii++) {
-                simdgroup_half8x8 mv;
-                simdgroup_load(mv, pv + ii * 8, kv_dim, 0, false);
-                simdgroup_multiply_accumulate(lo[ii], pa, mv, lo[ii]);
+        if (DB >= 1) {
+            #pragma unroll
+            for (ushort cc2 = 0; cc2 < 4; cc2++) {
+                uint pa0 = ic + cc2 * 16;
+                uint pb0 = pa0 + 8;
+                ulong q0 = pa0 < max_pos ? pa0 : min(pa0, span8);
+                ulong q1 = pb0 < max_pos ? pb0 : min(pb0, span8);
+                device const half* pv0 = v + v_base + q0 * kv_dim
+                    + (ulong)kv_head * head_dim + sgitg * 64;
+                device const half* pv1 = v + v_base + q1 * kv_dim
+                    + (ulong)kv_head * head_dim + sgitg * 64;
+                simdgroup_float8x8 pa_0, pa_1;
+                simdgroup_load(pa_0, ss + cc2 * 16, 64, 0, false);
+                simdgroup_load(pa_1, ss + cc2 * 16 + 8, 64, 0, false);
+                #pragma unroll
+                for (ushort ii2 = 0; ii2 < 4; ii2++) {
+                    simdgroup_half8x8 mv0, mv1, mv2, mv3;
+                    simdgroup_load(mv0, pv0 + (2 * ii2) * 8, kv_dim, 0, false);
+                    simdgroup_load(mv1, pv0 + (2 * ii2 + 1) * 8, kv_dim, 0, false);
+                    simdgroup_load(mv2, pv1 + (2 * ii2) * 8, kv_dim, 0, false);
+                    simdgroup_load(mv3, pv1 + (2 * ii2 + 1) * 8, kv_dim, 0, false);
+                    simdgroup_multiply_accumulate(lo[2 * ii2], pa_0, mv0, lo[2 * ii2]);
+                    simdgroup_multiply_accumulate(lo[2 * ii2 + 1], pa_0, mv1, lo[2 * ii2 + 1]);
+                    simdgroup_multiply_accumulate(lo[2 * ii2], pa_1, mv2, lo[2 * ii2]);
+                    simdgroup_multiply_accumulate(lo[2 * ii2 + 1], pa_1, mv3, lo[2 * ii2 + 1]);
+                }
+            }
+        } else {
+            for (ushort cc = 0; cc < 8; cc++) {
+                uint pstart = ic + cc * 8;
+                ulong p0 = pstart < max_pos ? pstart : min(pstart, span8);
+                device const half* pv = v + v_base + p0 * kv_dim
+                    + (ulong)kv_head * head_dim + sgitg * 64;
+                simdgroup_float8x8 pa;
+                simdgroup_load(pa, ss + cc * 8, 64, 0, false);
+                for (ushort ii = 0; ii < 8; ii++) {
+                    simdgroup_half8x8 mv;
+                    simdgroup_load(mv, pv + ii * 8, kv_dim, 0, false);
+                    simdgroup_multiply_accumulate(lo[ii], pa, mv, lo[ii]);
+                }
             }
         }
         for (ushort ii = 0; ii < 8; ii++) {
@@ -7869,6 +8102,22 @@ kernel void attend_mm256(
             o4[lane + 32] = s4[lane + 32] * inv;
         }
     }
+}
+
+kernel void attend_mm256(ATTEND_MM_ARGS)
+{
+    threadgroup half sq[8 * 256];
+    threadgroup float so[8 * 256];
+    threadgroup float ss[8 * 64];
+    attend_mm256_impl<0>(ATTEND_MM_FWD, sq, so, ss);
+}
+
+kernel void attend_mm256_db(ATTEND_MM_ARGS)
+{
+    threadgroup half sq[8 * 256];
+    threadgroup float so[8 * 256];
+    threadgroup float ss[8 * 64];
+    attend_mm256_impl<1>(ATTEND_MM_FWD, sq, so, ss);
 }
 
 // The batched attend: grid (query head, row), each row causal over its own
