@@ -331,10 +331,13 @@ pub(crate) async fn list(
     State(app): State<crate::App>,
     Query(query): Query<Search>,
 ) -> crate::ApiResult<Value> {
-    app.review_queues
-        .list(&query)
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        app.review_queues
+            .list(&query)
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -349,13 +352,16 @@ pub(crate) async fn history(
     Path(id): Path<String>,
     Query(page): Query<HistoryPage>,
 ) -> crate::ApiResult<Value> {
-    (||->Result<Value> {
-        if page.offset>2000 || !(1..=100).contains(&page.limit) {bail!("Invalid review queue history page");}
-        let queue=app.review_queues.read(&id)?;
-        let total=queue.history.len();
-        let entries=queue.history.iter().rev().skip(page.offset).take(page.limit).collect::<Vec<_>>();
-        Ok(serde_json::json!({"kind":"review_queue_history","queue_id":id,"project_id":queue.project_id,"queue_version":queue.version,"total":total,"offset":page.offset,"limit":page.limit,"has_more":page.offset+entries.len()<total,"order":"version_desc","history_complete":queue.history.first().is_some_and(|e|e.version==1),"entries":entries,"provider_calls":0,"reviewer_identity":"self_reported"}))
-    })().map(Json).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))
+    crate::blocking(move || {
+        (||->Result<Value> {
+            if page.offset>2000 || !(1..=100).contains(&page.limit) {bail!("Invalid review queue history page");}
+            let queue=app.review_queues.read(&id)?;
+            let total=queue.history.len();
+            let entries=queue.history.iter().rev().skip(page.offset).take(page.limit).collect::<Vec<_>>();
+            Ok(serde_json::json!({"kind":"review_queue_history","queue_id":id,"project_id":queue.project_id,"queue_version":queue.version,"total":total,"offset":page.offset,"limit":page.limit,"has_more":page.offset+entries.len()<total,"order":"version_desc","history_complete":queue.history.first().is_some_and(|e|e.version==1),"entries":entries,"provider_calls":0,"reviewer_identity":"self_reported"}))
+        })().map(Json).map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -479,20 +485,23 @@ pub(crate) async fn lifecycle(
     Path(id): Path<String>,
     Json(input): Json<Lifecycle>,
 ) -> crate::ApiResult<Value> {
-    app.review_queues
-        .lifecycle(&id, input)
-        .and_then(|queue| Ok(serde_json::to_value(queue)?))
-        .map(Json)
-        .map_err(|e| {
-            crate::error(
-                if e.is::<Conflict>() {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::BAD_REQUEST
-                },
-                e,
-            )
-        })
+    crate::blocking(move || {
+        app.review_queues
+            .lifecycle(&id, input)
+            .and_then(|queue| Ok(serde_json::to_value(queue)?))
+            .map(Json)
+            .map_err(|e| {
+                crate::error(
+                    if e.is::<Conflict>() {
+                        StatusCode::CONFLICT
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    e,
+                )
+            })
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -576,78 +585,90 @@ pub(crate) async fn complete(
     Path(id): Path<String>,
     Json(input): Json<Completion>,
 ) -> crate::ApiResult<Value> {
-    app.review_queues
-        .complete(&id, input, &app.feedback)
-        .and_then(|queue| Ok(serde_json::to_value(queue)?))
-        .map(Json)
-        .map_err(|e| {
-            crate::error(
-                if e.is::<Conflict>() {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::BAD_REQUEST
-                },
-                e,
-            )
-        })
+    crate::blocking(move || {
+        app.review_queues
+            .complete(&id, input, &app.feedback)
+            .and_then(|queue| Ok(serde_json::to_value(queue)?))
+            .map(Json)
+            .map_err(|e| {
+                crate::error(
+                    if e.is::<Conflict>() {
+                        StatusCode::CONFLICT
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    e,
+                )
+            })
+    })
+    .await
 }
 pub(crate) async fn assign(
     State(app): State<crate::App>,
     Path(id): Path<String>,
     Json(input): Json<Assignment>,
 ) -> crate::ApiResult<Value> {
-    app.review_queues
-        .assign(&id, input)
-        .and_then(|queue| Ok(serde_json::to_value(queue)?))
-        .map(Json)
-        .map_err(|e| {
-            crate::error(
-                if e.is::<Conflict>() {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::BAD_REQUEST
-                },
-                e,
-            )
-        })
+    crate::blocking(move || {
+        app.review_queues
+            .assign(&id, input)
+            .and_then(|queue| Ok(serde_json::to_value(queue)?))
+            .map(Json)
+            .map_err(|e| {
+                crate::error(
+                    if e.is::<Conflict>() {
+                        StatusCode::CONFLICT
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    e,
+                )
+            })
+    })
+    .await
 }
 pub(crate) async fn create(
     State(app): State<crate::App>,
     Json(input): Json<Create>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        if input.targets.is_empty() || input.targets.len() > 200 {
-            bail!("Use 1-200 review targets");
-        }
-        if !app
-            .projects
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|p| p.id == input.project_id)
-        {
-            bail!("Review queue project does not exist");
-        }
-        for target in &input.targets {
-            app.observability.validate_project_target(
-                &target.trace_id,
-                target.span_id,
-                &input.project_id,
-            )?;
-        }
-        Ok(serde_json::to_value(app.review_queues.create(input)?)?)
-    })();
-    result.map(Json).map_err(crate::bad_request)
+    crate::blocking(move || {
+        let result = (|| -> Result<Value> {
+            if input.targets.is_empty() || input.targets.len() > 200 {
+                bail!("Use 1-200 review targets");
+            }
+            if !app
+                .projects
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.id == input.project_id)
+            {
+                bail!("Review queue project does not exist");
+            }
+            for target in &input.targets {
+                app.observability.validate_project_target(
+                    &target.trace_id,
+                    target.span_id,
+                    &input.project_id,
+                )?;
+            }
+            Ok(serde_json::to_value(app.review_queues.create(input)?)?)
+        })();
+        result.map(Json).map_err(crate::bad_request)
+    })
+    .await
 }
 pub(crate) async fn detail(
     State(app): State<crate::App>,
     Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    app.review_queues
-        .read(&id)
-        .and_then(|queue| Ok(serde_json::to_value(queue)?))
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        app.review_queues
+            .read(&id)
+            .and_then(|queue| Ok(serde_json::to_value(queue)?))
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 #[cfg(test)]
 mod tests {

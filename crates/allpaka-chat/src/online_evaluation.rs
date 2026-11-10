@@ -957,32 +957,38 @@ pub(crate) async fn save_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     body: axum::body::Bytes,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
-        if body.len() > 8192 {
-            bail!("Rule request exceeds limit");
-        }
-        let value = crate::strict_json::parse(std::str::from_utf8(&body)?)?;
-        let rule: Rule = serde_json::from_value(value)?;
-        crate::memory::project_exists(&app, &rule.project_id)?;
-        crate::model_evaluators::validate_rule(&app.data, &rule)?;
-        Ok(serde_json::to_value(Store::open(&app.data)?.put(rule)?)?)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    crate::blocking(move || {
+        let result = (|| -> Result<_> {
+            if body.len() > 8192 {
+                bail!("Rule request exceeds limit");
+            }
+            let value = crate::strict_json::parse(std::str::from_utf8(&body)?)?;
+            let rule: Rule = serde_json::from_value(value)?;
+            crate::memory::project_exists(&app, &rule.project_id)?;
+            crate::model_evaluators::validate_rule(&app.data, &rule)?;
+            Ok(serde_json::to_value(Store::open(&app.data)?.put(rule)?)?)
+        })();
+        result
+            .map(axum::Json)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
 }
 pub(crate) async fn get_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Path(hash): axum::extract::Path<String>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result =
-        (|| -> Result<_> { Ok(serde_json::to_value(Store::open(&app.data)?.get(&hash)?)?) })();
-    result.map(axum::Json).map_err(|_| {
-        crate::error(
-            axum::http::StatusCode::NOT_FOUND,
-            "Online evaluation rule unavailable",
-        )
+    crate::blocking(move || {
+        let result =
+            (|| -> Result<_> { Ok(serde_json::to_value(Store::open(&app.data)?.get(&hash)?)?) })();
+        result.map(axum::Json).map_err(|_| {
+            crate::error(
+                axum::http::StatusCode::NOT_FOUND,
+                "Online evaluation rule unavailable",
+            )
+        })
     })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1000,27 +1006,33 @@ pub(crate) async fn list_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Query(page): axum::extract::Query<Page>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
-        crate::memory::project_exists(&app, &page.project_id)?;
-        Store::open(&app.data)?.list(&page.project_id, page.offset, page.limit)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    crate::blocking(move || {
+        let result = (|| -> Result<_> {
+            crate::memory::project_exists(&app, &page.project_id)?;
+            Store::open(&app.data)?.list(&page.project_id, page.offset, page.limit)
+        })();
+        result
+            .map(axum::Json)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
 }
 pub(crate) async fn bind_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::Json(input): axum::Json<BindInput>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
-        let store = Store::open(&app.data)?;
-        let snapshot = store.get(&input.rule_sha256)?;
-        crate::memory::project_exists(&app, &snapshot.rule.project_id)?;
-        Ok(serde_json::to_value(store.bind(input)?)?)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    crate::blocking(move || {
+        let result = (|| -> Result<_> {
+            let store = Store::open(&app.data)?;
+            let snapshot = store.get(&input.rule_sha256)?;
+            crate::memory::project_exists(&app, &snapshot.rule.project_id)?;
+            Ok(serde_json::to_value(store.bind(input)?)?)
+        })();
+        result
+            .map(axum::Json)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1032,15 +1044,18 @@ pub(crate) async fn binding_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Query(query): axum::extract::Query<BindingQuery>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
-        crate::memory::project_exists(&app, &query.project_id)?;
-        Ok(
-            serde_json::json!({"kind":"online_evaluation_binding_status","project_id":query.project_id,"rule_id":query.rule_id,"binding":Store::open(&app.data)?.binding(&query.project_id,&query.rule_id)?,"provider_calls":0,"automatic_execution":false}),
-        )
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    crate::blocking(move || {
+        let result = (|| -> Result<_> {
+            crate::memory::project_exists(&app, &query.project_id)?;
+            Ok(
+                serde_json::json!({"kind":"online_evaluation_binding_status","project_id":query.project_id,"rule_id":query.rule_id,"binding":Store::open(&app.data)?.binding(&query.project_id,&query.rule_id)?,"provider_calls":0,"automatic_execution":false}),
+            )
+        })();
+        result
+            .map(axum::Json)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1052,53 +1067,65 @@ pub(crate) async fn select_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::Json(input): axum::Json<SelectionInput>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
-        let fingerprint = app
-            .observability
-            .completed_trace_fingerprint(&input.trace_id, &input.project_id)?;
-        Store::open(&app.data)?.select_trace(&input.project_id, &input.trace_id, &fingerprint)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    crate::blocking(move || {
+        let result = (|| -> Result<_> {
+            let fingerprint = app
+                .observability
+                .completed_trace_fingerprint(&input.trace_id, &input.project_id)?;
+            Store::open(&app.data)?.select_trace(&input.project_id, &input.trace_id, &fingerprint)
+        })();
+        result
+            .map(axum::Json)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
 }
 pub(crate) async fn selection_archive_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Query(input): axum::extract::Query<SelectionInput>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
-        crate::memory::project_exists(&app, &input.project_id)?;
-        Store::open(&app.data)?.read_selection_archive(&input.project_id, &input.trace_id)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    crate::blocking(move || {
+        let result = (|| -> Result<_> {
+            crate::memory::project_exists(&app, &input.project_id)?;
+            Store::open(&app.data)?.read_selection_archive(&input.project_id, &input.trace_id)
+        })();
+        result
+            .map(axum::Json)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
 }
 pub(crate) async fn assess_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::Json(input): axum::Json<SelectionInput>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
-        let (hash, health) = app
-            .observability
-            .completed_trace_health(&input.trace_id, &input.project_id)?;
-        Store::open(&app.data)?.assess_trace(&input.project_id, &input.trace_id, &hash, health)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    crate::blocking(move || {
+        let result = (|| -> Result<_> {
+            let (hash, health) = app
+                .observability
+                .completed_trace_health(&input.trace_id, &input.project_id)?;
+            Store::open(&app.data)?.assess_trace(&input.project_id, &input.trace_id, &hash, health)
+        })();
+        result
+            .map(axum::Json)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
 }
 pub(crate) async fn jobs_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Query(page): axum::extract::Query<Page>,
 ) -> crate::ApiResult<serde_json::Value> {
-    let result = (|| -> Result<_> {
-        crate::memory::project_exists(&app, &page.project_id)?;
-        jobs_catalog(&app.data, &page.project_id, page.offset, page.limit)
-    })();
-    result
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    crate::blocking(move || {
+        let result = (|| -> Result<_> {
+            crate::memory::project_exists(&app, &page.project_id)?;
+            jobs_catalog(&app.data, &page.project_id, page.offset, page.limit)
+        })();
+        result
+            .map(axum::Json)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
 }
 fn read_catalog_packet(path: &std::path::Path) -> Result<serde_json::Value> {
     use std::io::Read;
@@ -1267,9 +1294,12 @@ pub(crate) async fn drain_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::Json(input): axum::Json<DrainInput>,
 ) -> crate::ApiResult<serde_json::Value> {
-    drain_jobs(&app.data, input.limit)
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    crate::blocking(move || {
+        drain_jobs(&app.data, input.limit)
+            .map(axum::Json)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
 }
 pub(crate) fn selection_pin(
     data: &std::path::Path,

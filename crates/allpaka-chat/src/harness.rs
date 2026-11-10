@@ -950,34 +950,40 @@ pub(crate) async fn get_api(
     State(app): State<App>,
     Query(q): Query<ProjectQuery>,
 ) -> ApiResult<Value> {
-    known_project(&app, &q.project_id)?;
-    let active = active_revision(&app.data, &q.project_id).map_err(bad)?;
-    let revisions = list_revisions(&app.data, &q.project_id).map_err(bad)?;
-    let tree = active.as_ref().map(|r| r.tree.clone()).unwrap_or_default();
-    Ok(Json(json!({
-        "project_id": q.project_id,
-        "active": active.as_ref().map(|r| r.id.clone()),
-        "current": describe(&tree),
-        "revisions": revisions.iter().map(summary).collect::<Vec<_>>(),
-    })))
+    crate::blocking(move || {
+        known_project(&app, &q.project_id)?;
+        let active = active_revision(&app.data, &q.project_id).map_err(bad)?;
+        let revisions = list_revisions(&app.data, &q.project_id).map_err(bad)?;
+        let tree = active.as_ref().map(|r| r.tree.clone()).unwrap_or_default();
+        Ok(Json(json!({
+            "project_id": q.project_id,
+            "active": active.as_ref().map(|r| r.id.clone()),
+            "current": describe(&tree),
+            "revisions": revisions.iter().map(summary).collect::<Vec<_>>(),
+        })))
+    })
+    .await
 }
 pub(crate) async fn revision_api(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> ApiResult<Value> {
-    let revision = load_revision(&app.data, &id).map_err(crate::not_found)?;
-    let parent = revision
-        .origin
-        .as_deref()
-        .and_then(|o| load_revision(&app.data, o).ok())
-        .map(|r| r.tree)
-        .unwrap_or_default();
-    Ok(Json(json!({
-        "revision": summary(&revision),
-        "project_id": revision.project_id,
-        "current": describe(&revision.tree),
-        "diff_from_origin": diff(&parent, &revision.tree),
-    })))
+    crate::blocking(move || {
+        let revision = load_revision(&app.data, &id).map_err(crate::not_found)?;
+        let parent = revision
+            .origin
+            .as_deref()
+            .and_then(|o| load_revision(&app.data, o).ok())
+            .map(|r| r.tree)
+            .unwrap_or_default();
+        Ok(Json(json!({
+            "revision": summary(&revision),
+            "project_id": revision.project_id,
+            "current": describe(&revision.tree),
+            "diff_from_origin": diff(&parent, &revision.tree),
+        })))
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -993,19 +999,22 @@ pub(crate) async fn save_api(
     State(app): State<App>,
     Json(request): Json<SaveRequest>,
 ) -> ApiResult<Value> {
-    known_project(&app, &request.project_id)?;
-    let origin = active_revision(&app.data, &request.project_id)
-        .map_err(bad)?
-        .map(|r| r.id);
-    let tree = autotrigger(&request.tree);
-    let revision =
-        save_revision(&app.data, &request.project_id, &tree, origin, &request.note).map_err(bad)?;
-    if request.activate {
-        activate(&app.data, &request.project_id, Some(&revision.id)).map_err(bad)?;
-    }
-    Ok(Json(
-        json!({"revision": summary(&revision), "current": describe(&revision.tree)}),
-    ))
+    crate::blocking(move || {
+        known_project(&app, &request.project_id)?;
+        let origin = active_revision(&app.data, &request.project_id)
+            .map_err(bad)?
+            .map(|r| r.id);
+        let tree = autotrigger(&request.tree);
+        let revision = save_revision(&app.data, &request.project_id, &tree, origin, &request.note)
+            .map_err(bad)?;
+        if request.activate {
+            activate(&app.data, &request.project_id, Some(&revision.id)).map_err(bad)?;
+        }
+        Ok(Json(
+            json!({"revision": summary(&revision), "current": describe(&revision.tree)}),
+        ))
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1017,9 +1026,12 @@ pub(crate) async fn activate_api(
     State(app): State<App>,
     Json(request): Json<ActivateRequest>,
 ) -> ApiResult<Value> {
-    known_project(&app, &request.project_id)?;
-    activate(&app.data, &request.project_id, request.revision.as_deref()).map_err(bad)?;
-    Ok(Json(json!({"active": request.revision})))
+    crate::blocking(move || {
+        known_project(&app, &request.project_id)?;
+        activate(&app.data, &request.project_id, request.revision.as_deref()).map_err(bad)?;
+        Ok(Json(json!({"active": request.revision})))
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1035,31 +1047,36 @@ pub(crate) async fn import_skill_api(
     State(app): State<App>,
     Json(request): Json<ImportSkill>,
 ) -> ApiResult<Value> {
-    known_project(&app, &request.project_id)?;
-    let fields = frontmatter(&request.text).0;
-    let name = fields
-        .get("name")
-        .filter(|n| valid_name(n))
-        .ok_or_else(|| bad("SKILL.md needs frontmatter name of lowercase letters, digits, - or _"))?
-        .clone();
-    let active = active_revision(&app.data, &request.project_id).map_err(bad)?;
-    let mut tree = active.as_ref().map(|r| r.tree.clone()).unwrap_or_default();
-    tree.insert(format!("skills/{name}/SKILL.md"), request.text.clone());
-    let tree = autotrigger(&tree);
-    let revision = save_revision(
-        &app.data,
-        &request.project_id,
-        &tree,
-        active.map(|r| r.id),
-        &format!("import skill {name}"),
-    )
-    .map_err(bad)?;
-    if request.activate {
-        activate(&app.data, &request.project_id, Some(&revision.id)).map_err(bad)?;
-    }
-    Ok(Json(
-        json!({"revision": summary(&revision), "current": describe(&revision.tree)}),
-    ))
+    crate::blocking(move || {
+        known_project(&app, &request.project_id)?;
+        let fields = frontmatter(&request.text).0;
+        let name = fields
+            .get("name")
+            .filter(|n| valid_name(n))
+            .ok_or_else(|| {
+                bad("SKILL.md needs frontmatter name of lowercase letters, digits, - or _")
+            })?
+            .clone();
+        let active = active_revision(&app.data, &request.project_id).map_err(bad)?;
+        let mut tree = active.as_ref().map(|r| r.tree.clone()).unwrap_or_default();
+        tree.insert(format!("skills/{name}/SKILL.md"), request.text.clone());
+        let tree = autotrigger(&tree);
+        let revision = save_revision(
+            &app.data,
+            &request.project_id,
+            &tree,
+            active.map(|r| r.id),
+            &format!("import skill {name}"),
+        )
+        .map_err(bad)?;
+        if request.activate {
+            activate(&app.data, &request.project_id, Some(&revision.id)).map_err(bad)?;
+        }
+        Ok(Json(
+            json!({"revision": summary(&revision), "current": describe(&revision.tree)}),
+        ))
+    })
+    .await
 }
 
 #[cfg(test)]

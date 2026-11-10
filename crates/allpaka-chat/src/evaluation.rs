@@ -633,54 +633,63 @@ pub(crate) async fn list(
     State(app): State<crate::App>,
     Query(query): Query<ListQuery>,
 ) -> crate::ApiResult<Value> {
-    project_exists(&app, &query.project_id)
-        .and_then(|_| {
-            app.evaluation.list_query(
-                &query.project_id,
-                query.archived,
-                query.offset,
-                query.limit,
-                query.q.as_deref(),
-            )
-        })
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        project_exists(&app, &query.project_id)
+            .and_then(|_| {
+                app.evaluation.list_query(
+                    &query.project_id,
+                    query.archived,
+                    query.offset,
+                    query.limit,
+                    query.q.as_deref(),
+                )
+            })
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 pub(crate) async fn lifecycle(
     State(app): State<crate::App>,
     Path(id): Path<String>,
     Json(input): Json<LifecycleInput>,
 ) -> crate::ApiResult<Value> {
-    project_exists(&app, &input.project_id)
-        .and_then(|_| app.evaluation.change_lifecycle(&id, input))
-        .map(Json)
-        .map_err(|e| {
-            crate::error(
-                if e.to_string().starts_with("Dataset lifecycle conflict") {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::BAD_REQUEST
-                },
-                e,
-            )
-        })
+    crate::blocking(move || {
+        project_exists(&app, &input.project_id)
+            .and_then(|_| app.evaluation.change_lifecycle(&id, input))
+            .map(Json)
+            .map_err(|e| {
+                crate::error(
+                    if e.to_string().starts_with("Dataset lifecycle conflict") {
+                        StatusCode::CONFLICT
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    e,
+                )
+            })
+    })
+    .await
 }
 pub(crate) async fn save(
     State(app): State<crate::App>,
     Json(input): Json<SaveDataset>,
 ) -> crate::ApiResult<Value> {
-    project_exists(&app, &input.project_id)
-        .and_then(|_| app.evaluation.save(input))
-        .and_then(|s| Ok(serde_json::to_value(s)?))
-        .map(Json)
-        .map_err(|e| {
-            let code = if e.to_string().starts_with("Dataset version conflict") {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            crate::error(code, e)
-        })
+    crate::blocking(move || {
+        project_exists(&app, &input.project_id)
+            .and_then(|_| app.evaluation.save(input))
+            .and_then(|s| Ok(serde_json::to_value(s)?))
+            .map(Json)
+            .map_err(|e| {
+                let code = if e.to_string().starts_with("Dataset version conflict") {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                crate::error(code, e)
+            })
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -694,17 +703,20 @@ pub(crate) async fn versions(
     Path(id): Path<String>,
     Query(query): Query<VersionsQuery>,
 ) -> crate::ApiResult<Value> {
-    project_exists(&app, &query.project_id)
-        .and_then(|_| {
-            app.evaluation.versions(
-                &id,
-                &query.project_id,
-                query.offset.unwrap_or(0),
-                query.limit.unwrap_or(20),
-            )
-        })
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        project_exists(&app, &query.project_id)
+            .and_then(|_| {
+                app.evaluation.versions(
+                    &id,
+                    &query.project_id,
+                    query.offset.unwrap_or(0),
+                    query.limit.unwrap_or(20),
+                )
+            })
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -720,20 +732,26 @@ pub(crate) async fn compare(
     Path(id): Path<String>,
     Query(query): Query<CompareQuery>,
 ) -> crate::ApiResult<Value> {
-    project_exists(&app, &query.project_id)
-        .and_then(|_| app.evaluation.compare(&id, &query))
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        project_exists(&app, &query.project_id)
+            .and_then(|_| app.evaluation.compare(&id, &query))
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 pub(crate) async fn snapshot(
     State(app): State<crate::App>,
     Path((id, version)): Path<(String, u64)>,
 ) -> crate::ApiResult<Value> {
-    app.evaluation
-        .load(&id, Some(version))
-        .and_then(|s| Ok(serde_json::to_value(s)?))
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        app.evaluation
+            .load(&id, Some(version))
+            .and_then(|s| Ok(serde_json::to_value(s)?))
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 #[cfg(test)]
 mod tests {

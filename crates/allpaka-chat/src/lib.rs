@@ -195,6 +195,15 @@ pub(crate) fn not_found(message: impl ToString) -> ApiError {
 pub(crate) fn internal(message: impl ToString) -> ApiError {
     error(StatusCode::INTERNAL_SERVER_ERROR, message)
 }
+/// Execute a synchronous filesystem/store handler body on Tokio's blocking pool
+/// so Axum worker threads are never stalled by directory scans or `sync_all`.
+pub(crate) async fn blocking<T, F>(f: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> ApiResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.map_err(internal)?
+}
 pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> Result<()> {
     if !bind.ip().is_loopback() {
         bail!("Studio is a local single-user service: bind to a loopback address");

@@ -300,44 +300,47 @@ pub(crate) async fn ingest(
     State(app): State<crate::App>,
     Json(request): Json<ExternalTrace>,
 ) -> crate::ApiResult<Value> {
-    if !app
-        .projects
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|project| project.id == request.project_id)
-    {
-        return Err(crate::error(
-            StatusCode::BAD_REQUEST,
-            "Unknown external trace project",
-        ));
-    }
-    let project = request.project_id.clone();
-    let completed = request
-        .spans
-        .first()
-        .is_some_and(|span| span.status == "completed")
-        && request.spans.iter().all(|span| span.status != "running");
-    app.observability
-        .ingest(request)
-        .map(|receipt| {
-            if completed {
-                if let Some(id) = receipt["id"].as_str() {
-                    if let Err(error) =
-                        crate::online_evaluation::enqueue_completed(&app.data, &project, id)
-                    {
-                        eprintln!("External online evaluation admission failed: {error}");
+    crate::blocking(move || {
+        if !app
+            .projects
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|project| project.id == request.project_id)
+        {
+            return Err(crate::error(
+                StatusCode::BAD_REQUEST,
+                "Unknown external trace project",
+            ));
+        }
+        let project = request.project_id.clone();
+        let completed = request
+            .spans
+            .first()
+            .is_some_and(|span| span.status == "completed")
+            && request.spans.iter().all(|span| span.status != "running");
+        app.observability
+            .ingest(request)
+            .map(|receipt| {
+                if completed {
+                    if let Some(id) = receipt["id"].as_str() {
+                        if let Err(error) =
+                            crate::online_evaluation::enqueue_completed(&app.data, &project, id)
+                        {
+                            eprintln!("External online evaluation admission failed: {error}");
+                        }
                     }
                 }
-            }
-            Json(receipt)
-        })
-        .map_err(|e| {
-            let status = if e.to_string() == "External trace idempotency conflict" {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            crate::error(status, e)
-        })
+                Json(receipt)
+            })
+            .map_err(|e| {
+                let status = if e.to_string() == "External trace idempotency conflict" {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                crate::error(status, e)
+            })
+    })
+    .await
 }

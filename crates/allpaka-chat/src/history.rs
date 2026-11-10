@@ -216,7 +216,14 @@ pub async fn import(State(app): State<App>, Json(input): Json<Import>) -> ApiRes
     session.notice = Some(
         "Импортирована копия. Выбран режим Chat; очередь и разрешения записи не перенесены.".into(),
     );
-    save(&app, &session).map_err(crate::internal)?;
+    let save_app = app.clone();
+    let session =
+        tokio::task::spawn_blocking(move || -> std::result::Result<_, crate::ApiError> {
+            save(&save_app, &session).map_err(crate::internal)?;
+            Ok(session)
+        })
+        .await
+        .map_err(crate::internal)??;
     attach(&app, session);
     Ok(Json(json!({"id":id})))
 }
