@@ -216,17 +216,13 @@ streamable-HTTP клиент к локальному `rag-mcp` (префикс `
 **DoD:** CI покрывает GPU-кернелы и smoke-тесты с настоящими моделями, а не
 только CPU-часть.
 
-### D3. Распил `crates/allpaka-backend/src/gpu/`
+### D3. Распил `crates/allpaka-backend/src/gpu/` — сделано
 
-`metal.rs` → device/memory, реестр pipeline, пути исполнения, диагностика, без
-изменения измеренного поведения. **DoD:** существующие parity-тесты зелёные,
-цифры бенчмарка не сдвинулись за пределы дрейфа.
+`metal.rs` разнесён на `metal/{device,region,select,telemetry,matvec,attn,args,ffn_grouped,decode,verify,prefill,mega}`, шейдеры подключаются из единого источника `shaders/kernels.metal` (`2d8cc16`), а `cuda/mod.rs` и `cuda/runtime.rs` разнесены по подмодулям (`bd55b83`) без изменения измеренного поведения; паритет стаба и CUDA проверяется через `scripts/check-backends.sh`.
 
-### D4. Clippy-долг backend/model
+### D4. Clippy-долг backend/model — сделано
 
-Objective-C macro `cfg` expansion и старые internals. **DoD:**
-`cargo clippy --workspace --all-targets -- -D warnings` проходит, после чего
-проверка становится обязательной в CI (D1).
+`cargo clippy --workspace --all-targets -- -D warnings` и `scripts/check-backends.sh` (native Metal, stub `x86_64-pc-windows-msvc`, CUDA `x86_64-pc-windows-msvc --features allpaka-backend/cuda`) проходят с нулём предупреждений.
 
 ### Допущения, требующие подтверждения
 
@@ -237,14 +233,9 @@ Objective-C macro `cfg` expansion и старые internals. **DoD:**
 
 ---
 
-### D6. Оставшийся stringly-статус: `PlanItem.status`
+### D6. Оставшийся stringly-статус: `PlanItem.status` — сделано
 
-`Session.status` и `SwarmReport.status` закрыты enum'ами (`types.rs`), третья
-строка того же семейства осталась: `PlanItem.status` принимает
-`pending|in_progress|completed` и проверяется списком строк в `lib.rs:558` и
-`tools.rs:257`. **DoD:** enum с теми же словами на проводе, два списка сравнения
-исчезают, `scripts/test-studio.py` зелёный без изменений в asserting-строках —
-он и есть проверка, что имена не поменялись.
+`PlanItem.status` переведён на `PlanStatus` (`types.rs:298`) с прежними словами на проводе (`pending|in_progress|completed`), покрыт `status_wire_tests` и сквозными тестами Studio.
 
 ## Приложение: предлагаемый CI (черновик, не применён)
 
