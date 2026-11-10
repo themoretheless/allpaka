@@ -3,6 +3,41 @@
 Связанные документы: [BASELINE](BASELINE.md), [INVENTORY](INVENTORY.md),
 [ARCHITECTURE](ARCHITECTURE.md). Размер: S (часы), M (день), L (несколько дней).
 
+## Что осталось (на `572e167`, 2026-11-10)
+
+Короткая сводка для следующего захода; подробности и статусы в таблицах ниже.
+
+**Заблокировано свободным GPU** (на этой машине шум между одинаковыми
+конфигурациями до 12.5%, см. BASELINE):
+- 0.2: сравнение с llama.cpp на 8B и 30B и `verify --decode`.
+- Горячие правки 3.20–3.27 (model: `ffn_residual`, `AttnMode`, `QuantMat::desc`,
+  `GpuEligibility`, `enum Mixer`; backend: разбор `decode_token` и
+  `decode_token_one_fused`, request-структуры вместо 13–19 параметров).
+- Волна 4: кэш дескрипторов `token_layers`, быстрые GPU-пути для не-Neox RoPE,
+  повтор серии переключателей. Первая цель по записям: prefill 8B (0.946×).
+
+**Можно делать без замеров:**
+- 3.5: строковые поля в `guardrail_policies` и `online_evaluation`; статусы
+  `experiments`/`matrix_jobs` после разбора байтового бюджета записи.
+- 3.6: `turn_traced` (577 строк) на стадии: вызов провайдера, цикл
+  инструментов, guardrails, сохранение. Риск высокий, нужен прогон
+  `scripts/test-studio.py`.
+- 3.8: блокирующий `std::fs` в async-обработчиках → `spawn_blocking`.
+- 3.9: реестр инструментов вместо `match name`; токены отмены в experiments,
+  judge_runs, memory_extract, swarm.
+- 3.10: таблица маршрутов вместо цепочки `starts_with` в `serve`.
+- 3.12, 3.13: один `Architecture` enum и `ModelError` в model; типизированные
+  ошибки в gguf, mlx, dtype.
+- 2.5: MLX-деквант из `allpaka-dtype` в `allpaka-mlx`, `anyhow` из dtype.
+- 2.10: общий harness для 58 UI-тестов Studio.
+- 1.4, 1.8: тест кодов `dq_fmt` против ядер; комментарии `// SAFETY:`.
+- Волна 5: справочник `ALLPAKA_*`, обновление `docs/roadmap.md` (D6 сделан),
+  тесты непокрытых модулей.
+- B7: гонка чтение-изменение-запись в `state_file`.
+
+**Ждёт вашего решения:** единое правило `valid_id` (3.4), судьба
+недостижимого megakernel-кода и проигравших вариантов ядер (5.1).
+
 ## Инварианты
 
 1. Поведение, HTTP-контракты, форматы файлов не меняются без явного решения.
