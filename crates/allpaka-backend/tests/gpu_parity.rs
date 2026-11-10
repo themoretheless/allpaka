@@ -24,7 +24,7 @@ fn attached_region() -> Option<&'static [u8]> {
         .get_or_init(|| {
             let len = 64 << 20;
             let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
-            let ptr = unsafe { std::alloc::alloc(layout) };
+            let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
             assert!(!ptr.is_null());
             let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
             // Deterministic pseudo-random bytes: valid quant blocks for every

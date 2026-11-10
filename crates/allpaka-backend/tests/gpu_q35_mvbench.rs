@@ -53,7 +53,7 @@ fn bench_shape(region: &[u8], ty: GgmlType, n_out: usize, n_in: usize, label: &s
 fn q35_decode_matvecs_report_effective_bandwidth() {
     let len: usize = 2 << 30;
     let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
-    let ptr = unsafe { std::alloc::alloc(layout) };
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0x9E37_79B9_7F4A_7C15u64;

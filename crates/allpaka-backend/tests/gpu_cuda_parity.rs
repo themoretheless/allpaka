@@ -81,7 +81,7 @@ fn attach_and_matvec_parity() {
     let (f32_out, f32_in, f32_off) = (4usize, 32usize, PAGE);
     let len = PAGE * 4;
     let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
-    let ptr = unsafe { std::alloc::alloc(layout) };
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0xC0FF_EE00_D15C_AFE1u64;
@@ -167,7 +167,7 @@ fn gemm_q4k_q6k_parity() {
     let q6_rb = n_in / 256 * 210;
     let len = PAGE * 5;
     let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
-    let ptr = unsafe { std::alloc::alloc(layout) };
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0xA5A5_5A5A_C0DE_BEEFu64;
