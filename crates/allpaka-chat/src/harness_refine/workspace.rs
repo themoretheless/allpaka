@@ -688,9 +688,7 @@ impl StudioEngine {
                 std::fs::create_dir_all(file.parent().context("No parent directory")?)?;
                 std::fs::write(file, text)?;
             }
-            let mut child = tokio::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&external.command)
+            let mut child = crate::shell::command(&external.command)
                 .current_dir(&copy)
                 .env("ALLPAKA_TASK", &self.task)
                 .stdin(std::process::Stdio::piped())

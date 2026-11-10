@@ -638,9 +638,7 @@ pub(crate) async fn transform_output(
     input: &str,
 ) -> Result<String> {
     use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(program)
+    let mut child = crate::shell::command(program)
         .current_dir(cwd)
         .env("ALLPAKA_TOOL", tool)
         .env("ALLPAKA_TOOL_ARGS", args)

@@ -37,6 +37,7 @@ mod rag;
 mod remote_worker;
 mod review_queues;
 mod runtime;
+mod shell;
 mod state_file;
 pub mod storage;
 mod strict_json;

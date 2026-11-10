@@ -24,11 +24,7 @@ pub(crate) async fn execute_command(cwd: &std::path::Path, args: &Value) -> Resu
     let timeout_secs = args["timeout"].as_u64().unwrap_or(30).clamp(1, 120);
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
-        tokio::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(cwd)
-            .output(),
+        crate::shell::command(command).current_dir(cwd).output(),
     )
     .await
     .context("Command timed out")?

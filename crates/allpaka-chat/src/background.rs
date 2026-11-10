@@ -18,6 +18,7 @@ use tokio::{
 
 const OUTPUT_LIMIT: usize = 128 * 1024;
 use crate::storage::now_ms as timestamp_ms;
+#[cfg_attr(not(unix), allow(dead_code))]
 struct ProcessGroup(u32);
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
@@ -434,18 +435,7 @@ impl Manager {
         {
             bail!("Background task capacity reached; cancel or clean up tasks");
         }
-        #[cfg(unix)]
-        let mut process = {
-            let mut c = tokio::process::Command::new("/bin/sh");
-            c.arg("-c").arg(command);
-            c
-        };
-        #[cfg(windows)]
-        let mut process = {
-            let mut c = tokio::process::Command::new("cmd.exe");
-            c.arg("/C").arg(command);
-            c
-        };
+        let mut process = crate::shell::command(command);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
