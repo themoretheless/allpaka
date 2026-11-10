@@ -142,7 +142,7 @@
 | 5.1 | Megakernel и проигравшие варианты ядер → `experimental` | M | **требует решения** |
 | 5.2 | Справочник `ALLPAKA_*` из `RuntimePolicy` | M | done (`5e81cfb`): `docs/env-reference.md`, тест свежести |
 | 5.3 | `docs/roadmap.md`: D3, D4, D6 | S | done (`94a1982`) |
-| 5.4 | Тесты непокрытых модулей; фикстуры Rust ↔ Python SDK | M | частично: CPU dot-ядра (`f07fb4c`), state_file, ход Studio; общие фикстуры с Python SDK — todo |
+| 5.4 | Тесты непокрытых модулей; фикстуры Rust ↔ Python SDK | M | done: CPU dot-ядра (`f07fb4c`), state_file, ход Studio, общая фикстура guardrail для Rust и Python SDK (`f529784`) |
 | 5.5 | Таблица до/после в BASELINE, остаточный бэклог | S | done: BASELINE, раздел CUDA |
 
 ## Заметки по ходу работ
