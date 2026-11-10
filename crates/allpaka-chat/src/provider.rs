@@ -1042,13 +1042,21 @@ pub(crate) async fn save_provider(
             "This provider ID is reserved",
         ));
     }
-    let mut list = load_custom_providers(app.data.as_path()).map_err(crate::internal)?;
-    match list.iter().position(|p| p.id == candidate.id) {
-        Some(i) => list[i] = candidate.clone(),
-        None => list.push(candidate.clone()),
-    }
-    save_custom_providers(app.data.as_path(), &list).map_err(crate::internal)?;
     let mut providers = app.providers.lock().unwrap();
+    state_file::update_list(
+        app.data.as_path(),
+        "custom-providers",
+        "custom provider",
+        validate_custom_provider,
+        |list| {
+            match list.iter().position(|p| p.id == candidate.id) {
+                Some(i) => list[i] = candidate.clone(),
+                None => list.push(candidate.clone()),
+            }
+            Ok(())
+        },
+    )
+    .map_err(crate::internal)?;
     let old = providers
         .iter()
         .find(|p| p.id == candidate.id)
@@ -1074,12 +1082,22 @@ pub(crate) async fn delete_provider(
             "Built-in providers cannot be removed",
         ));
     }
-    let mut list = load_custom_providers(app.data.as_path()).map_err(crate::internal)?;
-    if !list.iter().any(|p| p.id == id) {
+    let mut providers = app.providers.lock().unwrap();
+    let found = state_file::update_list(
+        app.data.as_path(),
+        "custom-providers",
+        "custom provider",
+        validate_custom_provider,
+        |list| {
+            let before = list.len();
+            list.retain(|p| p.id != id);
+            Ok(list.len() != before)
+        },
+    )
+    .map_err(crate::internal)?;
+    if !found {
         return Err(error(StatusCode::NOT_FOUND, "Custom provider not found"));
     }
-    list.retain(|p| p.id != id);
-    save_custom_providers(app.data.as_path(), &list).map_err(crate::internal)?;
     if credentials::AVAILABLE {
         // Remove any persisted system-credential secret for this provider id.
         let _ = credentials::Store::new(app.data.as_path()).update(
@@ -1089,10 +1107,7 @@ pub(crate) async fn delete_provider(
             false,
         );
     }
-    app.providers
-        .lock()
-        .unwrap()
-        .retain(|p| p.id != id || !p.custom);
+    providers.retain(|p| p.id != id || !p.custom);
     Ok(Json(json!({"deleted": id})))
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -1147,9 +1162,6 @@ pub(crate) fn load_custom_providers(data: &std::path::Path) -> Result<Vec<Custom
     state_file::load_list(data, "custom-providers", "custom provider", |p| {
         validate_custom_provider(p)
     })
-}
-pub(crate) fn save_custom_providers(data: &std::path::Path, list: &[CustomProvider]) -> Result<()> {
-    state_file::save_list(data, "custom-providers", list)
 }
 pub(crate) fn custom_to_provider(p: &CustomProvider) -> Provider {
     Provider {

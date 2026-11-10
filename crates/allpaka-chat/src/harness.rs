@@ -641,7 +641,11 @@ pub fn similarity(trees: &[&Tree]) -> Option<f64> {
             pairs += 1;
         }
     }
-    (pairs > 0).then(|| total / pairs as f64)
+    if pairs > 0 {
+        Some(total / pairs as f64)
+    } else {
+        None
+    }
 }
 
 /// The body of one skill and the scripts it ships, for the load_skill tool.
@@ -877,15 +881,28 @@ pub fn activate(data: &std::path::Path, project_id: &str, revision: Option<&str>
         }
     }
     std::fs::create_dir_all(data.join("harness"))?;
-    let mut list = load_active(data)?;
-    list.retain(|a| a.project_id != project_id);
-    if let Some(id) = revision {
-        list.push(Active {
-            project_id: project_id.into(),
-            revision: id.into(),
-        });
-    }
-    crate::state_file::save_list(data.join("harness").as_path(), "active", &list)
+    crate::state_file::update_list(
+        data.join("harness").as_path(),
+        "active",
+        "harness",
+        |a: &Active| {
+            if valid_hash(&a.revision) {
+                Ok(())
+            } else {
+                bail!("Invalid harness revision")
+            }
+        },
+        |list| {
+            list.retain(|a| a.project_id != project_id);
+            if let Some(id) = revision {
+                list.push(Active {
+                    project_id: project_id.into(),
+                    revision: id.into(),
+                });
+            }
+            Ok(())
+        },
+    )
 }
 
 // ---- HTTP ------------------------------------------------------------------

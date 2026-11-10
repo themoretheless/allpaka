@@ -273,6 +273,13 @@ pub(crate) async fn save_plugin(
     validate(&config).map_err(crate::bad_request)?;
     {
         let mut registry = app.plugins.write().unwrap();
+        let mut configs: Vec<PluginConfig> = registry
+            .values()
+            .filter(|state| state.config.id != config.id)
+            .map(|state| state.config.clone())
+            .collect();
+        configs.push(config.clone());
+        save(app.data.as_path(), &configs).map_err(crate::internal)?;
         match registry.get_mut(&config.id) {
             Some(state) => {
                 let changed = state.config.url != config.url
@@ -296,14 +303,6 @@ pub(crate) async fn save_plugin(
             }
         }
     }
-    let configs: Vec<PluginConfig> = {
-        let registry = app.plugins.read().unwrap();
-        registry
-            .values()
-            .map(|state| state.config.clone())
-            .collect()
-    };
-    save(app.data.as_path(), &configs).map_err(crate::internal)?;
     if config.enabled {
         spawn_plugin_connect(app.clone(), config.id.clone());
     }
@@ -313,18 +312,19 @@ pub(crate) async fn delete_plugin(
     State(app): State<App>,
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<Value> {
-    let existed = app.plugins.write().unwrap().remove(&id).is_some();
-    if !existed {
-        return Err(error(StatusCode::NOT_FOUND, "Plugin not found"));
-    }
-    let configs: Vec<PluginConfig> = {
-        let registry = app.plugins.read().unwrap();
-        registry
+    {
+        let mut registry = app.plugins.write().unwrap();
+        if !registry.contains_key(&id) {
+            return Err(error(StatusCode::NOT_FOUND, "Plugin not found"));
+        }
+        let configs: Vec<PluginConfig> = registry
             .values()
+            .filter(|state| state.config.id != id)
             .map(|state| state.config.clone())
-            .collect()
-    };
-    save(app.data.as_path(), &configs).map_err(crate::internal)?;
+            .collect();
+        save(app.data.as_path(), &configs).map_err(crate::internal)?;
+        registry.remove(&id);
+    }
     Ok(Json(json!({"deleted": id})))
 }
 pub(crate) async fn reload_plugin(
