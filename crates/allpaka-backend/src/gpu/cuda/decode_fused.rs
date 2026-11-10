@@ -290,7 +290,11 @@ pub(super) fn decode_token_one_fused(
             gpu.ensure_q8(q8_n, 1)?;
         }
 
-        let graph_flags = unsafe { std::mem::transmute::<u32, CUgraphInstantiate_flags>(0) };
+        // cudarc's flag enum has no zero variant, and transmuting 0 into it is
+        // undefined behaviour (debug builds abort on it). AUTO_FREE_ON_LAUNCH
+        // only affects memory-allocation nodes, and captures here allocate
+        // nothing (scratch is sized above), so it behaves like no flags.
+        let graph_flags = CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH;
 
         let n_layers = req.layers.len();
         let capturing_whole =

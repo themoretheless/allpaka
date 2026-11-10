@@ -83,7 +83,9 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
             return None;
         }
         if gpu.pf_capturing {
-            let graph_flags = unsafe { std::mem::transmute::<u32, CUgraphInstantiate_flags>(0) };
+            // See decode_fused.rs: no zero variant; AUTO_FREE_ON_LAUNCH is a no-op here.
+            let graph_flags =
+                CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH;
             match gpu.stream.end_capture(graph_flags) {
                 Ok(Some(g)) => {
                     eprintln!("cuda: prefill graph captured ({} floats)", gpu.pf_len);
