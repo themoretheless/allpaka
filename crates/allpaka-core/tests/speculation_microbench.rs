@@ -2,16 +2,19 @@ use std::time::Instant;
 
 #[test]
 fn speculation_microbench_100_rounds() {
-    const ITERATIONS: usize = 100;
-    const LOOPS: usize = 200_000;
+    let (iterations, loops) = if cfg!(debug_assertions) {
+        (4usize, 2_000usize)
+    } else {
+        (100usize, 200_000usize)
+    };
 
-    let mut expected_ns = Vec::with_capacity(ITERATIONS);
-    let mut argmax_ns = Vec::with_capacity(ITERATIONS);
+    let mut expected_ns = Vec::with_capacity(iterations);
+    let mut argmax_ns = Vec::with_capacity(iterations);
 
-    for round in 0..ITERATIONS {
+    for round in 0..iterations {
         let t0 = Instant::now();
         let mut acc = 0.0f64;
-        for i in 0..LOOPS {
+        for i in 0..loops {
             let a = 0.72 + ((i % 17) as f64 * 0.013);
             let s = allpaka_core::Speculation {
                 draft_weight_bytes: 1 << 20,
@@ -27,7 +30,7 @@ fn speculation_microbench_100_rounds() {
             .map(|i| ((i % 23) as f32) * 0.125 + (round as f32) * 0.01)
             .collect();
         let t1 = Instant::now();
-        for _ in 0..LOOPS {
+        for _ in 0..loops {
             let _ = allpaka_core::Speculation {
                 draft_weight_bytes: 1,
                 draft_tokens: 8,
@@ -48,12 +51,12 @@ fn speculation_microbench_100_rounds() {
     let argmax_avg_ns = argmax_ns.iter().sum::<u128>() as f64 / argmax_ns.len() as f64;
 
     println!(
-        "speculation.expected_accepted avg: {:.2} ns/iter, 100 rounds",
-        expected_avg_ns / LOOPS as f64
+        "speculation.expected_accepted avg: {:.2} ns/iter, {iterations} rounds",
+        expected_avg_ns / loops as f64
     );
     println!(
-        "speculation.argmax avg: {:.2} ns/iter, 100 rounds",
-        argmax_avg_ns / LOOPS as f64
+        "speculation.argmax avg: {:.2} ns/iter, {iterations} rounds",
+        argmax_avg_ns / loops as f64
     );
 }
 

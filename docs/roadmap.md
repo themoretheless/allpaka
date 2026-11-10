@@ -194,39 +194,37 @@ streamable-HTTP клиент к локальному `rag-mcp` (префикс `
 
 ## Трек D — гигиена (сквозной)
 
-### D1. CI: подключить существующие проверки
+### D1. CI: подключить существующие проверки — в работе
 
-Факт: `.github/workflows/ci.yml` — один job `macos-14` с
-`cargo test --workspace` и кэшем cargo. Не подключены: `clippy`, `fmt`, тесты
-`allpaka-chat`, `scripts/test-serving-controls.py`,
-`scripts/test-serving-memory.py`, `scripts/test-studio.py`, node-проверки Studio.
-В самом файле есть комментарий, что `plugin_smoke` скипает engine/RAG-кейсы —
-для них нужен self-hosted runner и `RAG_MCP_BIN`/`RAG_DB_PATH`.
-
-**Блокер среды:** `.github/` — скрытый путь, инструменты записи этого воркспейса
-его не редактируют («Only relative, non-hidden workspace paths are allowed»).
-Патч ниже применяется вручную либо после явного исключения для `.github/`.
+Подключены в `.github/workflows/ci.yml`: `cargo fmt --all -- --check`,
+`bash scripts/check-backends.sh`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo clippy -p allpaka-backend --target x86_64-pc-windows-msvc --features allpaka-backend/cuda -- -D warnings`,
+`cargo test --workspace`, `node --check crates/allpaka-chat/web/app.js`,
+`node scripts/test-studio-content.cjs`, `bash scripts/studio-ui-tests/run.sh`.
+Ещё не подключены к CI: `scripts/test-studio.py` (длительный сквозной прогон) и
+GPU-зависимые `scripts/test-serving-controls.py`, `scripts/test-serving-memory.py`
+(ждут self-hosted раннер D2).
 
 **DoD:** всё, что не требует Metal/GGUF, выполняется в CI и является обязательной
-проверкой. `clippy -D warnings` включается после D4, иначе job будет красным
-из-за известного долга.
+проверкой.
 
-### D2. Self-hosted Metal-раннер
+### D2. Self-hosted Metal-раннер — ожидает
 
 **DoD:** CI покрывает GPU-кернелы и smoke-тесты с настоящими моделями, а не
 только CPU-часть.
 
-### D3. Распил `crates/allpaka-backend/src/gpu/`
+### D3. Распил `crates/allpaka-backend/src/gpu/` — сделано
 
-`metal.rs` → device/memory, реестр pipeline, пути исполнения, диагностика, без
-изменения измеренного поведения. **DoD:** существующие parity-тесты зелёные,
-цифры бенчмарка не сдвинулись за пределы дрейфа.
+`metal.rs` разложен на `gpu/metal/{device,region,select,telemetry,matvec,attn,args,ffn_grouped,decode,verify,prefill,mega}.rs`,
+`cuda/mod.rs` и `cuda/runtime.rs` — на `gpu/cuda/{region,attn,decode,decode_fused,prefill,ffn_grouped}` и
+`gpu/cuda/runtime/{device,select,embed,gemm,q8,l2,matvec}`, общие таблицы вынесены в `gpu/common.rs`.
+Все parity-тесты и `scripts/check-backends.sh` зелёные.
 
-### D4. Clippy-долг backend/model
+### D4. Clippy-долг backend/model — сделано
 
-Objective-C macro `cfg` expansion и старые internals. **DoD:**
-`cargo clippy --workspace --all-targets -- -D warnings` проходит, после чего
-проверка становится обязательной в CI (D1).
+`cargo clippy --workspace --all-targets -- -D warnings` и кросс-проверка
+`cargo clippy -p allpaka-backend --target x86_64-pc-windows-msvc --features allpaka-backend/cuda -- -D warnings`
+проходят с нулём предупреждений и подключены в `.github/workflows/ci.yml` (D1).
 
 ### Допущения, требующие подтверждения
 
@@ -237,14 +235,11 @@ Objective-C macro `cfg` expansion и старые internals. **DoD:**
 
 ---
 
-### D6. Оставшийся stringly-статус: `PlanItem.status`
+### D6. Оставшийся stringly-статус: `PlanItem.status` — сделано
 
-`Session.status` и `SwarmReport.status` закрыты enum'ами (`types.rs`), третья
-строка того же семейства осталась: `PlanItem.status` принимает
-`pending|in_progress|completed` и проверяется списком строк в `lib.rs:558` и
-`tools.rs:257`. **DoD:** enum с теми же словами на проводе, два списка сравнения
-исчезают, `scripts/test-studio.py` зелёный без изменений в asserting-строках —
-он и есть проверка, что имена не поменялись.
+`PlanItem.status` переведён на `PlanStatus` (`Pending | InProgress | Completed`,
+`#[serde(rename_all = "snake_case")]`) в `crates/allpaka-chat/src/types.rs` с
+сохранением проволочного контракта.
 
 ## Приложение: предлагаемый CI (черновик, не применён)
 

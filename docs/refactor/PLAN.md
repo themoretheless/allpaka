@@ -64,7 +64,7 @@
 | 1.1 | B1: стаб приведён к API; проверка — `scripts/check-backends.sh` (stub и CUDA) | S | низкий | done (`4b12e1a`, `523c5e9`) |
 | 1.2 | B2: >256 экспертов | S | низкий | не дефект: буфер по `n_used` (top-k), а не по числу экспертов; `moe.rs` при >256 уходит в кучу. Осталась только именованная константа |
 | 1.3 | B3: `total_cmp` вместо `partial_cmp().unwrap()` | S | низкий | done (`704972c`) |
-| 1.4 | B4: именованные таблицы `dq_fmt` и тест | S | низкий | todo |
+| 1.4 | B4: именованные таблицы `dq_fmt` и тест | S | низкий | done: общий `gpu/common.rs`, все 10 форматов `embed_row` на Metal/CUDA и parity-тест `gpu_embed_decode_token_matches_cpu_for_all_ten_formats` |
 | 1.5 | B5 и все некэшированные чтения env → `RuntimePolicy` / `DebugFlags` | M | низкий | wip: B5 done (`9e538b5`); B6 не дефект (аргумент `_def` дублирует соглашение о флаге, таблица согласована); CUDA и Metal — todo |
 | 1.6 | Оставшиеся предупреждения clippy | S | низкий | done (`9bd193d`): 0 предупреждений |
 | 1.7 | `cargo fmt --all` отдельным коммитом | S | — | done: `fmt --check` проходит |
@@ -77,8 +77,8 @@
 | 2.1 | `gpu/metal.rs` → `metal/{device,region,pipelines,select,telemetry,matvec,attn,args,ffn_grouped,decode,verify,prefill,mega}` | L | низкий–средний | done (`4b8ccc9` и следующий): чистый перенос, проверен сравнением строк; `mod.rs` 527 строк. Pipelines остались внутри `impl Gpu` в `device.rs` |
 | 2.2 | `gpu/cuda/mod.rs` → `{region,attn,decode,decode_fused,prefill,ffn_grouped}` | M | низкий | done (`bd55b83`): 4 914 → 254 строки в `mod.rs`; проверено только type-check'ом |
 | 2.3 | `gpu/cuda/runtime.rs` → `runtime/{device,select,embed,gemm,q8,l2,matvec}` | M | низкий | done (`bd55b83`) |
-| 2.4 | `gpu/common.rs`: общие `row_bytes`, окна весов, телеметрия, `attn_shape_ok` | M | низкий | todo |
-| 2.5 | backend импортирует `GgmlType` из dtype; MLX-деквант → mlx; `anyhow` из dtype | S | низкий | wip: импорт done; перенос MLX-декванта и `anyhow` — todo |
+| 2.4 | `gpu/common.rs`: общие `row_bytes`, окна весов, телеметрия, `attn_shape_ok` | M | низкий | wip: `dq_fmt`, `row_bytes`, `embed_row_groups` сведены в `gpu/common.rs` |
+| 2.5 | backend импортирует `GgmlType` из dtype; MLX-деквант → mlx; `anyhow` из dtype | S | низкий | done (`62a9a60`) |
 | 2.6 | `core`: поиск из `plan.rs` и `fleet.rs` → `plan/search.rs`, `fleet/search.rs` | M | низкий | done (`ce57524`). Длина `search_tree` (190 строк) — задача 3.11 |
 | 2.7 | `cli`: `serve.rs` → `serve/{inference,router}`; диспетчер из `main.rs` | S | низкий | wip: inference и router вынесены (`576cd8b`), `serve.rs` 1 402 → 589; `handle` (300 строк) и `main.rs` требуют правки логики → волна 3 |
 | 2.8 | `chat`: `lib.rs` → `api/{router,handlers}`, `runtime/{actor,turn,subagent,exec}` | M | низкий | done (`8c5bb55`): `lib.rs` 2 350 → 348 |
@@ -96,12 +96,12 @@
 | 3.2 | chat: запись через `storage::atomic_write*` | M | средний | done в реальном объёме (`e3e5dce`): индекс учётных данных и JSON harness-refine. Аудит завысил масштаб: почти все прямые `fs::write` находятся в тестах, а `state_file` уже атомарен. Осталось: `harness.rs:717` (temp+rename без fsync), собственный писатель `observability` (намеренно без fsync для бегущих трасс) |
 | 3.3 | chat: убрать дубли времени и идентичных `valid_id` | S | низкий | done (`98cfdd8`). Функции `digest` дублями не являются: у каждой свой набор полей |
 | 3.4 | chat: `valid_id` — одно правило (B9) | S | **требует решения** | todo |
-| 3.5 | chat: строковые status/kind/action → enum с прежними словами на проводе | M | средний | частично: `background` и история `review_queues` done. Статусы спанов observability **не переводятся**: их пишут 40+ мест в 15 файлах, набор открытый (`token_limit`, `step_limit`, выражения), записи лежат на диске, и значение вне enum сделало бы старую трассу нечитаемой. `experiments`/`matrix_jobs` отложены из-за байтового бюджета записи. guardrail_policies, online_evaluation — todo |
+| 3.5 | chat: строковые status/kind/action → enum с прежними словами на проводе | M | средний | done в целевом объёме: `background`, `review_queues`, `guardrail_policies`, `online_evaluation` переведены на serde-enum. Статусы спанов observability не переводятся (открытый набор в 40+ местах); `experiments`/`matrix_jobs` отложены из-за байтового бюджета записи |
 | 3.6 | chat: `turn_traced` → стадии хода | L | высокий | todo |
 | 3.7 | chat: контекстные структуры вместо 8–14 параметров | S | низкий | done: `run_subagent`, `MemberRun`, `SwarmTurn`, `MergeTarget`/`Synthesizer`/`MergePass` (`b71ef9a`); в `swarm.rs` не осталось `too_many_arguments` |
-| 3.8 | chat: блокирующий fs из async → `spawn_blocking` | M | средний | todo |
+| 3.8 | chat: блокирующий fs из async → `spawn_blocking` | M | средний | wip: `guardrail_policies` и `online_evaluation` API переведены на `spawn_blocking` |
 | 3.9 | chat: реестр инструментов вместо `match name`; токены отмены в experiments, judge_runs, memory_extract, swarm | M | средний | todo |
-| 3.10 | cli: таблица маршрутов вместо `starts_with` | M | средний | todo |
+| 3.10 | cli: таблица маршрутов вместо `starts_with` | M | средний | done (`e60b831`) |
 | 3.11 | core: общий co-residency, типизированные ошибки | M | низкий | done: `FleetError` (`e3159c0`), `cost::charge_co_residency` через трейт `PoolLoad` (`fcb018e`). Общий тип для `Placement`/`Replica` не вводился: у них разные поля отчёта, общий хелпер снял единственное дублирование логики |
 | 3.12 | model: один `Architecture` enum; `ModelError`; дедупликация `loader.rs` | M | низкий | todo |
 | 3.13 | gguf/mlx/dtype: типизированные ошибки | M | низкий | todo |
@@ -110,10 +110,10 @@
 
 | # | Задача | Размер | Риск | Статус |
 |---|---|---|---|---|
-| 3.20 | model: `ffn_residual()` вместо 4 копий | S | низкий | todo |
+| 3.20 | model: `ffn_residual()` вместо 4 копий | S | низкий | wip: `run_layer_ffn()` дедуплицирован на путях `decode` |
 | 3.21 | model: `AttnMode` + `AttnInputs` | S | низкий | todo |
-| 3.22 | model: `QuantMat::desc()` | S | низкий | todo |
-| 3.23 | model: `GpuEligibility` при загрузке | M | средний | todo |
+| 3.22 | model: `QuantMat::desc()` | S | низкий | done: `QuantMat::desc()` и `embd_desc()` |
+| 3.23 | model: `GpuEligibility` при загрузке | M | средний | done: `Model::token_layer_template` предвалидируется при загрузке |
 | 3.24 | model: `enum Mixer`, `Norm`, общий `Block`, `RoutingPolicy` | L | средний | todo |
 | 3.25 | backend: `decode_token` → функции кодирования стадий | L | средний | todo |
 | 3.26 | backend: `decode_token_one_fused` → контекстная структура | L | средний | todo |
@@ -123,9 +123,9 @@
 
 | # | Гипотеза | Размер | Статус |
 |---|---|---|---|
-| 4.1 | Кэш дескрипторов `token_layers` на сессию/модель | M | todo |
+| 4.1 | Кэш дескрипторов `token_layers` на сессию/модель | M | done: статический шаблон `token_layer_template` в `Model`, штампуются только `k_off`/`v_off` |
 | 4.2 | Эффект от снятия некэшированных чтений env на CUDA-путях | S | todo |
-| 4.3 | Что мешает не-Neox RoPE (Llama, Mistral) идти быстрыми GPU-путями | M | todo |
+| 4.3 | Что мешает не-Neox RoPE (Llama, Mistral) идти быстрыми GPU-путями | M | done: `RopeStyle::Norm` поддержан на GPU prefill/decode/verify + тест `norm_rope_gpu_parity` |
 | 4.4 | Studio: блокирующий I/O и contention на блокировках — по профилю | M | todo |
 
 Отрицательные результаты записываются в реестр проекта.
@@ -136,7 +136,7 @@
 |---|---|---|---|
 | 5.1 | Megakernel и проигравшие варианты ядер → `experimental` | M | **требует решения** |
 | 5.2 | Справочник `ALLPAKA_*`, генерируемый из `RuntimePolicy` | M | todo |
-| 5.3 | `docs/roadmap.md`: закрыть D6, обновить D3/D4 | S | todo |
+| 5.3 | `docs/roadmap.md`: закрыть D6, обновить D3/D4 | S | done |
 | 5.4 | Тесты для непокрытых модулей; общие фикстуры Rust ↔ Python SDK | M | todo |
 | 5.5 | Таблица до/после в BASELINE, остаточный бэклог | S | todo |
 

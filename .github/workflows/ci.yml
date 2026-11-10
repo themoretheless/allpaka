@@ -28,6 +28,9 @@ jobs:
         # workspace is built by nightly; stable only sets the rustup default.
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Windows cross-check target
+        run: rustup target add x86_64-pc-windows-msvc
+
       - name: Cargo cache
         uses: actions/cache@v4
         with:
@@ -38,6 +41,17 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Cross-backend check (Metal, stub, CUDA)
+        run: bash scripts/check-backends.sh
+
+      - name: cargo clippy (workspace + CUDA cross-target)
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy -p allpaka-backend --target x86_64-pc-windows-msvc --features allpaka-backend/cuda -- -D warnings
+
       - name: cargo test --workspace
         run: cargo test --workspace
         # plugin_smoke skips its engine/RAG cases gracefully: CI runners have
@@ -45,6 +59,12 @@ jobs:
         # and everything not needing local data still run. To cover the smoke
         # tests too, run this workflow on a self-hosted runner that has
         # models/qwen3-0.6b-Q8_0.gguf and RAG_MCP_BIN/RAG_DB_PATH set.
+
+      - name: Studio frontend & UI checks
+        run: |
+          node --check crates/allpaka-chat/web/app.js
+          node scripts/test-studio-content.cjs
+          bash scripts/studio-ui-tests/run.sh
 
   # Опциональный разбор отказа. Показывает, почему упало, и предлагает команды;
   # сам ничего не чинит. Раскомментируйте, чтобы получать отчёт артефактом.
