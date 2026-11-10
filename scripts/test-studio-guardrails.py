@@ -9,6 +9,18 @@ from allpaka_studio import Studio
 from allpaka_guardrails import check_guardrails, guard_task, GuardrailBlocked, policy_manifest, rules_from_manifest, save_policy, load_policy
 
 class GuardrailTests(unittest.TestCase):
+    def test_shared_fixture_matches_the_rust_store(self):
+        # The same cases drive allpaka-chat's guardrail_policies tests.
+        path=pathlib.Path(__file__).resolve().parents[1]/'sdk/fixtures/guardrail_cases.json'
+        cases=json.loads(path.read_text(encoding='utf-8'))['cases']
+        self.assertTrue(cases)
+        for case in cases:
+            with self.subTest(name=case['name'],stage=case['stage'],text=case['text']):
+                self.assertEqual(policy_manifest(case['rules'])['policy_sha256'],case['policy_sha256'])
+                receipt=check_guardrails(case['text'],case['rules'],stage=case['stage'],action='observe')
+                self.assertEqual(receipt['passed'],case['passed'])
+                self.assertEqual([r['passed'] for r in receipt['rules']],case['rule_results'])
+
     def test_required_fragments_all_literal_and_case_sensitive(self):
         rules=[dict(id='required',kind='required_substrings',value=['Привет','ready'])]
         self.assertTrue(check_guardrails('Привет: ready',rules)['passed'])

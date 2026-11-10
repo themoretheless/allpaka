@@ -191,6 +191,35 @@ impl Manifest {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    /// The same cases drive the Python SDK's local checks
+    /// (scripts/test-studio-guardrails.py); both must agree on every result
+    /// and on the policy fingerprint.
+    #[test]
+    fn shared_fixture_matches_the_python_sdk() {
+        let doc: Value =
+            serde_json::from_str(include_str!("../../../sdk/fixtures/guardrail_cases.json"))
+                .unwrap();
+        let cases = doc["cases"].as_array().unwrap();
+        assert!(!cases.is_empty());
+        for case in cases {
+            let rules: Vec<Rule> = serde_json::from_value(case["rules"].clone()).unwrap();
+            let manifest = Manifest::create(rules).unwrap();
+            assert_eq!(manifest.policy_sha256, case["policy_sha256"], "{case}");
+            let stage: Stage = serde_json::from_value(case["stage"].clone()).unwrap();
+            let receipt = manifest
+                .check(case["text"].as_str().unwrap(), stage, Action::Observe)
+                .unwrap();
+            assert_eq!(receipt["passed"], case["passed"], "{case}");
+            let per_rule: Vec<Value> = receipt["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["passed"].clone())
+                .collect();
+            assert_eq!(Value::from(per_rule), case["rule_results"], "{case}");
+        }
+    }
     #[test]
     fn rules_and_tampering() {
         let mut manifest = Manifest::create(vec![Rule {
