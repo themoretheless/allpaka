@@ -155,21 +155,12 @@ pub(crate) fn skip_host_rope_enabled() -> bool {
 
 #[inline]
 pub(crate) fn greedy_chain_enabled() -> bool {
-    #[cfg(test)]
-    {
-        std::env::var("ALLPAKA_GREEDY_CHAIN")
-            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-            .unwrap_or(true)
+    // Allow per-test env overrides (`ALLPAKA_GREEDY_CHAIN=0|1`) when explicitly
+    // set, and otherwise read once from the process environment.
+    if let Ok(v) = std::env::var("ALLPAKA_GREEDY_CHAIN") {
+        return !(v == "0" || v.eq_ignore_ascii_case("false"));
     }
-    #[cfg(not(test))]
-    {
-        static G: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *G.get_or_init(|| {
-            std::env::var("ALLPAKA_GREEDY_CHAIN")
-                .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-                .unwrap_or(true)
-        })
-    }
+    true
 }
 
 #[inline]
