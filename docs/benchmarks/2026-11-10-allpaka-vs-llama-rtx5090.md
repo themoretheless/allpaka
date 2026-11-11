@@ -97,3 +97,20 @@ ggml in prefill now runs on the cudarc stream. The GPU was idle; same interleave
 | 3 | 3 475 | 3 372 | 103.0% | 76.7 | 70.21 | 109.2% |
 
 Prefill argmax was 201 in every round, and logits-fnv was the same in every round.
+
+## Fused prefill kernels + prefill CUDA graph (`5ee6299`), 2026-11-11
+
+This build includes:
+- Q/K norm+RoPE+K store fusion and the residual add folded into RMSNorm (`e2b6fe9`);
+- flash attention writing the o_proj input directly (`d5dea0f`; needs the rebuilt `allpaka_ggml.dll`);
+- prefill CUDA graph replay, fixed and turned on (`5ee6299`).
+
+Same interleaved setup, 3 rounds. This session ran faster overall than the previous one, for llama.cpp as well, so compare only within a round.
+
+| Round | allpaka pp | no graph pp | llama pp | pp ratio (no graph) | allpaka tg | llama tg | tg ratio |
+|---|---|---|---|---|---|---|---|
+| 1 | 3 847 | 3 728 | 3 477 | 110.6% (107.2%) | 79.8 | 72.64 | 109.9% |
+| 2 | 3 796 | 3 724 | 3 535 | 107.4% (105.3%) | 79.8 | 72.56 | 110.0% |
+| 3 | 3 808 | 3 761 | 3 404 | 111.9% (110.5%) | 79.8 | 72.94 | 109.4% |
+
+The graph only replays when the chunk shape and KV base repeat, as they do in the bench. A chunked long prompt never replays, so the "no graph" column is closer to real prompts.
