@@ -13,6 +13,7 @@
 
 mod container;
 mod dequant;
+pub mod error;
 mod ffi;
 mod shapes;
 
@@ -21,6 +22,7 @@ pub use dequant::{
     bf16_to_f32, dequant_mlx_q4_block, dequant_mlx_q4_block_slice, dequant_mlx_q8_block,
     dequant_mlx_q8_block_slice,
 };
+pub use error::{MlxError, Result};
 pub use ffi::{
     free_mlx_blob, mlx_dtype_t, mlx_load_tensor_sparse, mlx_repack_to_allpaka, GgmlType, MlxBlob,
 };
@@ -60,7 +62,7 @@ impl MlxQuantType {
 }
 
 /// Parse an MLX checkpoint directory containing `*.safetensors`.
-pub fn load_safetensors<P>(path: P) -> anyhow::Result<MlxSafetensors>
+pub fn load_safetensors<P>(path: P) -> Result<MlxSafetensors>
 where
     P: AsRef<std::path::Path>,
 {

@@ -100,18 +100,24 @@ pub(crate) async fn create_session(
     State(app): State<App>,
     Json(settings): Json<Settings>,
 ) -> ApiResult<Value> {
-    validate_settings(&settings, &app).map_err(crate::bad_request)?;
-    let id = format!(
-        "{:x}-{:x}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-        std::process::id()
-    );
-    let session = Session::new(id.clone(), settings);
-    save(&app, &session).map_err(crate::internal)?;
-    attach(&app, session);
+    let app_for_attach = app.clone();
+    let (id, session) = tokio::task::spawn_blocking(move || -> std::result::Result<_, ApiError> {
+        validate_settings(&settings, &app).map_err(crate::bad_request)?;
+        let id = format!(
+            "{:x}-{:x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        );
+        let session = Session::new(id.clone(), settings);
+        save(&app, &session).map_err(crate::internal)?;
+        Ok((id, session))
+    })
+    .await
+    .map_err(crate::internal)??;
+    attach(&app_for_attach, session);
     Ok(Json(json!({"id":id})))
 }
 pub(crate) fn attach(app: &App, session: Session) {
@@ -179,7 +185,13 @@ pub(crate) async fn branch_session(
         session_id: id,
         message_count: n,
     });
-    save(&app, &branch).map_err(crate::internal)?;
+    let save_app = app.clone();
+    let branch = tokio::task::spawn_blocking(move || -> std::result::Result<_, ApiError> {
+        save(&save_app, &branch).map_err(crate::internal)?;
+        Ok(branch)
+    })
+    .await
+    .map_err(crate::internal)??;
     attach(&app, branch);
     Ok(Json(json!({"id":new_id})))
 }
@@ -332,7 +344,8 @@ pub(crate) async fn delete_session(
     }
     app.background.cancel_owned(&id);
     app.sessions.lock().unwrap().remove(&id);
-    let _ = std::fs::remove_file(app.data.join(format!("{id}.json")));
+    let path = app.data.join(format!("{id}.json"));
+    let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
     Ok(Json(json!({"deleted": id})))
 }
 #[derive(Deserialize)]
@@ -359,39 +372,42 @@ pub(crate) async fn save_plan(
     Path(id): Path<String>,
     Json(input): Json<PlanInput>,
 ) -> ApiResult<Value> {
-    if input.steps.len() > 30 {
-        return Err(error(StatusCode::BAD_REQUEST, "Too many plan steps"));
-    }
-    for step in &input.steps {
-        if step.title.trim().is_empty() || step.title.chars().count() > 300 {
-            return Err(error(StatusCode::BAD_REQUEST, "Invalid plan step title"));
+    crate::blocking(move || {
+        if input.steps.len() > 30 {
+            return Err(error(StatusCode::BAD_REQUEST, "Too many plan steps"));
         }
-    }
-    let sessions = app.sessions.lock().unwrap();
-    let (shared, _) = sessions
-        .get(&id)
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
-    let mut state = shared.lock().unwrap();
-    if state.folder != HistoryFolder::Active {
-        return Err(error(
-            StatusCode::CONFLICT,
-            "Conversation is archived or in trash; restore it first",
-        ));
-    }
-    let mut next = state.clone();
-    plan::update(
-        &mut next,
-        input.steps,
-        input.base_revision,
-        "user",
-        input.allow_reopen,
-    )
-    .map_err(|e| error(StatusCode::CONFLICT, e))?;
-    save(&app, &next).map_err(crate::internal)?;
-    *state = next;
-    Ok(Json(
-        json!({"updated": true,"revision":state.plan_revision,"steps":state.plan,"evidence_basis":"reported"}),
-    ))
+        for step in &input.steps {
+            if step.title.trim().is_empty() || step.title.chars().count() > 300 {
+                return Err(error(StatusCode::BAD_REQUEST, "Invalid plan step title"));
+            }
+        }
+        let sessions = app.sessions.lock().unwrap();
+        let (shared, _) = sessions
+            .get(&id)
+            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
+        let mut state = shared.lock().unwrap();
+        if state.folder != HistoryFolder::Active {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Conversation is archived or in trash; restore it first",
+            ));
+        }
+        let mut next = state.clone();
+        plan::update(
+            &mut next,
+            input.steps,
+            input.base_revision,
+            "user",
+            input.allow_reopen,
+        )
+        .map_err(|e| error(StatusCode::CONFLICT, e))?;
+        save(&app, &next).map_err(crate::internal)?;
+        *state = next;
+        Ok(Json(
+            json!({"updated": true,"revision":state.plan_revision,"steps":state.plan,"evidence_basis":"reported"}),
+        ))
+    })
+    .await
 }
 pub(crate) async fn action(
     State(app): State<App>,
@@ -399,36 +415,39 @@ pub(crate) async fn action(
     Json(mut action): Json<Action>,
 ) -> ApiResult<Value> {
     if matches!(action.kind, ActionKind::Rename | ActionKind::Move) {
-        let sessions = app.sessions.lock().unwrap();
-        let (shared, _) = sessions
-            .get(&id)
-            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
-        let mut state = shared.lock().unwrap();
-        if action.kind == ActionKind::Move && state.status == SessionStatus::Running {
-            return Err(error(
-                StatusCode::CONFLICT,
-                "Stop generation before moving the conversation",
-            ));
-        }
-        if action.kind == ActionKind::Rename {
-            let title = action.text.trim();
-            if title.is_empty() || title.chars().count() > 100 {
+        return crate::blocking(move || {
+            let sessions = app.sessions.lock().unwrap();
+            let (shared, _) = sessions
+                .get(&id)
+                .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
+            let mut state = shared.lock().unwrap();
+            if action.kind == ActionKind::Move && state.status == SessionStatus::Running {
                 return Err(error(
-                    StatusCode::BAD_REQUEST,
-                    "Title must be 1–100 characters",
+                    StatusCode::CONFLICT,
+                    "Stop generation before moving the conversation",
                 ));
             }
-            state.title = title.to_string();
-        } else {
-            state.folder = match action.text.as_str() {
-                "active" => HistoryFolder::Active,
-                "archived" => HistoryFolder::Archived,
-                "trash" => HistoryFolder::Trash,
-                _ => return Err(error(StatusCode::BAD_REQUEST, "Unknown history folder")),
-            };
-        }
-        save(&app, &state).map_err(crate::internal)?;
-        return Ok(Json(json!({"accepted":true})));
+            if action.kind == ActionKind::Rename {
+                let title = action.text.trim();
+                if title.is_empty() || title.chars().count() > 100 {
+                    return Err(error(
+                        StatusCode::BAD_REQUEST,
+                        "Title must be 1–100 characters",
+                    ));
+                }
+                state.title = title.to_string();
+            } else {
+                state.folder = match action.text.as_str() {
+                    "active" => HistoryFolder::Active,
+                    "archived" => HistoryFolder::Archived,
+                    "trash" => HistoryFolder::Trash,
+                    _ => return Err(error(StatusCode::BAD_REQUEST, "Unknown history folder")),
+                };
+            }
+            save(&app, &state).map_err(crate::internal)?;
+            Ok(Json(json!({"accepted":true})))
+        })
+        .await;
     }
     if matches!(
         action.kind,
@@ -508,27 +527,30 @@ pub(crate) async fn save_project(
     State(app): State<App>,
     Json(mut project): Json<context::Project>,
 ) -> ApiResult<Value> {
-    project.validate(&app.data).map_err(crate::bad_request)?;
-    if project.id.is_empty() {
-        project.id = format!(
-            "{:x}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-    }
-    if project.id != "default" && !valid_id(&project.id) {
-        return Err(error(StatusCode::BAD_REQUEST, "Invalid project ID"));
-    }
-    let mut projects = app.projects.lock().unwrap();
-    let mut updated = projects.clone();
-    if let Some(p) = updated.iter_mut().find(|p| p.id == project.id) {
-        *p = project.clone();
-    } else {
-        updated.push(project.clone());
-    }
-    state_file::save_list(app.data.as_path(), "projects", &updated).map_err(crate::internal)?;
-    *projects = updated;
-    Ok(Json(json!(project)))
+    crate::blocking(move || {
+        project.validate(&app.data).map_err(crate::bad_request)?;
+        if project.id.is_empty() {
+            project.id = format!(
+                "{:x}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+        }
+        if project.id != "default" && !valid_id(&project.id) {
+            return Err(error(StatusCode::BAD_REQUEST, "Invalid project ID"));
+        }
+        let mut projects = app.projects.lock().unwrap();
+        let mut updated = projects.clone();
+        if let Some(p) = updated.iter_mut().find(|p| p.id == project.id) {
+            *p = project.clone();
+        } else {
+            updated.push(project.clone());
+        }
+        state_file::save_list(app.data.as_path(), "projects", &updated).map_err(crate::internal)?;
+        *projects = updated;
+        Ok(Json(json!(project)))
+    })
+    .await
 }

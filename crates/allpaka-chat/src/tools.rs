@@ -7,42 +7,168 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-pub fn schemas(settings: &Settings, cmd_enabled: bool) -> Vec<Value> {
-    let mut list = vec![
-        schema(
-            "list_files",
-            "List one workspace directory (up to 200 entries).",
-            json!({"path":{"type":"string"}}),
-            json!(["path"]),
-        ),
-        schema(
-            "read_file",
-            "Read a UTF-8 file (up to 8 MiB) with optional inclusive 1-based start_line/end_line. Output at most 128 KiB.",
-            json!({"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}),
-            json!(["path"]),
-        ),
-        schema(
-            "set_plan",
-            "Publish/update the durable task plan. Retain milestone IDs. Goal requires current base_revision, acceptance criteria for each milestone and reported evidence for completion. Completed Goal milestones cannot be silently removed, changed or repeated.",
-            json!({"base_revision":{"type":"integer","minimum":0},"steps":{"type":"array","maxItems":30,"items":{"type":"object","properties":{"id":{"type":"string","maxLength":80},"title":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]},"acceptance":{"type":"array","maxItems":4,"items":{"type":"string"}},"evidence":{"type":"array","maxItems":4,"items":{"type":"string"}}},"required":["title","status"],"additionalProperties":false}}}),
-            json!(["steps"]),
-        ),
-    ];
-    if settings.mode == Mode::Chat {
-        list.truncate(2);
-    }
-    if matches!(settings.mode, Mode::Auto | Mode::Goal) && settings.allow_writes {
-        list.push(schema("edit_file", "Replace one exact, unique non-empty fragment in an existing UTF-8 file. Fails if absent or ambiguous. Returns the actual diff.", json!({"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}}),json!(["path","old_text","new_text"])));
-        list.push(schema("write_file", "Create or replace a UTF-8 file inside the workspace. Read existing content first. Cannot access hidden paths or leave the workspace.", json!({"path":{"type":"string"},"content":{"type":"string"}}),json!(["path","content"])));
-    }
-    if matches!(settings.mode, Mode::Auto | Mode::Goal) && cmd_enabled {
-        list.push(schema("run_command", "Run a shell command in the project root directory. Returns stdout, stderr and exit code. Timeout 30s by default (max 120s). Output truncated at 128 KiB.", json!({"command":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":120}}),json!(["command"])));
-    }
-    list.push(schema("agentgrep", "Search a context file or directory for literal text. Returns line numbers and preceding declaration hints (heuristic, not AST). Skips hidden files, symlinks and binary files. Bounded to 100 matches and 32 MiB scanned.", json!({"path":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":1000},"limit":{"type":"integer","minimum":1,"maximum":100}}),json!(["path","query"])));
-    list
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolEligibility {
+    /// Available in every mode, including `Chat` and `Swarm`.
+    Always,
+    /// Available in structured/agent modes (`Plan`, `Auto`, `Goal`, `Swarm`), omitted in `Chat`.
+    StructuredModes,
+    /// Available only in `Auto` or `Goal` when `settings.allow_writes` is enabled.
+    WriteModes,
+    /// Available only in `Auto` or `Goal` when shell execution is enabled.
+    CommandModes,
 }
-fn schema(name: &str, description: &str, properties: Value, required: Value) -> Value {
-    json!({"type":"function","function":{"name":name,"description":description,"parameters":{"type":"object","properties":properties,"required":required,"additionalProperties":false}}})
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolCapability {
+    Read,
+    Write,
+    Plan,
+    Command,
+}
+
+type ToolHandler = fn(&Path, &Value, Option<&Path>) -> Result<Value>;
+
+struct ToolSpec {
+    name: &'static str,
+    description: &'static str,
+    parameters: fn() -> (Value, Value),
+    eligibility: ToolEligibility,
+    capability: ToolCapability,
+    handler: Option<ToolHandler>,
+}
+
+impl ToolSpec {
+    fn is_enabled(&self, settings: &Settings, cmd_enabled: bool) -> bool {
+        match self.eligibility {
+            ToolEligibility::Always => true,
+            ToolEligibility::StructuredModes => settings.mode != Mode::Chat,
+            ToolEligibility::WriteModes => {
+                matches!(settings.mode, Mode::Auto | Mode::Goal) && settings.allow_writes
+            }
+            ToolEligibility::CommandModes => {
+                matches!(settings.mode, Mode::Auto | Mode::Goal) && cmd_enabled
+            }
+        }
+    }
+
+    fn schema(&self) -> Value {
+        let (properties, required) = (self.parameters)();
+        json!({
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                    "additionalProperties": false
+                }
+            }
+        })
+    }
+}
+
+const REGISTRY: &[ToolSpec] = &[
+    ToolSpec {
+        name: "list_files",
+        description: "List one workspace directory (up to 200 entries).",
+        parameters: || (json!({"path":{"type":"string"}}), json!(["path"])),
+        eligibility: ToolEligibility::Always,
+        capability: ToolCapability::Read,
+        handler: Some(exec_list_files),
+    },
+    ToolSpec {
+        name: "read_file",
+        description: "Read a UTF-8 file (up to 8 MiB) with optional inclusive 1-based start_line/end_line. Output at most 128 KiB.",
+        parameters: || {
+            (
+                json!({"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}),
+                json!(["path"]),
+            )
+        },
+        eligibility: ToolEligibility::Always,
+        capability: ToolCapability::Read,
+        handler: Some(exec_read_file),
+    },
+    ToolSpec {
+        name: "set_plan",
+        description: "Publish/update the durable task plan. Retain milestone IDs. Goal requires current base_revision, acceptance criteria for each milestone and reported evidence for completion. Completed Goal milestones cannot be silently removed, changed or repeated.",
+        parameters: || {
+            (
+                json!({"base_revision":{"type":"integer","minimum":0},"steps":{"type":"array","maxItems":30,"items":{"type":"object","properties":{"id":{"type":"string","maxLength":80},"title":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]},"acceptance":{"type":"array","maxItems":4,"items":{"type":"string"}},"evidence":{"type":"array","maxItems":4,"items":{"type":"string"}}},"required":["title","status"],"additionalProperties":false}}}),
+                json!(["steps"]),
+            )
+        },
+        eligibility: ToolEligibility::StructuredModes,
+        capability: ToolCapability::Plan,
+        handler: None,
+    },
+    ToolSpec {
+        name: "edit_file",
+        description: "Replace one exact, unique non-empty fragment in an existing UTF-8 file. Fails if absent or ambiguous. Returns the actual diff.",
+        parameters: || {
+            (
+                json!({"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}}),
+                json!(["path", "old_text", "new_text"]),
+            )
+        },
+        eligibility: ToolEligibility::WriteModes,
+        capability: ToolCapability::Write,
+        handler: Some(exec_edit_file),
+    },
+    ToolSpec {
+        name: "write_file",
+        description: "Create or replace a UTF-8 file inside the workspace. Read existing content first. Cannot access hidden paths or leave the workspace.",
+        parameters: || {
+            (
+                json!({"path":{"type":"string"},"content":{"type":"string"}}),
+                json!(["path", "content"]),
+            )
+        },
+        eligibility: ToolEligibility::WriteModes,
+        capability: ToolCapability::Write,
+        handler: Some(exec_write_file),
+    },
+    ToolSpec {
+        name: "run_command",
+        description: "Run a shell command in the project root directory. Returns stdout, stderr and exit code. Timeout 30s by default (max 120s). Output truncated at 128 KiB.",
+        parameters: || {
+            (
+                json!({"command":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":120}}),
+                json!(["command"]),
+            )
+        },
+        eligibility: ToolEligibility::CommandModes,
+        capability: ToolCapability::Command,
+        handler: None,
+    },
+    ToolSpec {
+        name: "agentgrep",
+        description: "Search a context file or directory for literal text. Returns line numbers and preceding declaration hints (heuristic, not AST). Skips hidden files, symlinks and binary files. Bounded to 100 matches and 32 MiB scanned.",
+        parameters: || {
+            (
+                json!({"path":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":1000},"limit":{"type":"integer","minimum":1,"maximum":100}}),
+                json!(["path", "query"]),
+            )
+        },
+        eligibility: ToolEligibility::Always,
+        capability: ToolCapability::Read,
+        handler: Some(exec_agentgrep),
+    },
+];
+
+fn find_tool(name: &str) -> Option<&'static ToolSpec> {
+    REGISTRY.iter().find(|spec| spec.name == name)
+}
+
+pub fn schemas(settings: &Settings, cmd_enabled: bool) -> Vec<Value> {
+    REGISTRY
+        .iter()
+        .filter(|spec| spec.is_enabled(settings, cmd_enabled))
+        .map(ToolSpec::schema)
+        .collect()
 }
 pub(crate) fn resolve(root: &Path, path: &str, write: bool) -> Result<PathBuf> {
     let relative = Path::new(path);
@@ -134,120 +260,125 @@ pub(crate) fn execute_scoped(
     args: &Value,
     excluded: Option<&Path>,
 ) -> Result<Value> {
-    match name {
-        "agentgrep" => crate::code_search::search(root, args, excluded),
-        "list_files" => {
-            let path = resolve(
-                root,
-                args["path"].as_str().context("path is required")?,
-                false,
-            )?;
-            let mut entries = vec![];
-            for entry in fs::read_dir(path)?.take(201) {
-                let e = entry?;
-                let name = e.file_name().to_string_lossy().to_string();
-                if !name.starts_with('.') {
-                    entries.push(json!({"name":name,"directory":e.file_type()?.is_dir()}));
-                }
-            }
-            entries.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_owned());
-            let truncated = entries.len() > 200;
-            entries.truncate(200);
-            Ok(json!({"entries":entries,"truncated":truncated}))
-        }
-        "read_file" => {
-            let path = resolve(
-                root,
-                args["path"].as_str().context("path is required")?,
-                false,
-            )?;
-            if !fs::metadata(&path)?.is_file() {
-                bail!("Not a regular file");
-            }
-            let content = read_text(&path, 8 * 1024 * 1024)?;
-            let lines: Vec<&str> = content.split_inclusive('\n').collect();
-            let start = line_arg(args, "start_line")?.unwrap_or(1);
-            let end = line_arg(args, "end_line")?.unwrap_or(lines.len().max(1));
-            if end < start || start > lines.len().max(1) {
-                bail!("Invalid line range for {} lines", lines.len());
-            }
-            let selected = lines
-                .get(start - 1..end.min(lines.len()))
-                .unwrap_or(&[])
-                .concat();
-            if selected.len() > 131072 {
-                bail!("Output exceeds 128 KiB; request a smaller line range");
-            }
-            Ok(
-                json!({"content":selected,"start_line":start,"end_line":end.min(lines.len()),"total_lines":lines.len()}),
-            )
-        }
-        "edit_file" => {
-            if !matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes {
-                bail!("Writing requires Auto or Goal mode and enabled workspace writes");
-            }
-            let name = args["path"].as_str().context("path is required")?;
-            let path = resolve(root, name, false)?;
-            let lock = mutation_lock(&path);
-            let _guard = lock
-                .lock()
-                .map_err(|_| anyhow::anyhow!("File mutation lock poisoned"))?;
-            let before = read_text(&path, 131072)?;
-            let old = args["old_text"].as_str().context("old_text is required")?;
-            let new = args["new_text"].as_str().context("new_text is required")?;
-            if old.is_empty() || before.matches(old).count() != 1 {
-                bail!(
-                    "old_text must match exactly once; read the current file and include more context"
-                );
-            }
-            let after = before.replacen(old, new, 1);
-            if after.len() > 131072 {
-                bail!("Write exceeds 128 KiB");
-            }
-            fs::write(&path, &after)?;
-            Ok(json!({"written":name,"bytes":after.len(),"diff":unified_diff(name,&before,&after)}))
-        }
-
-        "write_file" => {
-            if !matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes {
-                bail!("Writing requires Auto or Goal mode and enabled workspace writes");
-            }
-            create_parents(root, args["path"].as_str().context("path is required")?)?;
-            let path = resolve(
-                root,
-                args["path"].as_str().context("path is required")?,
-                true,
-            )?;
-            let lock = mutation_lock(&path);
-            let _guard = lock
-                .lock()
-                .map_err(|_| anyhow::anyhow!("File mutation lock poisoned"))?;
-            let content = args["content"].as_str().context("content is required")?;
-            if content.len() > 131072 {
-                bail!("Write exceeds 128 KiB");
-            }
-            if path.exists() && !path.is_file() {
-                bail!("Not a regular file");
-            }
-            let before = if path.exists() {
-                read_text(&path, 131072)?
-            } else {
-                String::new()
-            };
-            fs::write(&path, content)?;
-            Ok(
-                json!({"written":args["path"],"bytes":content.len(),"diff":unified_diff(args["path"].as_str().unwrap(),&before,content)}),
-            )
-        }
-        _ => bail!("Unknown tool: {name}"),
+    let Some(spec) = find_tool(name) else {
+        bail!("Unknown tool: {name}");
+    };
+    let Some(handler) = spec.handler else {
+        bail!("Unknown tool: {name}");
+    };
+    if spec.capability == ToolCapability::Write
+        && (!matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes)
+    {
+        bail!("Writing requires Auto or Goal mode and enabled workspace writes");
     }
+    handler(root, args, excluded)
 }
+
+fn exec_agentgrep(root: &Path, args: &Value, excluded: Option<&Path>) -> Result<Value> {
+    crate::code_search::search(root, args, excluded)
+}
+
+fn exec_list_files(root: &Path, args: &Value, _excluded: Option<&Path>) -> Result<Value> {
+    let path = resolve(
+        root,
+        args["path"].as_str().context("path is required")?,
+        false,
+    )?;
+    let mut entries = vec![];
+    for entry in fs::read_dir(path)?.take(201) {
+        let e = entry?;
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with('.') {
+            entries.push(json!({"name":name,"directory":e.file_type()?.is_dir()}));
+        }
+    }
+    entries.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_owned());
+    let truncated = entries.len() > 200;
+    entries.truncate(200);
+    Ok(json!({"entries":entries,"truncated":truncated}))
+}
+
+fn exec_read_file(root: &Path, args: &Value, _excluded: Option<&Path>) -> Result<Value> {
+    let path = resolve(
+        root,
+        args["path"].as_str().context("path is required")?,
+        false,
+    )?;
+    if !fs::metadata(&path)?.is_file() {
+        bail!("Not a regular file");
+    }
+    let content = read_text(&path, 8 * 1024 * 1024)?;
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let start = line_arg(args, "start_line")?.unwrap_or(1);
+    let end = line_arg(args, "end_line")?.unwrap_or(lines.len().max(1));
+    if end < start || start > lines.len().max(1) {
+        bail!("Invalid line range for {} lines", lines.len());
+    }
+    let selected = lines
+        .get(start - 1..end.min(lines.len()))
+        .unwrap_or(&[])
+        .concat();
+    if selected.len() > 131072 {
+        bail!("Output exceeds 128 KiB; request a smaller line range");
+    }
+    Ok(
+        json!({"content":selected,"start_line":start,"end_line":end.min(lines.len()),"total_lines":lines.len()}),
+    )
+}
+
+fn exec_edit_file(root: &Path, args: &Value, _excluded: Option<&Path>) -> Result<Value> {
+    let name = args["path"].as_str().context("path is required")?;
+    let path = resolve(root, name, false)?;
+    let lock = mutation_lock(&path);
+    let _guard = lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("File mutation lock poisoned"))?;
+    let before = read_text(&path, 131072)?;
+    let old = args["old_text"].as_str().context("old_text is required")?;
+    let new = args["new_text"].as_str().context("new_text is required")?;
+    if old.is_empty() || before.matches(old).count() != 1 {
+        bail!("old_text must match exactly once; read the current file and include more context");
+    }
+    let after = before.replacen(old, new, 1);
+    if after.len() > 131072 {
+        bail!("Write exceeds 128 KiB");
+    }
+    fs::write(&path, &after)?;
+    Ok(json!({"written":name,"bytes":after.len(),"diff":unified_diff(name,&before,&after)}))
+}
+
+fn exec_write_file(root: &Path, args: &Value, _excluded: Option<&Path>) -> Result<Value> {
+    let rel_path = args["path"].as_str().context("path is required")?;
+    create_parents(root, rel_path)?;
+    let path = resolve(root, rel_path, true)?;
+    let lock = mutation_lock(&path);
+    let _guard = lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("File mutation lock poisoned"))?;
+    let content = args["content"].as_str().context("content is required")?;
+    if content.len() > 131072 {
+        bail!("Write exceeds 128 KiB");
+    }
+    if path.exists() && !path.is_file() {
+        bail!("Not a regular file");
+    }
+    let before = if path.exists() {
+        read_text(&path, 131072)?
+    } else {
+        String::new()
+    };
+    fs::write(&path, content)?;
+    Ok(
+        json!({"written":rel_path,"bytes":content.len(),"diff":unified_diff(rel_path,&before,content)}),
+    )
+}
+
 pub fn writes(name: &str) -> bool {
-    matches!(name, "write_file" | "edit_file")
+    find_tool(name).is_some_and(|spec| spec.capability == ToolCapability::Write)
 }
 /// Tools that only inspect the connected context. Swarm members get these.
 pub fn reads(name: &str) -> bool {
-    matches!(name, "list_files" | "read_file" | "agentgrep")
+    find_tool(name).is_some_and(|spec| spec.capability == ToolCapability::Read)
 }
 fn line_arg(args: &Value, key: &str) -> Result<Option<usize>> {
     match args.get(key) {

@@ -17,16 +17,8 @@
   вместо 13–19 параметров).
 
 **Можно делать без замеров:**
-- 3.6: `turn_traced` (577 строк) на стадии: вызов провайдера, цикл
-  инструментов, guardrails, сохранение. Риск высокий, нужен прогон
-  `scripts/test-studio.py`.
-- 3.8: оставшиеся блокирующие `std::fs` в async-обработчиках → `spawn_blocking`.
-- 3.9: реестр инструментов вместо `match name`; токены отмены в experiments,
-  judge_runs, memory_extract, swarm.
-- 3.12, 3.13: один `Architecture` enum и `ModelError` в model; типизированные
-  ошибки в gguf и mlx (`DtypeError` в dtype сделан).
 - 2.10: общий harness для 58 UI-тестов Studio.
-- 1.8: комментарии `// SAFETY:`.
+- 1.8: оставшиеся комментарии `// SAFETY:` в backend/model.
 - Волна 5: справочник `ALLPAKA_*`, тесты непокрытых модулей.
 
 **Ждёт вашего решения:** единое правило `valid_id` (3.4), судьба
@@ -59,7 +51,7 @@
 | 1.2 | B2: >256 экспертов | S | низкий | не дефект: буфер по `n_used` (top-k), а не по числу экспертов; `moe.rs` при >256 уходит в кучу. Осталась только именованная константа |
 | 1.3 | B3: `total_cmp` вместо `partial_cmp().unwrap()` | S | низкий | done (`704972c`) |
 | 1.4 | B4: именованные таблицы `dq_fmt` и тест | S | низкий | done: общий `gpu/common.rs`, все 10 форматов `embed_row` на Metal/CUDA, прямые и сквозные parity-тесты (`embed_row_f32_dtoken_all_formats_match_cpu_dequant`, `gpu_embed_decode_token_matches_cpu_for_all_ten_formats`) |
-| 1.5 | B5 и все некэшированные чтения env → `RuntimePolicy` / `DebugFlags` | M | низкий | wip: B5 done (`9e538b5`); статические Metal- и model-флаги сведены в `RuntimePolicy` и `OnceLock`; B6 не дефект; CUDA — todo |
+| 1.5 | B5 и все некэшированные чтения env → `RuntimePolicy` / `DebugFlags` | M | низкий | done: B5 (`9e538b5`), Metal-, CUDA- и model-флаги сведены в `RuntimePolicy` и `OnceLock` (`7fe532d`, `b742c28`); B6 не дефект; единый справочник — задача 5.2 |
 | 1.6 | Оставшиеся предупреждения clippy | S | низкий | done (`9bd193d`): 0 предупреждений |
 | 1.7 | `cargo fmt --all` отдельным коммитом | S | — | done: `fmt --check` проходит |
 | 1.8 | `// SAFETY:` для `unsafe impl` и срезов из сырых указателей | M | — | todo |
@@ -72,13 +64,13 @@
 | 2.2 | `gpu/cuda/mod.rs` → `{region,attn,decode,decode_fused,prefill,ffn_grouped}` | M | низкий | done (`bd55b83`): 4 914 → 254 строки в `mod.rs`; проверено только type-check'ом |
 | 2.3 | `gpu/cuda/runtime.rs` → `runtime/{device,select,embed,gemm,q8,l2,matvec}` | M | низкий | done (`bd55b83`) |
 | 2.4 | `gpu/common.rs`: общие `row_bytes`, окна весов, телеметрия, `attn_shape_ok` | M | низкий | wip: `dq_fmt`, `row_bytes`, `embed_row_groups` сведены в `gpu/common.rs` |
-| 2.5 | backend импортирует `GgmlType` из dtype; MLX-деквант → mlx; `anyhow` из dtype | S | низкий | done (`62a9a60`) |
+| 2.5 | backend импортирует `GgmlType` из dtype; MLX-деквант → mlx; `anyhow` из dtype | S | низкий | done (`4f06675`, `62a9a60`) |
 | 2.6 | `core`: поиск из `plan.rs` и `fleet.rs` → `plan/search.rs`, `fleet/search.rs` | M | низкий | done (`ce57524`). Длина `search_tree` (190 строк) — задача 3.11 |
-| 2.7 | `cli`: `serve.rs` → `serve/{inference,router}`; диспетчер из `main.rs` | S | низкий | wip: inference и router вынесены (`576cd8b`), `serve.rs` 1 402 → 589; `handle` (300 строк) и `main.rs` требуют правки логики → волна 3 |
+| 2.7 | `cli`: `serve.rs` → `serve/{inference,router}`; диспетчер из `main.rs` | S | низкий | done (`576cd8b`, `bfd3024`): `main.rs` сжат до 36 строк (`dispatch.rs` вынесен) |
 | 2.8 | `chat`: `lib.rs` → `api/{router,handlers}`, `runtime/{actor,turn,subagent,exec}` | M | низкий | done (`8c5bb55`): `lib.rs` 2 350 → 348 |
 | 2.9 | `chat`: `observability.rs` → `observability/{model,trace,ingest,store,receipts,guardrails,api,tests}` | M | средний | done (`cb9a9ec`): `mod.rs` 63 строки кода |
 | 2.10 | `scripts/`: UI-тесты Studio в `studio-ui-tests/` с раннером | S | низкий | done (`d6fe2db`): 58 тестов, `run.sh`. Остальные скрипты оставлены на месте: на них ~130 ссылок в документах и внешней автоматизации, перенос не окупается. Общий harness для 58 тестов — todo |
-| 2.11 | `model/lib.rs`: сквозные тесты → `tests/` | S | — | todo |
+| 2.11 | `model/lib.rs`: сквозные тесты → `tests/` | S | — | done (`1103b5c`): вынесены в `tests/model_e2e.rs` |
 
 ## Волна 3. Логические рефакторинги
 
@@ -90,15 +82,15 @@
 | 3.2 | chat: запись через `storage::atomic_write*` | M | средний | done в реальном объёме (`e3e5dce`): индекс учётных данных и JSON harness-refine. Аудит завысил масштаб: почти все прямые `fs::write` находятся в тестах, а `state_file` уже атомарен. Осталось: `harness.rs:717` (temp+rename без fsync), собственный писатель `observability` (намеренно без fsync для бегущих трасс) |
 | 3.3 | chat: убрать дубли времени и идентичных `valid_id` | S | низкий | done (`98cfdd8`). Функции `digest` дублями не являются: у каждой свой набор полей |
 | 3.4 | chat: `valid_id` — одно правило (B9) | S | **требует решения** | todo |
-| 3.5 | chat: строковые status/kind/action → enum с прежними словами на проводе | M | средний | done в целевом объёме: `background`, `review_queues`, `guardrail_policies`, `online_evaluation` переведены на serde-enum. Статусы спанов observability не переводятся (открытый набор в 40+ местах); `experiments`/`matrix_jobs` отложены из-за байтового бюджета записи |
-| 3.6 | chat: `turn_traced` → стадии хода | L | высокий | todo |
+| 3.5 | chat: строковые status/kind/action → enum с прежними словами на проводе | M | средний | done в безопасном контуре (`3d54668`): `background`, история `review_queues`, `guardrail_policies` (`RuleKind`, `GuardrailStage`, `GuardrailAction`) и `online_evaluation` (`JobStatus`, `JobErrorCode`). Статусы спанов observability намеренно оставлены открытыми строками; `experiments`/`matrix_jobs` сохраняют байтовый бюджет записи |
+| 3.6 | chat: `turn_traced` → стадии хода | L | высокий | done (`d12d146`): `TurnContext::prepare`, `generate_step`, `check_step_completion`, `execute_tool_batch`, `dispatch_single_tool`, `apply_post_tool_hooks` |
 | 3.7 | chat: контекстные структуры вместо 8–14 параметров | S | низкий | done: `run_subagent`, `MemberRun`, `SwarmTurn`, `MergeTarget`/`Synthesizer`/`MergePass` (`b71ef9a`); в `swarm.rs` не осталось `too_many_arguments` |
-| 3.8 | chat: блокирующий fs из async → `spawn_blocking` | M | средний | wip: `guardrail_policies` и `online_evaluation` API переведены на `spawn_blocking` |
-| 3.9 | chat: реестр инструментов вместо `match name`; токены отмены в experiments, judge_runs, memory_extract, swarm | M | средний | todo |
+| 3.8 | chat: блокирующий fs из async → `spawn_blocking` | M | средний | done (`4e3ffb2`): синхронные обработчики `Store` / `std::fs` вынесены через `crate::blocking` |
+| 3.9 | chat: реестр инструментов вместо `match name`; токены отмены в experiments, judge_runs, memory_extract, swarm | M | средний | done (`fa19b34`): декларативная таблица `ToolSpec` в `tools.rs` и единый `CancelToken` (`tokio::sync::watch` + `AtomicBool`) |
 | 3.10 | cli: таблица маршрутов вместо `starts_with` | M | средний | done (`e60b831`) |
 | 3.11 | core: общий co-residency, типизированные ошибки | M | низкий | done: `FleetError` (`e3159c0`), `cost::charge_co_residency` через трейт `PoolLoad` (`fcb018e`). Общий тип для `Placement`/`Replica` не вводился: у них разные поля отчёта, общий хелпер снял единственное дублирование логики |
-| 3.12 | model: один `Architecture` enum; `ModelError`; дедупликация `loader.rs` | M | низкий | todo |
-| 3.13 | gguf/mlx/dtype: типизированные ошибки | M | низкий | wip: `DtypeError` в `allpaka-dtype` done; gguf/mlx — todo |
+| 3.12 | model: один `Architecture` enum; `ModelError`; дедупликация `loader.rs` | M | низкий | done (`5f9737d`) |
+| 3.13 | gguf/mlx/dtype: типизированные ошибки | M | низкий | done (`4f06675`, `cf8f77a`): `DtypeError`, `GgufError`, `MlxError`; `anyhow` убран из runtime-зависимостей всех трёх листовых крейтов |
 
 Горячий код (каждый пункт — отдельный A/B, заблокировано до 0.2):
 
@@ -118,7 +110,7 @@
 | # | Гипотеза | Размер | Статус |
 |---|---|---|---|
 | 4.1 | Кэш дескрипторов `token_layers` на сессию/модель | M | done: статический шаблон `token_layer_template` в `Model`, штампуются только `k_off`/`v_off` |
-| 4.2 | Эффект от снятия некэшированных чтений env на CUDA-путях | S | todo |
+| 4.2 | Эффект от снятия некэшированных чтений env на CUDA-путях | S | done (`b742c28`): все `std::env::var` на путях запуска ядер CUDA сведены в `OnceLock` |
 | 4.3 | Что мешает не-Neox RoPE (Llama, Mistral) идти быстрыми GPU-путями | M | done: `RopeStyle::Norm` поддержан на GPU prefill/decode/verify + тест `norm_rope_gpu_parity` |
 | 4.4 | Studio: блокирующий I/O и contention на блокировках — по профилю | M | todo |
 

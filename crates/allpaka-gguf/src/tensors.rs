@@ -1,8 +1,8 @@
 //! Access to tensor data: the table, the mmap, and bounds-checked views.
 
+use crate::error::{GgufError, Result};
 use crate::metadata::{parse, Header};
 pub use allpaka_dtype::GgmlType;
-use anyhow::{bail, Context, Result};
 use memmap2::Mmap;
 use std::fs::File;
 use std::io::BufReader;
@@ -39,29 +39,34 @@ impl TensorInfo {
             self.ggml_type.block_bytes(),
         ) {
             (Some(be), Some(bb)) => (be, bb),
-            _ => bail!(
-                "tensor {:?} has unsupported ggml type {:?}",
-                self.name,
-                self.ggml_type
-            ),
+            _ => {
+                return Err(GgufError::unsupported_tensor_type(
+                    &self.name,
+                    self.ggml_type,
+                ))
+            }
         };
         let elements = self
             .dims
             .iter()
             .copied()
             .try_fold(1u64, u64::checked_mul)
-            .with_context(|| format!("tensor {:?}: element count overflows u64", self.name))?;
+            .ok_or_else(|| GgufError::Tensor {
+                name: self.name.clone(),
+                detail: "element count overflows u64".to_string(),
+            })?;
         if elements % be != 0 {
-            bail!(
-                "tensor {:?}: {} elements is not a whole number of {}-element blocks",
-                self.name,
-                elements,
-                be
-            );
+            return Err(GgufError::Tensor {
+                name: self.name.clone(),
+                detail: format!("{elements} elements is not a whole number of {be}-element blocks"),
+            });
         }
         (elements / be)
             .checked_mul(bb)
-            .with_context(|| format!("tensor {:?}: byte size overflows u64", self.name))
+            .ok_or_else(|| GgufError::Tensor {
+                name: self.name.clone(),
+                detail: "byte size overflows u64".to_string(),
+            })
     }
 }
 
@@ -87,14 +92,15 @@ impl GgufFile {
         let mut merged = Vec::new();
         let mut header = None;
         for (pi, p) in split_paths(path)?.into_iter().enumerate() {
-            let file = File::open(&p).with_context(|| format!("opening {}", p.display()))?;
+            let file = File::open(&p)
+                .map_err(|e| GgufError::io_ctx(format!("opening {}", p.display()), e))?;
             let mut h = parse(&mut BufReader::new(&file))
-                .with_context(|| format!("parsing {}", p.display()))?;
+                .map_err(|e| e.with_context(format!("parsing {}", p.display())))?;
             // Safety: the map is read-only; a concurrent writer to the file would
             // be undefined behaviour, which is the standard mmap trade every
             // GGUF-serving runtime makes.
             let mmap = unsafe { Mmap::map(&file) }
-                .with_context(|| format!("memory-mapping {}", p.display()))?;
+                .map_err(|e| GgufError::io_ctx(format!("memory-mapping {}", p.display()), e))?;
             data_offsets.push(h.data_offset);
             for mut t in std::mem::take(&mut h.tensors) {
                 t.part = pi;
@@ -105,7 +111,7 @@ impl GgufFile {
             }
             mmaps.push(mmap);
         }
-        let header = header.context("no split parts")?;
+        let header = header.ok_or_else(|| GgufError::Format("no split parts".to_string()))?;
         let mut tensor_index = std::collections::HashMap::with_capacity(merged.len());
         for (idx, t) in merged.iter().enumerate() {
             tensor_index.entry(t.name.clone()).or_insert(idx);
@@ -182,20 +188,29 @@ impl GgufFile {
         let start = self
             .data_offsets
             .get(t.part)
-            .with_context(|| format!("tensor {:?}: bad split part", t.name))?
+            .ok_or_else(|| GgufError::Tensor {
+                name: t.name.clone(),
+                detail: "bad split part".to_string(),
+            })?
             .checked_add(t.offset)
-            .with_context(|| format!("tensor {:?}: offset overflows", t.name))?;
+            .ok_or_else(|| GgufError::Tensor {
+                name: t.name.clone(),
+                detail: "offset overflows".to_string(),
+            })?;
         let len = t.byte_size()?;
-        let end = start
-            .checked_add(len)
-            .with_context(|| format!("tensor {:?}: size overflows", t.name))?;
+        let end = start.checked_add(len).ok_or_else(|| GgufError::Tensor {
+            name: t.name.clone(),
+            detail: "size overflows".to_string(),
+        })?;
         let mmap = &self.mmaps[t.part];
         if end > mmap.len() as u64 {
-            bail!(
-                "tensor {:?} claims bytes {start}..{end}, but the file has only {}",
-                t.name,
-                mmap.len()
-            );
+            return Err(GgufError::Tensor {
+                name: t.name.clone(),
+                detail: format!(
+                    "claims bytes {start}..{end}, but the file has only {}",
+                    mmap.len()
+                ),
+            });
         }
         Ok(&mmap[start as usize..end as usize])
     }
@@ -239,8 +254,18 @@ impl GgufFile {
 
     /// One tensor dequantised to f32, allocated fresh.
     pub fn dequant(&self, t: &TensorInfo) -> Result<Vec<f32>> {
-        crate::dequant::dequant(t.ggml_type, self.data(t)?, t.elements() as usize)
-            .with_context(|| format!("dequantising tensor {:?}", t.name))
+        crate::dequant::dequant(t.ggml_type, self.data(t)?, t.elements() as usize).map_err(|e| {
+            match e {
+                GgufError::Dequant { detail, .. } => GgufError::Dequant {
+                    tensor: Some(t.name.clone()),
+                    detail,
+                },
+                other => GgufError::Dequant {
+                    tensor: Some(t.name.clone()),
+                    detail: other.to_string(),
+                },
+            }
+        })
     }
 }
 
@@ -268,7 +293,9 @@ pub fn fingerprint(path: &Path) -> Result<String> {
             read += n as u64;
         }
         if read != expected {
-            bail!("GGUF part changed while computing identity");
+            return Err(GgufError::Format(
+                "GGUF part changed while computing identity".to_string(),
+            ));
         }
     }
     use std::fmt::Write;
@@ -309,7 +336,7 @@ fn split_paths(path: &Path) -> Result<Vec<std::path::PathBuf>> {
     for i in 1..=total {
         let p = path.with_file_name(format!("{base}-{i:05}-of-{total:05}.gguf"));
         if !p.exists() {
-            bail!("split GGUF part missing: {}", p.display());
+            return Err(GgufError::MissingSplitPart(p));
         }
         out.push(p);
     }

@@ -14,21 +14,15 @@ pub(crate) enum RuleKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ManifestKind {
-    #[serde(rename = "local_guardrail_policy")]
-    LocalGuardrailPolicy,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Stage {
+pub(crate) enum GuardrailStage {
     Input,
     Output,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Action {
+pub enum GuardrailAction {
     Observe,
     Block,
 }
@@ -44,7 +38,7 @@ pub(crate) struct Rule {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Manifest {
-    pub kind: ManifestKind,
+    pub kind: String,
     pub schema_version: u32,
     pub policy_sha256: String,
     pub rules: Vec<Rule>,
@@ -101,14 +95,19 @@ impl Manifest {
         }
         let policy_sha256 = crate::storage::hex_sha256(&bytes);
         Ok(Self {
-            kind: ManifestKind::LocalGuardrailPolicy,
+            kind: "local_guardrail_policy".into(),
             schema_version: 1,
             policy_sha256,
             rules,
         })
     }
 
-    pub fn check(&self, text: &str, stage: Stage, action: Action) -> Result<Value> {
+    pub fn check(
+        &self,
+        text: &str,
+        stage: GuardrailStage,
+        action: GuardrailAction,
+    ) -> Result<Value> {
         self.validate()?;
         if text.len() > 64000 {
             bail!("Guardrail text exceeds 64000 UTF-8 bytes");
@@ -138,13 +137,22 @@ impl Manifest {
             })
             .collect::<Vec<_>>();
         let passed = rules.iter().all(|rule| rule["passed"] == true);
-        Ok(
-            json!({"kind":"local_guardrail","schema_version":1,"stage":stage,"action":action,"passed":passed,"blocked":!passed&&action==Action::Block,"rules":rules,"policy_sha256":self.policy_sha256,"provider_calls":0,"content_captured":false}),
-        )
+        Ok(json!({
+            "kind": "local_guardrail",
+            "schema_version": 1,
+            "stage": stage,
+            "action": action,
+            "passed": passed,
+            "blocked": !passed && action == GuardrailAction::Block,
+            "rules": rules,
+            "policy_sha256": self.policy_sha256,
+            "provider_calls": 0,
+            "content_captured": false,
+        }))
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.kind != ManifestKind::LocalGuardrailPolicy || self.schema_version != 1 {
+        if self.kind != "local_guardrail_policy" || self.schema_version != 1 {
             bail!("Invalid policy schema");
         }
         let expected = Self::create(self.rules.clone())?;
@@ -184,10 +192,12 @@ mod tests {
             value: json!(0),
         };
         assert!(Manifest::create(vec![rule.clone(), rule]).is_err());
-        assert!(
-            serde_json::from_value::<Rule>(json!({"id":"x","kind":"unknown","value":true}))
-                .is_err()
-        );
+        assert!(serde_json::from_value::<Rule>(json!({
+            "id": "unknown",
+            "kind": "unsupported_kind",
+            "value": true,
+        }))
+        .is_err());
     }
     #[test]
     fn persistent_store_roundtrip_and_corruption() {
@@ -236,12 +246,18 @@ mod tests {
         .unwrap();
         assert_eq!(
             manifest
-                .check("Привет ready", Stage::Output, Action::Block)
+                .check(
+                    "Привет ready",
+                    GuardrailStage::Output,
+                    GuardrailAction::Block
+                )
                 .unwrap()["passed"],
             true
         );
         for text in ["Привет", "привет ready", "ready"] {
-            let receipt = manifest.check(text, Stage::Output, Action::Block).unwrap();
+            let receipt = manifest
+                .check(text, GuardrailStage::Output, GuardrailAction::Block)
+                .unwrap();
             assert_eq!(receipt["blocked"], true);
             assert_eq!(receipt["rules"][0]["kind"], "required_substrings");
             assert!(!receipt.to_string().contains("Привет"));
@@ -253,7 +269,7 @@ mod tests {
         }
         assert_eq!(
             manifest
-                .check("ready", Stage::Input, Action::Observe)
+                .check("ready", GuardrailStage::Input, GuardrailAction::Observe)
                 .unwrap()["blocked"],
             false
         );
@@ -275,15 +291,21 @@ mod tests {
         }])
         .unwrap();
         assert_eq!(
-            length.check("яя", Stage::Input, Action::Block).unwrap()["passed"],
+            length
+                .check("яя", GuardrailStage::Input, GuardrailAction::Block)
+                .unwrap()["passed"],
             true
         );
         assert_eq!(
-            length.check("яяX", Stage::Input, Action::Block).unwrap()["blocked"],
+            length
+                .check("яяX", GuardrailStage::Input, GuardrailAction::Block)
+                .unwrap()["blocked"],
             true
         );
         assert_eq!(
-            length.check("яяX", Stage::Output, Action::Observe).unwrap()["blocked"],
+            length
+                .check("яяX", GuardrailStage::Output, GuardrailAction::Observe)
+                .unwrap()["blocked"],
             false
         );
         let manifest = Manifest::create(vec![Rule {
@@ -299,23 +321,30 @@ mod tests {
             "{\"nested\":{\"a\":1,\"a\":2}}",
         ] {
             assert_eq!(
-                manifest.check(text, Stage::Output, Action::Block).unwrap()["blocked"],
+                manifest
+                    .check(text, GuardrailStage::Output, GuardrailAction::Block)
+                    .unwrap()["blocked"],
                 true
             );
         }
         assert_eq!(
             manifest
-                .check("{\"a\":[true,null,1]}", Stage::Output, Action::Block)
+                .check(
+                    "{\"a\":[true,null,1]}",
+                    GuardrailStage::Output,
+                    GuardrailAction::Block
+                )
                 .unwrap()["passed"],
             true
         );
         assert!(manifest
-            .check(&"x".repeat(64001), Stage::Input, Action::Observe)
+            .check(
+                &"x".repeat(64001),
+                GuardrailStage::Input,
+                GuardrailAction::Observe
+            )
             .is_err());
-        assert!(serde_json::from_value::<Check>(
-            json!({"text":"{}","stage":"unknown","action":"block"})
-        )
-        .is_err());
+        assert!(serde_json::from_value::<GuardrailStage>(json!("unknown")).is_err());
         let private = Manifest::create(vec![Rule {
             id: "literal".into(),
             kind: RuleKind::ForbiddenSubstrings,
@@ -323,7 +352,7 @@ mod tests {
         }])
         .unwrap();
         let receipt = private
-            .check("PRIVATE", Stage::Input, Action::Block)
+            .check("PRIVATE", GuardrailStage::Input, GuardrailAction::Block)
             .unwrap();
         assert_eq!(receipt["blocked"], true);
         assert!(!receipt.to_string().contains("PRIVATE"));
@@ -349,7 +378,7 @@ mod tests {
         let selection = Selection {
             input_policy_sha256: manifest.policy_sha256.clone(),
             output_policy_sha256: manifest.policy_sha256.clone(),
-            action: Action::Block,
+            action: GuardrailAction::Block,
         };
         let prepared = selection.prepare(&store).unwrap();
         std::fs::write(store.path(&manifest.policy_sha256).unwrap(), b"corrupt").unwrap();
@@ -495,21 +524,12 @@ impl Store {
     }
 }
 
-async fn run_blocking<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T> + Send + 'static,
-) -> Result<T, crate::ApiError> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(crate::internal)?
-        .map_err(crate::bad_request)
-}
-
 pub(crate) async fn save_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     body: axum::body::Bytes,
 ) -> crate::ApiResult<Value> {
     let data = app.data.clone();
-    run_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
         if body.len() > 128 * 1024 {
             bail!("Policy file exceeds 128 KiB");
         }
@@ -519,16 +539,24 @@ pub(crate) async fn save_api(
         Ok(json!({"policy":saved,"provider_calls":0}))
     })
     .await
-    .map(axum::Json)
+    .map_err(|error| crate::error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    result
+        .map(axum::Json)
+        .map_err(|error| crate::error(axum::http::StatusCode::BAD_REQUEST, error))
 }
 pub(crate) async fn get_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Path(hash): axum::extract::Path<String>,
 ) -> crate::ApiResult<Value> {
     let data = app.data.clone();
-    run_blocking(move || Ok(json!({"policy":Store::open(&data)?.get(&hash)?,"provider_calls":0})))
-        .await
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        Ok(json!({"policy":Store::open(&data)?.get(&hash)?,"provider_calls":0}))
+    })
+    .await
+    .map_err(|error| crate::error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    result
         .map(axum::Json)
+        .map_err(|error| crate::error(axum::http::StatusCode::BAD_REQUEST, error))
 }
 
 #[derive(Deserialize)]
@@ -547,9 +575,14 @@ pub(crate) async fn list_api(
     axum::extract::Query(page): axum::extract::Query<Page>,
 ) -> crate::ApiResult<Value> {
     let data = app.data.clone();
-    run_blocking(move || Store::open(&data)?.list(page.offset, page.limit))
-        .await
+    let result = tokio::task::spawn_blocking(move || {
+        Store::open(&data).and_then(|store| store.list(page.offset, page.limit))
+    })
+    .await
+    .map_err(|error| crate::error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    result
         .map(axum::Json)
+        .map_err(|error| crate::error(axum::http::StatusCode::BAD_REQUEST, error))
 }
 
 #[derive(Deserialize)]
@@ -562,7 +595,7 @@ pub(crate) async fn create_api(
     body: axum::body::Bytes,
 ) -> crate::ApiResult<Value> {
     let data = app.data.clone();
-    run_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
         if body.len() > 128 * 1024 {
             bail!("Policy request exceeds 128 KiB");
         }
@@ -572,15 +605,18 @@ pub(crate) async fn create_api(
         Ok(json!({"policy":Store::open(&data)?.put(&manifest)?,"provider_calls":0}))
     })
     .await
-    .map(axum::Json)
+    .map_err(|error| crate::error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    result
+        .map(axum::Json)
+        .map_err(|error| crate::error(axum::http::StatusCode::BAD_REQUEST, error))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Check {
     text: String,
-    stage: Stage,
-    action: Action,
+    stage: GuardrailStage,
+    action: GuardrailAction,
 }
 pub(crate) async fn check_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
@@ -588,7 +624,7 @@ pub(crate) async fn check_api(
     body: axum::body::Bytes,
 ) -> crate::ApiResult<Value> {
     let data = app.data.clone();
-    run_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
         if body.len() > 512 * 1024 {
             bail!("Guardrail request exceeds 512 KiB");
         }
@@ -599,7 +635,10 @@ pub(crate) async fn check_api(
             .check(&request.text, request.stage, request.action)
     })
     .await
-    .map(axum::Json)
+    .map_err(|error| crate::error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    result
+        .map(axum::Json)
+        .map_err(|error| crate::error(axum::http::StatusCode::BAD_REQUEST, error))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -607,16 +646,16 @@ pub(crate) async fn check_api(
 pub struct Selection {
     pub input_policy_sha256: String,
     pub output_policy_sha256: String,
-    pub action: Action,
+    pub action: GuardrailAction,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Prepared {
     input: Manifest,
     output: Manifest,
-    action: Action,
+    action: GuardrailAction,
 }
 impl Selection {
-    pub fn prepare(&self, store: &Store) -> Result<Prepared> {
+    pub(crate) fn prepare(&self, store: &Store) -> Result<Prepared> {
         Ok(Prepared {
             input: store.get(&self.input_policy_sha256)?,
             output: store.get(&self.output_policy_sha256)?,
@@ -626,12 +665,12 @@ impl Selection {
 }
 impl Prepared {
     pub fn input(&self, text: &str) -> Result<Value> {
-        self.input.check(text, Stage::Input, self.action)
+        self.input.check(text, GuardrailStage::Input, self.action)
     }
     pub fn output(&self, text: &str) -> Result<Value> {
-        self.output.check(text, Stage::Output, self.action)
+        self.output.check(text, GuardrailStage::Output, self.action)
     }
     pub fn buffers_output(&self) -> bool {
-        self.action == Action::Block
+        self.action == GuardrailAction::Block
     }
 }

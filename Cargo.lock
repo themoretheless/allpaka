@@ -113,7 +113,6 @@ name = "allpaka-gguf"
 version = "0.1.0"
 dependencies = [
  "allpaka-dtype",
- "anyhow",
  "memmap2",
  "sha2",
 ]

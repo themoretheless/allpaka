@@ -295,12 +295,15 @@ pub(crate) async fn list(
     Path(id): Path<String>,
     Query(q): Query<Search>,
 ) -> crate::ApiResult<Value> {
-    app.observability
-        .validate_target(&id, None)
-        .and_then(|_| app.feedback.load(&id, q.version))
-        .map(response)
-        .map(Json)
-        .map_err(crate::bad_request)
+    crate::blocking(move || {
+        app.observability
+            .validate_target(&id, None)
+            .and_then(|_| app.feedback.load(&id, q.version))
+            .map(response)
+            .map(Json)
+            .map_err(crate::bad_request)
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -318,11 +321,14 @@ pub(crate) async fn history(
     Path(id): Path<String>,
     Query(query): Query<HistoryQuery>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        app.observability.validate_target(&id, None)?;
-        app.feedback.history(&id, query.offset, query.limit)
-    })();
-    result.map(Json).map_err(crate::bad_request)
+    crate::blocking(move || {
+        let result = (|| -> Result<Value> {
+            app.observability.validate_target(&id, None)?;
+            app.feedback.history(&id, query.offset, query.limit)
+        })();
+        result.map(Json).map_err(crate::bad_request)
+    })
+    .await
 }
 impl Store {
     fn history(&self, id: &str, offset: usize, limit: usize) -> Result<Value> {
@@ -353,21 +359,24 @@ pub(crate) async fn save(
     Path(id): Path<String>,
     Json(request): Json<Save>,
 ) -> crate::ApiResult<Value> {
-    app.observability
-        .validate_target(&id, request.annotation.span_id)
-        .and_then(|_| app.feedback.save(&id, request))
-        .map(response)
-        .map(Json)
-        .map_err(|e| {
-            crate::error(
-                if e.is::<Conflict>() {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::BAD_REQUEST
-                },
-                e,
-            )
-        })
+    crate::blocking(move || {
+        app.observability
+            .validate_target(&id, request.annotation.span_id)
+            .and_then(|_| app.feedback.save(&id, request))
+            .map(response)
+            .map(Json)
+            .map_err(|e| {
+                crate::error(
+                    if e.is::<Conflict>() {
+                        StatusCode::CONFLICT
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    e,
+                )
+            })
+    })
+    .await
 }
 #[cfg(test)]
 mod tests {

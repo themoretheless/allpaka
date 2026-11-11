@@ -75,52 +75,55 @@ pub(crate) async fn save_api(
     axum::extract::State(app): axum::extract::State<App>,
     axum::Json(definition): axum::Json<Definition>,
 ) -> crate::ApiResult<Value> {
-    let outcome = (|| -> Result<_> {
-        crate::validate_settings(&definition.settings, &app)?;
-        if definition.settings.mode != Mode::Chat
-            || definition.settings.allow_writes
-            || definition.rubric.trim().is_empty()
-            || definition.rubric.len() > 16000
-        {
-            bail!("Invalid model evaluator settings/rubric");
-        }
-        let hash = digest(&definition)?;
-        let packet = Snapshot {
-            kind: "online_model_evaluator".into(),
-            schema_version: 1,
-            evaluator_id: format!("model_quality.{hash}"),
-            evaluator_version: 1,
-            evaluator_sha256: hash.clone(),
-            definition,
-        };
-        if serde_json::to_vec(&packet)?.len() > 64000 {
-            bail!("Model evaluator exceeds write bound");
-        }
-        let _lock = WRITES
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Model evaluator lock unavailable"))?;
-        let root = directory(&app.data)?;
-        let path = root.join(format!("{hash}.json"));
-        if path.try_exists()? {
-            return Ok(serde_json::to_value(read(&app.data, &hash)?)?);
-        }
-        let mut count = 0;
-        for entry in std::fs::read_dir(&root)? {
-            let entry = entry?;
-            if entry.path().extension().and_then(|v| v.to_str()) != Some("json") {
-                continue;
+    crate::blocking(move || {
+        let outcome = (|| -> Result<_> {
+            crate::validate_settings(&definition.settings, &app)?;
+            if definition.settings.mode != Mode::Chat
+                || definition.settings.allow_writes
+                || definition.rubric.trim().is_empty()
+                || definition.rubric.len() > 16000
+            {
+                bail!("Invalid model evaluator settings/rubric");
             }
-            count += 1;
-            if count >= 1000 || !entry.file_type()?.is_file() {
-                bail!("Model evaluator capacity reached");
+            let hash = digest(&definition)?;
+            let packet = Snapshot {
+                kind: "online_model_evaluator".into(),
+                schema_version: 1,
+                evaluator_id: format!("model_quality.{hash}"),
+                evaluator_version: 1,
+                evaluator_sha256: hash.clone(),
+                definition,
+            };
+            if serde_json::to_vec(&packet)?.len() > 64000 {
+                bail!("Model evaluator exceeds write bound");
             }
-        }
-        crate::evaluation::commit_new(&path, &packet)?;
-        Ok(serde_json::to_value(packet)?)
-    })();
-    outcome
-        .map(axum::Json)
-        .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+            let _lock = WRITES
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Model evaluator lock unavailable"))?;
+            let root = directory(&app.data)?;
+            let path = root.join(format!("{hash}.json"));
+            if path.try_exists()? {
+                return Ok(serde_json::to_value(read(&app.data, &hash)?)?);
+            }
+            let mut count = 0;
+            for entry in std::fs::read_dir(&root)? {
+                let entry = entry?;
+                if entry.path().extension().and_then(|v| v.to_str()) != Some("json") {
+                    continue;
+                }
+                count += 1;
+                if count >= 1000 || !entry.file_type()?.is_file() {
+                    bail!("Model evaluator capacity reached");
+                }
+            }
+            crate::evaluation::commit_new(&path, &packet)?;
+            Ok(serde_json::to_value(packet)?)
+        })();
+        outcome
+            .map(axum::Json)
+            .map_err(|e| crate::error(axum::http::StatusCode::BAD_REQUEST, e))
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,20 +135,23 @@ pub(crate) async fn read_api(
     axum::extract::Path(hash): axum::extract::Path<String>,
     axum::extract::Query(scope): axum::extract::Query<Scope>,
 ) -> crate::ApiResult<Value> {
-    let outcome = (|| -> Result<_> {
-        crate::memory::project_exists(&app, &scope.project_id)?;
-        let packet = read(&app.data, &hash)?;
-        if packet.definition.settings.project_id != scope.project_id {
-            bail!("Model evaluator project mismatch");
-        }
-        Ok(serde_json::to_value(packet)?)
-    })();
-    outcome.map(axum::Json).map_err(|_| {
-        crate::error(
-            axum::http::StatusCode::NOT_FOUND,
-            "Model evaluator unavailable or invalid",
-        )
+    crate::blocking(move || {
+        let outcome = (|| -> Result<_> {
+            crate::memory::project_exists(&app, &scope.project_id)?;
+            let packet = read(&app.data, &hash)?;
+            if packet.definition.settings.project_id != scope.project_id {
+                bail!("Model evaluator project mismatch");
+            }
+            Ok(serde_json::to_value(packet)?)
+        })();
+        outcome.map(axum::Json).map_err(|_| {
+            crate::error(
+                axum::http::StatusCode::NOT_FOUND,
+                "Model evaluator unavailable or invalid",
+            )
+        })
     })
+    .await
 }
 pub(crate) fn validate_rule(data: &Path, rule: &crate::online_evaluation::Rule) -> Result<()> {
     if let Some(hash) = rule.evaluator_id.strip_prefix("model_quality.") {

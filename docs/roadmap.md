@@ -215,7 +215,7 @@ GPU-зависимые `scripts/test-serving-controls.py`, `scripts/test-serving
 
 ### D3. Распил `crates/allpaka-backend/src/gpu/` — сделано
 
-`metal.rs` разложен на `gpu/metal/{device,region,select,telemetry,matvec,attn,args,ffn_grouped,decode,verify,prefill,mega}.rs`,
+`metal.rs` разложен на `gpu/metal/{device,region,select,telemetry,matvec,attn,args,ffn_grouped,decode,verify,prefill,mega}.rs`, шейдеры подключаются из единого источника `shaders/kernels.metal` (`2d8cc16`),
 `cuda/mod.rs` и `cuda/runtime.rs` — на `gpu/cuda/{region,attn,decode,decode_fused,prefill,ffn_grouped}` и
 `gpu/cuda/runtime/{device,select,embed,gemm,q8,l2,matvec}`, общие таблицы вынесены в `gpu/common.rs`.
 Все parity-тесты и `scripts/check-backends.sh` зелёные.
@@ -239,7 +239,7 @@ GPU-зависимые `scripts/test-serving-controls.py`, `scripts/test-serving
 
 `PlanItem.status` переведён на `PlanStatus` (`Pending | InProgress | Completed`,
 `#[serde(rename_all = "snake_case")]`) в `crates/allpaka-chat/src/types.rs` с
-сохранением проволочного контракта.
+сохранением проволочного контракта, покрыт `status_wire_tests` и сквозными тестами Studio.
 
 ## Приложение: предлагаемый CI (черновик, не применён)
 

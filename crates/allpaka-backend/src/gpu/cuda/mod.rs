@@ -87,10 +87,13 @@ pub fn has_device_rope_freq() -> bool {
 
 /// Prefer on-GPU token_embd dequant (skip host embd.row + x H2D). Opt-in: ALLPAKA_GPU_EMBED=1.
 pub fn prefer_gpu_embed() -> bool {
+    static PREFER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     is_attached()
-        && std::env::var("ALLPAKA_GPU_EMBED")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+        && *PREFER.get_or_init(|| {
+            std::env::var("ALLPAKA_GPU_EMBED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        })
 }
 
 pub fn can_embed_on_gpu(ty: GgmlType, bytes: &[u8], n_in: usize) -> bool {
