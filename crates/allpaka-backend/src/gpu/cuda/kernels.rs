@@ -131,6 +131,49 @@ extern "C" __global__ void rmsnorm_f32(
     }
 }
 
+// x[row] += a[row]; dst[row] = rmsnorm(x[row]) * w. One block per row.
+// residual_add followed by rmsnorm_into_f32 in one launch (same math).
+extern "C" __global__ void add_rmsnorm_into_f32(
+    float* __restrict__ dst,
+    float* __restrict__ x,
+    const float* __restrict__ a,
+    const float* __restrict__ w,
+    unsigned n,
+    float eps,
+    unsigned rows)
+{
+    unsigned row = blockIdx.x;
+    if (row >= rows) return;
+    float* xr = x + (size_t)row * n;
+    const float* ar = a + (size_t)row * n;
+    float* dr = dst + (size_t)row * n;
+    __shared__ float wsum[32];
+    pdl_sync();
+    float local = 0.f;
+    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
+        float v = xr[i] + ar[i];
+        xr[i] = v;
+        local += v * v;
+    }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) local += __shfl_xor_sync(0xffffffffu, local, off);
+    unsigned lane = threadIdx.x & 31u, warp = threadIdx.x >> 5;
+    if (lane == 0) wsum[warp] = local;
+    __syncthreads();
+    if (warp == 0) {
+        unsigned nw = blockDim.x >> 5;
+        float s = lane < nw ? wsum[lane] : 0.f;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) s += __shfl_xor_sync(0xffffffffu, s, off);
+        if (lane == 0) wsum[0] = s;
+    }
+    __syncthreads();
+    float scale = rsqrtf(wsum[0] / (float)n + eps);
+    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
+        dr[i] = xr[i] * scale * w[i];
+    }
+}
+
 extern "C" __global__ void rmsnorm_into_f32(
     float* __restrict__ dst,
     const float* __restrict__ src,
@@ -830,6 +873,100 @@ extern "C" __global__ void rope_neox_batch(
         float b = xh[i + half_n];
         xh[i] = a * cosv - b * sinv;
         xh[i + half_n] = a * sinv + b * cosv;
+    }
+}
+
+// Prefill per-head RMSNorm (optional) + RoPE NeoX in one pass, one warp per
+// (token, head). x: [m, heads, head_dim]; rope: [m, rot_dim/2] (sin,cos).
+// store == 0 writes x back in place; store != 0 writes the result as f16 to
+// cache[cache_off + (pos0+row)*kv_dim + h*head_dim + i] instead (the K path:
+// the f32 K is dead after store_kv). NJ = head_dim/32, HJ = rot_dim/64, so
+// each lane owns both elements of a rotation pair. Same math as rmsnorm_f32
+// followed by rope_neox_batch (and store_kv_batch_f16 for K).
+template <int NJ, int HJ>
+__device__ __forceinline__ void prefill_norm_rope_body(
+    float* __restrict__ x, const float* __restrict__ w, const float* __restrict__ rope,
+    uint16_t* __restrict__ cache, unsigned long long cache_off, unsigned warp, unsigned lane,
+    unsigned heads, float eps, unsigned has_norm, unsigned kv_dim, unsigned pos0, unsigned store)
+{
+    const unsigned head_dim = NJ * 32;
+    unsigned row = warp / heads;
+    unsigned h = warp - row * heads;
+    float* xh = x + (size_t)warp * head_dim;
+    float v[NJ];
+    float ss = 0.f;
+    #pragma unroll
+    for (int j = 0; j < NJ; j++) {
+        v[j] = xh[lane + 32 * j];
+        ss += v[j] * v[j];
+    }
+    if (has_norm) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, off);
+        float scale = rsqrtf(ss / (float)head_dim + eps);
+        #pragma unroll
+        for (int j = 0; j < NJ; j++) v[j] = v[j] * scale * w[lane + 32 * j];
+    }
+    const float* rh = rope + (size_t)row * (HJ * 32) * 2;
+    #pragma unroll
+    for (int j = 0; j < HJ; j++) {
+        unsigned i = lane + 32 * j;
+        float2 sc = *reinterpret_cast<const float2*>(rh + 2 * i);
+        float a = v[j];
+        float b = v[j + HJ];
+        v[j] = a * sc.y - b * sc.x;
+        v[j + HJ] = a * sc.x + b * sc.y;
+    }
+    if (store) {
+        uint16_t* dst = cache + cache_off + (unsigned long long)(pos0 + row) * kv_dim
+            + (size_t)h * head_dim;
+        #pragma unroll
+        for (int j = 0; j < NJ; j++) dst[lane + 32 * j] = f32_to_half_bits(v[j]);
+    } else {
+        #pragma unroll
+        for (int j = 0; j < NJ; j++) xh[lane + 32 * j] = v[j];
+    }
+}
+
+extern "C" __global__ void prefill_norm_rope(
+    float* __restrict__ x,
+    const float* __restrict__ w,
+    const float* __restrict__ rope,
+    uint16_t* __restrict__ cache,
+    unsigned long long cache_off,
+    unsigned m,
+    unsigned heads,
+    unsigned head_dim,
+    unsigned rot_dim,
+    float eps,
+    unsigned has_norm,
+    unsigned kv_dim,
+    unsigned pos0,
+    unsigned store)
+{
+    pdl_sync();
+    unsigned warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    unsigned lane = threadIdx.x & 31;
+    if (warp >= m * heads) return;
+    unsigned key = (head_dim << 16) | rot_dim;
+    switch (key) {
+    case (128u << 16) | 128u:
+        prefill_norm_rope_body<4, 2>(x, w, rope, cache, cache_off, warp, lane, heads, eps, has_norm, kv_dim, pos0, store);
+        break;
+    case (128u << 16) | 64u:
+        prefill_norm_rope_body<4, 1>(x, w, rope, cache, cache_off, warp, lane, heads, eps, has_norm, kv_dim, pos0, store);
+        break;
+    case (64u << 16) | 64u:
+        prefill_norm_rope_body<2, 1>(x, w, rope, cache, cache_off, warp, lane, heads, eps, has_norm, kv_dim, pos0, store);
+        break;
+    case (256u << 16) | 256u:
+        prefill_norm_rope_body<8, 4>(x, w, rope, cache, cache_off, warp, lane, heads, eps, has_norm, kv_dim, pos0, store);
+        break;
+    case (256u << 16) | 128u:
+        prefill_norm_rope_body<8, 2>(x, w, rope, cache, cache_off, warp, lane, heads, eps, has_norm, kv_dim, pos0, store);
+        break;
+    default:
+        break;
     }
 }
 

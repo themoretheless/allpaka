@@ -21,6 +21,7 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
             .memcpy_htod(xs, &mut gpu.pf_x.slice_mut(0..xs.len()))
             .ok()?;
         gpu.pf_active = true;
+        gpu.pf_pending_add = None;
         gpu.pf_len = xs.len();
         gpu.pf_ffn_done = false;
         gpu.pf_rope_n = 0;
@@ -85,6 +86,7 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
         if !gpu.pf_active || xs.len() != gpu.pf_len {
             return None;
         }
+        gpu.pf_flush_add()?;
         if gpu.pf_capturing {
             // See decode_fused.rs: no zero variant; AUTO_FREE_ON_LAUNCH is a no-op here.
             let graph_flags =
@@ -119,6 +121,7 @@ pub fn prefill_abort() {
     let _ = with_gpu(|gpu| {
         gpu.pf_active = false;
         gpu.pf_ffn_done = false;
+        gpu.pf_pending_add = None;
         Some(())
     });
 }
@@ -177,8 +180,7 @@ pub(super) fn try_prefill_attn_fused_dev(
 
         // attn RMSNorm: pf_x -> pf_hs
         {
-            let w = norm_f32_bytes(fusion.attn_norm, hidden)?;
-            rmsnorm_pf_x_into_hs(gpu, &w, hidden, m, req.eps)?;
+            rmsnorm_pf_x_into_hs(gpu, fusion.attn_norm, hidden, m, req.eps)?;
         }
         if gpu.pf_rope_n != rope_host.len() {
             gpu.stream
@@ -260,23 +262,17 @@ pub(super) fn try_prefill_attn_fused_dev(
 
         crate::gpu::cuda::ggml::prepare_for_cudarc();
         let stream = Arc::clone(&gpu.stream);
-        // Stage head-norm weights before taking device ptrs (borrowck).
-        if let Some(wn) = req.q_norm {
-            if wn.len() < hd {
-                return None;
-            }
-            stream
-                .memcpy_htod(&wn[..hd], &mut gpu.x_arena.slice_mut(qn_at..qn_at + hd))
-                .ok()?;
-        }
-        if let Some(wn) = req.k_norm {
-            if wn.len() < hd {
-                return None;
-            }
-            stream
-                .memcpy_htod(&wn[..hd], &mut gpu.x_arena.slice_mut(kn_at..kn_at + hd))
-                .ok()?;
-        }
+        // Head-norm weights: persistent device copies (no per-layer H2D).
+        let qn_dev = match req.q_norm {
+            Some(wn) if wn.len() >= hd => Some(dev_f32(gpu, wn.as_ptr() as usize, &wn[..hd])?),
+            Some(_) => return None,
+            None => None,
+        };
+        let kn_dev = match req.k_norm {
+            Some(wn) if wn.len() >= hd => Some(dev_f32(gpu, wn.as_ptr() as usize, &wn[..hd])?),
+            Some(_) => return None,
+            None => None,
+        };
         if let Some((qb, kb, vb)) = req.attn_bias {
             let qb = norm_f32_bytes(qb, q_dim)?;
             let kb = norm_f32_bytes(kb, kv)?;
@@ -320,7 +316,82 @@ pub(super) fn try_prefill_attn_fused_dev(
             let (ybase, _yg) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
             let (xbase, _xg) = DevicePtr::device_ptr(&gpu.x_arena, &stream);
 
-            if req.q_norm.is_some() {
+            let fused_nr = crate::runtime::get().cuda_pf_norm_rope
+                && matches!(
+                    (hd, rot),
+                    (128, 128) | (128, 64) | (64, 64) | (256, 256) | (256, 128)
+                );
+            if fused_nr {
+                // Q in place; K straight into the f16 cache (replaces the
+                // separate norm, rope and K store_kv launches).
+                let f = gpu.func_owned("prefill_norm_rope")?;
+                let rp = xbase + (rope_at * 4) as u64;
+                let (cache_p, cg) = DevicePtr::device_ptr(&req.cache.buf, &stream);
+                drop(cg);
+                let m_u = m as u32;
+                let hd_u = hd as u32;
+                let rot_u = rot as u32;
+                let eps = req.eps;
+                let kv_u = kv as u32;
+                let pos_u = req.base as u32;
+                for (at, heads, wn, store, coff) in [
+                    (q_at, req.n_heads, qn_dev, 0u32, 0u64),
+                    (k_at, req.n_kv_heads, kn_dev, 1u32, req.k_off as u64),
+                ] {
+                    let xp = ybase + (at * 4) as u64;
+                    let wp = wn.unwrap_or(0);
+                    let has = wn.is_some() as u32;
+                    let heads_u = heads as u32;
+                    let threads = (m * heads * 32) as u32;
+                    let cfg = LaunchConfig {
+                        grid_dim: (threads.div_ceil(128), 1, 1),
+                        block_dim: (128, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    unsafe {
+                        stream
+                            .launch_builder_pdl(&f)
+                            .arg(&xp)
+                            .arg(&wp)
+                            .arg(&rp)
+                            .arg(&cache_p)
+                            .arg(&coff)
+                            .arg(&m_u)
+                            .arg(&heads_u)
+                            .arg(&hd_u)
+                            .arg(&rot_u)
+                            .arg(&eps)
+                            .arg(&has)
+                            .arg(&kv_u)
+                            .arg(&pos_u)
+                            .arg(&store)
+                            .launch_pdl(cfg)
+                    }
+                    .ok()?;
+                }
+                let f = gpu.func_owned("store_kv_batch_f16")?;
+                let cfg = LaunchConfig {
+                    grid_dim: (kv_u.div_ceil(256), m_u, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let v_off = req.v_off as u64;
+                let vp = ybase + (v_at * 4) as u64;
+                unsafe {
+                    stream
+                        .launch_builder_pdl(&f)
+                        .arg(&req.cache.buf)
+                        .arg(&vp)
+                        .arg(&v_off)
+                        .arg(&kv_u)
+                        .arg(&m_u)
+                        .arg(&pos_u)
+                        .launch_pdl(cfg)
+                }
+                .ok()?;
+            }
+
+            if !fused_nr && req.q_norm.is_some() {
                 let f = gpu.func_owned("rmsnorm_f32")?;
                 let n_u = hd as u32;
                 let rows_u = (m * req.n_heads) as u32;
@@ -331,7 +402,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                     shared_mem_bytes: 0,
                 };
                 let xp = ybase + (q_at * 4) as u64;
-                let wp = xbase + (qn_at * 4) as u64;
+                let wp = qn_dev?;
                 unsafe {
                     stream
                         .launch_builder_pdl(&f)
@@ -344,7 +415,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                 }
                 .ok()?;
             }
-            {
+            if !fused_nr {
                 let f = gpu.func_owned("rope_neox_batch")?;
                 let m_u = m as u32;
                 let heads_u = req.n_heads as u32;
@@ -370,7 +441,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                 }
                 .ok()?;
             }
-            if req.k_norm.is_some() {
+            if !fused_nr && req.k_norm.is_some() {
                 let f = gpu.func_owned("rmsnorm_f32")?;
                 let n_u = hd as u32;
                 let rows_u = (m * req.n_kv_heads) as u32;
@@ -381,7 +452,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                     shared_mem_bytes: 0,
                 };
                 let xp = ybase + (k_at * 4) as u64;
-                let wp = xbase + (kn_at * 4) as u64;
+                let wp = kn_dev?;
                 unsafe {
                     stream
                         .launch_builder_pdl(&f)
@@ -394,7 +465,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                 }
                 .ok()?;
             }
-            {
+            if !fused_nr {
                 let f = gpu.func_owned("rope_neox_batch")?;
                 let m_u = m as u32;
                 let heads_u = req.n_kv_heads as u32;
@@ -420,7 +491,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                 }
                 .ok()?;
             }
-            {
+            if !fused_nr {
                 let f = gpu.func_owned("store_kv_batch_f16")?;
                 let kv_u = kv as u32;
                 let m_u = m as u32;
@@ -567,27 +638,21 @@ pub(super) fn try_prefill_attn_fused_dev(
             },
         )?;
         crate::gpu::cuda::ggml::prepare_for_cudarc();
-        // residual into pf_x
+        // residual into pf_x + FFN RMSNorm into pf_hs, one launch
         {
-            let f_add = gpu.func_owned("residual_add")?;
-            let n = (m * hidden) as u32;
-            let cfg = CudaGpu::cfg_1d(n, 256);
-            let mut a = gpu.pf_x.slice_mut(0..m * hidden);
-            let b = gpu.y_arena.slice(proj_at..proj_at + m * hidden);
-            unsafe {
-                stream
-                    .launch_builder_pdl(&f_add)
-                    .arg(&mut a)
-                    .arg(&b)
-                    .arg(&n)
-                    .launch_pdl(cfg)
+            let proj_dev = {
+                let (p, g) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
+                drop(g);
+                p + (proj_at * 4) as u64
+            };
+            if crate::runtime::get().cuda_pf_defer_add {
+                add_rmsnorm_pf(gpu, proj_dev, fusion.ffn_norm, hidden, m, req.eps)?;
+            } else {
+                gpu.pf_flush_add()?;
+                gpu.pf_pending_add = Some((proj_dev, m * hidden));
+                gpu.pf_flush_add()?;
+                rmsnorm_pf_x_into_hs(gpu, fusion.ffn_norm, hidden, m, req.eps)?;
             }
-            .ok()?;
-        }
-        // FFN RMSNorm into pf_hs
-        {
-            let w = norm_f32_bytes(fusion.ffn_norm, hidden)?;
-            rmsnorm_pf_x_into_hs(gpu, &w, hidden, m, req.eps)?;
         }
         if fusion.n_expert == 0 {
             // No sync: dense FFN continues from pf_hs on-device.
@@ -733,7 +798,13 @@ pub(super) fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             },
         )?;
         crate::gpu::cuda::ggml::prepare_for_cudarc();
-        {
+        if crate::runtime::get().cuda_pf_defer_add {
+            // Fold the residual into the next layer's attention RMSNorm.
+            let (p, g) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
+            drop(g);
+            gpu.pf_flush_add()?;
+            gpu.pf_pending_add = Some((p + (down_at * 4) as u64, m * hidden));
+        } else {
             let f_add = gpu.func_owned("residual_add")?;
             let n = (m * hidden) as u32;
             let cfg = CudaGpu::cfg_1d(n, 256);
@@ -782,8 +853,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             if !gpu.pf_active || gpu.pf_len < req.m * hidden {
                 return None;
             }
-            let w = norm_f32_bytes(f.attn_norm, hidden)?;
-            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
+            rmsnorm_pf_x_into_hs(gpu, f.attn_norm, hidden, req.m, req.eps)?;
             gpu.sync()?;
             gpu.stream
                 .clone_dtoh(&gpu.pf_hs.slice(0..req.m * hidden))
@@ -945,6 +1015,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 return None;
             }
             gpu.ensure_arenas(proj.len() * 4, 4)?;
+            gpu.pf_flush_add()?;
             gpu.stream
                 .memcpy_htod(&proj, &mut gpu.y_arena.slice_mut(0..proj.len()))
                 .ok()?;
@@ -964,8 +1035,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 }
                 .ok()?;
             }
-            let w = norm_f32_bytes(f.ffn_norm, hidden)?;
-            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
+            rmsnorm_pf_x_into_hs(gpu, f.ffn_norm, hidden, req.m, req.eps)?;
             gpu.sync()?;
             if f.n_expert == 0 {
                 return Some(Vec::new());
@@ -991,8 +1061,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 if !gpu.pf_active || gpu.pf_len < req.m * req.hidden {
                     return None;
                 }
-                let w = norm_f32_bytes(f.ffn_norm, req.hidden)?;
-                rmsnorm_pf_x_into_hs(gpu, &w, req.hidden, req.m, req.eps)?;
+                rmsnorm_pf_x_into_hs(gpu, f.ffn_norm, req.hidden, req.m, req.eps)?;
                 gpu.sync()?;
                 if f.n_expert == 0 {
                     return Some(Vec::new());
@@ -1046,8 +1115,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             if !gpu.pf_active || gpu.pf_len < req.m * hidden {
                 return None;
             }
-            let w = norm_f32_bytes(f.attn_norm, hidden)?;
-            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
+            rmsnorm_pf_x_into_hs(gpu, f.attn_norm, hidden, req.m, req.eps)?;
             gpu.sync()?;
             gpu.stream
                 .clone_dtoh(&gpu.pf_hs.slice(0..req.m * hidden))
@@ -1362,6 +1430,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 return None;
             }
             gpu.ensure_arenas(proj.len() * 4, req.m * f.n_expert.max(1) * 4)?;
+            gpu.pf_flush_add()?;
             gpu.stream
                 .memcpy_htod(&proj, &mut gpu.y_arena.slice_mut(0..proj.len()))
                 .ok()?;
@@ -1381,8 +1450,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 }
                 .ok()?;
             }
-            let w = norm_f32_bytes(f.ffn_norm, hidden)?;
-            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
+            rmsnorm_pf_x_into_hs(gpu, f.ffn_norm, hidden, req.m, req.eps)?;
             gpu.sync()?;
             if f.n_expert == 0 {
                 return Some(Vec::new());

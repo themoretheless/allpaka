@@ -252,26 +252,60 @@ pub(super) fn norm_f32_bytes(raw: &[u8], n: usize) -> Option<Vec<f32>> {
     Some(v)
 }
 
-/// Upload RMSNorm weights into persistent VRAM scratch (no per-layer alloc).
-pub(super) fn upload_w_scratch(gpu: &mut CudaGpu, w: &[f32]) -> Option<u64> {
-    gpu.ensure_w_scratch(w.len())?;
-    gpu.stream
-        .memcpy_htod(w, &mut gpu.w_scratch.slice_mut(0..w.len()))
-        .ok()?;
+/// Device address of a small persistent host f32 tensor (Q/K norm weights),
+/// uploaded once. Keyed by host address with a content check so a freed and
+/// reused address never serves stale values. No per-call H2D, so prefill
+/// layers stop paying pageable copies and the address is graph-stable.
+pub(super) fn dev_f32(gpu: &mut CudaGpu, key: usize, host: &[f32]) -> Option<u64> {
+    let hit = matches!(gpu.f32_cache.get(&key), Some((h, _)) if h.as_slice() == host);
+    if !hit {
+        let mut d = gpu.stream.alloc_zeros::<f32>(host.len().max(1)).ok()?;
+        gpu.stream
+            .memcpy_htod(host, &mut d.slice_mut(0..host.len()))
+            .ok()?;
+        gpu.f32_cache.insert(key, (host.to_vec(), d));
+    }
     let stream = Arc::clone(&gpu.stream);
-    let (p, g) = DevicePtr::device_ptr(&gpu.w_scratch, &stream);
+    let (p, g) = DevicePtr::device_ptr(&gpu.f32_cache.get(&key)?.1, &stream);
     drop(g);
     Some(p)
 }
 
+/// Device address of an f32 norm weight given as raw little-endian bytes:
+/// the resident weight chunk when the bytes live there, else [`dev_f32`].
+pub(super) fn dev_norm_bytes(gpu: &mut CudaGpu, raw: &[u8], n: usize) -> Option<u64> {
+    if raw.len() < n * 4 {
+        return None;
+    }
+    let raw = &raw[..n * 4];
+    if raw.as_ptr() as usize % 4 == 0 {
+        if let Some((c, off)) = resolve_w(gpu, raw) {
+            let stream = Arc::clone(&gpu.stream);
+            let (p, g) = DevicePtr::device_ptr(&gpu.chunks[c].buf, &stream);
+            drop(g);
+            return Some(p + off);
+        }
+    }
+    let w = norm_f32_bytes(raw, n)?;
+    dev_f32(gpu, raw.as_ptr() as usize, &w)
+}
+
 pub(super) fn rmsnorm_pf_x_into_hs(
     gpu: &mut CudaGpu,
-    w: &[f32],
+    w_raw: &[u8],
     hidden: usize,
     m: usize,
     eps: f32,
 ) -> Option<()> {
-    let wp = upload_w_scratch(gpu, w)?;
+    match gpu.pf_pending_add {
+        Some((add, len)) if len == m * hidden => {
+            gpu.pf_pending_add = None;
+            return add_rmsnorm_pf(gpu, add, w_raw, hidden, m, eps);
+        }
+        Some(_) => gpu.pf_flush_add()?,
+        None => {}
+    }
+    let wp = dev_norm_bytes(gpu, w_raw, hidden)?;
     let f_rms = gpu.func_owned("rmsnorm_into_f32")?;
     let n = hidden as u32;
     let rows = m as u32;
@@ -287,6 +321,44 @@ pub(super) fn rmsnorm_pf_x_into_hs(
             .launch_builder_pdl(&f_rms)
             .arg(&mut dst)
             .arg(&src)
+            .arg(&wp)
+            .arg(&n)
+            .arg(&eps)
+            .arg(&rows)
+            .launch_pdl(cfg)
+    }
+    .ok()?;
+    Some(())
+}
+
+/// `pf_x += add` then `pf_hs = rmsnorm(pf_x) * w` in one launch. `add` is a
+/// device address of `m * hidden` f32.
+pub(super) fn add_rmsnorm_pf(
+    gpu: &mut CudaGpu,
+    add: u64,
+    w_raw: &[u8],
+    hidden: usize,
+    m: usize,
+    eps: f32,
+) -> Option<()> {
+    gpu.pf_flush_add()?;
+    let wp = dev_norm_bytes(gpu, w_raw, hidden)?;
+    let f = gpu.func_owned("add_rmsnorm_into_f32")?;
+    let n = hidden as u32;
+    let rows = m as u32;
+    let cfg = LaunchConfig {
+        grid_dim: (rows, 1, 1),
+        block_dim: (512, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let mut x = gpu.pf_x.slice_mut(0..m * hidden);
+    let mut dst = gpu.pf_hs.slice_mut(0..m * hidden);
+    unsafe {
+        gpu.stream
+            .launch_builder_pdl(&f)
+            .arg(&mut dst)
+            .arg(&mut x)
+            .arg(&add)
             .arg(&wp)
             .arg(&n)
             .arg(&eps)

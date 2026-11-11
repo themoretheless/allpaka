@@ -28,6 +28,8 @@ pub(super) const KERNEL_NAMES: &[&str] = &[
     "rmsnorm_rope_qk_store_table_dpos",
     "rope_neox_freq_dpos",
     "rope_neox_batch",
+    "prefill_norm_rope",
+    "add_rmsnorm_into_f32",
     "argmax_f32",
     "store_kv_f16",
     "store_kv_f16_dpos",
@@ -155,6 +157,14 @@ pub struct CudaGpu {
     /// Persistent scratch for RMSNorm weights (avoids cudaMalloc per layer).
     pub w_scratch: CudaSlice<f32>,
     pub w_scratch_cap: usize,
+    /// Small host f32 tensors (norm weights) mirrored on device, keyed by
+    /// host address; a lookup re-checks the contents against a host copy.
+    pub f32_cache: HashMap<usize, (Vec<f32>, CudaSlice<f32>)>,
+    /// Prefill: device address of an `m * hidden` addend not yet folded into
+    /// `pf_x` (the dense FFN's down projection). The next attention RMSNorm
+    /// folds it in with `add_rmsnorm_into_f32`; anything else that reads or
+    /// writes `pf_x` (or may reallocate `y_arena`) calls `pf_flush_add` first.
+    pub pf_pending_add: Option<(u64, usize)>,
     pub pf_rope_n: usize,
     pub x_f16_n: usize,
     /// Second stream: dequant next W while compute GEMMs the current W.
@@ -441,6 +451,8 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         decode_norms_key: 0,
         w_scratch,
         w_scratch_cap: 1 << 14,
+        f32_cache: HashMap::new(),
+        pf_pending_add: None,
         pf_rope_n: 0,
         x_f16_n: 0,
         dq_stream,
@@ -600,7 +612,32 @@ impl CudaGpu {
         true
     }
 
+    /// Fold a deferred prefill residual (`pf_pending_add`) into `pf_x`.
+    pub fn pf_flush_add(&mut self) -> Option<()> {
+        let Some((add, len)) = self.pf_pending_add.take() else {
+            return Some(());
+        };
+        let f = self.func_owned("residual_add")?;
+        let n = len as u32;
+        let cfg = CudaGpu::cfg_1d(n, 256);
+        let mut a = self.pf_x.slice_mut(0..len);
+        unsafe {
+            self.stream
+                .launch_builder_pdl(&f)
+                .arg(&mut a)
+                .arg(&add)
+                .arg(&n)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        Some(())
+    }
+
     pub fn ensure_arenas(&mut self, x_need: usize, y_need: usize) -> Option<()> {
+        if y_need > self.y_cap * 4 {
+            // The deferred addend lives in y_arena.
+            self.pf_flush_add()?;
+        }
         let mut grew = false;
         if x_need > self.x_cap * 4 {
             let elems = x_need.div_ceil(4).next_power_of_two();

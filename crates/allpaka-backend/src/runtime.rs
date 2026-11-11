@@ -198,6 +198,10 @@ flags! {
     cuda_prefill_dual: bool = false, env "ALLPAKA_PREFILL_DUAL", yes;
     // Off: capturing the single-stream prefill gives non-finite logits on replay.
     cuda_pf_graph: bool = false, env "ALLPAKA_PF_GRAPH", yes;
+    // Prefill Q/K head RMSNorm + RoPE (+ K store) in one kernel per tensor.
+    cuda_pf_norm_rope: bool = true, env "ALLPAKA_PF_NORM_ROPE", not_no;
+    // Prefill residual adds fused into the following RMSNorm (both sides).
+    cuda_pf_defer_add: bool = true, env "ALLPAKA_PF_DEFER_ADD", not_no;
     cuda_gpu_embed: bool = false, env "ALLPAKA_GPU_EMBED", yes;
     gdn_zero: bool = false, env "ALLPAKA_GDN_ZERO", present;
     // Metal switches, formerly read from the environment on every call.

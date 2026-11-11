@@ -282,6 +282,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             if !gpu.pf_active {
                 return None;
             }
+            gpu.pf_flush_add()?;
             gpu.ensure_arenas(down_out.len() * 4, 4)?;
             gpu.stream
                 .memcpy_htod(&down_out, &mut gpu.y_arena.slice_mut(0..down_out.len()))
