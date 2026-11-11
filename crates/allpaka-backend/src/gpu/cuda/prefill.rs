@@ -3,6 +3,17 @@
 
 use super::*;
 
+/// Announce the identity of the next prefill chunk for graph replay: a hash
+/// of everything a captured prefill bakes in besides the residual input
+/// (chunk length, KV base and cache, RoPE table, model). 0 disables replay
+/// for that chunk. Consumed by the next [`prefill_replay`] / [`prefill_begin`].
+pub fn prefill_graph_key(key: u64) {
+    let _ = with_gpu(|gpu| {
+        gpu.pf_graph_want = key;
+        Some(())
+    });
+}
+
 pub fn prefill_begin(xs: &[f32]) -> Option<()> {
     with_gpu(|gpu| {
         gpu.ensure_prefill(xs.len())?;
@@ -12,10 +23,19 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
         if dual {
             crate::gpu::cuda::ggml::clear_shared_for_prefill();
         }
-        if pf_graph_on() && gpu.pf_graph_len != xs.len() {
-            gpu.pf_graph = None;
-            gpu.pf_graph_seen = 0;
+        let want = std::mem::take(&mut gpu.pf_graph_want);
+        // want == 0 (tiny chunks, unsupported models) leaves the graph state
+        // alone, so a one-token step between two equal chunks keeps it.
+        if pf_graph_on() && want != 0 && (gpu.pf_graph_key != want || gpu.pf_graph_len != xs.len())
+        {
+            // A different chunk: the old graph's baked state is stale. Capture
+            // only after one uncaptured run of the new key, which settles the
+            // arenas and weight caches (no allocation inside a capture).
+            gpu.drop_pf_graph();
+            gpu.pf_graph_key = want;
             gpu.pf_graph_len = xs.len();
+            gpu.pf_graph_seen = 0;
+            gpu.pf_graph_failed = false;
         }
         gpu.stream
             .memcpy_htod(xs, &mut gpu.pf_x.slice_mut(0..xs.len()))
@@ -30,14 +50,17 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
         gpu.invalidate_q8();
         if pf_graph_on()
             && !dual
+            && want != 0
             && gpu.pf_graph.is_none()
-            && gpu.pf_graph_seen == 1
+            && gpu.pf_graph_seen >= 1
+            && !gpu.pf_graph_failed
             && gpu
                 .stream
                 .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
                 .is_ok()
         {
             gpu.pf_capturing = true;
+            gpu.pf_capture_bad = false;
         }
         Some(())
     })
@@ -49,16 +72,20 @@ pub fn prefill_replay(xs: &[f32]) -> Option<Vec<f32>> {
         return None;
     }
     with_gpu(|gpu| {
-        if gpu.pf_graph_len != xs.len() {
+        let want = gpu.pf_graph_want;
+        if want == 0
+            || gpu.pf_graph_key != want
+            || gpu.pf_graph_len != xs.len()
+            || gpu.pf_graph.is_none()
+        {
             return Some(None);
         }
-        if gpu.pf_graph.is_none() {
-            return Some(None);
-        }
+        gpu.pf_graph_want = 0;
         gpu.ensure_prefill(xs.len())?;
         gpu.stream
             .memcpy_htod(xs, &mut gpu.pf_x.slice_mut(0..xs.len()))
             .ok()?;
+        gpu.invalidate_q8();
         gpu.pf_graph.as_ref()?.launch().ok()?;
         crate::gpu::cuda::ggml::sync();
         gpu.sync()?;
@@ -66,6 +93,9 @@ pub fn prefill_replay(xs: &[f32]) -> Option<Vec<f32>> {
         gpu.stream
             .memcpy_dtoh(&gpu.pf_x.slice(0..xs.len()), &mut out)
             .ok()?;
+        gpu.pf_rope_n = 0;
+        gpu.invalidate_q8();
+        crate::gpu::cuda::ggml::bind_peer_stream(&gpu.stream);
         Some(Some(out))
     })
     .flatten()
@@ -88,21 +118,46 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
         }
         gpu.pf_flush_add()?;
         if gpu.pf_capturing {
+            gpu.pf_capturing = false;
             // See decode_fused.rs: no zero variant; AUTO_FREE_ON_LAUNCH is a no-op here.
             let graph_flags =
                 CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH;
-            match gpu.stream.end_capture(graph_flags) {
-                Ok(Some(g)) => {
-                    eprintln!("cuda: prefill graph captured ({} floats)", gpu.pf_len);
+            let captured = match gpu.stream.end_capture(graph_flags) {
+                Ok(Some(g)) => Some(g),
+                Ok(None) => {
+                    eprintln!("cuda: prefill graph empty");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("cuda: prefill end_capture failed: {e}");
+                    None
+                }
+            };
+            // Capture only recorded the chunk; run it once for real. On any
+            // failure the caller falls back and recomputes the chunk.
+            match captured {
+                Some(g) if !gpu.pf_capture_bad && g.launch().is_ok() => {
+                    static LOGGED: std::sync::atomic::AtomicU32 =
+                        std::sync::atomic::AtomicU32::new(0);
+                    if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+                        eprintln!("cuda: prefill graph captured ({} floats)", gpu.pf_len);
+                    }
                     gpu.pf_graph = Some(g);
                     gpu.pf_graph_len = gpu.pf_len;
                 }
-                Ok(None) => eprintln!("cuda: prefill graph empty"),
-                Err(e) => eprintln!("cuda: prefill end_capture failed: {e}"),
+                _ => {
+                    eprintln!("cuda: prefill graph capture discarded; chunk reruns");
+                    gpu.drop_pf_graph();
+                    gpu.pf_graph_failed = true;
+                    gpu.pf_active = false;
+                    return None;
+                }
             }
-            gpu.pf_capturing = false;
         }
-        gpu.pf_graph_seen = gpu.pf_graph_seen.saturating_add(1);
+        if gpu.pf_len == gpu.pf_graph_len {
+            // Only runs of the keyed chunk shape count toward capture.
+            gpu.pf_graph_seen = gpu.pf_graph_seen.saturating_add(1);
+        }
         // Drain ggml private queue before sharing cudarc again (graph capture).
         crate::gpu::cuda::ggml::sync();
         gpu.sync()?;
@@ -119,11 +174,61 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
 
 pub fn prefill_abort() {
     let _ = with_gpu(|gpu| {
+        if gpu.pf_capturing {
+            // Discard a partial capture; the caller reruns the chunk.
+            eprintln!("cuda: prefill graph capture aborted; chunk reruns uncaptured");
+            gpu.pf_capturing = false;
+            gpu.pf_graph_failed = true;
+            let flags = CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH;
+            let _ = gpu.stream.end_capture(flags);
+            gpu.drop_pf_graph();
+        }
         gpu.pf_active = false;
         gpu.pf_ffn_done = false;
         gpu.pf_pending_add = None;
         Some(())
     });
+}
+
+/// Copy the RoPE table into `x_arena[at..]` through page-locked staging, so
+/// the copy is legal (and replayable) inside a prefill graph capture. The
+/// staging is only rewritten by a later prefill, after this one has synced.
+fn upload_rope_pinned(gpu: &mut CudaGpu, rope: &[f32], at: usize) -> Option<()> {
+    let (mut ptr, cap) = gpu.pf_rope_pinned;
+    if cap < rope.len() {
+        if ptr != 0 {
+            // SAFETY: `ptr` came from `malloc_host` below. Draining the stream
+            // retires every copy that read it, and dropping the prefill graph
+            // removes the only other holder of the address.
+            let _ = gpu.stream.synchronize();
+            unsafe {
+                let _ = cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void);
+            }
+            gpu.drop_pf_graph();
+        }
+        let n = rope.len().next_power_of_two();
+        // SAFETY: plain page-locked allocation of `n` f32, written below
+        // before any read.
+        ptr = unsafe { cudarc::driver::result::malloc_host(n * 4, 0) }.ok()? as usize;
+        gpu.pf_rope_pinned = (ptr, n);
+    }
+    // SAFETY: `ptr` is a live page-locked allocation of at least `rope.len()`
+    // f32 (checked above) that no Rust reference aliases; the destination is
+    // a sub-range of `x_arena` the caller sized with `ensure_arenas`.
+    unsafe {
+        let staging = std::slice::from_raw_parts_mut(ptr as *mut f32, rope.len());
+        staging.copy_from_slice(rope);
+        let stream = Arc::clone(&gpu.stream);
+        let (base, g) = DevicePtr::device_ptr(&gpu.x_arena, &stream);
+        drop(g);
+        cudarc::driver::result::memcpy_htod_async(
+            base + (at * 4) as u64,
+            staging,
+            stream.cu_stream(),
+        )
+        .ok()?;
+    }
+    Some(())
 }
 
 /// Dense fused prefill attention: keep activations on device (Metal-style).
@@ -183,12 +288,7 @@ pub(super) fn try_prefill_attn_fused_dev(
             rmsnorm_pf_x_into_hs(gpu, fusion.attn_norm, hidden, m, req.eps)?;
         }
         if gpu.pf_rope_n != rope_host.len() {
-            gpu.stream
-                .memcpy_htod(
-                    rope_host,
-                    &mut gpu.x_arena.slice_mut(rope_at..rope_at + rope_host.len()),
-                )
-                .ok()?;
+            upload_rope_pinned(gpu, rope_host, rope_at)?;
             gpu.pf_rope_n = rope_host.len();
         }
 

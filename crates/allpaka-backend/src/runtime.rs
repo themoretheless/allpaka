@@ -196,8 +196,9 @@ flags! {
     cuda_ggml_gemm: bool = true, env "ALLPAKA_GGML_GEMM", not_no;
     // Off: a private ggml stream needs a cross-stream wait per GEMM (~9% prefill).
     cuda_prefill_dual: bool = false, env "ALLPAKA_PREFILL_DUAL", yes;
-    // Off: capturing the single-stream prefill gives non-finite logits on replay.
-    cuda_pf_graph: bool = false, env "ALLPAKA_PF_GRAPH", yes;
+    // Replay a captured prefill chunk when the same chunk shape (model, length,
+    // KV buffer and base) repeats; see prefill_graph_key.
+    cuda_pf_graph: bool = true, env "ALLPAKA_PF_GRAPH", not_no;
     // Prefill Q/K head RMSNorm + RoPE (+ K store) in one kernel per tensor.
     cuda_pf_norm_rope: bool = true, env "ALLPAKA_PF_NORM_ROPE", not_no;
     // Prefill residual adds fused into the following RMSNorm (both sides).

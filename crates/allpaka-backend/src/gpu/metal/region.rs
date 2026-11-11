@@ -16,6 +16,12 @@ pub struct SharedRegion {
 }
 
 impl SharedRegion {
+    /// No prefill graphs on this backend.
+    #[inline]
+    pub fn graph_id(&self) -> u64 {
+        0
+    }
+
     /// Memory architecture backing this region (`UMA` zero-copy shared memory).
     #[inline]
     pub const fn architecture(&self) -> crate::memory::MemoryArchitecture {

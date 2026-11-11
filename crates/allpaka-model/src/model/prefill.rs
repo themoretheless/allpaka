@@ -286,6 +286,7 @@ impl<'a> Model<'a> {
         s: &mut Session,
     ) -> Option<Activation> {
         let hidden = self.config.hidden as usize;
+        allpaka_backend::gpu::prefill_graph_key(self.prefill_graph_key(m, base, s));
         if let Some(done) = allpaka_backend::gpu::prefill_replay(xs) {
             return Some(done.into());
         }
@@ -297,6 +298,44 @@ impl<'a> Model<'a> {
             return None;
         }
         allpaka_backend::gpu::prefill_end_output(m * hidden)
+    }
+
+    /// Identity of a fused prefill chunk for CUDA graph replay: everything a
+    /// captured chunk bakes in besides its residual input (model, chunk
+    /// length, KV base, KV device buffer, RoPE table slice). 0 (no replay)
+    /// for models with GDN or MoE layers, whose blocks synchronize mid-chunk.
+    fn prefill_graph_key(&self, m: usize, base: usize, s: &mut Session) -> u64 {
+        let dense_attn = self
+            .layers
+            .iter()
+            .all(|l| l.mixer.gdn().is_none() && matches!(l.ffn, Ffn::Dense { .. }));
+        // Small chunks gain nothing from a graph; keep them from evicting
+        // the key of the large chunk in between (0 leaves graph state alone).
+        if !dense_attn || m < 64 {
+            return 0;
+        }
+        let Some((cache, _, _)) = s.kv.gpu_view(0) else {
+            return 0;
+        };
+        let cache_id = cache.graph_id();
+        if cache_id == 0 {
+            return 0;
+        }
+        let pairs = s.rope_cache_pairs;
+        let rope = s.rope_cache[base * pairs..].as_ptr() as u64;
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for v in [
+            self as *const Self as u64,
+            m as u64,
+            base as u64,
+            cache_id,
+            rope,
+            pairs as u64,
+        ] {
+            h = (h ^ v).wrapping_mul(0x0000_0100_0000_01b3);
+            h ^= h >> 29;
+        }
+        h.max(1)
     }
 
     /// The per-layer loop of the fused prefill chunk, split out so a

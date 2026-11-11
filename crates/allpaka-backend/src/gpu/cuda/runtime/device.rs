@@ -140,6 +140,19 @@ pub struct CudaGpu {
     pub pf_graph_len: usize,
     pub pf_graph_seen: u32,
     pub pf_capturing: bool,
+    /// Identity of the prefill `pf_graph` was captured for (0 = none).
+    pub pf_graph_key: u64,
+    /// Key the caller announced for the next prefill (`prefill_graph_key`),
+    /// consumed by `prefill_replay` / `prefill_begin`.
+    pub pf_graph_want: u64,
+    /// Set when something reallocated a buffer mid-capture.
+    pub pf_capture_bad: bool,
+    /// A capture for the current key failed; do not retry until it changes.
+    pub pf_graph_failed: bool,
+    /// Page-locked staging for the prefill RoPE table (address, capacity in
+    /// f32). Pageable H2D copies cannot be stream-captured; a copy from
+    /// pinned memory can, and a replay re-reads the same staging bytes.
+    pub pf_rope_pinned: (usize, usize),
     /// Hybrid FA decode: per-layer (pre-attend, post-attend) graphs + final tail.
     /// Used when ALLPAKA_CUDA_GRAPH=1 and ggml FA is available.
     pub decode_fa_graphs: Option<(Vec<CudaGraph>, Vec<CudaGraph>, CudaGraph)>,
@@ -443,6 +456,11 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         pf_graph_len: 0,
         pf_graph_seen: 0,
         pf_capturing: false,
+        pf_graph_key: 0,
+        pf_graph_want: 0,
+        pf_capture_bad: false,
+        pf_graph_failed: false,
+        pf_rope_pinned: (0, 0),
         decode_fa_graphs: None,
         decode_fa_attn: None,
         decode_fa_execs: None,
@@ -527,14 +545,22 @@ impl CudaGpu {
         let end = key.0 + key.1.div_ceil(16384) * 16384;
         self.chunks.retain(|c| c.start < key.0 || c.start >= end);
         self.drop_graphs();
+    }
+
+    /// Forget the captured prefill graph (its baked buffer addresses or
+    /// weights are about to change). During a capture the recording is
+    /// poisoned instead: `prefill_end` discards it and the chunk reruns.
+    pub fn drop_pf_graph(&mut self) {
         self.pf_graph = None;
-        self.pf_graph_len = 0;
-        self.pf_graph_seen = 0;
+        if self.pf_capturing {
+            self.pf_capture_bad = true;
+        }
     }
 
     /// Forget captured decode graphs and the keys that select them.
     pub fn drop_graphs(&mut self) {
         self.clear_decode_graphs();
+        self.drop_pf_graph();
         self.decode_graph_key = 0;
         self.decode_norms_key = 0;
     }
@@ -672,6 +698,9 @@ impl CudaGpu {
     }
 
     pub fn ensure_prefill(&mut self, elems: usize) -> Option<()> {
+        if elems > self.pf_x_cap || elems > self.pf_hs_cap {
+            self.drop_pf_graph();
+        }
         if elems > self.pf_x_cap {
             let cap = elems.next_power_of_two();
             self.pf_x = self.stream.alloc_zeros::<f32>(cap).ok()?;

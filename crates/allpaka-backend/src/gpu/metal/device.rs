@@ -311,6 +311,8 @@ pub fn prefill_replay(_xs: &[f32]) -> Option<Vec<f32>> {
     None
 }
 
+pub fn prefill_graph_key(_key: u64) {}
+
 /// Largest request a chunked mapping can serve; chunks overlap by this much.
 /// Tensors in real GGUFs top out in the hundreds of megabytes (the 235B's
 /// biggest is ~0.5 GiB), so 2 GiB of overlap leaves a wide margin.

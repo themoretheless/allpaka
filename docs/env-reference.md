@@ -57,7 +57,7 @@ to rewrite this file. Every switch is read once per process.
 | `ALLPAKA_PF_DEFER` | `prefill_defer` | on | on unless `=0` |
 | `ALLPAKA_PF_DEFER_ADD` | `cuda_pf_defer_add` | on | on unless `=0` or `=false` |
 | `ALLPAKA_PF_FQK` | `pf_fused_qk` | on | on unless `=0` |
-| `ALLPAKA_PF_GRAPH` | `cuda_pf_graph` | off | off unless `=1` or `=true` |
+| `ALLPAKA_PF_GRAPH` | `cuda_pf_graph` | on | on unless `=0` or `=false` |
 | `ALLPAKA_PF_NORM_ROPE` | `cuda_pf_norm_rope` | on | on unless `=0` or `=false` |
 | `ALLPAKA_PF_OBUF_DENSE` | `dense_obuf` | on | on unless `=0` |
 | `ALLPAKA_PF_ONEBUF` | `prefill_one_buffer` | on | on unless `=0` |

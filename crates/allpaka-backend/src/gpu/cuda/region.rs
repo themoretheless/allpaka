@@ -30,6 +30,17 @@ impl SharedRegion {
     pub const fn is_discrete(&self) -> bool {
         true
     }
+
+    /// Device address mixed with the length: what a captured prefill graph
+    /// bakes in for this region (0 if the device is unavailable).
+    pub fn graph_id(&self) -> u64 {
+        with_gpu(|gpu| {
+            let (p, g) = DevicePtr::device_ptr(&self.buf, &gpu.stream);
+            drop(g);
+            Some(p ^ ((self.len as u64).rotate_left(40)))
+        })
+        .unwrap_or(0)
+    }
 }
 
 // SAFETY: the fields are a `CudaSlice<u8>` (cudarc already declares it Send + Sync) and

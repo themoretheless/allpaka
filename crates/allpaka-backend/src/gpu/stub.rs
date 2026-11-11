@@ -26,6 +26,12 @@ impl SharedRegion {
     pub const fn is_discrete(&self) -> bool {
         false
     }
+
+    /// No prefill graphs on this backend.
+    #[inline]
+    pub fn graph_id(&self) -> u64 {
+        0
+    }
 }
 
 pub fn attach(_mapping: &[u8]) -> bool {
@@ -165,6 +171,8 @@ pub fn prefill_begin(_xs: &[f32]) -> Option<()> {
 pub fn prefill_replay(_xs: &[f32]) -> Option<Vec<f32>> {
     None
 }
+
+pub fn prefill_graph_key(_key: u64) {}
 
 pub fn prefill_end(_xs: &mut [f32]) -> Option<()> {
     None
