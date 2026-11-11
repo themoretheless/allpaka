@@ -861,12 +861,30 @@ extern "C" int allpaka_ggml_flash_attn(
     slot->perm->data = slot->perm_dev;
     slot->out->data = out_dev;
 
+    // FA output [hd, n_q, m] is already the [m, q_dim] row layout o_proj
+    // reads, so prefill writes it straight into out_dev instead of fa_dev +
+    // an identity copy (allpaka_fa_permute). ALLPAKA_FA_PERMUTE=1 restores
+    // the copy for A/B.
+    static const bool permute_copy = [] {
+        const char * e = std::getenv("ALLPAKA_FA_PERMUTE");
+        return e && e[0] == '1';
+    }();
+    if (!permute_copy) {
+        slot->vfa->ptr = out_dev;
+        slot->fa->data = out_dev;
+    }
     enum ggml_status stc = ggml_backend_graph_compute_async(g_be, slot->gf);
+    if (!permute_copy) {
+        slot->vfa->ptr = slot->fa_dev;
+        slot->fa->data = slot->fa_dev;
+    }
     if (stc != GGML_STATUS_SUCCESS) {
         return -7;
     }
-    allpaka_fa_permute_launch(static_cast<const float *>(slot->fa_dev), out_dev,
-                              head_dim, n_q_heads, m, st);
+    if (permute_copy) {
+        allpaka_fa_permute_launch(static_cast<const float *>(slot->fa_dev), out_dev,
+                                  head_dim, n_q_heads, m, st);
+    }
     return 0;
 }
 
