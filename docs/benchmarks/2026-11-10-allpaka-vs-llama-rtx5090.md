@@ -85,3 +85,15 @@ Prefill argmax was 8 then; correct is 201. Commits `3815e23` and `4af983e` fix t
 
 - **Decode:** about 110% of llama.cpp.
 - **Prefill:** 93% of llama.cpp. The always-on queue wait costs it; the earlier 101% was measured on wrong results.
+
+## Shared-stream prefill (`98ee3e3`), 2026-11-11
+
+ggml in prefill now runs on the cudarc stream. The GPU was idle; same interleaved setup.
+
+| Round | allpaka pp | llama pp | pp ratio | allpaka tg | llama tg | tg ratio |
+|---|---|---|---|---|---|---|
+| 1 | 3 485 | 3 379 | 103.1% | 76.7 | 69.27 | 110.7% |
+| 2 | 3 482 | 3 359 | 103.6% | 76.7 | 70.27 | 109.1% |
+| 3 | 3 475 | 3 372 | 103.0% | 76.7 | 70.21 | 109.2% |
+
+Prefill argmax was 201 in every round, and logits-fnv was the same in every round.
