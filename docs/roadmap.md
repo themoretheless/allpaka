@@ -27,6 +27,9 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
   `allpaka_ggml.dll` и эталонный `llama-bench` собираются одним скриптом
   `third_party/build_allpaka_ggml.bat`; ревизия и патч llama.cpp закреплены
   рядом (`llama.cpp.rev`, `llama.cpp.patch`).
+  `allpaka verify --decode 32` на Qwen2.5-7B проходит против CUDA-сборки
+  llama-server (max |Δlog-prob| 0.2312 при допуске 0.24); против Vulkan-сборки
+  из winget тот же прогон выходит за допуск на 8-м шаге (0.2454).
 - **Metal (M4 Max):** 30B pp ~0.90×, GLM-Air decode ~0.86×, 235B decode ~0.72×.
   Артефакт: `docs/benchmarks/allpaka-vs-llama-metal-status.md`.
 - **Сервинг:** изолированные сессии, отмена, дедлайны, backpressure, блочный
@@ -251,17 +254,6 @@ clippy backend/model под `aarch64-apple-darwin`; на раннере `macos-1
   clippy под `aarch64-apple-darwin`. Осталось прогнать на Metal.
 
 **DoD:** `grep 'FIXME(soundness)'` пуст, на каждый — тест или обоснование.
-
-### D5. `verify --decode 32` выходит за допуск на Qwen2.5-7B
-
-Грубое расхождение с llama.cpp (argmax 12095 против 135958) на `7bd0aa4` не
-воспроизводится: prefill PASS, argmax совпадает на всех пройденных шагах.
-Остаток: на 8-м шаге decode разница log-prob 0.2454 при допуске 0.24, и
-`verify --decode 32` завершается ошибкой. Эталон — llama-server из winget
-(Vulkan).
-
-**DoD:** `allpaka verify --model <7B> --decode 32` проходит против llama-server
-на CUDA, либо допуск обоснованно изменён с записью, чем объясняется дрейф.
 
 ### D6. Мусор и мёртвый код
 
