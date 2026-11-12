@@ -2383,52 +2383,6 @@ pub(super) fn dq_fmt(ty: GgmlType) -> Option<u32> {
     })
 }
 
-#[cfg(test)]
-mod dq_fmt_tests {
-    use super::fmt;
-
-    /// The embed kernel's per-format branches read blocks of the size (or
-    /// element type) the host code means by each `fmt` number.
-    #[test]
-    fn embed_kernel_branches_match_the_host_codes() {
-        let src = crate::gpu::metal_kernels::KERNELS;
-        let start = src
-            .find("kernel void embed_row_f32_dtoken(")
-            .expect("embed_row_f32_dtoken exists");
-        let body = &src[start..];
-        let body = &body[..body[1..]
-            .find(
-                "
-kernel void",
-            )
-            .map_or(body.len(), |i| i + 1)];
-        let branch = |code: u32| {
-            let at = body
-                .find(&format!("fmt == {code}u"))
-                .unwrap_or_else(|| panic!("no branch for fmt {code}"));
-            &body[at..(at + 200).min(body.len())]
-        };
-        assert!(
-            body.contains("fmt <= 2u"),
-            "K formats 0..=2 share one block"
-        );
-        assert!(
-            branch(fmt::Q4K).contains("b * 144u"),
-            "Q4_K blocks are 144 bytes"
-        );
-        assert!(
-            branch(fmt::Q5K).contains("b * 176u"),
-            "Q5_K blocks are 176 bytes"
-        );
-        for code in [fmt::Q8_0, fmt::Q2K, fmt::Q3K] {
-            branch(code);
-        }
-        assert!(branch(fmt::BF16).contains("device const ushort*"));
-        assert!(branch(fmt::F16).contains("device const half*"));
-        assert!(branch(fmt::F32).contains("device const float*"));
-    }
-}
-
 pub(super) use crate::gpu::common::row_bytes;
 
 /// After a successful greedy decode, run `n_more` further tokens on-device:
@@ -3375,4 +3329,50 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
         }
         Some(results)
     })
+}
+
+#[cfg(test)]
+mod dq_fmt_tests {
+    use super::fmt;
+
+    /// The embed kernel's per-format branches read blocks of the size (or
+    /// element type) the host code means by each `fmt` number.
+    #[test]
+    fn embed_kernel_branches_match_the_host_codes() {
+        let src = crate::gpu::metal_kernels::KERNELS;
+        let start = src
+            .find("kernel void embed_row_f32_dtoken(")
+            .expect("embed_row_f32_dtoken exists");
+        let body = &src[start..];
+        let body = &body[..body[1..]
+            .find(
+                "
+kernel void",
+            )
+            .map_or(body.len(), |i| i + 1)];
+        let branch = |code: u32| {
+            let at = body
+                .find(&format!("fmt == {code}u"))
+                .unwrap_or_else(|| panic!("no branch for fmt {code}"));
+            &body[at..(at + 200).min(body.len())]
+        };
+        assert!(
+            body.contains("fmt <= 2u"),
+            "K formats 0..=2 share one block"
+        );
+        assert!(
+            branch(fmt::Q4K).contains("b * 144u"),
+            "Q4_K blocks are 144 bytes"
+        );
+        assert!(
+            branch(fmt::Q5K).contains("b * 176u"),
+            "Q5_K blocks are 176 bytes"
+        );
+        for code in [fmt::Q8_0, fmt::Q2K, fmt::Q3K] {
+            branch(code);
+        }
+        assert!(branch(fmt::BF16).contains("device const ushort*"));
+        assert!(branch(fmt::F16).contains("device const half*"));
+        assert!(branch(fmt::F32).contains("device const float*"));
+    }
 }
