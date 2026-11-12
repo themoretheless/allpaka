@@ -91,6 +91,30 @@ pub fn read_bounded_bytes(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Rename `temp` over `path`. On Windows the rename is refused while another
+/// process holds `path` open without delete sharing (a reader, an indexer, an
+/// antivirus scan); such holds are brief, so retry for up to half a second
+/// instead of losing the write.
+fn rename_over(temp: &Path, path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut attempt = 0;
+        loop {
+            match std::fs::rename(temp, path) {
+                Err(error)
+                    if attempt < 50 && matches!(error.raw_os_error(), Some(5) | Some(32)) =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                other => return other,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    std::fs::rename(temp, path)
+}
+
 pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     atomic_write_bytes_with_sync(path, bytes, false)
 }
@@ -110,7 +134,7 @@ pub fn atomic_write_bytes_with_sync(path: &Path, bytes: &[u8], sync_parent: bool
         file.sync_all()?;
         // Windows refuses to rename a file that still has an open handle.
         drop(file);
-        std::fs::rename(&temp, path)?;
+        rename_over(&temp, path)?;
         if sync_parent {
             #[cfg(unix)]
             if let Some(parent) = path.parent() {
@@ -148,6 +172,32 @@ pub fn atomic_create_new_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reader that briefly holds the destination open must not lose the write.
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_survives_a_brief_reader_without_delete_sharing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("allpaka-rename-{}", crate::evaluation::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("job.json");
+        atomic_write_bytes(&path, b"old").unwrap();
+        // FILE_SHARE_READ only: what Python's open() and most tools request.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(held);
+        });
+        atomic_write_bytes(&path, b"new").unwrap();
+        release.join().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// PLAN 3.4 / B9: two identifier rules. Named ids (plugins, feedback,
     /// review queues, storage) share valid_id; generated ids (sessions,
