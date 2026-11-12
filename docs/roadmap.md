@@ -22,6 +22,9 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 - **CUDA (RTX 5090, Qwen3-32B Q4_K_M):** decode ~110% llama.cpp, prefill
   105–110% (без повтора CUDA-графа; с графом — до 112%).
   Артефакт: `docs/benchmarks/2026-11-10-allpaka-vs-llama-rtx5090.md`.
+  `allpaka_ggml.dll` и эталонный `llama-bench` собираются одним скриптом
+  `third_party/build_allpaka_ggml.bat`; ревизия и патч llama.cpp закреплены
+  рядом (`llama.cpp.rev`, `llama.cpp.patch`).
 - **Metal (M4 Max):** 30B pp ~0.90×, GLM-Air decode ~0.86×, 235B decode ~0.72×.
   Артефакт: `docs/benchmarks/allpaka-vs-llama-metal-status.md`.
 - **Сервинг:** изолированные сессии, отмена, дедлайны, backpressure, блочный
@@ -54,16 +57,6 @@ argmax), а в режиме по умолчанию и при pp512 — не м�
 
 **DoD:** причина найдена (порядок редукции / гонка), хэш повторяется между
 запусками при pp128 и pp512, тест на повторяемость.
-
-### P3. CUDA: сборка `allpaka_ggml.dll` воспроизводима из репозитория
-
-Сейчас DLL собирается локальными неотслеживаемыми `.bat`
-(`third_party/build_ggml_cuda.bat`, `link_ggml_cuda.bat`,
-`rebuild_ggml_cuda_fa.bat`, `compile_mmq_ptx.bat`, `.compile_mmvq_tmp.bat`), а
-`third_party/llama.cpp` не закреплён.
-
-**DoD:** один закоммиченный скрипт + закреплённая ревизия llama.cpp; чистый
-клон собирает DLL, которую ждут `d5dea0f`/`3815e23`; временные `.bat` удалены.
 
 ### P4. Metal: GLM-Air decode ≥ llama
 
@@ -267,14 +260,17 @@ clippy backend/model под `aarch64-apple-darwin`; на раннере `macos-1
 
 **DoD:** `grep 'FIXME(soundness)'` пуст, на каждый — тест или обоснование.
 
-### D5. CPU-эталон расходится с llama.cpp
+### D5. `verify --decode 32` выходит за допуск на Qwen2.5-7B
 
-`allpaka verify` на x86, Qwen2.5-7B-Instruct-Q4_K_M, промпт по умолчанию:
-argmax llama.cpp 12095, наш 135958; топ-10 логитов ниже на ~9–13. Было и до
-рефакторинга. Воспроизведение: `llama-server -m <7B> --port 8080`, затем
-`allpaka verify --model <7B> --decode 32`.
+Грубое расхождение с llama.cpp (argmax 12095 против 135958) на `7bd0aa4` не
+воспроизводится: prefill PASS, argmax совпадает на всех пройденных шагах.
+Остаток: на 8-м шаге decode разница log-prob 0.2454 при допуске 0.24, и
+`verify --decode 32` завершается ошибкой. Эталон — llama-server из winget
+(Vulkan). Разница prefill между двумя запусками тоже плавает (0.094 и 0.105),
+см. P2.
 
-**DoD:** причина найдена, argmax совпадает, регрессионный тест.
+**DoD:** `allpaka verify --model <7B> --decode 32` проходит против llama-server
+на CUDA, либо допуск обоснованно изменён с записью, чем объясняется дрейф.
 
 ### D6. Мусор и мёртвый код
 

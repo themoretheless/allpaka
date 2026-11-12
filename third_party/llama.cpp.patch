@@ -1,0 +1,62 @@
+diff --git a/ggml/src/ggml-cuda/convert.cu b/ggml/src/ggml-cuda/convert.cu
+index 360c614..bbfe2aa 100644
+--- a/ggml/src/ggml-cuda/convert.cu
++++ b/ggml/src/ggml-cuda/convert.cu
+@@ -703,3 +703,18 @@ to_fp32_nc_cuda_t ggml_get_to_fp32_nc_cuda(ggml_type type) {
+             return nullptr;
+     }
+ }
++
++extern "C" __declspec(dllexport) int allpaka_dequant_f16(
++    void * cuda_ctx_v, const void * src, void * dst, int64_t n_elem, int w_type)
++{
++    if (!cuda_ctx_v || !src || !dst || n_elem <= 0) {
++        return -2;
++    }
++    to_fp16_cuda_t fn = ggml_get_to_fp16_cuda((ggml_type) w_type);
++    if (!fn) {
++        return -3;
++    }
++    auto * ctx = static_cast<ggml_backend_cuda_context *>(cuda_ctx_v);
++    fn(src, static_cast<half *>(dst), n_elem, ctx->stream());
++    return 0;
++}
+diff --git a/ggml/src/ggml-cuda/fattn.cuh b/ggml/src/ggml-cuda/fattn.cuh
+index f9a7e15..40ee457 100644
+--- a/ggml/src/ggml-cuda/fattn.cuh
++++ b/ggml/src/ggml-cuda/fattn.cuh
+@@ -1,6 +1,13 @@
+ #include "common.cuh"
+ 
+-void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
++// allpaka: export for direct decode FA (no ggml cgraph).
++#if defined(_WIN32) && defined(GGML_BACKEND_BUILD)
++#    define ALLPAKA_FATTN_API __declspec(dllexport)
++#else
++#    define ALLPAKA_FATTN_API
++#endif
++
++ALLPAKA_FATTN_API void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+ 
+ bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst);
+ 
+diff --git a/ggml/src/ggml-cuda/mmvq.cuh b/ggml/src/ggml-cuda/mmvq.cuh
+index 5605bf7..e5f10d4 100644
+--- a/ggml/src/ggml-cuda/mmvq.cuh
++++ b/ggml/src/ggml-cuda/mmvq.cuh
+@@ -8,7 +8,14 @@ bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11);
+ // based on the quantization type and GPU architecture (compute capability).
+ int get_mmvq_mmid_max_batch(ggml_type type, int cc);
+ 
+-void ggml_cuda_mul_mat_vec_q(ggml_backend_cuda_context & ctx,
++// allpaka: export for direct decode MMVQ (no ggml cgraph).
++#if defined(_WIN32) && defined(GGML_BACKEND_BUILD)
++#    define ALLPAKA_MMVQ_API __declspec(dllexport)
++#else
++#    define ALLPAKA_MMVQ_API
++#endif
++
++ALLPAKA_MMVQ_API void ggml_cuda_mul_mat_vec_q(ggml_backend_cuda_context & ctx,
+     const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst, const ggml_cuda_mm_fusion_args_host * fusion = nullptr);
+ 
+ void ggml_cuda_op_mul_mat_vec_q(
