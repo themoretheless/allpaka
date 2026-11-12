@@ -28,7 +28,8 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 - **Metal (M4 Max):** 30B pp ~0.90×, GLM-Air decode ~0.86×, 235B decode ~0.72×.
   Артефакт: `docs/benchmarks/allpaka-vs-llama-metal-status.md`.
 - **Сервинг:** изолированные сессии, отмена, дедлайны, backpressure, блочный
-  prefix cache с hit/miss — есть (`docs/serving.md`). Инференс сериализован
+  prefix cache с hit/miss — есть (`docs/serving.md`). Бюджет памяти —
+  reservation-счётчики с явно названной границей в `/stats`, не hard-cap. Инференс сериализован
   одним владельцем, `kernel_batching: false`.
 - **Распределённый движок:** разрез по слоям на TCP-стадии, gateway с
   токенизатором и `pipeline-plan` есть; loopback-регрессия
@@ -126,15 +127,6 @@ pp480 — 481 dispatch в одном command buffer, GPU занят 321/322 мс
 **DoD:** replay одного и того же токен-стрима в обоих движках; артефакт по
 стабильной JSON-схеме с флагом comparability; для MoE в отчёте отражено, что
 одинаковые формы тензоров не означают одинаковый роутинг экспертов.
-
-### A2. Единый бюджет памяти: KV/scratch admission
-
-Есть reservations для mapped-весов, prefix-cache и сессий,
-`peak_reserved_bytes` в `/stats`. Не покрыты GPU scratch, вспомогательные
-аллокации модели и HTTP-буферы — это счётчики, не hard-cap процесса.
-
-**DoD:** покрыть эти статьи либо явно назвать границу в `docs/serving.md` и в
-ответе API.
 
 ### A3. Step scheduler + chunked prefill
 

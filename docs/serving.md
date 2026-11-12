@@ -158,9 +158,16 @@ are retained, and account for old/new buffer overlap during replacement.
 Insufficient request capacity returns HTTP 429 before streaming; startup fails
 if model weights and cache capacity alone exceed the limit. `/stats` exposes
 `memory_admission.limit_bytes`, `reserved_bytes`, and `peak_reserved_bytes`.
-These are reservation counters, not measured RSS. GPU scratch, model-side
-auxiliary allocations, HTTP buffers, and other process overhead are not yet
-covered; this is not a hard process memory cap.
+These are reservation counters, not measured RSS, and this is not a hard
+process memory cap. The same block states the boundary:
+
+- `admitted` - what counts against `limit_bytes`: model weights, prefix cache
+  capacity and session KV/SSM/RoPE storage;
+- `reported_only` - `gpu_arena_bytes`, the GPU scratch arenas, shown (and added
+  into `effective_used_bytes`) but never the reason for a 429;
+- `not_counted` - CPU scratch, model-side auxiliary allocations, HTTP buffers
+  and other process overhead;
+- `hard_cap: false`.
 
 Validation: `python3 scripts/test-serving-memory.py` exercises actual memory
 rejection, reservation release, and a successful request after rejection.
