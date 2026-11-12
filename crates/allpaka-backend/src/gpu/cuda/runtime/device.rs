@@ -635,6 +635,13 @@ impl CudaGpu {
             added.len()
         );
         self.chunks.extend(added);
+        if let Ok(total) = self.ctx.total_mem() {
+            let weights: usize = self.chunks.iter().map(|c| c.len).sum();
+            crate::gpu::cuda::ggml::set_f16_budget(crate::gpu::cuda::ggml::f16_cache_budget(
+                total as u64,
+                weights as u64,
+            ));
+        }
         true
     }
 

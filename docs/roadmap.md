@@ -15,13 +15,15 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 2. Число без ссылки на артефакт не считается результатом.
 3. Сделанный пункт удаляется из плана, а не помечается «done».
 
-Сверено с деревом на `bda7219`.
+Сверено с деревом на `f9344ae`.
 
 ## Где мы сейчас
 
-- **CUDA (RTX 5090, Qwen3-32B Q4_K_M):** decode ~110% llama.cpp, prefill
-  105–110% (без повтора CUDA-графа; с графом — до 112%).
-  Артефакт: `docs/benchmarks/2026-11-10-allpaka-vs-llama-rtx5090.md`.
+- **CUDA (RTX 5090, Qwen3-32B Q4_K_M):** decode ~110% llama.cpp; prefill
+  pp512 ~109% (106–112% без повтора CUDA-графа), pp2048 ~98%. Хэш логитов
+  prefill и greedy-поток decode повторяются между запусками.
+  Артефакты: `docs/benchmarks/2026-11-10-allpaka-vs-llama-rtx5090.md`,
+  `docs/benchmarks/2026-11-13-cuda-prefill-determinism-rtx5090.md`.
   `allpaka_ggml.dll` и эталонный `llama-bench` собираются одним скриптом
   `third_party/build_allpaka_ggml.bat`; ревизия и патч llama.cpp закреплены
   рядом (`llama.cpp.rev`, `llama.cpp.patch`).
@@ -40,24 +42,15 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 
 ## Трек P — производительность движка
 
-### P1. CUDA: prefill без повтора графа
+### P1. CUDA: prefill на длинном промпте
 
-Граф повторяется только при одинаковой форме чанка и базе KV; длинный промпт
-по чанкам его не повторяет, поэтому реальный показатель — колонка «no graph».
+Один чанк 512 без повтора графа — 106–112% llama.cpp, но на промпте 2048
+токенов (четыре чанка с растущей историей KV) — 97.7–98.6%: llama.cpp от pp512
+к pp2048 ускоряется (3 500 → 3 600), allpaka замедляется (3 820 → 3 530).
+Артефакт: `docs/benchmarks/2026-11-13-cuda-prefill-determinism-rtx5090.md`.
 
-**DoD:** pp на чанкованном промпте ≥ llama.cpp в парном замере (3 раунда
-интерлив), argmax и logits-fnv стабильны между раундами.
-
-### P2. CUDA: недетерминизм prefill
-
-Хэш логитов prefill меняется от запуска к запуску: без ggml при pp128 (вместе с
-argmax), а в режиме по умолчанию и при pp512 — не меньше восьми разных значений
-за 20 прогонов при стабильном argmax=201
-(`docs/benchmarks/2026-11-13-cuda-pdl-rtx5090.md`). Decode стабилен: один и тот
-же `tokens-fnv` в 7 прогонах из 7.
-
-**DoD:** причина найдена (порядок редукции / гонка), хэш повторяется между
-запусками при pp128 и pp512, тест на повторяемость.
+**DoD:** pp2048 ≥ llama.cpp в парном замере (3 раунда интерлив), хэш логитов
+и argmax одинаковы между раундами (`scripts/check-prefill-determinism.sh`).
 
 ### P4. Metal: GLM-Air decode ≥ llama
 
@@ -258,8 +251,7 @@ clippy backend/model под `aarch64-apple-darwin`; на раннере `macos-1
 воспроизводится: prefill PASS, argmax совпадает на всех пройденных шагах.
 Остаток: на 8-м шаге decode разница log-prob 0.2454 при допуске 0.24, и
 `verify --decode 32` завершается ошибкой. Эталон — llama-server из winget
-(Vulkan). Разница prefill между двумя запусками тоже плавает (0.094 и 0.105),
-см. P2.
+(Vulkan).
 
 **DoD:** `allpaka verify --model <7B> --decode 32` проходит против llama-server
 на CUDA, либо допуск обоснованно изменён с записью, чем объясняется дрейф.

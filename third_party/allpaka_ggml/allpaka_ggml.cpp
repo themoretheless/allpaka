@@ -107,6 +107,38 @@ static bool f16_weights_on() {
 // One-time Q4/Q6 -> f16. Prefill otherwise dequants the same weights on every GEMM.
 static std::unordered_map<const void *, void *> g_f16_w;
 
+// Which weights get an f16 copy must not depend on how much VRAM other
+// programs hold at the moment: a weight that is cached in one run and
+// quantised in the next gives two different roundings of the same prefill.
+// The host sets a byte budget derived from the card and the model
+// (allpaka_ggml_set_f16_budget); weights are cached in call order until it is
+// spent, and the first weight that does not fit closes the cache for good.
+// ALLPAKA_F16_W_MIB overrides the budget. Without either, the old rule
+// applies: cache while 3 GiB stay free.
+static int64_t g_f16_budget = -1;
+static int64_t g_f16_used = 0;
+static bool g_f16_closed = false;
+
+static int64_t f16_budget() {
+    static const int64_t from_env = [] {
+        const char * e = std::getenv("ALLPAKA_F16_W_MIB");
+        if (!e || !e[0]) {
+            return (int64_t) -1;
+        }
+        const long long mib = std::atoll(e);
+        return mib < 0 ? (int64_t) -1 : (int64_t) mib << 20;
+    }();
+    return from_env >= 0 ? from_env : g_f16_budget;
+}
+
+static void f16_close(const char * why) {
+    if (!g_f16_closed) {
+        std::fprintf(stderr, "allpaka_ggml: f16 weight cache closed at %d MiB in %d weights (%s)\n",
+                     (int) (g_f16_used >> 20), (int) g_f16_w.size(), why);
+    }
+    g_f16_closed = true;
+}
+
 static const void * f16_weight(const void * w, int32_t n_in, int32_t n_out, int32_t w_type, int32_t * ty_io) {
     if (!f16_weights_on() || !g_be) {
         return w;
@@ -116,16 +148,31 @@ static const void * f16_weight(const void * w, int32_t n_in, int32_t n_out, int3
         *ty_io = GGML_TYPE_F16;
         return it->second;
     }
+    if (g_f16_closed) {
+        return w;
+    }
     const int64_t n = (int64_t) n_in * (int64_t) n_out;
     if (n <= 0) {
         return w;
     }
+    const size_t need = (size_t) n * sizeof(uint16_t);
+    const int64_t budget = f16_budget();
     size_t free_b = 0, total_b = 0;
     if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) {
         return w;
     }
-    const size_t need = (size_t) n * sizeof(uint16_t);
-    if (free_b < need + (3ull << 30)) {
+    if (budget >= 0) {
+        if (g_f16_used + (int64_t) need > budget) {
+            f16_close("budget spent");
+            return w;
+        }
+        // The budget assumes the card is otherwise ours. If it is not, stop
+        // rather than push the driver into shared system memory.
+        if (free_b < need + (1ull << 30)) {
+            f16_close("VRAM pressure: results may differ from an idle card");
+            return w;
+        }
+    } else if (free_b < need + (3ull << 30)) {
         return w;
     }
     void * dst = nullptr;
@@ -137,6 +184,7 @@ static const void * f16_weight(const void * w, int32_t n_in, int32_t n_out, int3
         return w;
     }
     g_f16_w.emplace(w, dst);
+    g_f16_used += (int64_t) need;
     static int logged = 0;
     if (logged < 3) {
         std::fprintf(stderr, "allpaka_ggml: f16 weight %d MiB (cached %d)\n",
@@ -886,6 +934,16 @@ extern "C" int allpaka_ggml_flash_attn(
                                   head_dim, n_q_heads, m, st);
     }
     return 0;
+}
+
+extern "C" void allpaka_ggml_set_f16_budget(int64_t bytes)
+{
+    std::lock_guard<std::mutex> lock(g_mu);
+    g_f16_budget = bytes < 0 ? -1 : bytes;
+    // A larger budget reopens a cache that an earlier, smaller one closed.
+    if (g_f16_budget < 0 || g_f16_used < g_f16_budget) {
+        g_f16_closed = false;
+    }
 }
 
 extern "C" int allpaka_hybrid_replay(

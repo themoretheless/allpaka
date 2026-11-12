@@ -71,6 +71,10 @@ ALLPAKA_GGML_API void allpaka_fa_reset_mask_lim(void);
 /** Drain ggml CUDA stream. Call before reading Y or mixing with other CUDA work. */
 ALLPAKA_GGML_API void allpaka_ggml_sync(void);
 
+// Bytes the f16 weight cache may hold; negative restores the free-memory rule.
+// Set it from facts that do not change between runs (card size, model size).
+ALLPAKA_GGML_API void allpaka_ggml_set_f16_budget(int64_t bytes);
+
 /**
  * Direct llama MMVQ for m=1 (no cgraph). Faster than mul_mat graph for decode.
  * Same pointer conventions as allpaka_ggml_mul_mat with m=1.

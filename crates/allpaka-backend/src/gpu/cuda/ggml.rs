@@ -63,6 +63,7 @@ type HybridReplayFn = unsafe extern "C" fn(
     d_pos_dev: *const u32,
 ) -> i32;
 type ResetMaskFn = unsafe extern "C" fn();
+type SetF16BudgetFn = unsafe extern "C" fn(i64);
 type SetQ8Fn = unsafe extern "C" fn(*mut c_void);
 type Q8ConsumedFn = unsafe extern "C" fn() -> i32;
 type FaLastSrcFn = unsafe extern "C" fn() -> *mut c_void;
@@ -83,6 +84,7 @@ struct Api {
     wait_peer: Option<PeerFn>,
     signal_peer: Option<PeerFn>,
     clear_shared: Option<ClearSharedFn>,
+    set_f16_budget: Option<SetF16BudgetFn>,
 }
 
 static API: OnceLock<Option<Api>> = OnceLock::new();
@@ -187,8 +189,11 @@ fn load() -> Option<&'static Api> {
                 unsafe { lib.get(b"allpaka_ggml_signal_peer\0").ok().map(|s| *s) };
             let clear_shared: Option<ClearSharedFn> =
                 unsafe { lib.get(b"allpaka_ggml_clear_shared\0").ok().map(|s| *s) };
+            let set_f16_budget: Option<SetF16BudgetFn> =
+                unsafe { lib.get(b"allpaka_ggml_set_f16_budget\0").ok().map(|s| *s) };
             let api = Api {
                 _lib: lib,
+                set_f16_budget,
                 init,
                 mul_mat,
                 mul_mat_vec,
@@ -235,6 +240,35 @@ pub fn fa_kv_floor() -> usize {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&v| (16..=8192).contains(&v))
         .unwrap_or(256)
+}
+
+/// VRAM left for everything but the weights and their f16 copies: arenas, KV,
+/// ggml's pools and cuBLAS workspaces, and whatever the desktop holds.
+const F16_CACHE_RESERVE: u64 = 6 << 30;
+const F16_CACHE_STEP: u64 = 256 << 20;
+
+/// The f16 weight cache budget for a card of `total` bytes holding `weights`
+/// bytes of quantised weights. A function of the card and the model only, so
+/// the same weights are cached in every run.
+pub fn f16_cache_budget(total: u64, weights: u64) -> u64 {
+    let spare = total
+        .saturating_sub(weights)
+        .saturating_sub(F16_CACHE_RESERVE);
+    spare / F16_CACHE_STEP * F16_CACHE_STEP
+}
+
+/// Tell the bridge how many bytes of f16 weight copies it may keep.
+pub fn set_f16_budget(bytes: u64) {
+    let Some(api) = load() else {
+        return;
+    };
+    let Some(set) = api.set_f16_budget else {
+        // An older allpaka_ggml.dll: it keeps its free-memory rule.
+        return;
+    };
+    // SAFETY: the symbol was resolved from the loaded library with this signature; the
+    // call only stores an integer under the bridge's own mutex.
+    unsafe { set(i64::try_from(bytes).unwrap_or(i64::MAX)) };
 }
 
 /// Bind cudarc's stream so ggml can share it (preferred) or use events.
@@ -632,5 +666,24 @@ pub fn ggml_type_code(ty: allpaka_dtype::GgmlType) -> Option<i32> {
         allpaka_dtype::GgmlType::Q4K => Some(12),
         allpaka_dtype::GgmlType::Q6K => Some(14),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::f16_cache_budget;
+
+    #[test]
+    fn f16_budget_depends_only_on_card_and_model() {
+        let gib = 1u64 << 30;
+        // RTX 5090 with Qwen3-32B Q4_K_M: 32 607 MiB card, 18.4 GiB of weights.
+        let total = 32_607u64 << 20;
+        let weights = 19_757_000_000;
+        let budget = f16_cache_budget(total, weights);
+        assert_eq!(budget % (256 << 20), 0);
+        assert!(budget > 6 * gib && budget < 8 * gib, "{budget}");
+        // Weights that leave less than the reserve get no cache at all.
+        assert_eq!(f16_cache_budget(24 * gib, 20 * gib), 0);
+        assert_eq!(f16_cache_budget(8 * gib, 20 * gib), 0);
     }
 }
