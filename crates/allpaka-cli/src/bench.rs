@@ -182,6 +182,13 @@ pub fn measure_engine(
     println!(
         "  decode   {decode_tokens:>4} tok in {decode_secs:>6.2} s   {decode_rate:>7.1} tok/s"
     );
+    // The greedy stream itself: two builds or switches that agree here chose the
+    // same token at every step, whatever their logits rounding.
+    let mut stream_hash = 0xcbf29ce484222325u64;
+    for token in std::iter::once(&next).chain(&outs) {
+        stream_hash = (stream_hash ^ *token as u64).wrapping_mul(0x100000001b3);
+    }
+    eprintln!("  decode tokens-fnv={stream_hash:016x}");
     crate::airbug::log_rate("decode", decode_tokens, decode_secs, decode_rate);
     let decode_stats_after = allpaka_backend::gpu::decode_path_stats();
     let gpu_attempts = decode_stats_after.attempts - decode_stats_before.attempts;
