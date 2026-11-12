@@ -84,7 +84,7 @@ rules decide what they can claim:
   says "held by the model lock". `--interval-ms` bounds each probe, which is
   what makes a held probe observable at all.
 * **Residency is not reuse.** `PrefixCacheResident` reports entries and bytes
-  from `/stats`, which is what A4 of the roadmap calls residency - not hit
+  from `/stats`, which is residency (entries held) - not hit
   rate. `MemoryHeadroom` compares `reserved_bytes` to `limit_bytes`, and
   reports `no cap set` when the limit is the `u64::MAX` sentinel `serve` uses
   for an unbudgeted process.

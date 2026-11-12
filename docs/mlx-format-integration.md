@@ -113,10 +113,7 @@ crates/allpaka-mlx/
 
 ## Future Work
 
-1. **Runtime kernel integration**: Implement GPU-accelerated matmul directly on MLX blocks without full dequantization
-2. **Repacking path**: Convert MLX weights into allpaka's optimized block format at load time
-3. **Checkpoint downloading**: Add automatic download of reference checkpoints for CI validation
-4. **Real benchmark harness**: Integrate with `docs/benchmarks/2026-09-26-postflip-matrix/wait-then-run.sh` for gated testing
+Tracked in [roadmap.md](roadmap.md), item A7.
 
 ## References
 

@@ -169,43 +169,14 @@ universal llama beat.
 
 ## Open gaps (priority)
 
-1. **GLM decode (~0.86×)** — experts dominate (down ~33%, gate_up ~25%).
-   Shared expert adds Q5+Q8 traffic every MoE layer. In-graph Q4/Q8 matvec BW
-   ~0.85× llama is the remaining lever (not more dispatch folds).
-2. **235B decode (~0.72×)** — Q2_K path; after GLM.
-
-## Branch knobs pending cool verify (agent cannot measure)
-
-Cursor agent seatbelt → `MTLCreateSystemDefaultDevice() == nil`. Fail-closed
-harness: [scripts/glm-ab-stagger.sh](../../scripts/glm-ab-stagger.sh).
-
-Unmeasured in-agent (opt-in / default until Terminal A/B):
-
-- `ALLPAKA_MV_ID` default **ON** — llama `mul_mv_id` `grid.z=slots` for INDEXED Q4/Q8 `_mv`
-- `ALLPAKA_SHARED_STAGGER=1` — shared Q5 after expert Q4 barrier
-- Q4 `_mv` float4 activation loads (always on in tree)
-- `ALLPAKA_MV_TG` ∈ {64,128,256}
-
-```sh
-# Run outside Cursor agent (Metal required):
-scripts/glm-ab-stagger.sh
-# A/B: MV_ID on/off, SHARED_STAGGER, llama. Ship if decode ≥ llama.
-```
+Tracked in [roadmap.md](../roadmap.md): GLM decode — P4 (includes the
+unmeasured `MV_ID`/`SHARED_STAGGER`/`MV_TG` knobs, `scripts/glm-ab-stagger.sh`
+and the GPU-capture step), 235B decode — P5.
 
 ## Dead ends (do not retry)
 
 RFUSE under normflag, SHARED_TAIL tok/s, NR0≠2, Q8 K-split+shmem, MEGA
 device atomic spin, GUFUSE/CFUSE/RTOPK defaults — [decode-opts.md](../decode-opts.md).
-
-## Next if GLM still <1.0× after stagger A/B
-
-Metal System Trace / GPU capture on one decode token:
-
-1. Expert Q8_0 down `[4096×1408]` indexed ×8 — effective GB/s vs llama `mul_mv_q8_0`
-2. Expert Q4_K gate/up `[1408×4096]` indexed ×8 — vs llama `mul_mv_q4_K`
-3. Barrier / encoder idle between stages (whole-`y_arena` drain)
-
-Do **not** add fuse env knobs before those numbers.
 
 ## Interleaved / warm note
 
@@ -432,12 +403,7 @@ parity/tolerance tests plus bit-exact same-shape kernel comparisons
 
 ### Open: mmbench q6_k anomaly, needs a quiet machine
 
-One noisy-machine run (searchpartyd/rustc storm) showed llama's
-`kernel_mul_mm_q6_K` ahead of `mmll_q6_k` on 12288->4096 m=480 while
-`mmllp_q6_k` landed behind both, and the q4_k control run inverted the
-llama ordering minutes later — i.e. load-contaminated, not actionable.
-Re-measure at top-process <60%: `MM_FMT=q6_k MM_NIN=12288 MM_NOUT=4096
-MM_M=480 MM_LLAMA=1` with the q4_k same-shape control.
+Tracked in [roadmap.md](../roadmap.md), item P6.
 
 ## 2026-11-09 (round 2): decode side of the Q6_K fold + fused decode QKV
 
