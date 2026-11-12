@@ -44,13 +44,16 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 **DoD:** pp на чанкованном промпте ≥ llama.cpp в парном замере (3 раунда
 интерлив), argmax и logits-fnv стабильны между раундами.
 
-### P2. CUDA: недетерминизм prefill pp128 без ggml
+### P2. CUDA: недетерминизм prefill
 
-В режиме без ggml при pp128 хэш логитов и argmax меняются от запуска к запуску;
-pp512 и decode стабильны.
+Хэш логитов prefill меняется от запуска к запуску: без ggml при pp128 (вместе с
+argmax), а в режиме по умолчанию и при pp512 — не меньше восьми разных значений
+за 20 прогонов при стабильном argmax=201
+(`docs/benchmarks/2026-11-13-cuda-pdl-rtx5090.md`). Decode стабилен: один и тот
+же `tokens-fnv` в 7 прогонах из 7.
 
-**DoD:** причина найдена (порядок редукции / гонка), pp128 детерминирован, тест
-на повторяемость хэша.
+**DoD:** причина найдена (порядок редукции / гонка), хэш повторяется между
+запусками при pp128 и pp512, тест на повторяемость.
 
 ### P3. CUDA: сборка `allpaka_ggml.dll` воспроизводима из репозитория
 
@@ -255,8 +258,6 @@ clippy backend/model под `aarch64-apple-darwin`; на раннере `macos-1
 
 ### D4. Soundness-FIXME
 
-- `gpu/cuda/pdl.rs` читает приватные поля cudarc по угаданным смещениям —
-  собирать аргументы запуска самим.
 - `gpu/metal/ffn_grouped.rs:216` — гонка рестейджинга GLM router bias
   (вероятный баг GLM fused prefill). Нужен Mac.
 - `gpu/metal/verify.rs:361` — дамп `ALLPAKA_VERIFY_DEBUG`.
@@ -310,6 +311,11 @@ argmax llama.cpp 12095, наш 135958; топ-10 логитов ниже на ~9
   `docs/decode-opts.md`.
 - **Порт `kernel_mul_mm_id_q4_K`** и прочее из «What was tried and falsified» —
   `docs/moe-prefill.md`.
+- **CUDA PDL по умолчанию.** До 2026-11-13 не работал вовсе (угаданное
+  смещение в `LaunchArgs`); починенный даёт +1% decode и в 1 прогоне из 7 —
+  другой greedy-поток. Opt-in `ALLPAKA_CUDA_PDL=1`. Возврат: найдена причина
+  расхождения и 20 прогонов подряд с одинаковым `tokens-fnv`
+  (`docs/benchmarks/2026-11-13-cuda-pdl-rtx5090.md`).
 - **Tensor parallel** вместо pipeline; **сжатие активаций** между узлами.
 - **Кэш дескрипторов `token_layers`** — эффект ниже шума.
 

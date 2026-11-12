@@ -3,9 +3,12 @@
 //! Host: `cuLaunchKernelEx` + `PROGRAMMATIC_STREAM_SERIALIZATION`.
 //! Device: `griddepcontrol.wait` / `launch_dependents` in kernels.
 //!
-//! Layout (cudarc 0.19, 64-bit):
-//!   CudaFunction: Arc module @0, CUfunction @8 (slot=2)
-//!   LaunchArgs: stream@0, func@8, waits@16 (24), records@40 (24), args@64
+//! cudarc keeps the raw function handle and the argument vector private, and
+//! `cuLaunchKernelEx` needs both. Their place inside `CudaFunction` and
+//! `LaunchArgs` is not guessed: the first launch compares the candidate words
+//! with the values the types print through their public `Debug` impls, and
+//! only a match enables the PDL path. Without a match every launch goes
+//! through cudarc's own `launch`.
 
 use cudarc::driver::result::DriverError;
 use cudarc::driver::sys::{self, CUresult};
@@ -22,22 +25,50 @@ fn pdl_wanted() -> bool {
     static ON: AtomicBool = AtomicBool::new(false);
     static INIT: AtomicBool = AtomicBool::new(false);
     if !INIT.swap(true, Ordering::Relaxed) {
+        // Off unless asked for; see docs/benchmarks/2026-11-13-cuda-pdl-rtx5090.md.
         let on = match std::env::var("ALLPAKA_CUDA_PDL") {
-            // Default on for Blackwell decode (measured ~+0.5–1 tg on 5090).
-            Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false")),
-            Err(_) => true,
+            Ok(v) => !(v.is_empty() || v == "0" || v.eq_ignore_ascii_case("false")),
+            Err(_) => false,
         };
         ON.store(on, Ordering::Relaxed);
         if on {
-            eprintln!("cuda: PDL launches enabled (ALLPAKA_CUDA_PDL=0 to disable)");
+            eprintln!("cuda: PDL launches enabled by ALLPAKA_CUDA_PDL (experimental)");
         }
     }
     ON.load(Ordering::Relaxed)
 }
 
 static PDL_DEAD: AtomicBool = AtomicBool::new(false);
-static ARGS_OFF: AtomicUsize = AtomicUsize::new(64); // fixed: LaunchArgs.args
 static USE_PDL_ATTR: AtomicBool = AtomicBool::new(true);
+
+const WORD: usize = std::mem::size_of::<usize>();
+const UNVERIFIED: usize = usize::MAX;
+const REJECTED: usize = usize::MAX - 1;
+/// Byte offset of `cu_function` inside `CudaFunction`, once verified.
+static FUNC_OFF: AtomicUsize = AtomicUsize::new(UNVERIFIED);
+/// `ptr_word << 8 | len_word` of the `args` vector inside `LaunchArgs`, once
+/// verified; both are word indices from the start of the struct.
+static ARGS_AT: AtomicUsize = AtomicUsize::new(UNVERIFIED);
+/// The address after `key` in a derived `Debug` rendering (`key0x1f..`).
+fn debug_ptr(text: &str, key: &str) -> Option<usize> {
+    let rest = &text[text.find(key)? + key.len()..];
+    let hex = rest.strip_prefix("0x")?;
+    let end = hex
+        .find(|c: char| !c.is_ascii_hexdigit())
+        .unwrap_or(hex.len());
+    usize::from_str_radix(&hex[..end], 16).ok()
+}
+
+/// The pointers of the last `args: [..]` list in a `LaunchArgs` rendering.
+fn debug_args(text: &str) -> Option<Vec<usize>> {
+    let rest = &text[text.rfind("args: [")? + "args: [".len()..];
+    let list = &rest[..rest.find(']')?];
+    list.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(|item| usize::from_str_radix(item.strip_prefix("0x")?, 16).ok())
+        .collect()
+}
 
 fn cu_ok(r: CUresult) -> Result<(), DriverError> {
     if r == CUresult::CUDA_SUCCESS {
@@ -47,46 +78,123 @@ fn cu_ok(r: CUresult) -> Result<(), DriverError> {
     }
 }
 
-unsafe fn cu_function_of(f: &CudaFunction) -> sys::CUfunction {
-    // cudarc 0.19: Arc<Module> then CUfunction (or reverse). Prefer offset 8.
-    // FIXME(soundness): `CudaFunction` is a default-repr (`repr(Rust)`) struct with
-    // private fields `{ cu_function, module: Arc<CudaModule> }`; Rust guarantees neither
-    // field order nor offsets, so reading a `CUfunction` at byte 0 or 8 relies on what the
-    // current rustc happens to emit. Both reads stay in bounds (the struct is 16 bytes)
-    // and both fields are non-null pointers, so the "non-null" heuristic always picks
-    // offset 8: if the compiler (or `-Z randomize-layout`) ever puts `cu_function` first,
-    // we pass the `Arc`'s heap pointer to `cuLaunchKernelEx` as a function handle. Fix:
-    // obtain the handle without layout punning, e.g. look it up ourselves with
-    // `cuModuleGetFunction` next to cudarc's `load_function`, or upstream an accessor.
-    let p = f as *const CudaFunction as *const u8;
-    let a = std::ptr::read(p as *const sys::CUfunction);
-    let b = std::ptr::read(p.add(8) as *const sys::CUfunction);
-    // Heuristic: live CUfunction is non-null and not looking like a small Arc refcount.
-    if !b.is_null() {
-        b
+/// The raw handle of `f`, or null when its place in `CudaFunction` could not
+/// be verified.
+fn cu_function_of(f: &CudaFunction) -> sys::CUfunction {
+    const { assert!(std::mem::size_of::<CudaFunction>() == 2 * WORD) };
+    let base = f as *const CudaFunction as *const usize;
+    // SAFETY: `CudaFunction` is two words (asserted above), both pointers that are
+    // always initialised (`cu_function` and an `Arc`), so each word read is in bounds
+    // and reads initialised memory.
+    let word = |i: usize| unsafe { std::ptr::read(base.add(i)) };
+    let mut off = FUNC_OFF.load(Ordering::Relaxed);
+    if off == UNVERIFIED {
+        let printed = debug_ptr(&format!("{f:?}"), "cu_function: ");
+        off = match printed {
+            Some(handle) if word(1) == handle && word(0) != handle => WORD,
+            Some(handle) if word(0) == handle && word(1) != handle => 0,
+            _ => REJECTED,
+        };
+        FUNC_OFF.store(off, Ordering::Relaxed);
+        if off == REJECTED {
+            eprintln!("cuda: CudaFunction layout not recognised; PDL launches disabled");
+        }
+    }
+    if off == REJECTED {
+        return std::ptr::null_mut();
+    }
+    word(off / WORD) as sys::CUfunction
+}
+
+/// Find `args` inside `launch` by comparing it with what `Debug` prints.
+/// Returns the packed position, `REJECTED`, or `UNVERIFIED` when this launch
+/// cannot decide (no arguments, or length and capacity coincide).
+fn verify_args(launch: &LaunchArgs<'_>) -> usize {
+    let Some(printed) = debug_args(&format!("{launch:?}")) else {
+        return REJECTED;
+    };
+    let n = printed.len();
+    if n == 0 {
+        return UNVERIFIED;
+    }
+    let words = std::mem::size_of::<LaunchArgs<'_>>() / WORD;
+    let base = launch as *const LaunchArgs<'_> as *const usize;
+    // SAFETY: every index is below the struct's size in words, so the read is in
+    // bounds. All fields but `flags` are references and vectors, whose words are
+    // initialised; `flags` is a 4-byte optional enum, and the word holding it is only
+    // ever compared against, never used as a pointer or a length.
+    let word = |i: usize| unsafe { std::ptr::read(base.add(i)) };
+    let mut undecided = false;
+    // A `Vec` is three adjacent words: buffer pointer, capacity and length, in an
+    // order the compiler chooses.
+    for first in 0..words.saturating_sub(2) {
+        let triple = [word(first), word(first + 1), word(first + 2)];
+        for len_at in 0..3 {
+            if triple[len_at] != n {
+                continue;
+            }
+            for cap_at in (0..3).filter(|&i| i != len_at) {
+                let ptr_at = 3 - len_at - cap_at;
+                let (cap, ptr) = (triple[cap_at], triple[ptr_at]);
+                // The capacity is a small count no less than the length; the buffer
+                // is a word-aligned heap address far above any such count.
+                if !(n..=1024).contains(&cap) || ptr < 0x1_0000 || ptr % WORD != 0 {
+                    continue;
+                }
+                if cap == n {
+                    // Length and capacity look alike: a launch with spare capacity
+                    // decides which word is the length.
+                    undecided = true;
+                    continue;
+                }
+                // SAFETY: `ptr` sits next to a length of `n` and a capacity above it,
+                // which among this struct's fields only a non-empty vector provides;
+                // its buffer holds at least `n` initialised words. The comparison
+                // rejects every vector but `args`.
+                let held = unsafe { std::slice::from_raw_parts(ptr as *const usize, n) };
+                if held == printed.as_slice() {
+                    return (first + ptr_at) << 8 | (first + len_at);
+                }
+            }
+        }
+    }
+    if undecided {
+        UNVERIFIED
     } else {
-        a
+        REJECTED
     }
 }
 
-unsafe fn args_vec<'a, 'b>(
-    launch: &'a mut LaunchArgs<'b>,
-    off: usize,
-) -> Option<&'a mut Vec<*mut std::ffi::c_void>> {
-    let base = launch as *mut LaunchArgs<'b> as *mut u8;
-    // FIXME(soundness): `LaunchArgs` is `repr(Rust)` with private fields (stream, func,
-    // waits, records, args, flags); offset 64 for `args` is what current rustc emits, not
-    // a guarantee. If the layout moves, this reinterprets another field (e.g. `waits`, a
-    // `Vec<&CudaEvent>`) as the argument vector; the length/capacity sanity check below
-    // cannot tell two `Vec`s apart, so the kernel would get wrong arguments. Fix: collect
-    // the kernel argument pointers ourselves (a small builder that mirrors `.arg()`) and
-    // call `cuLaunchKernelEx` with them, instead of reading cudarc's private `args`.
-    let v = &mut *(base.add(off) as *mut Vec<*mut std::ffi::c_void>);
-    let n = v.len();
-    if n == 0 || n > 64 || v.capacity() < n {
+/// The kernel arguments collected in `launch`, or `None` when their place in
+/// `LaunchArgs` is not (yet) verified.
+fn args_of<'a>(launch: &'a mut LaunchArgs<'_>) -> Option<&'a mut [*mut std::ffi::c_void]> {
+    let mut at = ARGS_AT.load(Ordering::Relaxed);
+    if at == UNVERIFIED {
+        at = verify_args(launch);
+        if at == UNVERIFIED {
+            return None;
+        }
+        ARGS_AT.store(at, Ordering::Relaxed);
+        if at == REJECTED {
+            eprintln!("cuda: LaunchArgs layout not recognised; PDL launches disabled");
+            PDL_DEAD.store(true, Ordering::Relaxed);
+        } else {
+            eprintln!("cuda: PDL launch path verified against cudarc's layout");
+        }
+    }
+    if at == REJECTED {
         return None;
     }
-    Some(v)
+    let base = launch as *mut LaunchArgs<'_> as *mut usize;
+    // SAFETY: `verify_args` matched these two words against the vector's printed
+    // contents, and a type's field layout is fixed for the whole program, so they are the
+    // buffer pointer and length of `launch.args` for every `LaunchArgs`. The slice borrows
+    // `launch` mutably for `'a`, so nothing else touches the vector meanwhile.
+    unsafe {
+        let ptr = std::ptr::read(base.add(at >> 8)) as *mut *mut std::ffi::c_void;
+        let len = std::ptr::read(base.add(at & 0xff));
+        (len != 0).then(|| std::slice::from_raw_parts_mut(ptr, len))
+    }
 }
 
 unsafe fn launch_ex(
@@ -139,8 +247,7 @@ impl StreamPdlExt for CudaStream {
     #[inline(always)]
     fn launch_builder_pdl<'a>(&'a self, func: &'a CudaFunction) -> LaunchArgs<'a> {
         TLS_STREAM.with(|c| c.set(self as *const CudaStream));
-        // FIXME(soundness): relies on the layout guess in `cu_function_of`; see there.
-        let cu = unsafe { cu_function_of(func) };
+        let cu = cu_function_of(func);
         TLS_CU.with(|c| c.set(cu));
         self.launch_builder(func)
     }
@@ -166,24 +273,22 @@ pub unsafe fn launch_pdl_inner(
     // `launch_builder_pdl`, and the TLS slots are cleared (`replace(null)`) on each launch;
     // a builder from plain `launch_builder` finds null and takes the cudarc path.
     let stream = &*stream_ptr;
-    let off = ARGS_OFF.load(Ordering::Relaxed);
 
-    if let Some(args) = args_vec(launch, off) {
-        let pdl = USE_PDL_ATTR.load(Ordering::Relaxed);
-        match launch_ex(stream, f, cfg, args.as_mut_slice(), pdl) {
-            Ok(()) => return Ok(None),
-            Err(_) if pdl => {
-                // Fall back to plain cuLaunchKernelEx without PDL attr.
-                if let Some(args) = args_vec(launch, off) {
-                    if launch_ex(stream, f, cfg, args.as_mut_slice(), false).is_ok() {
-                        eprintln!("cuda: PDL attr unsupported; using plain launches");
-                        USE_PDL_ATTR.store(false, Ordering::Relaxed);
-                        return Ok(None);
-                    }
-                }
+    let Some(args) = args_of(launch) else {
+        return launch.launch(cfg);
+    };
+    let pdl = USE_PDL_ATTR.load(Ordering::Relaxed);
+    match launch_ex(stream, f, cfg, args, pdl) {
+        Ok(()) => return Ok(None),
+        Err(_) if pdl => {
+            // Fall back to plain cuLaunchKernelEx without PDL attr.
+            if launch_ex(stream, f, cfg, args, false).is_ok() {
+                eprintln!("cuda: PDL attr unsupported; using plain launches");
+                USE_PDL_ATTR.store(false, Ordering::Relaxed);
+                return Ok(None);
             }
-            Err(_) => {}
         }
+        Err(_) => {}
     }
 
     eprintln!("cuda: PDL launch failed; disabling PDL and falling back to cudarc launch");
@@ -205,5 +310,27 @@ impl LaunchArgsPdl for LaunchArgs<'_> {
         cfg: LaunchConfig,
     ) -> Result<Option<(cudarc::driver::CudaEvent, cudarc::driver::CudaEvent)>, DriverError> {
         launch_pdl_inner(self, cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{debug_args, debug_ptr};
+
+    #[test]
+    fn debug_renderings_give_back_the_pointers() {
+        let func =
+            "CudaFunction { cu_function: 0x1f2e3d4c5b60, module: CudaModule { cu_module: 0x77 } }";
+        assert_eq!(debug_ptr(func, "cu_function: "), Some(0x1f2e_3d4c_5b60));
+        assert_eq!(debug_ptr(func, "missing: "), None);
+
+        let launch = "LaunchArgs { stream: S { args: [0x1] }, waits: [], records: [], args: [0x10, 0xabc, 0x7ffe0008], flags: None }";
+        assert_eq!(debug_args(launch), Some(vec![0x10, 0xabc, 0x7ffe_0008]));
+        assert_eq!(
+            debug_args("LaunchArgs { args: [], flags: None }"),
+            Some(vec![])
+        );
+        assert_eq!(debug_args("LaunchArgs { args: [nonsense] }"), None);
+        assert_eq!(debug_args("LaunchArgs { }"), None);
     }
 }
