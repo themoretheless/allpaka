@@ -1226,7 +1226,10 @@ impl FusedCtx<'_> {
             ..
         } = *self;
 
-        if self.launch_attend_g8(gpu, q_off, out_off, k_off, v_off).is_some() {
+        if self
+            .launch_attend_g8(gpu, q_off, out_off, k_off, v_off)
+            .is_some()
+        {
             return Some(());
         }
 

@@ -76,7 +76,10 @@ fn same_shape_matvecs_requantize_x() {
     };
     let y1 = run(&x1);
     let y2 = run(&x2);
-    assert!(y1.iter().any(|v| v.abs() > 1e-3), "degenerate output {y1:?}");
+    assert!(
+        y1.iter().any(|v| v.abs() > 1e-3),
+        "degenerate output {y1:?}"
+    );
     for (i, (a, b)) in y1.iter().zip(&y2).enumerate() {
         assert!(
             (a + b).abs() < 1e-3 + 1e-3 * a.abs(),
