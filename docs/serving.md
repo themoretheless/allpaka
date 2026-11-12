@@ -116,6 +116,30 @@ The census the vision increments are planned from is:
 and the tensors grouped by top-level name prefix, and claims nothing beyond what
 the file contains.
 
+## Tool calls
+
+With `tools` in the request (ChatML models), a `<tool_call>` block the model
+writes is returned in the OpenAI `tool_calls` shape only if it is well formed
+**and** fits the declarations: the name is one of the request's tools, the
+arguments are a JSON object, and they satisfy the tool's `parameters` schema.
+The schema keywords checked are `type`, `properties`, `required`,
+`additionalProperties: false`, `items` and `enum`; others are ignored.
+
+A block that fails is not a tool call. Its text stays in `content`, exactly as
+a malformed block does, and the choice carries the reasons:
+
+```json
+"tool_call_rejections": [
+  {"name": "search", "reason": "arguments: missing required `query`"},
+  {"name": "rm_rf",  "reason": "tool `rm_rf` was not declared in this request"}
+]
+```
+
+The field is absent when nothing was refused. In SSE it arrives as one chunk
+before the final one. The built-in RAG tool loop never executes a refused
+call. Generation itself is not constrained by the schema: this is a check of
+what the model produced, not a grammar.
+
 ## Request lifetime and sessions
 
 HTTP admission continues while inference runs. Readers are limited to 16, with

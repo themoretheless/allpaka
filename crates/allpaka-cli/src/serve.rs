@@ -23,10 +23,12 @@ mod routes;
 mod sampler;
 mod session;
 mod template;
+mod tool_schema;
 
 pub(crate) use http::{read_request, respond, respond_html, write_sse_event, write_sse_headers};
 pub(crate) use messages::{
-    append_valid_utf8, image_part_count, parse_tool_calls, render_messages, stream_safe_len,
+    append_valid_utf8, image_part_count, parse_tool_calls, parse_tool_calls_checked,
+    render_messages, stream_safe_len,
 };
 pub(crate) use predict::{
     extract_prediction_text, parse_prompt_lookup_k, predict_followup_prompts,
@@ -64,6 +66,9 @@ const SESSION_TOKENS: usize = MAX_NEW_TOKENS + 32_768;
 struct CompletionResult {
     content: String,
     tool_calls: Vec<Value>,
+    /// Tool calls the model wrote that the request's tool declarations do not
+    /// allow: `{name, reason}` each. Their text stays in `content`.
+    tool_rejections: Vec<Value>,
     finish: String,
     prompt_tokens: usize,
     completion_tokens: usize,
@@ -98,6 +103,8 @@ struct GenerationRequest<'a> {
     top_p: f64,
     repeat_penalty: f64,
     parse_tools: bool,
+    /// The request's tool declarations; parsed calls are checked against them.
+    tool_specs: Option<&'a [Value]>,
     prediction_tokens: &'a [u32],
     prompt_lookup_k: usize,
     stream: Option<&'a mut TcpStream>,

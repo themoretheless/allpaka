@@ -176,6 +176,7 @@ pub(super) fn chat_completions(
                 top_p,
                 repeat_penalty,
                 parse_tools: false,
+                tool_specs: None,
                 prediction_tokens: &prediction_tokens,
                 prompt_lookup_k,
                 stream: Some(&mut *stream),
@@ -195,6 +196,7 @@ pub(super) fn chat_completions(
                 top_p,
                 repeat_penalty,
                 parse_tools: false,
+                tool_specs: None,
                 prediction_tokens: &prediction_tokens,
                 prompt_lookup_k,
                 stream: if streaming { Some(&mut *stream) } else { None },
@@ -211,6 +213,7 @@ pub(super) fn chat_completions(
                 top_p,
                 repeat_penalty,
                 parse_tools: true,
+                tool_specs: tools,
                 prediction_tokens: &prediction_tokens,
                 prompt_lookup_k,
                 stream: if streaming { Some(&mut *stream) } else { None },
@@ -231,6 +234,7 @@ pub(super) fn chat_completions(
                     top_p,
                     repeat_penalty,
                     parse_tools: true,
+                    tool_specs: tools,
                     prediction_tokens: &prediction_tokens,
                     prompt_lookup_k,
                     stream: if streaming { Some(&mut *stream) } else { None },
@@ -279,14 +283,7 @@ pub(super) fn chat_completions(
         return Ok(());
     }
 
-    respond(
-        stream,
-        200,
-        &json!({
-            "id": "chatcmpl-allpaka",
-            "object": "chat.completion",
-            "model": model_name,
-            "choices": [{
+    let mut choice = json!({
                 "index": 0,
                 "message": {
                     "role": "assistant",
@@ -298,7 +295,19 @@ pub(super) fn chat_completions(
                     },
                 },
                 "finish_reason": completion.finish,
-            }],
+    });
+    // Present only when the model wrote a call the request did not allow.
+    if !completion.tool_rejections.is_empty() {
+        choice["tool_call_rejections"] = Value::Array(completion.tool_rejections);
+    }
+    respond(
+        stream,
+        200,
+        &json!({
+            "id": "chatcmpl-allpaka",
+            "object": "chat.completion",
+            "model": model_name,
+            "choices": [choice],
             "usage": {
                 "prompt_tokens": completion.prompt_tokens,
                 "completion_tokens": completion.completion_tokens,

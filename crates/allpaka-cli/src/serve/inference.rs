@@ -193,6 +193,7 @@ pub(super) fn run_inference(
         top_p,
         repeat_penalty,
         parse_tools,
+        tool_specs,
         prediction_tokens,
         prompt_lookup_k,
         mut stream,
@@ -357,10 +358,10 @@ pub(super) fn run_inference(
     let decode_secs = t1.elapsed().as_secs_f64();
 
     let text = format!("{think_prefix}{}", String::from_utf8_lossy(&raw_bytes));
-    let (content, tool_calls) = if parse_tools {
-        parse_tool_calls(&text)
+    let (content, tool_calls, tool_rejections) = if parse_tools {
+        parse_tool_calls_checked(&text, tool_specs)
     } else {
-        (text.clone(), Vec::new())
+        (text.clone(), Vec::new(), Vec::new())
     };
     if !tool_calls.is_empty() && finish == "stop" {
         finish = "tool_calls";
@@ -437,6 +438,19 @@ pub(super) fn run_inference(
                 }),
             )?;
         }
+        if !tool_rejections.is_empty() {
+            write_sse_event(
+                stream.as_mut().unwrap(),
+                &json!({
+                    "object": "chat.completion.chunk",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "tool_call_rejections": tool_rejections,
+                    }],
+                }),
+            )?;
+        }
         if emit_done {
             write_sse_event(
                 stream.as_mut().unwrap(),
@@ -466,6 +480,7 @@ pub(super) fn run_inference(
     Ok(CompletionResult {
         content,
         tool_calls,
+        tool_rejections,
         finish: finish.to_string(),
         prompt_tokens: prompt.len(),
         completion_tokens: generated.len(),

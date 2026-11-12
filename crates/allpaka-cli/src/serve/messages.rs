@@ -132,8 +132,23 @@ pub(crate) fn render_messages(raw: &[Value], tools: Option<&[Value]>) -> Vec<(St
 /// string). Malformed blocks stay in the content untouched - the client sees
 /// what the model actually wrote instead of a silent drop.
 pub(crate) fn parse_tool_calls(text: &str) -> (String, Vec<Value>) {
+    let (content, calls, _) = parse_tool_calls_checked(text, None);
+    (content, calls)
+}
+
+/// `parse_tool_calls`, and with `tools` also a check of every well-formed call
+/// against the request's tool declarations. A call that names an undeclared
+/// tool or whose arguments do not fit the tool's schema is refused: it stays
+/// in the content like a malformed block, and the third value says why
+/// (`{name, reason}`), so the client is told instead of handed a call it
+/// never offered.
+pub(crate) fn parse_tool_calls_checked(
+    text: &str,
+    tools: Option<&[Value]>,
+) -> (String, Vec<Value>, Vec<Value>) {
     let mut content = String::new();
     let mut calls = Vec::new();
+    let mut rejections = Vec::new();
     let mut rest = text;
     while let Some(start) = rest.find("<tool_call>") {
         let after = &rest[start + "<tool_call>".len()..];
@@ -142,9 +157,16 @@ pub(crate) fn parse_tool_calls(text: &str) -> (String, Vec<Value>) {
         };
         let inner = after[..end].trim();
         let parsed: Option<Value> = serde_json::from_str(inner).ok();
-        let valid = parsed
+        let mut valid = parsed
             .as_ref()
             .is_some_and(|v| v["name"].is_string() && !v["arguments"].is_null());
+        if let (true, Some(tools), Some(v)) = (valid, tools, parsed.as_ref()) {
+            let name = v["name"].as_str().unwrap_or_default();
+            if let Err(reason) = super::tool_schema::check_call(tools, name, &v["arguments"]) {
+                rejections.push(json!({"name": name, "reason": reason}));
+                valid = false;
+            }
+        }
         if valid {
             let v = parsed.unwrap();
             calls.push(json!({
@@ -162,7 +184,7 @@ pub(crate) fn parse_tool_calls(text: &str) -> (String, Vec<Value>) {
         rest = &after[end + "</tool_call>".len()..];
     }
     content.push_str(rest);
-    (content.trim().to_string(), calls)
+    (content.trim().to_string(), calls, rejections)
 }
 
 /// The longest prefix of `text` that is safe to stream when tool calls may
@@ -295,6 +317,60 @@ mod tests {
         assert_eq!(out[2].0, "user");
         assert_eq!(out[2].1.matches("<tool_response>").count(), 2);
         assert_eq!(out.len(), 3);
+    }
+
+    /// The model wrote garbage where a tool call belongs: nothing of it
+    /// becomes a call, all of it stays visible, and each refusal has a reason.
+    #[test]
+    fn checked_parse_refuses_calls_the_request_did_not_offer() {
+        let tools = [json!({"type": "function", "function": {
+            "name": "search",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": false
+            }
+        }})];
+        let text = concat!(
+            "before ",
+            "<tool_call>{\"name\": \"search\", \"arguments\": {\"query\": \"ok\"}}</tool_call>",
+            "<tool_call>{\"name\": \"search\", \"arguments\": {\"q\": 1}}</tool_call>",
+            "<tool_call>{\"name\": \"rm_rf\", \"arguments\": {\"path\": \"/\"}}</tool_call>",
+            "<tool_call>{\"name\": \"search\", \"arguments\": \"zzz\"}</tool_call>",
+            "<tool_call>not json</tool_call>",
+            " after"
+        );
+        let (content, calls, rejections) = parse_tool_calls_checked(text, Some(&tools));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "search");
+        assert_eq!(calls[0]["function"]["arguments"], "{\"query\":\"ok\"}");
+        // Three well-formed but disallowed calls; the non-JSON block is
+        // malformed, not refused.
+        assert_eq!(rejections.len(), 3);
+        assert_eq!(rejections[0]["name"], "search");
+        assert!(rejections[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("missing required `query`"));
+        assert_eq!(rejections[1]["name"], "rm_rf");
+        assert!(rejections[1]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not declared"));
+        assert!(rejections[2]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not JSON"));
+        for kept in ["\"q\": 1", "rm_rf", "zzz", "not json", "before", "after"] {
+            assert!(content.contains(kept), "{kept} missing from {content}");
+        }
+        assert!(!content.contains("\"query\": \"ok\""));
+
+        // Without declarations nothing is checked: the old behaviour.
+        let (_, unchecked, none) = parse_tool_calls_checked(text, None);
+        assert_eq!(unchecked.len(), 4);
+        assert!(none.is_empty());
     }
 
     #[test]
