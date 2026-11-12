@@ -28,6 +28,9 @@ jobs:
         # workspace is built by nightly; stable only sets the rustup default.
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Lint components for the pinned toolchain
+        run: rustup component add rustfmt clippy
+
       - name: Cargo cache
         uses: actions/cache@v4
         with:
@@ -38,6 +41,12 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: cargo test --workspace
         run: cargo test --workspace
         # plugin_smoke skips its engine/RAG cases gracefully: CI runners have
@@ -45,6 +54,22 @@ jobs:
         # and everything not needing local data still run. To cover the smoke
         # tests too, run this workflow on a self-hosted runner that has
         # models/qwen3-0.6b-Q8_0.gguf and RAG_MCP_BIN/RAG_DB_PATH set.
+
+      - name: CLI without default features
+        run: cargo build -p allpaka-cli --no-default-features
+
+      - name: Studio web sources parse
+        run: node --check crates/allpaka-chat/web/app.js
+
+      - name: Studio content rendering
+        run: node scripts/test-studio-content.cjs
+
+      - name: Studio HTTP contracts (mock provider)
+        # The step above left a reduced binary at target/debug/allpaka; the
+        # contracts drive the default one.
+        run: |
+          cargo build -p allpaka-cli
+          python3 scripts/test-studio.py
 
   # Опциональный разбор отказа. Показывает, почему упало, и предлагает команды;
   # сам ничего не чинит. Раскомментируйте, чтобы получать отчёт артефактом.

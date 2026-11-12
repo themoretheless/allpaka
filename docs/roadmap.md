@@ -15,7 +15,7 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 2. Число без ссылки на артефакт не считается результатом.
 3. Сделанный пункт удаляется из плана, а не помечается «done».
 
-Сверено с деревом на `1584ad5`.
+Сверено с деревом на `bda7219`.
 
 ## Где мы сейчас
 
@@ -202,9 +202,7 @@ CI-проверка на скачиваемом эталонном чекпои�
 ### C1. Поиск/RAG по папкам проекта
 
 **DoD:** цитаты с provenance (файл + строки), видимый бюджет контекста, выбор
-файлов через `@`; изменённый файл не выдаётся из кэша как свежий. В том же
-пункте: `docs/studio.md` всё ещё пишет, что MCP «пока не включён», хотя
-`crates/allpaka-chat/src/mcp.rs` — работающий клиент к `rag-mcp`.
+файлов через `@`; изменённый файл не выдаётся из кэша как свежий.
 
 ### C2. Checkpoints/undo, git diff, безопасные патчи, shell
 
@@ -232,14 +230,17 @@ CI-проверка на скачиваемом эталонном чекпои�
 
 ## Трек D — гигиена и корректность
 
-### D1. CI: подключить существующие проверки
+### D1. CI: первый зелёный прогон расширенного набора
 
-Сейчас `.github/workflows/ci.yml` — один job `macos-14` с `cargo test
---workspace`. Не подключены `fmt`, `clippy`, `allpaka-chat`, Studio-скрипты,
-node-проверки. Clippy на workspace уже чист (Metal и CUDA).
+`.github/workflows/ci.yml` теперь гоняет `fmt --check`, `clippy -D warnings`,
+`cargo test --workspace`, сборку CLI без default-features, node-проверки Studio
+и `scripts/test-studio.py`. Локально проверено на Windows (fmt, clippy, node) и
+clippy backend/model под `aarch64-apple-darwin`; на раннере `macos-14` набор
+ещё не запускался. `test-studio.py` на Windows не проходит целиком: проверка
+`signal==15` у фоновых задач POSIX-специфична.
 
-**DoD:** всё, что не требует GPU/GGUF, выполняется в CI и обязательно, включая
-`cargo clippy --workspace --all-targets -- -D warnings`. Черновик — в приложении.
+**DoD:** зелёный прогон на `macos-14` после push; проверки отмечены
+обязательными в защите ветки.
 
 ### D2. Self-hosted GPU-раннеры
 
@@ -275,7 +276,6 @@ argmax llama.cpp 12095, наш 135958; топ-10 логитов ниже на ~9
 
 ### D6. Мусор и мёртвый код
 
-- `gpu/shaders/kernels.metal` — неиспользуемая копия `metal_kernels.rs`.
 - Одноразовые debug-пробы (`ALLPAKA_*_ZERO`, `ROWS_DEBUG`, `TOKENBUF_DEBUG`,
   …): либо результат задокументирован с датой и проба удаляется, либо остаётся
   как инструмент в `docs/env-reference.md`. Требует решения владельца по
@@ -326,40 +326,9 @@ argmax llama.cpp 12095, наш 135958; топ-10 логитов ниже на ~9
    дороге — отдельный коммит с тестом.
 6. Отрицательный результат публикуется, а не забывается.
 
-## Приложение: предлагаемый CI (черновик, не применён)
+## Приложение: GPU-job для D2 (черновик, не применён)
 
 ```yaml
-name: ci
-on:
-  push: { branches: [main] }
-  pull_request: {}
-
-jobs:
-  test:                       # без GPU: быстро, кандидат в обязательные
-    runs-on: macos-14
-    env: { RUSTFLAGS: "" }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { components: "rustfmt, clippy" }
-      - name: Cargo cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - run: cargo test -p allpaka-chat --offline
-      - run: cargo build -p allpaka-cli --no-default-features --offline
-      - run: python3 scripts/test-studio.py
-      - run: node --check crates/allpaka-chat/web/app.js
-      - run: node scripts/test-studio-content.cjs
-
   gpu:                        # self-hosted Metal; цель D2, до неё не блокирует PR
     if: github.event_name == 'push'
     runs-on: [self-hosted, macos, metal]
