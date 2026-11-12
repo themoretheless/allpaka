@@ -655,12 +655,16 @@ extern "C" __global__ void rmsnorm_rope_qk_store_table_dpos(
     unsigned gh = blockIdx.x;
     bool is_k = gh >= q_heads;
     unsigned h = is_k ? gh - q_heads : gh;
+    pdl_lc();
     if ((!is_k && h >= q_heads) || (is_k && h >= kv_heads)) return;
     float* xh = (is_k ? k : q) + (size_t)h * head_dim;
     const float* w = is_k ? kw : qw;
     __shared__ float buf[256];
     __shared__ float kbuf[256];
     float local = 0.f;
+    // q/k come from the QKV matvec just before; d_pos and the cache are read
+    // and written below. Nothing is touched before this wait.
+    pdl_sync();
     for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
         float v = xh[i];
         local += v * v;
@@ -748,6 +752,7 @@ extern "C" __global__ void argmax_f32(
     unsigned n,
     unsigned* __restrict__ out_idx)
 {
+    pdl_sync();
     float best = (-1.0f/0.0f);
     unsigned bi = 0xffffffffu;
     const unsigned T = blockDim.x;

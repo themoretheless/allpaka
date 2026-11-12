@@ -123,7 +123,10 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
             let graph_flags =
                 CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH;
             let captured = match gpu.stream.end_capture(graph_flags) {
-                Ok(Some(g)) => Some(g),
+                Ok(Some(g)) => {
+                    crate::gpu::cuda::pdl::debug_report_graph("prefill graph", &g);
+                    Some(g)
+                }
                 Ok(None) => {
                     eprintln!("cuda: prefill graph empty");
                     None

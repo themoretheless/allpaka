@@ -1,336 +1,421 @@
 //! Programmatic Dependent Launch (PDL) for Hopper+/Blackwell.
 //!
-//! Host: `cuLaunchKernelEx` + `PROGRAMMATIC_STREAM_SERIALIZATION`.
-//! Device: `griddepcontrol.wait` / `launch_dependents` in kernels.
+//! Host: `cuLaunchKernelEx` + `PROGRAMMATIC_STREAM_SERIALIZATION` on the
+//! *dependent* kernel: it may start as soon as every block of the previous
+//! kernel in the stream has executed `griddepcontrol.launch_dependents` (or
+//! exited). Device: the dependent kernel must execute `griddepcontrol.wait`
+//! before touching anything the previous kernel reads or writes.
 //!
-//! cudarc keeps the raw function handle and the argument vector private, and
-//! `cuLaunchKernelEx` needs both. Their place inside `CudaFunction` and
-//! `LaunchArgs` is not guessed: the first launch compares the candidate words
-//! with the values the types print through their public `Debug` impls, and
-//! only a match enables the PDL path. Without a match every launch goes
-//! through cudarc's own `launch`.
+//! Nothing here depends on cudarc's private layouts: the raw `CUfunction`
+//! comes from a module this file loads through the public driver API
+//! ([`RawModule`]), and the kernel argument vector is collected by
+//! [`PdlLaunch`] itself.
 
-use cudarc::driver::result::DriverError;
+use cudarc::driver::result::{self, DriverError};
 use cudarc::driver::sys::{self, CUresult};
-use cudarc::driver::{CudaFunction, CudaStream, LaunchArgs, LaunchConfig};
-use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use cudarc::driver::{
+    CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, DevicePtr, LaunchConfig,
+};
+use std::ffi::{c_void, CString};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-thread_local! {
-    static TLS_STREAM: Cell<*const CudaStream> = const { Cell::new(std::ptr::null()) };
-    static TLS_CU: Cell<sys::CUfunction> = const { Cell::new(std::ptr::null_mut()) };
+/// Launches that carried the PDL attribute (process-wide; includes launches
+/// recorded into CUDA graphs, which replay without passing through here).
+static PDL_LAUNCHES: AtomicU64 = AtomicU64::new(0);
+/// Launches through [`PdlLaunch`] without the attribute (PDL off or refused).
+static PLAIN_LAUNCHES: AtomicU64 = AtomicU64::new(0);
+/// Set when the driver refuses the PDL attribute; launches stay plain after.
+static PDL_REFUSED: AtomicBool = AtomicBool::new(false);
+static ANNOUNCED: AtomicBool = AtomicBool::new(false);
+
+/// `ALLPAKA_CUDA_PDL_DEBUG`: per-kernel `(pdl, plain)` launch counts.
+static DEBUG_KERNELS: std::sync::Mutex<std::collections::BTreeMap<&'static str, (u64, u64)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// `(pdl, plain)` launch counts issued through [`PdlLaunch`] so far.
+pub fn pdl_launch_counts() -> (u64, u64) {
+    (
+        PDL_LAUNCHES.load(Ordering::Relaxed),
+        PLAIN_LAUNCHES.load(Ordering::Relaxed),
+    )
 }
 
-fn pdl_wanted() -> bool {
-    static ON: AtomicBool = AtomicBool::new(false);
-    static INIT: AtomicBool = AtomicBool::new(false);
-    if !INIT.swap(true, Ordering::Relaxed) {
-        // Off unless asked for; see docs/benchmarks/2026-11-13-cuda-pdl-rtx5090.md.
-        let on = match std::env::var("ALLPAKA_CUDA_PDL") {
-            Ok(v) => !(v.is_empty() || v == "0" || v.eq_ignore_ascii_case("false")),
-            Err(_) => false,
-        };
-        ON.store(on, Ordering::Relaxed);
-        if on {
-            eprintln!("cuda: PDL launches enabled by ALLPAKA_CUDA_PDL (experimental)");
-        }
-    }
-    ON.load(Ordering::Relaxed)
+/// True while launches carry the PDL attribute (flag on, driver accepted it).
+pub fn pdl_active() -> bool {
+    crate::runtime::get().cuda_pdl && !PDL_REFUSED.load(Ordering::Relaxed)
 }
 
-static PDL_DEAD: AtomicBool = AtomicBool::new(false);
-static USE_PDL_ATTR: AtomicBool = AtomicBool::new(true);
-
-const WORD: usize = std::mem::size_of::<usize>();
-const UNVERIFIED: usize = usize::MAX;
-const REJECTED: usize = usize::MAX - 1;
-/// Byte offset of `cu_function` inside `CudaFunction`, once verified.
-static FUNC_OFF: AtomicUsize = AtomicUsize::new(UNVERIFIED);
-/// `ptr_word << 8 | len_word` of the `args` vector inside `LaunchArgs`, once
-/// verified; both are word indices from the start of the struct.
-static ARGS_AT: AtomicUsize = AtomicUsize::new(UNVERIFIED);
-/// The address after `key` in a derived `Debug` rendering (`key0x1f..`).
-fn debug_ptr(text: &str, key: &str) -> Option<usize> {
-    let rest = &text[text.find(key)? + key.len()..];
-    let hex = rest.strip_prefix("0x")?;
-    let end = hex
-        .find(|c: char| !c.is_ascii_hexdigit())
-        .unwrap_or(hex.len());
-    usize::from_str_radix(&hex[..end], 16).ok()
-}
-
-/// The pointers of the last `args: [..]` list in a `LaunchArgs` rendering.
-fn debug_args(text: &str) -> Option<Vec<usize>> {
-    let rest = &text[text.rfind("args: [")? + "args: [".len()..];
-    let list = &rest[..rest.find(']')?];
-    list.split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(|item| usize::from_str_radix(item.strip_prefix("0x")?, 16).ok())
-        .collect()
-}
-
-fn cu_ok(r: CUresult) -> Result<(), DriverError> {
-    if r == CUresult::CUDA_SUCCESS {
-        Ok(())
-    } else {
-        Err(DriverError(r))
-    }
-}
-
-/// The raw handle of `f`, or null when its place in `CudaFunction` could not
-/// be verified.
-fn cu_function_of(f: &CudaFunction) -> sys::CUfunction {
-    const { assert!(std::mem::size_of::<CudaFunction>() == 2 * WORD) };
-    let base = f as *const CudaFunction as *const usize;
-    // SAFETY: `CudaFunction` is two words (asserted above), both pointers that are
-    // always initialised (`cu_function` and an `Arc`), so each word read is in bounds
-    // and reads initialised memory.
-    let word = |i: usize| unsafe { std::ptr::read(base.add(i)) };
-    let mut off = FUNC_OFF.load(Ordering::Relaxed);
-    if off == UNVERIFIED {
-        let printed = debug_ptr(&format!("{f:?}"), "cu_function: ");
-        off = match printed {
-            Some(handle) if word(1) == handle && word(0) != handle => WORD,
-            Some(handle) if word(0) == handle && word(1) != handle => 0,
-            _ => REJECTED,
-        };
-        FUNC_OFF.store(off, Ordering::Relaxed);
-        if off == REJECTED {
-            eprintln!("cuda: CudaFunction layout not recognised; PDL launches disabled");
-        }
-    }
-    if off == REJECTED {
-        return std::ptr::null_mut();
-    }
-    word(off / WORD) as sys::CUfunction
-}
-
-/// Find `args` inside `launch` by comparing it with what `Debug` prints.
-/// Returns the packed position, `REJECTED`, or `UNVERIFIED` when this launch
-/// cannot decide (no arguments, or length and capacity coincide).
-fn verify_args(launch: &LaunchArgs<'_>) -> usize {
-    let Some(printed) = debug_args(&format!("{launch:?}")) else {
-        return REJECTED;
+/// `(programmatic, total)` dependency edges of a captured graph. Programmatic
+/// edges are what PDL launches turn into under stream capture.
+pub fn graph_edge_counts(g: &cudarc::driver::CudaGraph) -> Option<(usize, usize)> {
+    let h = g.cu_graph();
+    let mut n = 0usize;
+    // SAFETY: null arrays with a count pointer query the edge count.
+    let r = unsafe {
+        sys::cuGraphGetEdges_v2(
+            h,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut n,
+        )
     };
-    let n = printed.len();
-    if n == 0 {
-        return UNVERIFIED;
-    }
-    let words = std::mem::size_of::<LaunchArgs<'_>>() / WORD;
-    let base = launch as *const LaunchArgs<'_> as *const usize;
-    // SAFETY: every index is below the struct's size in words, so the read is in
-    // bounds. All fields but `flags` are references and vectors, whose words are
-    // initialised; `flags` is a 4-byte optional enum, and the word holding it is only
-    // ever compared against, never used as a pointer or a length.
-    let word = |i: usize| unsafe { std::ptr::read(base.add(i)) };
-    let mut undecided = false;
-    // A `Vec` is three adjacent words: buffer pointer, capacity and length, in an
-    // order the compiler chooses.
-    for first in 0..words.saturating_sub(2) {
-        let triple = [word(first), word(first + 1), word(first + 2)];
-        for len_at in 0..3 {
-            if triple[len_at] != n {
-                continue;
-            }
-            for cap_at in (0..3).filter(|&i| i != len_at) {
-                let ptr_at = 3 - len_at - cap_at;
-                let (cap, ptr) = (triple[cap_at], triple[ptr_at]);
-                // The capacity is a small count no less than the length; the buffer
-                // is a word-aligned heap address far above any such count.
-                if !(n..=1024).contains(&cap) || ptr < 0x1_0000 || ptr % WORD != 0 {
-                    continue;
-                }
-                if cap == n {
-                    // Length and capacity look alike: a launch with spare capacity
-                    // decides which word is the length.
-                    undecided = true;
-                    continue;
-                }
-                // SAFETY: `ptr` sits next to a length of `n` and a capacity above it,
-                // which among this struct's fields only a non-empty vector provides;
-                // its buffer holds at least `n` initialised words. The comparison
-                // rejects every vector but `args`.
-                let held = unsafe { std::slice::from_raw_parts(ptr as *const usize, n) };
-                if held == printed.as_slice() {
-                    return (first + ptr_at) << 8 | (first + len_at);
-                }
-            }
-        }
-    }
-    if undecided {
-        UNVERIFIED
-    } else {
-        REJECTED
-    }
-}
-
-/// The kernel arguments collected in `launch`, or `None` when their place in
-/// `LaunchArgs` is not (yet) verified.
-fn args_of<'a>(launch: &'a mut LaunchArgs<'_>) -> Option<&'a mut [*mut std::ffi::c_void]> {
-    let mut at = ARGS_AT.load(Ordering::Relaxed);
-    if at == UNVERIFIED {
-        at = verify_args(launch);
-        if at == UNVERIFIED {
-            return None;
-        }
-        ARGS_AT.store(at, Ordering::Relaxed);
-        if at == REJECTED {
-            eprintln!("cuda: LaunchArgs layout not recognised; PDL launches disabled");
-            PDL_DEAD.store(true, Ordering::Relaxed);
-        } else {
-            eprintln!("cuda: PDL launch path verified against cudarc's layout");
-        }
-    }
-    if at == REJECTED {
+    if r != CUresult::CUDA_SUCCESS {
         return None;
     }
-    let base = launch as *mut LaunchArgs<'_> as *mut usize;
-    // SAFETY: `verify_args` matched these two words against the vector's printed
-    // contents, and a type's field layout is fixed for the whole program, so they are the
-    // buffer pointer and length of `launch.args` for every `LaunchArgs`. The slice borrows
-    // `launch` mutably for `'a`, so nothing else touches the vector meanwhile.
-    unsafe {
-        let ptr = std::ptr::read(base.add(at >> 8)) as *mut *mut std::ffi::c_void;
-        let len = std::ptr::read(base.add(at & 0xff));
-        (len != 0).then(|| std::slice::from_raw_parts_mut(ptr, len))
+    if n == 0 {
+        return Some((0, 0));
+    }
+    let mut from = vec![std::ptr::null_mut(); n];
+    let mut to = vec![std::ptr::null_mut(); n];
+    // SAFETY: plain-old-data out array, fully written by the driver below.
+    let mut data = vec![unsafe { std::mem::zeroed::<sys::CUgraphEdgeData>() }; n];
+    // SAFETY: the three arrays hold `n` elements, as reported above.
+    let r = unsafe {
+        sys::cuGraphGetEdges_v2(
+            h,
+            from.as_mut_ptr(),
+            to.as_mut_ptr(),
+            data.as_mut_ptr(),
+            &mut n,
+        )
+    };
+    if r != CUresult::CUDA_SUCCESS {
+        return None;
+    }
+    let prog = sys::CUgraphDependencyType_enum::CU_GRAPH_DEPENDENCY_TYPE_PROGRAMMATIC as u8;
+    let p = data.iter().take(n).filter(|e| e.type_ == prog).count();
+    Some((p, n))
+}
+
+/// `ALLPAKA_CUDA_PDL_DEBUG`: report a captured graph's programmatic edges and
+/// the running launch counters.
+pub fn debug_report_graph(label: &str, g: &cudarc::driver::CudaGraph) {
+    if !crate::runtime::get().cuda_pdl_debug {
+        return;
+    }
+    let (pdl, plain) = pdl_launch_counts();
+    match graph_edge_counts(g) {
+        Some((p, n)) => eprintln!(
+            "cuda: pdl-debug: {label}: {p}/{n} programmatic edges; launches so far pdl={pdl} plain={plain} active={}",
+            pdl_active()
+        ),
+        None => eprintln!("cuda: pdl-debug: {label}: edge query failed"),
+    }
+    // Per-kernel launches since the previous report (i.e. this capture).
+    let mut m = DEBUG_KERNELS.lock().unwrap_or_else(|e| e.into_inner());
+    for (name, (p, q)) in m.iter() {
+        eprintln!("cuda: pdl-debug:   {name}: pdl={p} plain={q}");
+    }
+    m.clear();
+}
+
+/// A module loaded through the raw driver API, used only to resolve
+/// `CUfunction` handles. Never unloaded: it lives as long as the device.
+pub struct RawModule {
+    module: sys::CUmodule,
+    /// Entry points whose PTX body contains `griddepcontrol.wait`.
+    waits: std::collections::HashSet<String>,
+}
+
+/// Names of the `.entry` kernels in `ptx` that execute `griddepcontrol.wait`.
+/// Only these may be launched as programmatic dependents: a kernel without
+/// the wait could start reading while the previous kernel is still writing.
+fn entries_with_wait(ptx: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut cur: Option<&str> = None;
+    for line in ptx.lines() {
+        let t = line.trim_start();
+        if let Some(i) = t.find(".entry ") {
+            if t.starts_with(".entry") || t.starts_with(".visible") || t.starts_with(".weak") {
+                let rest = t[i + 7..].trim_start();
+                let end = rest
+                    .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+                    .unwrap_or(rest.len());
+                cur = Some(&rest[..end]);
+                continue;
+            }
+        }
+        if t.starts_with(".func") || t.starts_with(".visible .func") || t.starts_with(".weak .func")
+        {
+            cur = None;
+        } else if t.contains("griddepcontrol.wait") {
+            if let Some(name) = cur {
+                out.insert(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+// SAFETY: a `CUmodule` is an opaque driver handle, valid from any thread that
+// has the owning context current (same contract as cudarc's `CudaModule`).
+unsafe impl Send for RawModule {}
+// SAFETY: see `Send`; the handle is only read.
+unsafe impl Sync for RawModule {}
+
+impl RawModule {
+    /// Loads PTX source text. The context must be current on this thread.
+    pub fn load_ptx(src: &str) -> Result<Self, DriverError> {
+        let c = CString::new(src).map_err(|_| DriverError(CUresult::CUDA_ERROR_INVALID_SOURCE))?;
+        // SAFETY: `c` is a NUL-terminated PTX image that outlives the call.
+        let m = unsafe { result::module::load_data(c.as_ptr() as *const c_void) }?;
+        Ok(Self {
+            module: m,
+            waits: entries_with_wait(src),
+        })
+    }
+
+    /// Raw handle of kernel `name` and whether it executes `griddepcontrol.wait`.
+    pub fn function(&self, name: &str) -> Option<(sys::CUfunction, bool)> {
+        let c = CString::new(name).ok()?;
+        // SAFETY: `self.module` is a live module (never unloaded).
+        let f = unsafe { result::module::get_function(self.module, c) }.ok()?;
+        Some((f, self.waits.contains(name)))
     }
 }
 
-unsafe fn launch_ex(
-    stream: &CudaStream,
-    f: sys::CUfunction,
-    cfg: LaunchConfig,
-    args: &mut [*mut std::ffi::c_void],
-    with_pdl: bool,
-) -> Result<(), DriverError> {
-    stream.context().bind_to_thread()?;
-    if with_pdl {
-        let mut attr = std::mem::zeroed::<sys::CUlaunchAttribute>();
-        attr.id = sys::CUlaunchAttributeID::CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
-        attr.value.programmaticStreamSerializationAllowed = 1;
-        let config = sys::CUlaunchConfig {
-            gridDimX: cfg.grid_dim.0,
-            gridDimY: cfg.grid_dim.1,
-            gridDimZ: cfg.grid_dim.2,
-            blockDimX: cfg.block_dim.0,
-            blockDimY: cfg.block_dim.1,
-            blockDimZ: cfg.block_dim.2,
-            sharedMemBytes: cfg.shared_mem_bytes,
-            hStream: stream.cu_stream(),
-            attrs: &mut attr,
-            numAttrs: 1,
-        };
-        cu_ok(sys::cuLaunchKernelEx(
-            &config,
-            f,
-            args.as_mut_ptr(),
-            std::ptr::null_mut(),
-        ))
-    } else {
-        cudarc::driver::result::launch_kernel(
-            f,
+/// A kernel: cudarc's handle (plain launches, attributes) plus the raw
+/// `CUfunction` of the same kernel for [`PdlLaunch`]. Derefs to
+/// [`CudaFunction`], so `stream.launch_builder(&f)` keeps working.
+#[derive(Clone)]
+pub struct KernelFn {
+    plain: CudaFunction,
+    raw: sys::CUfunction,
+    /// The kernel executes `griddepcontrol.wait`, so it may be a programmatic
+    /// dependent. Kernels without it always get a plain launch.
+    waits: bool,
+    name: &'static str,
+}
+
+// SAFETY: `CudaFunction` is Send + Sync; `raw` is an opaque driver handle with
+// the same contract.
+unsafe impl Send for KernelFn {}
+// SAFETY: see `Send`.
+unsafe impl Sync for KernelFn {}
+
+impl KernelFn {
+    pub fn new(
+        name: &'static str,
+        plain: CudaFunction,
+        (raw, waits): (sys::CUfunction, bool),
+    ) -> Self {
+        Self {
+            plain,
+            raw,
+            waits,
+            name,
+        }
+    }
+}
+
+impl std::ops::Deref for KernelFn {
+    type Target = CudaFunction;
+    #[inline(always)]
+    fn deref(&self) -> &CudaFunction {
+        &self.plain
+    }
+}
+
+const MAX_ARGS: usize = 32;
+
+#[derive(Clone, Copy)]
+enum Slot {
+    /// Pointer to a caller-owned scalar that outlives the builder.
+    Ref(*mut c_void),
+    /// Device pointer stored inline; its address is taken at launch.
+    Dev(sys::CUdeviceptr),
+}
+
+/// Kernel launch builder that owns its argument vector.
+pub struct PdlLaunch<'a> {
+    stream: &'a CudaStream,
+    func: sys::CUfunction,
+    waits: bool,
+    name: &'static str,
+    slots: [Slot; MAX_ARGS],
+    n: usize,
+}
+
+/// Something [`PdlLaunch::arg`] accepts.
+pub trait PdlArg<'a> {
+    fn push(self, launch: &mut PdlLaunch<'a>);
+}
+
+macro_rules! scalar_arg {
+    ($($t:ty),*) => {$(
+        impl<'a, 'b: 'a> PdlArg<'a> for &'b $t {
+            #[inline(always)]
+            fn push(self, launch: &mut PdlLaunch<'a>) {
+                launch.push_slot(Slot::Ref(self as *const $t as *mut c_void));
+            }
+        }
+    )*};
+}
+scalar_arg!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, f32, f64);
+
+macro_rules! device_arg {
+    ($($t:ty),*) => {$(
+        impl<'a, 'b: 'a, 'c: 'b, T> PdlArg<'a> for $t {
+            #[inline(always)]
+            fn push(self, launch: &mut PdlLaunch<'a>) {
+                // Event tracking is disabled on this context
+                // (`disable_event_tracking` in `init_device`), so the guard
+                // records nothing; the pointer value is all we need.
+                let (p, guard) = DevicePtr::device_ptr(&*self, launch.stream);
+                drop(guard);
+                launch.push_slot(Slot::Dev(p));
+            }
+        }
+    )*};
+}
+device_arg!(
+    &'b CudaSlice<T>,
+    &'b mut CudaSlice<T>,
+    &'b CudaView<'c, T>,
+    &'b mut CudaView<'c, T>,
+    &'b CudaViewMut<'c, T>,
+    &'b mut CudaViewMut<'c, T>
+);
+
+impl<'a> PdlLaunch<'a> {
+    #[inline(always)]
+    fn push_slot(&mut self, s: Slot) {
+        assert!(
+            self.n < MAX_ARGS,
+            "cuda: kernel has more than {MAX_ARGS} args"
+        );
+        self.slots[self.n] = s;
+        self.n += 1;
+    }
+
+    #[inline(always)]
+    pub fn arg<A: PdlArg<'a>>(&mut self, a: A) -> &mut Self {
+        a.push(self);
+        self
+    }
+
+    /// Submits the kernel; with PDL on it carries the
+    /// programmatic-stream-serialization attribute.
+    ///
+    /// # Safety
+    /// Same contract as cudarc's `LaunchArgs::launch`: argument types, order
+    /// and the memory the kernel touches are the caller's responsibility.
+    /// In addition the kernel must execute `griddepcontrol.wait` before it
+    /// reads or writes anything the previous kernel in the stream touches.
+    pub unsafe fn launch_pdl(&mut self, cfg: LaunchConfig) -> Result<(), DriverError> {
+        self.stream.context().bind_to_thread()?;
+        let mut ptrs = [std::ptr::null_mut::<c_void>(); MAX_ARGS];
+        for (p, s) in ptrs.iter_mut().zip(self.slots[..self.n].iter_mut()) {
+            *p = match s {
+                Slot::Ref(r) => *r,
+                Slot::Dev(d) => d as *mut sys::CUdeviceptr as *mut c_void,
+            };
+        }
+        let args = &mut ptrs[..self.n];
+        if crate::runtime::get().cuda_pdl_debug {
+            let mut m = DEBUG_KERNELS.lock().unwrap_or_else(|e| e.into_inner());
+            let e = m.entry(self.name).or_insert((0, 0));
+            if self.waits && pdl_active() {
+                e.0 += 1;
+            } else {
+                e.1 += 1;
+            }
+        }
+        if self.waits && pdl_active() {
+            let mut attr = std::mem::zeroed::<sys::CUlaunchAttribute>();
+            attr.id =
+                sys::CUlaunchAttributeID::CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
+            attr.value.programmaticStreamSerializationAllowed = 1;
+            let config = sys::CUlaunchConfig {
+                gridDimX: cfg.grid_dim.0,
+                gridDimY: cfg.grid_dim.1,
+                gridDimZ: cfg.grid_dim.2,
+                blockDimX: cfg.block_dim.0,
+                blockDimY: cfg.block_dim.1,
+                blockDimZ: cfg.block_dim.2,
+                sharedMemBytes: cfg.shared_mem_bytes,
+                hStream: self.stream.cu_stream(),
+                attrs: &mut attr,
+                numAttrs: 1,
+            };
+            let r =
+                sys::cuLaunchKernelEx(&config, self.func, args.as_mut_ptr(), std::ptr::null_mut());
+            if r == CUresult::CUDA_SUCCESS {
+                let n = PDL_LAUNCHES.fetch_add(1, Ordering::Relaxed);
+                if n == 0 && !ANNOUNCED.swap(true, Ordering::Relaxed) {
+                    eprintln!("cuda: PDL active (first programmatic launch accepted; ALLPAKA_CUDA_PDL=0 to disable)");
+                }
+                return Ok(());
+            }
+            // Not supported by this driver/device: stay plain from now on.
+            if !PDL_REFUSED.swap(true, Ordering::Relaxed) {
+                eprintln!("cuda: PDL launch attribute refused ({r:?}); using plain launches");
+            }
+        }
+        PLAIN_LAUNCHES.fetch_add(1, Ordering::Relaxed);
+        result::launch_kernel(
+            self.func,
             cfg.grid_dim,
             cfg.block_dim,
             cfg.shared_mem_bytes,
-            stream.cu_stream(),
+            self.stream.cu_stream(),
             args,
         )
     }
 }
 
 pub trait StreamPdlExt {
-    fn launch_builder_pdl<'a>(&'a self, func: &'a CudaFunction) -> LaunchArgs<'a>;
+    fn launch_builder_pdl<'a>(&'a self, func: &KernelFn) -> PdlLaunch<'a>;
 }
 
 impl StreamPdlExt for CudaStream {
     #[inline(always)]
-    fn launch_builder_pdl<'a>(&'a self, func: &'a CudaFunction) -> LaunchArgs<'a> {
-        TLS_STREAM.with(|c| c.set(self as *const CudaStream));
-        let cu = cu_function_of(func);
-        TLS_CU.with(|c| c.set(cu));
-        self.launch_builder(func)
-    }
-}
-
-pub unsafe fn launch_pdl_inner(
-    launch: &mut LaunchArgs<'_>,
-    cfg: LaunchConfig,
-) -> Result<Option<(cudarc::driver::CudaEvent, cudarc::driver::CudaEvent)>, DriverError> {
-    if !pdl_wanted() || PDL_DEAD.load(Ordering::Relaxed) {
-        return launch.launch(cfg);
-    }
-
-    let stream_ptr = TLS_STREAM.with(|c| c.replace(std::ptr::null()));
-    let f = TLS_CU.with(|c| c.replace(std::ptr::null_mut()));
-    if stream_ptr.is_null() || f.is_null() {
-        return launch.launch(cfg);
-    }
-    // SAFETY: `stream_ptr` was stored by `launch_builder_pdl` on this thread from the
-    // `&'a CudaStream` that the `LaunchArgs<'a>` being launched also borrows, so the
-    // stream is alive here. Pairing holds because every `launch_builder_pdl(..)` call in
-    // this backend is followed by its own `.launch_pdl(..)` before any other
-    // `launch_builder_pdl`, and the TLS slots are cleared (`replace(null)`) on each launch;
-    // a builder from plain `launch_builder` finds null and takes the cudarc path.
-    let stream = &*stream_ptr;
-
-    let Some(args) = args_of(launch) else {
-        return launch.launch(cfg);
-    };
-    let pdl = USE_PDL_ATTR.load(Ordering::Relaxed);
-    match launch_ex(stream, f, cfg, args, pdl) {
-        Ok(()) => return Ok(None),
-        Err(_) if pdl => {
-            // Fall back to plain cuLaunchKernelEx without PDL attr.
-            if launch_ex(stream, f, cfg, args, false).is_ok() {
-                eprintln!("cuda: PDL attr unsupported; using plain launches");
-                USE_PDL_ATTR.store(false, Ordering::Relaxed);
-                return Ok(None);
-            }
+    fn launch_builder_pdl<'a>(&'a self, func: &KernelFn) -> PdlLaunch<'a> {
+        PdlLaunch {
+            stream: self,
+            func: func.raw,
+            waits: func.waits,
+            name: func.name,
+            slots: [Slot::Dev(0); MAX_ARGS],
+            n: 0,
         }
-        Err(_) => {}
-    }
-
-    eprintln!("cuda: PDL launch failed; disabling PDL and falling back to cudarc launch");
-    PDL_DEAD.store(true, Ordering::Relaxed);
-    launch.launch(cfg)
-}
-
-pub trait LaunchArgsPdl {
-    unsafe fn launch_pdl(
-        &mut self,
-        cfg: LaunchConfig,
-    ) -> Result<Option<(cudarc::driver::CudaEvent, cudarc::driver::CudaEvent)>, DriverError>;
-}
-
-impl LaunchArgsPdl for LaunchArgs<'_> {
-    #[inline(always)]
-    unsafe fn launch_pdl(
-        &mut self,
-        cfg: LaunchConfig,
-    ) -> Result<Option<(cudarc::driver::CudaEvent, cudarc::driver::CudaEvent)>, DriverError> {
-        launch_pdl_inner(self, cfg)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{debug_args, debug_ptr};
+    use super::entries_with_wait;
 
     #[test]
-    fn debug_renderings_give_back_the_pointers() {
-        let func =
-            "CudaFunction { cu_function: 0x1f2e3d4c5b60, module: CudaModule { cu_module: 0x77 } }";
-        assert_eq!(debug_ptr(func, "cu_function: "), Some(0x1f2e_3d4c_5b60));
-        assert_eq!(debug_ptr(func, "missing: "), None);
-
-        let launch = "LaunchArgs { stream: S { args: [0x1] }, waits: [], records: [], args: [0x10, 0xabc, 0x7ffe0008], flags: None }";
-        assert_eq!(debug_args(launch), Some(vec![0x10, 0xabc, 0x7ffe_0008]));
-        assert_eq!(
-            debug_args("LaunchArgs { args: [], flags: None }"),
-            Some(vec![])
-        );
-        assert_eq!(debug_args("LaunchArgs { args: [nonsense] }"), None);
-        assert_eq!(debug_args("LaunchArgs { }"), None);
+    fn finds_entries_that_wait() {
+        let ptx = ".visible .entry a(
+.param .u64 a_param_0
+)
+{
+	griddepcontrol.wait;
+	ret;
+}
+.visible .entry b_2(
+)
+{
+	griddepcontrol.launch_dependents;
+	ret;
+}
+.func helper(
+)
+{
+	griddepcontrol.wait;
+}
+.entry c(
+)
+{
+	griddepcontrol.wait;
+}
+";
+        let w = entries_with_wait(ptx);
+        assert!(w.contains("a") && w.contains("c"));
+        assert!(!w.contains("b_2") && !w.contains("helper"));
+        assert_eq!(w.len(), 2);
     }
 }

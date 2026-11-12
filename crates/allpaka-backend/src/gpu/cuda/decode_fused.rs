@@ -422,6 +422,7 @@ pub(super) fn decode_token_one_fused(
             if capturing_hybrid {
                 match stream.end_capture(graph_flags) {
                     Ok(Some(g)) => {
+                        crate::gpu::cuda::pdl::debug_report_graph("decode post segment", &g);
                         g.launch().ok()?;
                         hybrid.post.push(g);
                     }
@@ -1874,6 +1875,7 @@ impl FusedCtx<'_> {
         if capturing_hybrid {
             match stream.end_capture(graph_flags) {
                 Ok(Some(g)) => {
+                    crate::gpu::cuda::pdl::debug_report_graph("decode pre segment", &g);
                     g.launch().ok()?;
                     hybrid.pre.push(g);
                 }
@@ -2256,6 +2258,7 @@ impl FusedCtx<'_> {
         } = hybrid;
         match stream.end_capture(graph_flags) {
             Ok(Some(g)) => {
+                crate::gpu::cuda::pdl::debug_report_graph("decode tail segment", &g);
                 g.launch().ok()?;
                 let k_offs: Vec<i32> = req.layers.iter().map(|l| l.k_off as i32).collect();
                 let v_offs: Vec<i32> = req.layers.iter().map(|l| l.v_off as i32).collect();
@@ -2362,6 +2365,7 @@ impl FusedCtx<'_> {
         match stream.end_capture(graph_flags) {
             Ok(Some(g)) => {
                 // Capture only records — must launch for this token.
+                crate::gpu::cuda::pdl::debug_report_graph("decode whole-token graph", &g);
                 g.launch().ok()?;
                 gpu.decode_graph = Some(g);
                 gpu.decode_graph_key = graph_key;

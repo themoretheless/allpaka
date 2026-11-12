@@ -81,6 +81,12 @@ __device__ __forceinline__ int vsubss4(int a, int b) {
 
 // Hopper+/Blackwell PDL ops. Even without host PROGRAMMATIC_STREAM_SERIALIZATION
 // these help on sm_120 (nopdl-dev A/B: ~57 vs ~63 tok/s). Keep enabled.
+// Only kernels that call pdl_sync() are launched as programmatic dependents
+// (the host scans the PTX for griddepcontrol.wait): the wait must come before
+// the first read or write of anything the previous kernel touches.
+// launch_dependents stays after the dot products: releasing it at kernel
+// entry measured -1% decode on RTX 5090 with PDL active (dependents then
+// occupy SM slots while they wait).
 __device__ __forceinline__ void pdl_sync() {
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
     asm volatile("griddepcontrol.wait;" ::: "memory");
@@ -286,10 +292,12 @@ __global__ void quantize_q8_1(
     unsigned row = blockIdx.y;
     unsigned warp = threadIdx.y;
     unsigned lane = threadIdx.x;
+    pdl_lc();
     if (row >= rows) return;
     unsigned blk = blockIdx.x * blockDim.y + warp;
     unsigned base = blk * 32u;
     if (base >= n) return;
+    pdl_sync();
     float v = x[(size_t)row * n + base + lane];
     float amax = fabsf(v);
     #pragma unroll
@@ -314,10 +322,12 @@ __global__ void quantize_q8_1_q6(
     unsigned row = blockIdx.y;
     unsigned warp = threadIdx.y;
     unsigned lane = threadIdx.x;
+    pdl_lc();
     if (row >= rows) return;
     unsigned blk = blockIdx.x * blockDim.y + warp;
     unsigned base = blk * 32u;
     if (base >= n) return;
+    pdl_sync();
     float v = x[(size_t)row * n + base + lane];
     float amax = fabsf(v);
     #pragma unroll

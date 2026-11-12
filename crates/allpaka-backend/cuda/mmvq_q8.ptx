@@ -60,6 +60,9 @@
 	ld.param.b32 	%r8, [quantize_q8_1_param_3];
 	mov.u32 	%r1, %ctaid.y;
 	mov.u32 	%r2, %tid.x;
+	// begin inline asm
+	griddepcontrol.launch_dependents;
+	// end inline asm
 	setp.ge.u32 	%p1, %r1, %r8;
 	@%p1 bra 	$L__BB0_6;
 	mov.u32 	%r9, %tid.y;
@@ -69,6 +72,9 @@
 	shl.b32 	%r4, %r3, 5;
 	setp.ge.u32 	%p2, %r4, %r7;
 	@%p2 bra 	$L__BB0_6;
+	// begin inline asm
+	griddepcontrol.wait;
+	// end inline asm
 	mul.wide.u32 	%rd4, %r7, %r1;
 	cvt.u64.u32 	%rd5, %r4;
 	cvt.u64.u32 	%rd6, %r2;
@@ -142,6 +148,9 @@ $L__BB0_6:
 	ld.param.b32 	%r5, [quantize_q8_1_q6_param_2];
 	ld.param.b32 	%r6, [quantize_q8_1_q6_param_3];
 	mov.u32 	%r1, %ctaid.y;
+	// begin inline asm
+	griddepcontrol.launch_dependents;
+	// end inline asm
 	setp.ge.u32 	%p1, %r1, %r6;
 	@%p1 bra 	$L__BB1_4;
 	mov.u32 	%r7, %tid.y;
@@ -152,6 +161,9 @@ $L__BB0_6:
 	setp.ge.u32 	%p2, %r3, %r5;
 	@%p2 bra 	$L__BB1_4;
 	mov.u32 	%r10, %tid.x;
+	// begin inline asm
+	griddepcontrol.wait;
+	// end inline asm
 	mul.wide.u32 	%rd4, %r5, %r1;
 	cvt.u64.u32 	%rd5, %r3;
 	cvt.u64.u32 	%rd6, %r10;

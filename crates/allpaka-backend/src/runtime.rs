@@ -168,6 +168,10 @@ flags! {
     // On by default: measured on RTX 5090 (docs/benchmarks/2026-11-10-allpaka-vs-llama-rtx5090.md).
     cuda_graph: bool = true, env "ALLPAKA_CUDA_GRAPH", not_no;
     cuda_ggml: bool = true, env "ALLPAKA_GGML", not_no;
+    // Programmatic Dependent Launch (sm_90+): dependent kernels start while
+    // the previous one drains. `=0` gives plain serialized launches.
+    cuda_pdl: bool = true, env "ALLPAKA_CUDA_PDL", not_no;
+    cuda_pdl_debug: bool = false, env "ALLPAKA_CUDA_PDL_DEBUG", present;
     cuda_no_fuse: bool = false, env "ALLPAKA_CUDA_NO_FUSE", present;
     // CUDA decode/prefill switches, formerly read from the environment on
     // every launch.

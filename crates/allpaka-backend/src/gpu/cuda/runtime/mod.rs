@@ -1,12 +1,11 @@
 //! CUDA device runtime: context, streams, weight residency, scratch arenas.
 
 use crate::gpu::cuda::kernels::{EMBED_KERNELS, KERNELS};
-use crate::gpu::cuda::pdl::{LaunchArgsPdl, StreamPdlExt};
+use crate::gpu::cuda::pdl::{KernelFn, RawModule, StreamPdlExt};
 use allpaka_dtype::GgmlType;
 use cudarc::cublaslt::{CudaBlasLT, Matmul, MatmulConfig};
 use cudarc::driver::{
-    CudaContext, CudaEvent, CudaFunction, CudaGraph, CudaModule, CudaSlice, CudaStream, DevicePtr,
-    LaunchConfig, PushKernelArg,
+    CudaContext, CudaEvent, CudaGraph, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig,
 };
 use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions, Ptx};
 use half::f16;

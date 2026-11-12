@@ -16,9 +16,9 @@ mod runtime;
 
 use allpaka_dtype::GgmlType;
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
-use cudarc::driver::{CudaSlice, DevicePtr, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaSlice, DevicePtr, LaunchConfig};
 use ggml::{FaShape, FlashAttnReq, HybridReplay};
-use pdl::{LaunchArgsPdl, StreamPdlExt};
+use pdl::StreamPdlExt;
 use runtime::{
     dq_fmt, launch_embed_row, launch_gemm_dequant, launch_matvec_q4k_2, launch_matvec_q4k_qkv,
     launch_matvec_y_ptr, note_call, q8_decode_enabled, resolve_w, row_bytes, run_matvec, try_init,

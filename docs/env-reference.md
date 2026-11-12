@@ -12,6 +12,8 @@ to rewrite this file. Every switch is read once per process.
 | `ALLPAKA_CFUSE` | `cfuse` | off | off unless `=1` |
 | `ALLPAKA_CUDA_GRAPH` | `cuda_graph` | on | on unless `=0` or `=false` |
 | `ALLPAKA_CUDA_NO_FUSE` | `cuda_no_fuse` | off | on when set to anything |
+| `ALLPAKA_CUDA_PDL` | `cuda_pdl` | on | on unless `=0` or `=false` |
+| `ALLPAKA_CUDA_PDL_DEBUG` | `cuda_pdl_debug` | off | on when set to anything |
 | `ALLPAKA_DECODE_GUFUSE` | `gufuse` | off | off unless `=1` |
 | `ALLPAKA_DECODE_SERIAL` | `decode_serial` | off | off unless `=1` |
 | `ALLPAKA_DECODE_SPLIT` | `decode_split` | off | on when set to anything |
