@@ -151,6 +151,43 @@ Two traps hit on the way:
 Not done: a 3-column-tile mode for 17-24 live columns (6% of tiles); the
 tail tile still pays a full dequant + staging pass.
 
+## Prefill time budget and probes after the narrow-MMA fix (2026-11-12)
+
+30B pp480, one pass = ~300 ms. `ALLPAKA_FFN_SPLIT` / `ALLPAKA_PF_SPLIT`
+(serialised, ~0.065 ms overhead per stage per layer), summed over 48 layers:
+
+| stage | ms | effective TFLOPS |
+|---|---|---|
+| expert gate + up | 116 | 9.7 on live rows |
+| expert down | 73 | 7.6 on live rows |
+| qkv | 41 | 11.8 |
+| wo | 32 | 12.1 |
+| attend | 15.5 | - |
+| ffn norm + router | 6 | - |
+
+Dense matmuls run at the microbench peak in-model (the old "in-model loss"
+is gone). The expert kernels are near peak once dead columns are counted;
+down is 10-20% behind a gate-calibrated model (about 10 ms per pass), cause
+not found.
+
+Probes, all on the q4_k grouped kernel:
+
+- Tail merge into a 33..48-column tile (12 accumulators, extra B region):
+  NO-OP in tiles mode, because route_fused already emits one MmGroup per
+  <=32-row tile, so `grp.rows > 32` never holds. The 12-accumulator kernel
+  alone cost ~2.5% on every tile. A real version needs route_fused to emit
+  wide tiles; estimated gain <=1.5% (only multi-tile tails qualify), below
+  the overhead. Closed.
+- Staged scalar store of partial tiles thinned to 1/16: no change. The store
+  path is not a cost.
+- exp removed from the folded swiglu: no gain. `mmid_swiglu_kernel_for`
+  returning None (standalone swiglu + plain down): 1.5% slower. Keep the fold.
+- Dense shape 768->2048 vs 2048->768 in mmbench: both 11.7-12 TFLOPS. The
+  down shape is not the problem.
+- B activations read as half instead of float (probe `mmllph_q4_k`, removed):
+  +1.5-3% in mmbench, bit-exact by construction. Not wired in: every producer
+  would have to write a half copy.
+
 ## What was tried and falsified (do not retry without new evidence)
 
 - **(qwen3-30b)** llama `kernel_mul_mm_id_q4_K` port: CLOSED BY INSPECTION +
