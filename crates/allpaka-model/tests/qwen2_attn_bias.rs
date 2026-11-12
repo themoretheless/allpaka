@@ -37,7 +37,11 @@ fn each_bias_alone_changes_the_logits() {
     let zero = open("qwen2-zero2", &tiny_qwen2_with_bias([0.0; 3]));
     let toks = [3, 1, 4];
     let a = logits_for(&zero, &toks);
-    for (which, scale) in [("q", [2.0, 0.0, 0.0]), ("k", [0.0, 2.0, 0.0]), ("v", [0.0, 0.0, 2.0])] {
+    for (which, scale) in [
+        ("q", [2.0, 0.0, 0.0]),
+        ("k", [0.0, 2.0, 0.0]),
+        ("v", [0.0, 0.0, 2.0]),
+    ] {
         let biased = open(&format!("qwen2-bias-{which}"), &tiny_qwen2_with_bias(scale));
         let b = logits_for(&biased, &toks);
         assert_ne!(a[2], b[2], "the {which} bias was not applied");

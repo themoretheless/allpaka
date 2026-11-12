@@ -207,14 +207,22 @@ pub fn tiny_qwen2_with_bias(scale: [f32; 3]) -> Vec<u8> {
     let mut biases = Vec::new();
     for i in 0..LAYERS {
         biases.push((format!("blk.{i}.attn_q.bias"), q_dim, vec(q_dim, scale[0])));
-        biases.push((format!("blk.{i}.attn_k.bias"), kv_dim, vec(kv_dim, scale[1])));
-        biases.push((format!("blk.{i}.attn_v.bias"), kv_dim, vec(kv_dim, scale[2])));
+        biases.push((
+            format!("blk.{i}.attn_k.bias"),
+            kv_dim,
+            vec(kv_dim, scale[1]),
+        ));
+        biases.push((
+            format!("blk.{i}.attn_v.bias"),
+            kv_dim,
+            vec(kv_dim, scale[2]),
+        ));
     }
-    tiny_model_with(
-        "qwen2",
-        false,
-        |b| biases.into_iter().fold(b, |b, (n, len, data)| b.tensor(&n, &[len], data)),
-    )
+    tiny_model_with("qwen2", false, |b| {
+        biases
+            .into_iter()
+            .fold(b, |b, (n, len, data)| b.tensor(&n, &[len], data))
+    })
 }
 
 /// Write `bytes` to a fresh temp file. The name carries the process id and a
