@@ -96,16 +96,16 @@ pub struct CudaGpu {
     pub ctx: Arc<CudaContext>,
     pub stream: Arc<CudaStream>,
     #[allow(dead_code)]
-    pub module: Arc<CudaModule>,
+    pub module: RawModule,
     /// Holds nvcc MMQ module so `mm_q4_k_mmq` stays valid.
     #[allow(dead_code)]
-    pub mmq_module: Option<Arc<CudaModule>>,
+    pub mmq_module: Option<RawModule>,
     /// Holds nvcc MMVQ module so Q8 matvec kernels stay valid.
     #[allow(dead_code)]
-    pub mmvq_module: Option<Arc<CudaModule>>,
+    pub mmvq_module: Option<RawModule>,
     /// Holds NVRTC embed_row module (kept separate from main KERNELS PTX).
     #[allow(dead_code)]
-    pub embed_module: Option<Arc<CudaModule>>,
+    pub embed_module: Option<RawModule>,
     pub fns: HashMap<&'static str, KernelFn>,
     pub chunks: Vec<WeightChunk>,
     /// Mappings uploaded by `attach_mapping`: (host base, length, owners).
@@ -289,21 +289,16 @@ pub(super) fn init_device() -> Option<CudaGpu> {
                 .ok()?
         }
     };
-    // Each PTX is also loaded through the raw driver API: PDL launches need the
+    // Modules are loaded through the raw driver API: launches need the
     // `CUfunction` handle, which cudarc does not expose (see `pdl.rs`).
-    let load_kfn =
-        |mm: &Arc<CudaModule>, raw: &RawModule, name: &'static str| -> Option<KernelFn> {
-            let plain = mm
-                .load_function(name)
-                .map_err(|e| eprintln!("cuda: load_function {name}: {e}"))
-                .ok()?;
-            Some(KernelFn::new(name, plain, raw.function(name)?))
-        };
-    let raw_module = RawModule::load_ptx(&ptx.to_src())
-        .map_err(|e| eprintln!("cuda: raw module load failed: {e}"))
-        .ok()?;
-    let module = ctx
-        .load_module(ptx)
+    let load_kfn = |mm: &RawModule, name: &'static str| -> Option<KernelFn> {
+        let f = mm.function(name);
+        if f.is_none() {
+            eprintln!("cuda: load_function {name}: not found");
+        }
+        f
+    };
+    let module = RawModule::load_ptx(&ptx.to_src())
         .map_err(|e| eprintln!("cuda: load_module failed: {e}"))
         .ok()?;
     let mut fns = HashMap::new();
@@ -311,18 +306,15 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         if name == "mm_q4_k_mmq" {
             continue; // loaded from nvcc PTX below
         }
-        fns.insert(name, load_kfn(&module, &raw_module, name)?);
+        fns.insert(name, load_kfn(&module, name)?);
     }
 
     // Optional nvcc-compiled Q4_K MMQ (ALLPAKA_MMQ=nvcc). Keep module alive for fns.
     let mmq_ptx_src = include_str!("../../../../cuda/mmq_q4_k.ptx");
     let mut mmq_module = None;
-    match ctx
-        .load_module(Ptx::from_src(mmq_ptx_src))
-        .and_then(|mm| Ok((mm, RawModule::load_ptx(mmq_ptx_src)?)))
-    {
-        Ok((mm, raw)) => {
-            if let Some(f) = load_kfn(&mm, &raw, "mm_q4_k_mmq") {
+    match RawModule::load_ptx(mmq_ptx_src) {
+        Ok(mm) => {
+            if let Some(f) = load_kfn(&mm, "mm_q4_k_mmq") {
                 // Dynamic smem ≈ 52 KiB (As+Ad+Asum+Wtile+scales+Bw).
                 let _ = f.set_attribute(
                     cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
@@ -339,11 +331,8 @@ pub(super) fn init_device() -> Option<CudaGpu> {
     // nvcc MMVQ overrides NVRTC ports (better codegen on sm_120).
     let mmvq_ptx_src = include_str!("../../../../cuda/mmvq_q8.ptx");
     let mut mmvq_module = None;
-    match ctx
-        .load_module(Ptx::from_src(mmvq_ptx_src))
-        .and_then(|mm| Ok((mm, RawModule::load_ptx(mmvq_ptx_src)?)))
-    {
-        Ok((mm, raw)) => {
+    match RawModule::load_ptx(mmvq_ptx_src) {
+        Ok(mm) => {
             let mut n = 0usize;
             for name in [
                 "matvec_q4_k_q8",
@@ -367,7 +356,7 @@ pub(super) fn init_device() -> Option<CudaGpu> {
                 "quantize_q8_1",
                 "quantize_q8_1_q6",
             ] {
-                if let Some(f) = load_kfn(&mm, &raw, name) {
+                if let Some(f) = load_kfn(&mm, name) {
                     fns.insert(name, f);
                     n += 1;
                 }
@@ -386,22 +375,21 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         Err(_) => compile_ptx_with_opts(EMBED_KERNELS, make_opts(None)).ok(),
     };
     if let Some(ptx) = embed_ptx {
-        let raw = RawModule::load_ptx(&ptx.to_src());
-        match ctx.load_module(ptx).and_then(|mm| Ok((mm, raw?))) {
-            Ok((mm, raw)) => {
-                if let Some(f) = load_kfn(&mm, &raw, "embed_row_f32") {
+        match RawModule::load_ptx(&ptx.to_src()) {
+            Ok(mm) => {
+                if let Some(f) = load_kfn(&mm, "embed_row_f32") {
                     fns.insert("embed_row_f32", f);
                 }
-                if let Some(f) = load_kfn(&mm, &raw, "embed_row_f32_dtoken") {
+                if let Some(f) = load_kfn(&mm, "embed_row_f32_dtoken") {
                     fns.insert("embed_row_f32_dtoken", f);
                 }
-                if let Some(f) = load_kfn(&mm, &raw, "inc_u32") {
+                if let Some(f) = load_kfn(&mm, "inc_u32") {
                     fns.insert("inc_u32", f);
                 }
-                if let Some(f) = load_kfn(&mm, &raw, "copy_u32") {
+                if let Some(f) = load_kfn(&mm, "copy_u32") {
                     fns.insert("copy_u32", f);
                 }
-                if let Some(f) = load_kfn(&mm, &raw, "store_u32_at") {
+                if let Some(f) = load_kfn(&mm, "store_u32_at") {
                     fns.insert("store_u32_at", f);
                 }
                 if fns.contains_key("embed_row_f32") {

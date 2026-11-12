@@ -5,9 +5,9 @@ use crate::gpu::cuda::pdl::{KernelFn, RawModule, StreamPdlExt};
 use allpaka_dtype::GgmlType;
 use cudarc::cublaslt::{CudaBlasLT, Matmul, MatmulConfig};
 use cudarc::driver::{
-    CudaContext, CudaEvent, CudaGraph, CudaModule, CudaSlice, CudaStream, DevicePtr, LaunchConfig,
+    CudaContext, CudaEvent, CudaGraph, CudaSlice, CudaStream, DevicePtr, LaunchConfig,
 };
-use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions, Ptx};
+use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
 use half::f16;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;

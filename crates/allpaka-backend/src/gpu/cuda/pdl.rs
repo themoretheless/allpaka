@@ -6,16 +6,14 @@
 //! exited). Device: the dependent kernel must execute `griddepcontrol.wait`
 //! before touching anything the previous kernel reads or writes.
 //!
-//! Nothing here depends on cudarc's private layouts: the raw `CUfunction`
-//! comes from a module this file loads through the public driver API
-//! ([`RawModule`]), and the kernel argument vector is collected by
-//! [`PdlLaunch`] itself.
+//! Nothing here depends on cudarc's private layouts: kernel modules are
+//! loaded through the public driver API ([`RawModule`]), which hands out the
+//! `CUfunction`, and the kernel argument vector is collected by
+//! [`PdlLaunch`] itself. Every kernel launch of the backend goes through it.
 
 use cudarc::driver::result::{self, DriverError};
 use cudarc::driver::sys::{self, CUresult};
-use cudarc::driver::{
-    CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, DevicePtr, LaunchConfig,
-};
+use cudarc::driver::{CudaSlice, CudaStream, CudaView, CudaViewMut, DevicePtr, LaunchConfig};
 use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -110,8 +108,8 @@ pub fn debug_report_graph(label: &str, g: &cudarc::driver::CudaGraph) {
     m.clear();
 }
 
-/// A module loaded through the raw driver API, used only to resolve
-/// `CUfunction` handles. Never unloaded: it lives as long as the device.
+/// A kernel module loaded through the raw driver API. Never unloaded: it
+/// lives as long as the device.
 pub struct RawModule {
     module: sys::CUmodule,
     /// Entry points whose PTX body contains `griddepcontrol.wait`.
@@ -166,21 +164,22 @@ impl RawModule {
         })
     }
 
-    /// Raw handle of kernel `name` and whether it executes `griddepcontrol.wait`.
-    pub fn function(&self, name: &str) -> Option<(sys::CUfunction, bool)> {
+    /// Kernel `name` of this module.
+    pub fn function(&self, name: &'static str) -> Option<KernelFn> {
         let c = CString::new(name).ok()?;
         // SAFETY: `self.module` is a live module (never unloaded).
-        let f = unsafe { result::module::get_function(self.module, c) }.ok()?;
-        Some((f, self.waits.contains(name)))
+        let raw = unsafe { result::module::get_function(self.module, c) }.ok()?;
+        Some(KernelFn {
+            raw,
+            waits: self.waits.contains(name),
+            name,
+        })
     }
 }
 
-/// A kernel: cudarc's handle (plain launches, attributes) plus the raw
-/// `CUfunction` of the same kernel for [`PdlLaunch`]. Derefs to
-/// [`CudaFunction`], so `stream.launch_builder(&f)` keeps working.
-#[derive(Clone)]
+/// A kernel of a [`RawModule`].
+#[derive(Clone, Copy)]
 pub struct KernelFn {
-    plain: CudaFunction,
     raw: sys::CUfunction,
     /// The kernel executes `griddepcontrol.wait`, so it may be a programmatic
     /// dependent. Kernels without it always get a plain launch.
@@ -188,32 +187,21 @@ pub struct KernelFn {
     name: &'static str,
 }
 
-// SAFETY: `CudaFunction` is Send + Sync; `raw` is an opaque driver handle with
-// the same contract.
+// SAFETY: a `CUfunction` is an opaque driver handle, usable from any thread
+// that has the owning context current (cudarc's `CudaFunction` is the same).
 unsafe impl Send for KernelFn {}
-// SAFETY: see `Send`.
+// SAFETY: see `Send`; the handle is only read.
 unsafe impl Sync for KernelFn {}
 
 impl KernelFn {
-    pub fn new(
-        name: &'static str,
-        plain: CudaFunction,
-        (raw, waits): (sys::CUfunction, bool),
-    ) -> Self {
-        Self {
-            plain,
-            raw,
-            waits,
-            name,
-        }
-    }
-}
-
-impl std::ops::Deref for KernelFn {
-    type Target = CudaFunction;
-    #[inline(always)]
-    fn deref(&self) -> &CudaFunction {
-        &self.plain
+    /// `cuFuncSetAttribute`; the context must be current on this thread.
+    pub fn set_attribute(
+        &self,
+        attribute: sys::CUfunction_attribute,
+        value: i32,
+    ) -> Result<(), DriverError> {
+        // SAFETY: `self.raw` belongs to a module that is never unloaded.
+        unsafe { result::function::set_function_attribute(self.raw, attribute, value) }
     }
 }
 
