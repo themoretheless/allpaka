@@ -6,7 +6,8 @@ rem   third_party\build_allpaka_ggml.bat
 rem
 rem Steps: fetch llama.cpp at the revision in llama.cpp.rev (if absent), apply
 rem llama.cpp.patch (three dllexport additions the bridge needs), build
-rem ggml-cuda and llama-bench with CMake + Ninja, then compile and link the
+rem ggml-cuda, llama-bench and llama-server (the references for `allpaka bench`
+rem and `allpaka verify`) with CMake + Ninja, then compile and link the
 rem bridge into third_party\allpaka_ggml\bin, where the backend looks for it.
 rem
 rem Needs: Visual Studio 2022 C++ tools, a Windows 10/11 SDK, the CUDA toolkit,
@@ -97,16 +98,16 @@ if errorlevel 1 (
   )
 )
 
-rem --- ggml-cuda and the llama-bench reference -----------------------------
-if not exist "%BUILD%\build.ninja" (
-  cmake -S "%LLAMA%" -B "%BUILD%" -G Ninja -DCMAKE_BUILD_TYPE=Release ^
-    -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DGGML_CUDA_FORCE_MMQ=OFF ^
-    -DCMAKE_CUDA_ARCHITECTURES=%ALLPAKA_CUDA_ARCH% -DBUILD_SHARED_LIBS=ON ^
-    -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF ^
-    -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_COMMON=ON -DLLAMA_CURL=OFF
-  if errorlevel 1 exit /b 1
-)
-cmake --build "%BUILD%" --config Release --target ggml-cuda llama-bench
+rem --- ggml-cuda and the references: llama-bench, llama-server --------------
+rem Configuring every time is cheap and brings an older build directory up to
+rem these options.
+cmake -S "%LLAMA%" -B "%BUILD%" -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+  -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DGGML_CUDA_FORCE_MMQ=OFF ^
+  -DCMAKE_CUDA_ARCHITECTURES=%ALLPAKA_CUDA_ARCH% -DBUILD_SHARED_LIBS=ON ^
+  -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON ^
+  -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_COMMON=ON -DLLAMA_CURL=OFF
+if errorlevel 1 exit /b 1
+cmake --build "%BUILD%" --config Release --target ggml-cuda llama-bench llama-server
 if errorlevel 1 exit /b 1
 
 rem --- the bridge ----------------------------------------------------------
