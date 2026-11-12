@@ -399,8 +399,12 @@ pub(super) fn init_device() -> Option<Gpu> {
         "attend_mm256_db",
         "route_patch_shared_w",
     ] {
+        // Specialised only for the narrow-tile switch; every other kernel
+        // here references no function constant and ignores it.
+        let consts = metal::FunctionConstantValues::new();
+        pin_mmid_narrow(&consts);
         let f = library
-            .get_function(name, None)
+            .get_function(name, Some(consts))
             .map_err(|e| init_failed(format!("get_function {name} failed: {e}")))
             .ok()?;
         let p = device
@@ -684,6 +688,7 @@ impl Gpu {
         );
         if !self.pipelines.contains_key(&key) {
             let consts = metal::FunctionConstantValues::new();
+            pin_mmid_narrow(&consts);
             for (index, value) in [(0u64, tile as u32), (1, lpr as u32)] {
                 consts.set_constant_value_at_index(
                     &value as *const u32 as *const _,
@@ -750,6 +755,7 @@ impl Gpu {
         let key = (name, tile, lpr + 8000);
         if !self.pipelines.contains_key(&key) {
             let consts = metal::FunctionConstantValues::new();
+            pin_mmid_narrow(&consts);
             for (index, value) in [(0u64, tile as u32), (1, lpr as u32)] {
                 consts.set_constant_value_at_index(
                     &value as *const u32 as *const _,
@@ -799,6 +805,7 @@ impl Gpu {
         let key = (name, 1, lpr + 16000 + if swiglu { 2000 } else { 0 });
         if !self.pipelines.contains_key(&key) {
             let consts = metal::FunctionConstantValues::new();
+            pin_mmid_narrow(&consts);
             for (index, value) in [(0u64, 1u32), (1, lpr as u32)] {
                 consts.set_constant_value_at_index(
                     &value as *const u32 as *const _,
@@ -850,6 +857,7 @@ impl Gpu {
         );
         if !self.pipelines.contains_key(&key) {
             let consts = metal::FunctionConstantValues::new();
+            pin_mmid_narrow(&consts);
             for (index, value) in [(0u64, 1u32), (1, lpr as u32)] {
                 consts.set_constant_value_at_index(
                     &value as *const u32 as *const _,
@@ -904,6 +912,7 @@ impl Gpu {
         if !self.pipelines.contains_key(&key) {
             let t0 = std::time::Instant::now();
             let consts = metal::FunctionConstantValues::new();
+            pin_mmid_narrow(&consts);
             for (index, value) in [
                 (10u64, gate_fmt),
                 (11, down_fmt),
@@ -1156,4 +1165,19 @@ impl Gpu {
             );
         }
     }
+}
+
+
+/// Narrow-MMA mode for tail tiles of the grouped mm (function constant 20).
+/// Pinned on every pipeline: an unset bool constant reads as TRUE on this
+/// Metal, so the off-arm of an A/B must be explicit. `ALLPAKA_MMID_NARROW=0`
+/// reverts to full-width MMAs for every tile.
+fn pin_mmid_narrow(consts: &metal::FunctionConstantValues) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var("ALLPAKA_MMID_NARROW").map_or(true, |v| v != "0"));
+    consts.set_constant_value_at_index(
+        &on as *const bool as *const _,
+        metal::MTLDataType::Bool,
+        20,
+    );
 }

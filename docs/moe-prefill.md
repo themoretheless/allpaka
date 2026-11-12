@@ -121,6 +121,36 @@ the ~8-12% gap is closed. Decode 36.5-37.5 tok/s (the llama decode gap,
     deliberately: `req.route.is_none()` is in the predicate, because that case
     is plausibly safe but was not measured.
 
+## Narrow MMA for tail tiles of the grouped mm (2026-11-12)
+
+Measured on qwen3-30b pp480 (CPU-routing probe, 144 layer passes): the
+32-column tiles of the grouped expert mm are only **67.7% full**. Routing is
+skewed (84 of 128 experts active on average, groups up to 450 rows), and of
+25524 tiles 26% carry <=8 live token columns and another 10% carry 9-16 -
+each billed as a full 64x32 tile. llama.cpp's `kernel_mul_mm_id` has the
+same waste.
+
+Fix (`MMID_NARROW`, function constant 20, default on, `ALLPAKA_MMID_NARROW=0`
+reverts): when a tile has <=16 live columns the four simdgroups split the 64
+weight rows 16 each against 1 or 2 column tiles, so the MMAs per K step drop
+from 8 to 2 (<=8 columns) or 4 (<=16). Staging and dequant are unchanged.
+Applied to `DEFINE_MM_ID_PIPE_Q4K`, `DEFINE_MM_ID_PIPE_Q6K` and the generic
+`DEFINE_MM_ID_PIPE` (Q2K/Q3K/Q5K/Q8_0).
+
+Result: 30B pp480 +9.5% in interleaved A/B (medians 1537 vs 1404 tok/s, 4 of
+5 rounds), `logits-fnv` identical. Quiet-machine paired run vs llama.cpp:
+prefill 1612 vs 1621 (99.4%, was 89%), decode 146 vs 127 (115%).
+
+Two traps hit on the way:
+- A store loop bounded by the runtime `nacc` (`for i < nacc` over `mc[]`)
+  demoted the accumulators from registers to memory and made EVERY tile 2-3x
+  slower. The bound must stay a constant 8 with an `if (i >= nacc) continue`.
+- BN16 for the whole dispatch (`ALLPAKA_MMID_BN16=1`) is NOT the same idea
+  and loses 5% here: big groups then pay the dequant twice.
+
+Not done: a 3-column-tile mode for 17-24 live columns (6% of tiles); the
+tail tile still pays a full dequant + staging pass.
+
 ## What was tried and falsified (do not retry without new evidence)
 
 - **(qwen3-30b)** llama `kernel_mul_mm_id_q4_K` port: CLOSED BY INSPECTION +

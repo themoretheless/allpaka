@@ -57,6 +57,10 @@ constant uint LPR [[function_constant(1)]];
 // when false - the CPU-routed paths bind nothing extra.
 constant bool INDEXED [[function_constant(2)]];
 
+// Narrow-MMA mode for tail tiles of the grouped mm (<=16 live token
+// columns). Compile-time switch so the A/B is a pipeline swap.
+constant bool MMID_NARROW [[function_constant(20)]];
+
 // SwiGLU folded into the activation reads of the DOWN matvec: x is the raw
 // gate output, buffer 8 the raw up output, and every load computes
 // silu(gate) * up on the fly. Removes the tiny standalone swiglu dispatch
@@ -6505,6 +6509,9 @@ kernel void NAME(                                                              \
         mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);                   \
     }                                                                          \
     const uint nblk = n_in / NK;                                               \
+    /* Uniform per threadgroup: live token columns in this tile. */            \
+    const bool narrow = MMID_NARROW && nr1 <= 16;                              \
+    const short nacc = !narrow ? 8 : (nr1 <= 8 ? 2 : 4);                       \
     STAGE_BLOCK_Q6K_SW(0, 0, SWIGLU);                                          \
     threadgroup_barrier(mem_flags::mem_threadgroup);                           \
     for (uint blk = 0; blk < nblk; blk++) {                                    \
@@ -6514,6 +6521,32 @@ kernel void NAME(                                                              \
         }                                                                      \
         threadgroup const half* sa = sab[cur];                                 \
         threadgroup const half* sb = sa + 64 * NK;                             \
+        if (narrow) {                                                          \
+            /* Tail tile: <=16 live token columns. Each simdgroup takes 16     \
+               weight rows (2 row tiles) against 1 or 2 column tiles, so the   \
+               MMA count per K step drops from 8 to 2 or 4. */                 \
+            threadgroup const half* la = sa + 2 * 64 * sgitg;                  \
+            threadgroup const half* lb = sb;                                   \
+            _Pragma("clang loop unroll(full)")                                 \
+            for (short ik = 0; ik < NK / 8; ik++) {                            \
+                simdgroup_barrier(mem_flags::mem_none);                        \
+                simdgroup_load(ma[0], la, 8, 0, false);                        \
+                simdgroup_load(ma[1], la + 64, 8, 0, false);                   \
+                simdgroup_barrier(mem_flags::mem_none);                        \
+                simdgroup_load(mb[0], lb, 8, 0, false);                        \
+                simdgroup_barrier(mem_flags::mem_none);                        \
+                simdgroup_multiply_accumulate(mc[0], mb[0], ma[0], mc[0]);     \
+                simdgroup_multiply_accumulate(mc[1], mb[0], ma[1], mc[1]);     \
+                if (nacc > 2) {                                                \
+                    simdgroup_load(mb[1], lb + 64, 8, 0, false);               \
+                    simdgroup_barrier(mem_flags::mem_none);                    \
+                    simdgroup_multiply_accumulate(mc[2], mb[1], ma[0], mc[2]); \
+                    simdgroup_multiply_accumulate(mc[3], mb[1], ma[1], mc[3]); \
+                }                                                              \
+                la += 8 * 64;                                                  \
+                lb += 4 * 64;                                                  \
+            }                                                                  \
+        } else {                                                               \
         threadgroup const half* lsma = sa + 4 * 64 * (sgitg % 2);              \
         threadgroup const half* lsmb = sb + 2 * 64 * (sgitg / 2);              \
         _Pragma("clang loop unroll(full)")                                     \
@@ -6534,6 +6567,7 @@ kernel void NAME(                                                              \
             lsma += 8 * 64;                                                    \
             lsmb += 4 * 64;                                                    \
         }                                                                      \
+        }                                                                      \
         threadgroup_barrier(mem_flags::mem_threadgroup);                       \
     }                                                                          \
     if (r0 + 64 <= n_out && r1 + 32 <= m) {                                    \
@@ -6546,12 +6580,20 @@ kernel void NAME(                                                              \
     } else {                                                                   \
         threadgroup float* temp_str = shmem_f + sgitg * 64;                    \
         threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+        _Pragma("clang loop unroll(full)")                                     \
         for (short i = 0; i < 8; i++) {                                        \
-            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
+            /* Constant bound: a runtime bound over mc[] demotes the           \
+               accumulators from registers to memory for EVERY tile. */        \
+            if (i >= nacc) {                                                   \
+                continue;                                                      \
+            }                                                                  \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                     \
             simdgroup_store(mc[i], temp_str, 8, 0, false);                     \
-            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
-            const short cc0 = 8 * (i % 4) + 32 * (sgitg & 1);                  \
-            const short rr0 = 8 * (i / 4) + 16 * (sgitg >> 1);                 \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                     \
+            const short cc0 = narrow ? 8 * (2 * sgitg + (i % 2))               \
+                                     : 8 * (i % 4) + 32 * (sgitg & 1);         \
+            const short rr0 = narrow ? 8 * (i / 2)                             \
+                                     : 8 * (i / 4) + 16 * (sgitg >> 1);        \
             for (short e = tiitg % 32; e < 64; e += 32) {                      \
                 const short cc = cc0 + (e % 8);                                \
                 const short rr = rr0 + (e / 8);                                \
@@ -6626,6 +6668,9 @@ kernel void NAME(                                                              \
         mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);                   \
     }                                                                          \
     const uint nblk = n_in / NK;                                               \
+    /* Uniform per threadgroup: live token columns in this tile. */            \
+    const bool narrow = MMID_NARROW && nr1 <= 16;                              \
+    const short nacc = !narrow ? 8 : (nr1 <= 8 ? 2 : 4);                       \
     STAGE_BLOCK_4(0, 0, SWIGLU);                                               \
     threadgroup_barrier(mem_flags::mem_threadgroup);                           \
     for (uint blk = 0; blk < nblk; blk++) {                                    \
@@ -6635,6 +6680,32 @@ kernel void NAME(                                                              \
         }                                                                      \
         threadgroup const half* sa = sab[cur];                                 \
         threadgroup const half* sb = sa + 64 * NK;                             \
+        if (narrow) {                                                          \
+            /* Tail tile: <=16 live token columns. Each simdgroup takes 16     \
+               weight rows (2 row tiles) against 1 or 2 column tiles, so the   \
+               MMA count per K step drops from 8 to 2 or 4. */                 \
+            threadgroup const half* la = sa + 2 * 64 * sgitg;                  \
+            threadgroup const half* lb = sb;                                   \
+            _Pragma("clang loop unroll(full)")                                 \
+            for (short ik = 0; ik < NK / 8; ik++) {                            \
+                simdgroup_barrier(mem_flags::mem_none);                        \
+                simdgroup_load(ma[0], la, 8, 0, false);                        \
+                simdgroup_load(ma[1], la + 64, 8, 0, false);                   \
+                simdgroup_barrier(mem_flags::mem_none);                        \
+                simdgroup_load(mb[0], lb, 8, 0, false);                        \
+                simdgroup_barrier(mem_flags::mem_none);                        \
+                simdgroup_multiply_accumulate(mc[0], mb[0], ma[0], mc[0]);     \
+                simdgroup_multiply_accumulate(mc[1], mb[0], ma[1], mc[1]);     \
+                if (nacc > 2) {                                                \
+                    simdgroup_load(mb[1], lb + 64, 8, 0, false);               \
+                    simdgroup_barrier(mem_flags::mem_none);                    \
+                    simdgroup_multiply_accumulate(mc[2], mb[1], ma[0], mc[2]); \
+                    simdgroup_multiply_accumulate(mc[3], mb[1], ma[1], mc[3]); \
+                }                                                              \
+                la += 8 * 64;                                                  \
+                lb += 4 * 64;                                                  \
+            }                                                                  \
+        } else {                                                               \
         threadgroup const half* lsma = sa + 4 * 64 * (sgitg % 2);              \
         threadgroup const half* lsmb = sb + 2 * 64 * (sgitg / 2);              \
         _Pragma("clang loop unroll(full)")                                     \
@@ -6655,6 +6726,7 @@ kernel void NAME(                                                              \
             lsma += 8 * 64;                                                    \
             lsmb += 4 * 64;                                                    \
         }                                                                      \
+        }                                                                      \
         threadgroup_barrier(mem_flags::mem_threadgroup);                       \
     }                                                                          \
     if (r0 + 64 <= n_out && r1 + 32 <= m) {                                    \
@@ -6667,12 +6739,20 @@ kernel void NAME(                                                              \
     } else {                                                                   \
         threadgroup float* temp_str = shmem_f + sgitg * 64;                    \
         threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+        _Pragma("clang loop unroll(full)")                                     \
         for (short i = 0; i < 8; i++) {                                        \
-            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
+            /* Constant bound: a runtime bound over mc[] demotes the           \
+               accumulators from registers to memory for EVERY tile. */        \
+            if (i >= nacc) {                                                   \
+                continue;                                                      \
+            }                                                                  \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                     \
             simdgroup_store(mc[i], temp_str, 8, 0, false);                     \
-            simdgroup_barrier(mem_flags::mem_threadgroup);                   \
-            const short cc0 = 8 * (i % 4) + 32 * (sgitg & 1);                  \
-            const short rr0 = 8 * (i / 4) + 16 * (sgitg >> 1);                 \
+            simdgroup_barrier(mem_flags::mem_threadgroup);                     \
+            const short cc0 = narrow ? 8 * (2 * sgitg + (i % 2))               \
+                                     : 8 * (i % 4) + 32 * (sgitg & 1);         \
+            const short rr0 = narrow ? 8 * (i / 2)                             \
+                                     : 8 * (i / 4) + 16 * (sgitg >> 1);        \
             for (short e = tiitg % 32; e < 64; e += 32) {                      \
                 const short cc = cc0 + (e % 8);                                \
                 const short rr = rr0 + (e / 8);                                \
@@ -7089,6 +7169,9 @@ kernel void NAME(                                                              \
         mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);                   \
     }                                                                          \
     const uint nblk = n_in / NK;                                               \
+    /* Uniform per threadgroup: live token columns in this tile. */            \
+    const bool narrow = MMID_NARROW && nr1 <= 16;                              \
+    const short nacc = !narrow ? 8 : (nr1 <= 8 ? 2 : 4);                       \
     {                                                                          \
         threadgroup half* sa = sab[0];                                         \
         threadgroup half* sb = sa + 64 * NK;                                   \
@@ -7179,6 +7262,32 @@ kernel void NAME(                                                              \
         }                                                                      \
         threadgroup const half* sa = sab[cur];                                 \
         threadgroup const half* sb = sa + 64 * NK;                             \
+        if (narrow) {                                                          \
+            /* Tail tile: <=16 live token columns. Each simdgroup takes 16     \
+               weight rows (2 row tiles) against 1 or 2 column tiles, so the   \
+               MMA count per K step drops from 8 to 2 or 4. */                 \
+            threadgroup const half* la = sa + 2 * 64 * sgitg;                  \
+            threadgroup const half* lb = sb;                                   \
+            _Pragma("clang loop unroll(full)")                                 \
+            for (short ik = 0; ik < NK / 8; ik++) {                            \
+                simdgroup_barrier(mem_flags::mem_none);                        \
+                simdgroup_load(ma[0], la, 8, 0, false);                        \
+                simdgroup_load(ma[1], la + 64, 8, 0, false);                   \
+                simdgroup_barrier(mem_flags::mem_none);                        \
+                simdgroup_load(mb[0], lb, 8, 0, false);                        \
+                simdgroup_barrier(mem_flags::mem_none);                        \
+                simdgroup_multiply_accumulate(mc[0], mb[0], ma[0], mc[0]);     \
+                simdgroup_multiply_accumulate(mc[1], mb[0], ma[1], mc[1]);     \
+                if (nacc > 2) {                                                \
+                    simdgroup_load(mb[1], lb + 64, 8, 0, false);               \
+                    simdgroup_barrier(mem_flags::mem_none);                    \
+                    simdgroup_multiply_accumulate(mc[2], mb[1], ma[0], mc[2]); \
+                    simdgroup_multiply_accumulate(mc[3], mb[1], ma[1], mc[3]); \
+                }                                                              \
+                la += 8 * 64;                                                  \
+                lb += 4 * 64;                                                  \
+            }                                                                  \
+        } else {                                                               \
         threadgroup const half* lsma = sa + 4 * 64 * (sgitg % 2);              \
         threadgroup const half* lsmb = sb + 2 * 64 * (sgitg / 2);              \
         _Pragma("clang loop unroll(full)")                                     \
@@ -7199,6 +7308,7 @@ kernel void NAME(                                                              \
             lsma += 8 * 64;                                                    \
             lsmb += 4 * 64;                                                    \
         }                                                                      \
+        }                                                                      \
         threadgroup_barrier(mem_flags::mem_threadgroup);                       \
     }                                                                          \
     if (r0 + 64 <= n_out && r1 + 32 <= m) {                                    \
@@ -7211,12 +7321,20 @@ kernel void NAME(                                                              \
     } else {                                                                   \
         threadgroup float* temp_str = shmem_f + sgitg * 64;                    \
         threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+        _Pragma("clang loop unroll(full)")                                     \
         for (short i = 0; i < 8; i++) {                                        \
+            /* Constant bound: a runtime bound over mc[] demotes the           \
+               accumulators from registers to memory for EVERY tile. */        \
+            if (i >= nacc) {                                                   \
+                continue;                                                      \
+            }                                                                  \
             simdgroup_barrier(mem_flags::mem_threadgroup);                     \
             simdgroup_store(mc[i], temp_str, 8, 0, false);                     \
             simdgroup_barrier(mem_flags::mem_threadgroup);                     \
-            const short cc0 = 8 * (i % 4) + 32 * (sgitg & 1);                  \
-            const short rr0 = 8 * (i / 4) + 16 * (sgitg >> 1);                 \
+            const short cc0 = narrow ? 8 * (2 * sgitg + (i % 2))               \
+                                     : 8 * (i % 4) + 32 * (sgitg & 1);         \
+            const short rr0 = narrow ? 8 * (i / 2)                             \
+                                     : 8 * (i / 4) + 16 * (sgitg >> 1);        \
             for (short e = tiitg % 32; e < 64; e += 32) {                      \
                 const short cc = cc0 + (e % 8);                                \
                 const short rr = rr0 + (e / 8);                                \
