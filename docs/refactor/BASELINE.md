@@ -23,7 +23,6 @@
 | Файл | LOC |
 |---|---:|
 | `allpaka-backend/src/gpu/metal.rs` | 10 236 |
-| `allpaka-backend/src/gpu/shaders/kernels.metal` | 8 564 |
 | `allpaka-backend/src/gpu/cuda/mod.rs` | 4 914 |
 | `allpaka-backend/src/gpu/cuda/kernels.rs` | 3 703 |
 | `allpaka-chat/src/observability.rs` | 2 845 |
