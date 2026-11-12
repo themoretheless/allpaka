@@ -303,8 +303,8 @@ clippy backend/model под `aarch64-apple-darwin`; на раннере `macos-1
 - **Порт `kernel_mul_mm_id_q4_K`** и прочее из «What was tried and falsified» —
   `docs/moe-prefill.md`.
 - **CUDA PDL по умолчанию.** До 2026-11-13 не работал вовсе (угаданное
-  смещение в `LaunchArgs`); починенный даёт +1% decode и в 1 прогоне из 7 —
-  другой greedy-поток. Opt-in `ALLPAKA_CUDA_PDL=1`. Возврат: найдена причина
+  смещение в `LaunchArgs`); починенный даёт +1% decode и в 6 прогонах из 27 —
+  другой greedy-поток (без PDL — 0 из 13). Opt-in `ALLPAKA_CUDA_PDL=1`. Возврат: найдена причина
   расхождения и 20 прогонов подряд с одинаковым `tokens-fnv`
   (`docs/benchmarks/2026-11-13-cuda-pdl-rtx5090.md`).
 - **Tensor parallel** вместо pipeline; **сжатие активаций** между узлами.
