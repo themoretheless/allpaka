@@ -14,6 +14,44 @@ use allpaka_gguf::GgmlType;
 
 const PAGE: usize = 16384;
 
+/// Geometry of the fused-FFN test's matrices.
+const FFN_HIDDEN: usize = 512;
+const FFN_WIDTH: usize = 256;
+const FFN_GATE_OFF: usize = 12 << 20;
+const FFN_UP_OFF: usize = 16 << 20;
+const FFN_DOWN_OFF: usize = 20 << 20;
+
+/// Every matrix the tests read from the region: type, byte offset, rows, row
+/// width. Their scale fields are tamed once, before the region is attached and
+/// shared, so no test ever writes to it. `check_parity` refuses a matrix that
+/// is not listed here.
+const MATRICES: &[(GgmlType, usize, usize, usize)] = &[
+    (GgmlType::Q8_0, 0, 64, 1024),
+    (GgmlType::Q8_0, 1 << 20, 64, 1024),
+    (GgmlType::Q2K, 2 << 20, 48, 1024),
+    (GgmlType::Q2K, 3 << 20, 48, 1024),
+    (GgmlType::Q2K, 37 << 20, 64, 1024),
+    (GgmlType::F32, 39 << 20, 128, 2048),
+    (GgmlType::F32, 41 << 20, 128, 2048),
+    (GgmlType::Q2K, 31 << 20, 48, 1024),
+    (GgmlType::Q3K, 24 << 20, 48, 1024),
+    (GgmlType::Q3K, 26 << 20, 48, 1024),
+    (GgmlType::Q4K, 4 << 20, 48, 1024),
+    (GgmlType::Q4K, 5 << 20, 48, 1024),
+    (GgmlType::Q4K, 32 << 20, 48, 1024),
+    (GgmlType::Q4K, 33 << 20, 64, 1024),
+    (GgmlType::Q4K, 35 << 20, 48, 1024),
+    (GgmlType::Q4K, 33 << 20, 48, 768),
+    (GgmlType::Q4K, 34 << 20, 48, 768),
+    (GgmlType::Q5K, 28 << 20, 48, 1024),
+    (GgmlType::Q5K, 30 << 20, 48, 1024),
+    (GgmlType::Q6K, 6 << 20, 48, 1024),
+    (GgmlType::Q6K, 8 << 20, 48, 1024),
+    (GgmlType::Q4K, FFN_GATE_OFF, FFN_WIDTH, FFN_HIDDEN),
+    (GgmlType::Q4K, FFN_UP_OFF, FFN_WIDTH, FFN_HIDDEN),
+    (GgmlType::Q6K, FFN_DOWN_OFF, FFN_HIDDEN, FFN_WIDTH),
+];
+
 /// Leaked page-aligned region the tests attach to the GPU once.
 /// None when the host has no Metal device (GitHub-hosted runners): the GPU
 /// tests then report SKIP instead of failing.
@@ -33,13 +71,16 @@ fn attached_region() -> Option<&'static [u8]> {
             let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
             // Deterministic pseudo-random bytes: valid quant blocks for every
             // format under test (any bit pattern decodes; f16 scales are tamed
-            // below per matrix).
+            // right after, per matrix).
             let mut state = 0x243F_6A88_85A3_08D3u64;
             for b in region.iter_mut() {
                 state = state
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
                 *b = (state >> 56) as u8;
+            }
+            for &(ty, off, rows, n_in) in MATRICES {
+                tame_scales(region, ty, off, rows, n_in);
             }
             if !gpu::attach(region) {
                 eprintln!("SKIP: no Metal device; parity tests need one");
@@ -97,17 +138,10 @@ fn check_parity(ty: GgmlType, n_out: usize, n_in: usize, m: usize, off: usize) {
     let Some(region) = attached_region() else {
         return;
     };
-    // Redo the taming through a raw pointer: the region is logically ours.
-    // FIXME(soundness): this builds a `&mut [u8]` from the `&'static [u8]` that `attached_region`
-    // hands out. Writing through a pointer derived from a shared reference is UB, the shared
-    // `region` stays live and is read later while `region_mut` exists, and cargo runs the tests of
-    // this file on parallel threads, so two tests can hold overlapping `&mut` views and race on the
-    // same bytes. Fix: keep the region as a raw pointer + length behind a `Mutex`, do all
-    // `tame_scales` writes under the lock (or once, inside `attached_region`), and only then hand
-    // out shared slices.
-    let region_mut =
-        unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
-    tame_scales(region_mut, ty, off, n_out, n_in);
+    assert!(
+        MATRICES.contains(&(ty, off, n_out, n_in)),
+        "{ty:?} {n_out}x{n_in} at {off} is not in MATRICES, so its scales were never tamed"
+    );
 
     let be = match ty {
         GgmlType::F32 => 1usize,
@@ -177,20 +211,8 @@ fn fused_ffn_matches_cpu_reference() {
     let Some(region) = attached_region() else {
         return;
     };
-    // FIXME(soundness): this builds a `&mut [u8]` from the `&'static [u8]` that `attached_region`
-    // hands out. Writing through a pointer derived from a shared reference is UB, the shared
-    // `region` stays live and is read later while `region_mut` exists, and cargo runs the tests of
-    // this file on parallel threads, so two tests can hold overlapping `&mut` views and race on the
-    // same bytes. Fix: keep the region as a raw pointer + length behind a `Mutex`, do all
-    // `tame_scales` writes under the lock (or once, inside `attached_region`), and only then hand
-    // out shared slices.
-    let region_mut =
-        unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
-    let (hidden, ffn) = (512usize, 256usize);
-    let (gate_off, up_off, down_off) = (12 << 20, 16 << 20, 20 << 20);
-    tame_scales(region_mut, GgmlType::Q4K, gate_off, ffn, hidden);
-    tame_scales(region_mut, GgmlType::Q4K, up_off, ffn, hidden);
-    tame_scales(region_mut, GgmlType::Q6K, down_off, hidden, ffn);
+    let (hidden, ffn) = (FFN_HIDDEN, FFN_WIDTH);
+    let (gate_off, up_off, down_off) = (FFN_GATE_OFF, FFN_UP_OFF, FFN_DOWN_OFF);
 
     let gate_bytes = ffn * hidden / 256 * 144;
     let down_bytes = hidden * ffn / 256 * 210;

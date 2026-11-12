@@ -261,8 +261,9 @@ clippy backend/model под `aarch64-apple-darwin`; на раннере `macos-1
 - `gpu/metal/ffn_grouped.rs:216` — гонка рестейджинга GLM router bias
   (вероятный баг GLM fused prefill). Нужен Mac.
 - `gpu/metal/verify.rs:361` — дамп `ALLPAKA_VERIFY_DEBUG`.
-- `tests/gpu_parity.rs:101,180` — `&mut` поверх общего `&'static` среза при
-  параллельных тестах.
+- `tests/gpu_parity.rs`: запись в общий срез убрана (все матрицы готовятся один
+  раз до attach), но файл собирается только под macOS — здесь он прошёл лишь
+  clippy под `aarch64-apple-darwin`. Осталось прогнать на Metal.
 
 **DoD:** `grep 'FIXME(soundness)'` пуст, на каждый — тест или обоснование.
 
