@@ -363,10 +363,11 @@ pub fn apply_cached(model_path: &Path, cache_path: Option<&Path>) -> Result<bool
 }
 
 fn key_for(model_path: &Path, file: &allpaka_gguf::GgufFile, workload: Workload) -> AutotuneKey {
+    let (device, software) = device_identity();
     AutotuneKey {
         workload: workload.name().to_owned(),
-        device_registry_id: host_value("sysctl", &["-n", "machdep.cpu.brand_string"]),
-        metal_os_version: host_value("sw_vers", &["-productVersion"]),
+        device_registry_id: device,
+        metal_os_version: software,
         model_fingerprint: model_fingerprint(model_path, file),
         model_architecture: file.architecture().to_string(),
         model_dimensions: format!("tensors={}", file.tensors().len()),
@@ -397,6 +398,29 @@ fn tensor_census(file: &allpaka_gguf::GgufFile) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     rows.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+/// What the tuned numbers depend on outside the model: the device and the
+/// software that drives it. On macOS the chip and the OS (which carries
+/// Metal); elsewhere the first NVIDIA GPU and its driver. A machine that
+/// answers neither gets `unknown`, and shares entries only with itself.
+fn device_identity() -> (String, String) {
+    if cfg!(target_os = "macos") {
+        return (
+            host_value("sysctl", &["-n", "machdep.cpu.brand_string"]),
+            host_value("sw_vers", &["-productVersion"]),
+        );
+    }
+    let first_gpu = |field: &str| {
+        let query = format!("--query-gpu={field}");
+        host_value("nvidia-smi", &[&query, "--format=csv,noheader"])
+            .lines()
+            .next()
+            .unwrap_or("unknown")
+            .trim()
+            .to_string()
+    };
+    (first_gpu("name"), first_gpu("driver_version"))
 }
 
 fn host_value(command: &str, args: &[&str]) -> String {
@@ -538,5 +562,12 @@ mod tests {
         assert_ne!(parsed, other);
         assert_eq!("memory".parse::<Workload>().unwrap(), Workload::Memory);
         assert!("fastest".parse::<Workload>().is_err());
+    }
+
+    #[test]
+    fn the_device_identity_is_never_empty() {
+        let (device, software) = super::device_identity();
+        assert!(!device.is_empty() && !software.is_empty());
+        assert!(device.lines().count() == 1 && software.lines().count() == 1);
     }
 }
