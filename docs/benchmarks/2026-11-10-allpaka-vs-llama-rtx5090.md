@@ -128,7 +128,27 @@ PDL is now really active (579 of 579 programmatic edges in the decode graph) and
 | Qwen2.5-7B Q4_K_M | 2 | 17 935 | 13 829 | 130% | 305.2 | 275.24 | 110.9% |
 | Qwen2.5-7B Q4_K_M | 3 | 17 523 | 13 659 | 128% | 305.2 | 277.24 | 110.1% |
 
-- **32B:** prefill argmax was 201 in all rounds, and 12 of 12 separate runs gave the same `tokens-fnv`.
-- **7B prefill is not trustworthy yet:** its argmax differed in every round (93256, 94030, 18351), so the 7B prefill ratio does not count until that is explained.
+Both notes that stood here are resolved in the next section:
+- the 32B decode stream of this build was stable but wrong (`tokens-fnv=95a4ac52…`);
+- the 7B prefill argmax changed every run.
 
-**Known problem in `serve`:** the second short request in a row on one server returns garbage on both models (greedy, temperature 0). The first short request, long prompts, and a short request after a long one answer correctly.
+## After the decode-input and prefill-bias fixes (`2aaa0b1`), 2026-11-13
+
+Fixed since the previous section:
+- fused decode norms no longer live in the arena that prefill uses as scratch (`69d99f1`), so the second short request in a row on one server answers correctly;
+- prefill q/k/v biases come from persistent device copies (`5645d61`), so the 7B prefill graph replays correctly.
+
+Same interleaved setup, GPU idle, 3 rounds.
+
+| Model | Round | allpaka pp | llama pp | pp ratio | allpaka tg | llama tg | tg ratio |
+|---|---|---|---|---|---|---|---|
+| Qwen3-32B Q4_K_M | 1 | 3 797 | 3 561 | 106.6% | 80.6 | 72.80 | 110.7% |
+| Qwen3-32B Q4_K_M | 2 | 3 791 | 3 551 | 106.7% | 80.6 | 72.01 | 111.9% |
+| Qwen3-32B Q4_K_M | 3 | 3 808 | 3 577 | 106.4% | 80.6 | 71.68 | 112.4% |
+| Qwen2.5-7B Q4_K_M | 1 | 18 146 | 13 842 | 131.1% | 306.0 | 277.22 | 110.4% |
+| Qwen2.5-7B Q4_K_M | 2 | 18 122 | 13 852 | 130.8% | 305.9 | 277.69 | 110.2% |
+| Qwen2.5-7B Q4_K_M | 3 | 17 938 | 13 754 | 130.4% | 305.9 | 275.35 | 111.1% |
+
+- **Stable outputs:** 32B argmax 201 and `tokens-fnv=7eb58085…` in every round; 7B argmax 198 and `tokens-fnv=d8a39faa…` in every round.
+- **Serve check (greedy):** three short requests, two 1 220-token requests and two more short ones all answer correctly on both models.
+- **Still open on 7B:** the first run of a remainder chunk after a prefix-cache hit (chunks 3, 512, 512, 73) is off (cosine about 0.95 against a single-chunk reference). It points at the first use of a flash-attention slot in the ggml bridge.
