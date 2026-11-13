@@ -109,13 +109,17 @@ pp480 — 481 dispatch в одном command buffer, GPU занят 321/322 мс
 
 **DoD:** модель проходит greedy-паритет и попадает в матрицу с артефактом.
 
-### P9. Не-Neox RoPE (Llama, Mistral) на быстрых путях
+### P9. Llama/Mistral на GPU: проверка на настоящей модели
 
-Пять проверок `RopeStyle::Neox` в model закрывают быстрые пути; GPU-ядра
-реализуют только Neox. Путь без правки ядер: переставить строки Wq/Wk при
-загрузке ценой копии этих весов.
+Загрузчик теперь переставляет строки Wq/Wk моделей с NORM-RoPE (Llama,
+Mistral) в порядок NEOX, и дальше такая модель идёт по тем же быстрым путям,
+что и Qwen; `ALLPAKA_ROPE_NORM=1` оставляет порядок файла. На синтетической
+модели логиты совпадают с эталоном в порядке файла (step decode и prefill,
+`tests/llama_rope_order.rs`). Настоящего GGUF Llama/Mistral на машине нет.
 
-**DoD:** Llama-модель идёт по GPU-пути с greedy-паритетом против CPU-эталона.
+**DoD:** Llama- или Mistral-модель идёт по GPU-пути (`allpaka explain`,
+счётчик `gpu path decode`) и `allpaka verify --decode 32` проходит против
+llama-server.
 
 ---
 

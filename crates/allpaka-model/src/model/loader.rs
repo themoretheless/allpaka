@@ -41,7 +41,7 @@ impl<'a> Model<'a> {
         end: usize,
         stage: bool,
     ) -> Result<Self> {
-        let config = Config::from_gguf(f)?;
+        let mut config = Config::from_gguf(f)?;
         if first >= end || end > config.n_layers as usize {
             bail!("invalid stage layer range {first}..{end}");
         }
@@ -91,6 +91,16 @@ impl<'a> Model<'a> {
         let ffn = config.ffn_hidden as usize;
 
         let mut owned_weights: Vec<Box<[f32]>> = Vec::new();
+        // Llama and Mistral rotate adjacent pairs (NORM); every fast path and
+        // GPU kernel rotates the two halves of a head (NEOX). Reordering the
+        // rows of Wq and Wk turns one into the other without changing a single
+        // q.k product, so those models are loaded in NEOX order and from here
+        // on are NEOX models. `ALLPAKA_ROPE_NORM=1` keeps the file's order.
+        let to_neox = neox_order(&config);
+        if to_neox.is_some() {
+            config.rope_style = crate::config::RopeStyle::Neox;
+        }
+        let to_neox = to_neox.as_deref();
         let mut layers = Vec::with_capacity(end - first);
         for i in first as u32..end as u32 {
             let name = |part: &str| format!("blk.{i}.{part}.weight");
@@ -144,7 +154,13 @@ impl<'a> Model<'a> {
                         ssm_out: qmat(f, &name("ssm_out"), hidden, value_dim)?,
                     })
                 } else {
-                    Mixer::Attention(attn_weights(f, &name, &config)?)
+                    Mixer::Attention(attn_weights(
+                        f,
+                        &name,
+                        &config,
+                        to_neox,
+                        &mut owned_weights,
+                    )?)
                 },
                 bias,
                 // Only full-attention layers carry q/k norms (qwen35moe's
@@ -183,7 +199,7 @@ impl<'a> Model<'a> {
             };
             Some(MtpLayer {
                 attn_norm: norm_vec(f, &name("attn_norm"), hidden)?,
-                attn: attn_weights(f, &name, &config)?,
+                attn: attn_weights(f, &name, &config, to_neox, &mut owned_weights)?,
                 q_norm: qk_norm(f, &name("attn_q_norm"), &config, true)?,
                 k_norm: qk_norm(f, &name("attn_k_norm"), &config, true)?,
                 ffn_norm: norm_vec(f, &name("post_attention_norm"), hidden)?,
@@ -272,6 +288,8 @@ fn attn_weights<'a>(
     f: &'a GgufFile,
     name: &dyn Fn(&str) -> String,
     config: &Config,
+    to_neox: Option<&[usize]>,
+    owned_weights: &mut Vec<Box<[f32]>>,
 ) -> Result<AttnWeights<'a>> {
     let hidden = config.hidden as usize;
     let q_dim = config.q_dim();
@@ -279,18 +297,98 @@ fn attn_weights<'a>(
     let gate_in_q = f
         .tensor(&name("attn_q"))
         .is_some_and(|t| t.dims.len() == 2 && t.dims[1] == 2 * q_dim as u64);
+    let mut wq = qmat(
+        f,
+        &name("attn_q"),
+        if gate_in_q { 2 * q_dim } else { q_dim },
+        hidden,
+    )?;
+    let mut wk = qmat(f, &name("attn_k"), kv_dim, hidden)?;
+    if let Some(order) = to_neox {
+        if gate_in_q {
+            bail!("NORM-style RoPE with a gate fused into attn_q is not supported");
+        }
+        wq = reorder_head_rows(&wq, order, owned_weights)?;
+        wk = reorder_head_rows(&wk, order, owned_weights)?;
+    }
     Ok(AttnWeights {
-        wq: qmat(
-            f,
-            &name("attn_q"),
-            if gate_in_q { 2 * q_dim } else { q_dim },
-            hidden,
-        )?,
-        wk: qmat(f, &name("attn_k"), kv_dim, hidden)?,
+        wq,
+        wk,
         wv: qmat(f, &name("attn_v"), kv_dim, hidden)?,
         wo: qmat(f, &name("attn_output"), hidden, q_dim)?,
         gate_in_q,
     })
+}
+
+/// For a NORM-style model that can be loaded in NEOX order: where each row of
+/// a head comes from. Row `i` of the new head is old row `2i`, row
+/// `i + rope_dim/2` is old row `2i + 1`, and rows past `rope_dim` stay put, so
+/// the pair NORM rotates as `(2i, 2i+1)` is the pair NEOX rotates as
+/// `(i, i + rope_dim/2)`, by the same angle.
+///
+/// `None` keeps the file's order: the model is NEOX already, the user asked for
+/// it, or it has per-head q/k norms or projection biases, which would need the
+/// same reordering and no NORM-style architecture has.
+fn neox_order(config: &Config) -> Option<Vec<usize>> {
+    if !matches!(config.rope_style, crate::config::RopeStyle::Norm)
+        || config.has_qk_norm
+        || config.has_attn_bias
+        || std::env::var_os("ALLPAKA_ROPE_NORM").is_some_and(|v| v == "1")
+    {
+        return None;
+    }
+    let head_dim = config.head_dim as usize;
+    let rope_dim = (config.rope_dim as usize).min(head_dim);
+    let half = rope_dim / 2;
+    Some(
+        (0..head_dim)
+            .map(|new| {
+                if new < half {
+                    2 * new
+                } else if new < rope_dim {
+                    2 * (new - half) + 1
+                } else {
+                    new
+                }
+            })
+            .collect(),
+    )
+}
+
+/// A copy of `m` with the rows of every head taken in `order` (new row -> old
+/// row within the head). Rows are whole quantised blocks, so this moves bytes
+/// and changes no value. The copy lives in `owned_weights` and is offered to
+/// the GPU like any other weight.
+fn reorder_head_rows<'a>(
+    m: &QuantMat<'a>,
+    order: &[usize],
+    owned_weights: &mut Vec<Box<[f32]>>,
+) -> Result<QuantMat<'a>> {
+    let (ty, bytes) = m.raw();
+    let head_dim = order.len();
+    if head_dim == 0 || m.n_out % head_dim != 0 || bytes.len() % m.n_out != 0 {
+        bail!("cannot reorder {} rows in heads of {head_dim}", m.n_out);
+    }
+    let row = bytes.len() / m.n_out;
+    // f32 storage keeps the 4-byte alignment the mmap gives quantised blocks.
+    let mut owned = vec![0f32; bytes.len().div_ceil(4)].into_boxed_slice();
+    // SAFETY: `owned` holds at least `bytes.len()` initialised bytes; u8 has no
+    // alignment or validity requirement, and nothing else borrows `owned` here.
+    let out = unsafe { std::slice::from_raw_parts_mut(owned.as_mut_ptr() as *mut u8, bytes.len()) };
+    for (head, rows) in out.chunks_exact_mut(head_dim * row).enumerate() {
+        for (new, &old) in order.iter().enumerate() {
+            let src = (head * head_dim + old) * row;
+            rows[new * row..(new + 1) * row].copy_from_slice(&bytes[src..src + row]);
+        }
+    }
+    // SAFETY: as in `qmat_f32ish`: the boxed slice goes into `Model::_owned_weights`,
+    // which outlives every `QuantMat<'a>` of the model and whose heap allocation
+    // does not move when the outer `Vec` does.
+    let shared: &'a [u8] =
+        unsafe { std::slice::from_raw_parts(owned.as_ptr() as *const u8, bytes.len()) };
+    allpaka_backend::gpu::attach(shared);
+    owned_weights.push(owned);
+    Ok(QuantMat::new(shared, ty, m.n_out, m.n_in)?)
 }
 
 /// A per-head q or k norm, when the model has them and this block uses them.
