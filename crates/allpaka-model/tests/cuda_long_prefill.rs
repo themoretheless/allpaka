@@ -66,7 +66,10 @@ fn long_chunked_prefill_is_deterministic_and_matches_decode() {
     assert!(a.iter().all(|v| v.is_finite()), "non-finite prefill logits");
     assert!(
         a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
-        "two identical prefills produced different logits"
+        "two identical prefills produced different logits: cosine {:.6}, argmax {} then {}",
+        cosine(&a, &b),
+        argmax(&a),
+        argmax(&b)
     );
 
     // Reference: one token at a time (decode attention, no ggml FA prefill).

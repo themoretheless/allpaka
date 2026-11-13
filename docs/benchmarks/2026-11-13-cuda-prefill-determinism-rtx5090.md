@@ -104,3 +104,25 @@ pp2048, defaults (four 512-token chunks, each with a longer KV history):
 - **One 512-token chunk, no graph:** 106% to 112% of llama.cpp.
 - **2 048-token prompt:** about 98% of llama.cpp. llama.cpp gets faster from
   pp512 to pp2048 (3 500 to 3 600); allpaka gets slower (3 820 to 3 530).
+
+## Chunk size on the long prompt
+
+`allpaka bench` feeds the prompt in chunks of `ALLPAKA_PREFILL_CHUNK` tokens
+(512 by default). pp2048, three interleaved rounds, card idle before each run:
+
+| Round | chunk 512 | chunk 1024 | chunk 2048 | llama pp |
+|---|---|---|---|---|
+| 1 | 3 528 | 3 653 | 3 713 | 3 599 |
+| 2 | 3 539 | 3 651 | 3 721 | 3 601 |
+| 3 | 3 541 | 3 651 | 3 725 | 3 601 |
+
+- **Chunk 2048:** 103.3% of llama.cpp, against 98.2% at 512 and 101.4% at 1024.
+- **Memory:** peak VRAM 28.7 GiB at chunk 2048, about 1.3 GiB more than at 512.
+
+The default was not changed. `cuda_long_prefill`'s check that two identical
+prefills in one process give identical logits failed once in seven runs at
+chunk 2048 (one 1 097-token chunk after a 3-token prefix) and passed at chunk
+2048 with `ALLPAKA_PF_GRAPH=0`, and four times out of four at chunk 512.
+Another process was loading the same model on the card during part of that
+series, so the failure is neither reproduced nor explained; the test now prints
+the cosine and both argmaxes when it fails.
