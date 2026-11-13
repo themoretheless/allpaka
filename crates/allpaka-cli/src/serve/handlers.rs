@@ -167,6 +167,8 @@ pub(super) fn chat_completions(
     );
 
     if streaming && (tools.is_none() || !rag.cfg.enabled) {
+        // With tools the text is held back from the first `<tool_call>` on and
+        // the calls go out parsed and checked, as in the non-streaming reply.
         run_inference(
             &mut context.inference,
             GenerationRequest {
@@ -175,8 +177,8 @@ pub(super) fn chat_completions(
                 temperature,
                 top_p,
                 repeat_penalty,
-                parse_tools: false,
-                tool_specs: None,
+                parse_tools: tools.is_some(),
+                tool_specs: tools,
                 prediction_tokens: &prediction_tokens,
                 prompt_lookup_k,
                 stream: Some(&mut *stream),

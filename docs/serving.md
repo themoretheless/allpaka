@@ -135,8 +135,9 @@ a malformed block does, and the choice carries the reasons:
 ]
 ```
 
-The field is absent when nothing was refused. In SSE it arrives as one chunk
-before the final one. The built-in RAG tool loop never executes a refused
+The field is absent when nothing was refused. With `stream: true` the text is
+streamed up to the first `<tool_call>`, then the parsed calls arrive as one
+`tool_calls` delta and the refusals as one chunk before the final one. The built-in RAG tool loop never executes a refused
 call. Generation itself is not constrained by the schema: this is a check of
 what the model produced, not a grammar.
 

@@ -121,6 +121,17 @@ def main():
             body = {'model':'fixture','messages':[{'role':'user','content':'hello'}],'temperature':0,'max_tokens':4}
             status, reference = call(local,body)
             assert status == 200, reference
+            # Whole-model serve with tools: the streamed text equals the plain reply.
+            tools = [{'type':'function','function':{'name':'lookup','parameters':{'type':'object','properties':{'q':{'type':'string'}},'required':['q']}}}]
+            status, with_tools = call(local,dict(body,tools=tools))
+            assert status == 200, with_tools
+            with_tools = json.loads(with_tools)['choices'][0]
+            status, tool_stream = call(local,dict(body,tools=tools,stream=True))
+            assert status == 200 and 'data: [DONE]' in tool_stream, tool_stream
+            tool_events = [json.loads(line[6:]) for line in tool_stream.splitlines() if line.startswith('data: {')]
+            streamed = ''.join(event['choices'][0].get('delta',{}).get('content','') for event in tool_events)
+            assert streamed.strip() == with_tools['message']['content'], (streamed, with_tools)
+            assert tool_events[-1]['choices'][0]['finish_reason'] == with_tools['finish_reason']
             status, actual = call(gateway,body)
             assert status == 200, actual
             reference, actual = json.loads(reference), json.loads(actual)

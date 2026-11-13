@@ -407,8 +407,14 @@ pub(super) fn run_inference(
 
     if streaming {
         // `complete_buf[..emitted_len]` tracks the body only; the think prefix went out first.
-        if let Some(delta) =
-            content[think_prefix.len()..].strip_prefix(&complete_buf[..emitted_len])
+        // `content` is trimmed, so text streamed with leading whitespace is
+        // matched without it; otherwise a refused call kept in the content
+        // would never reach the client.
+        let body = &content[think_prefix.len().min(content.len())..];
+        let sent = &complete_buf[..emitted_len];
+        if let Some(delta) = body
+            .strip_prefix(sent)
+            .or_else(|| body.strip_prefix(sent.trim_start()))
         {
             if !delta.is_empty() {
                 write_sse_event(
