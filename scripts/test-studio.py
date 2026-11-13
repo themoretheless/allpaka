@@ -206,7 +206,12 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         assert len(requests)==before_budget,'a model call was made past the budget'
         reject('sessions',dict(settings,budget=dict(max_tokens=0)));reject('sessions',dict(settings,budget=dict(max_cost=-1)))
         unbudgeted=api('sessions/'+create());assert 'budget' not in unbudgeted['settings'] and 'usage_total' not in unbudgeted
-        print('PASS conversation usage totals accumulate per model call, a token budget stops the turn before the next call, unset limits leave the JSON unchanged',flush=True)
+        # A Swarm turn spends through its members and the synthesis: 2 x (5+6) and 7+8 in the mock.
+        roster=dict(members=[dict(label='a',role='',provider='local',model='mock'),dict(label='b',role='',provider='local',model='mock')],max_steps_per_member=1)
+        swarm_spend=create(mode='swarm',swarm=roster);act(swarm_spend,'send','swarm spend fixture')
+        swarm_total=wait(swarm_spend,lambda state:state['status']=='idle' and state.get('usage_total',{}).get('requests',0)>=3,timeout=20)['usage_total']
+        assert swarm_total==dict(requests=3,input_tokens=17,output_tokens=20,cost=0.0,requests_without_cost=3),swarm_total
+        print('PASS conversation usage totals accumulate per model call, Swarm members and synthesis included; a token budget stops the turn before the next call; unset limits leave the JSON unchanged',flush=True)
         policy_client=Studio(base)
         online_client=Studio(base);online_calls=len(requests)
         online_rule=dict(id='quality',project_id='default',evaluator_id='rubric',evaluator_version=1,sample_rate=0.5,enabled=True)

@@ -211,12 +211,15 @@ async fn run_body(
                 &messages, &[], |_, _| {}));
             tokio::pin!(generation);
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
-            let (result, _) = loop {
+            let (result, usage) = loop {
                 tokio::select! {
                     result = &mut generation => break result?,
                     _ = tick.tick() => shared.lock().unwrap().notice = Some(progress()),
                 }
             };
+            // Counted in the conversation's total; a budget does not stop a
+            // compaction, which is what keeps the conversation usable.
+            shared.lock().unwrap().usage_total.add(&usage);
             if let Some(guards) = &guards {
                 crate::enforce_guardrail(guards.output(&result.content)?, trace, parent)?;
             }

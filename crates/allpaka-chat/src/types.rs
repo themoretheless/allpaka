@@ -266,8 +266,17 @@ impl UsageTotal {
     /// are read; a missing or malformed number counts as zero.
     pub fn add(&mut self, usage: &Value) {
         let tokens = |keys: [&str; 2]| {
+            // Usage summed elsewhere (a Swarm member's steps) arrives as floats.
             keys.iter()
-                .find_map(|key| usage.get(*key).and_then(Value::as_u64))
+                .find_map(|key| {
+                    let value = usage.get(*key)?;
+                    value.as_u64().or_else(|| {
+                        value
+                            .as_f64()
+                            .filter(|f| f.is_finite() && *f >= 0.0)
+                            .map(|f| f as u64)
+                    })
+                })
                 .unwrap_or(0)
         };
         self.requests += 1;
@@ -613,14 +622,15 @@ mod usage_tests {
         // A local model reports no usage at all; a broken one reports nonsense.
         total.add(&serde_json::Value::Null);
         total.add(&json!({"prompt_tokens": "many", "cost": -1.0}));
+        total.add(&json!({"prompt_tokens": 10.0, "completion_tokens": 2.0}));
         assert_eq!(
             total,
             UsageTotal {
-                requests: 4,
-                input_tokens: 150,
-                output_tokens: 25,
+                requests: 5,
+                input_tokens: 160,
+                output_tokens: 27,
                 cost: 0.004,
-                requests_without_cost: 3,
+                requests_without_cost: 4,
             }
         );
     }
