@@ -160,6 +160,8 @@ pub struct CudaGpu {
     /// f32). Pageable H2D copies cannot be stream-captured; a copy from
     /// pinned memory can, and a replay re-reads the same staging bytes.
     pub pf_rope_pinned: (usize, usize),
+    /// The same for chunks that are not being captured (see `upload_rope_pinned`).
+    pub pf_rope_scratch: (usize, usize),
     /// Hybrid FA decode: per-layer (pre-attend, post-attend) graphs + final tail.
     /// Used when ALLPAKA_CUDA_GRAPH=1 and ggml FA is available.
     pub decode_fa_graphs: Option<(Vec<CudaGraph>, Vec<CudaGraph>, CudaGraph)>,
@@ -478,6 +480,7 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         pf_capture_bad: false,
         pf_graph_failed: false,
         pf_rope_pinned: (0, 0),
+        pf_rope_scratch: (0, 0),
         decode_fa_graphs: None,
         decode_fa_attn: None,
         decode_fa_execs: None,

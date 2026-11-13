@@ -145,3 +145,33 @@ fn replayed_prefill_is_bit_stable() {
         );
     }
 }
+
+/// A chunk of 32..63 tokens has no graph key, so the graph captured for the
+/// larger chunk before it survives. It must not change what that graph
+/// replays (it used to overwrite the staged RoPE table the graph re-reads).
+#[test]
+#[ignore = "requires an actual GGUF model and a CUDA GPU"]
+fn replay_survives_an_unkeyed_chunk_in_between() {
+    let (file, vocab) = load();
+    let model = Model::load(&file).unwrap();
+    assert!(allpaka_backend::gpu::is_attached());
+    let tokens: Vec<u32> = (0..113u32).map(|i| (i * 733 + 17) % vocab).collect();
+    let mut s = model.new_session(256);
+    let mut runs: Vec<(Vec<f32>, Vec<f32>)> = Vec::new();
+    // Per run: 73 tokens at base 0 (keyed: uncaptured, captured, replayed...)
+    // then 40 more (unkeyed, runs normally every time).
+    for _ in 0..6 {
+        s.truncate(0);
+        let a = model.forward_batch_hidden(&tokens[..73], &mut s).unwrap();
+        let b = model.forward_batch_hidden(&tokens[73..], &mut s).unwrap();
+        runs.push((a, b));
+    }
+    for (i, (a, b)) in runs.iter().enumerate() {
+        let (ca, cb) = (cosine(a, &runs[0].0), cosine(b, &runs[0].1));
+        eprintln!("run {i}: keyed chunk cosine {ca:.6}, following chunk cosine {cb:.6}");
+        assert!(
+            ca > 0.9999 && cb > 0.9999,
+            "run {i} diverges from the uncaptured run: {ca} / {cb}"
+        );
+    }
+}

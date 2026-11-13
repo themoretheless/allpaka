@@ -194,26 +194,44 @@ pub fn prefill_abort() {
 }
 
 /// Copy the RoPE table into `x_arena[at..]` through page-locked staging, so
-/// the copy is legal (and replayable) inside a prefill graph capture. The
-/// staging is only rewritten by a later prefill, after this one has synced.
+/// the copy is legal (and replayable) inside a prefill graph capture.
+///
+/// A captured graph re-reads its staging on every replay, so only a capture
+/// writes `pf_rope_pinned`. Uncaptured chunks stage through `pf_rope_scratch`:
+/// sharing one buffer let a 32..63-token chunk (no graph key, so the graph of
+/// the larger chunk survives it) leave its own positions there, and the next
+/// replay rotated its first rows by them.
 fn upload_rope_pinned(gpu: &mut CudaGpu, rope: &[f32], at: usize) -> Option<()> {
-    let (mut ptr, cap) = gpu.pf_rope_pinned;
+    let for_graph = gpu.pf_capturing;
+    let (mut ptr, cap) = if for_graph {
+        gpu.pf_rope_pinned
+    } else {
+        gpu.pf_rope_scratch
+    };
     if cap < rope.len() {
         if ptr != 0 {
-            // SAFETY: `ptr` came from `malloc_host` below. Draining the stream
-            // retires every copy that read it, and dropping the prefill graph
-            // removes the only other holder of the address.
-            let _ = gpu.stream.synchronize();
+            // A capture only starts with no graph alive and the stream
+            // drained by the previous chunk, so nothing reads the old graph
+            // staging any more (and a capturing stream must not be
+            // synchronized). The scratch is read by this chunk's own copies.
+            if !for_graph {
+                let _ = gpu.stream.synchronize();
+            }
+            // SAFETY: `ptr` came from `malloc_host` below and, per the
+            // above, no pending copy still reads it.
             unsafe {
                 let _ = cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void);
             }
-            gpu.drop_pf_graph();
         }
         let n = rope.len().next_power_of_two();
         // SAFETY: plain page-locked allocation of `n` f32, written below
         // before any read.
         ptr = unsafe { cudarc::driver::result::malloc_host(n * 4, 0) }.ok()? as usize;
-        gpu.pf_rope_pinned = (ptr, n);
+        if for_graph {
+            gpu.pf_rope_pinned = (ptr, n);
+        } else {
+            gpu.pf_rope_scratch = (ptr, n);
+        }
     }
     // SAFETY: `ptr` is a live page-locked allocation of at least `rope.len()`
     // f32 (checked above) that no Rust reference aliases; the destination is
