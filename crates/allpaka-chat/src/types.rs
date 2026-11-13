@@ -203,6 +203,81 @@ pub struct Settings {
     /// Requested reasoning depth; None keeps the provider default.
     #[serde(default)]
     pub reasoning_effort: Option<Effort>,
+    /// Spending limits for the whole conversation; absent means none.
+    #[serde(default, skip_serializing_if = "Budget::is_unlimited")]
+    pub budget: Budget,
+}
+
+/// What a conversation may spend in total. A turn stops before the model
+/// call that would start past a limit; nothing already received is cut.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct Budget {
+    /// Input plus output tokens, as the provider reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    /// Reported cost, in the provider's currency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost: Option<f64>,
+}
+
+impl Budget {
+    pub fn is_unlimited(&self) -> bool {
+        self.max_tokens.is_none() && self.max_cost.is_none()
+    }
+
+    /// Why no further model call may start, if a limit has been reached.
+    pub fn exhausted(&self, spent: &UsageTotal) -> Option<String> {
+        if let Some(limit) = self.max_tokens {
+            let used = spent.input_tokens + spent.output_tokens;
+            if used >= limit {
+                return Some(format!("{used} of {limit} tokens"));
+            }
+        }
+        if let Some(limit) = self.max_cost {
+            if spent.cost >= limit {
+                return Some(format!("{:.6} of {limit:.6} in reported cost", spent.cost));
+            }
+        }
+        None
+    }
+}
+
+/// What a conversation has spent over every model call of its turns, where
+/// `Session::usage` holds the last call only.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct UsageTotal {
+    pub requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// Sum of the costs providers reported. Calls without one add nothing
+    /// here and are counted in `requests_without_cost`, so a total that looks
+    /// cheap can be told from one that is incomplete.
+    pub cost: f64,
+    pub requests_without_cost: u64,
+}
+
+impl UsageTotal {
+    pub fn is_empty(&self) -> bool {
+        self.requests == 0
+    }
+
+    /// Count one model call's usage as the provider reported it. Both the
+    /// OpenAI (`prompt_tokens`) and the Anthropic (`input_tokens`) spellings
+    /// are read; a missing or malformed number counts as zero.
+    pub fn add(&mut self, usage: &Value) {
+        let tokens = |keys: [&str; 2]| {
+            keys.iter()
+                .find_map(|key| usage.get(*key).and_then(Value::as_u64))
+                .unwrap_or(0)
+        };
+        self.requests += 1;
+        self.input_tokens += tokens(["prompt_tokens", "input_tokens"]);
+        self.output_tokens += tokens(["completion_tokens", "output_tokens"]);
+        match usage.get("cost").and_then(Value::as_f64) {
+            Some(cost) if cost.is_finite() && cost >= 0.0 => self.cost += cost,
+            _ => self.requests_without_cost += 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -365,6 +440,9 @@ pub struct Session {
     pub notice: Option<String>,
     pub step: usize,
     pub usage: Value,
+    /// Everything the conversation's turns have spent; see [`UsageTotal`].
+    #[serde(default, skip_serializing_if = "UsageTotal::is_empty")]
+    pub usage_total: UsageTotal,
     /// Set for headless runs (subagents, harness probes): never written to
     /// disk and resolved against its own project and harness.
     #[serde(skip)]
@@ -412,6 +490,7 @@ impl Session {
             notice: None,
             step: 0,
             usage: Value::Null,
+            usage_total: UsageTotal::default(),
             ephemeral: None,
         }
     }
@@ -517,5 +596,79 @@ mod status_wire_tests {
         assert_eq!(MemberStatus::default(), MemberStatus::Queued);
         assert_eq!(SessionStatus::default(), SessionStatus::Idle);
         assert_eq!(PlanStatus::default(), PlanStatus::Pending);
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::{Budget, UsageTotal};
+    use serde_json::json;
+
+    #[test]
+    fn totals_add_up_across_provider_spellings() {
+        let mut total = UsageTotal::default();
+        assert!(total.is_empty());
+        total.add(&json!({"prompt_tokens": 100, "completion_tokens": 20, "cost": 0.004}));
+        total.add(&json!({"input_tokens": 50, "output_tokens": 5}));
+        // A local model reports no usage at all; a broken one reports nonsense.
+        total.add(&serde_json::Value::Null);
+        total.add(&json!({"prompt_tokens": "many", "cost": -1.0}));
+        assert_eq!(
+            total,
+            UsageTotal {
+                requests: 4,
+                input_tokens: 150,
+                output_tokens: 25,
+                cost: 0.004,
+                requests_without_cost: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn a_budget_stops_at_its_limit_and_not_before() {
+        let spent = UsageTotal {
+            requests: 2,
+            input_tokens: 900,
+            output_tokens: 100,
+            cost: 0.5,
+            requests_without_cost: 0,
+        };
+        let budget = |max_tokens, max_cost| Budget {
+            max_tokens,
+            max_cost,
+        };
+        assert_eq!(budget(None, None).exhausted(&spent), None);
+        assert_eq!(budget(Some(1001), Some(0.51)).exhausted(&spent), None);
+        assert!(budget(Some(1000), None)
+            .exhausted(&spent)
+            .unwrap()
+            .contains("1000 of 1000"));
+        assert!(budget(None, Some(0.5))
+            .exhausted(&spent)
+            .unwrap()
+            .contains("reported cost"));
+        assert!(budget(None, None).is_unlimited() && !budget(Some(1), None).is_unlimited());
+    }
+
+    #[test]
+    fn unset_limits_and_empty_totals_leave_the_json_as_it_was() {
+        let settings: super::Settings =
+            serde_json::from_value(json!({"provider": "local", "model": "mock"})).unwrap();
+        let text = serde_json::to_value(&settings).unwrap();
+        assert!(text.get("budget").is_none(), "{text}");
+        let with: super::Settings = serde_json::from_value(
+            json!({"provider": "local", "model": "mock", "budget": {"max_tokens": 5000}}),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&with).unwrap()["budget"],
+            json!({"max_tokens": 5000})
+        );
+        let session = super::Session::new("id".into(), settings);
+        assert!(serde_json::to_value(&session)
+            .unwrap()
+            .get("usage_total")
+            .is_none());
     }
 }

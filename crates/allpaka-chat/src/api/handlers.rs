@@ -20,6 +20,13 @@ pub(crate) fn validate_settings(s: &Settings, app: &App) -> Result<()> {
         }
         selection.prepare(&guardrail_policies::Store::open(&app.data)?)?;
     }
+    if s.budget.max_tokens == Some(0)
+        || s.budget
+            .max_cost
+            .is_some_and(|cost| !cost.is_finite() || cost <= 0.0)
+    {
+        bail!("Budget limits must be positive; omit a limit to leave it open");
+    }
     if !(4096..=1000000).contains(&s.compact_threshold) {
         bail!("Compaction threshold must be between 4096 and 1000000 estimated tokens");
     }

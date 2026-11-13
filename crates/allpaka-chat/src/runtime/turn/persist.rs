@@ -10,6 +10,7 @@ impl Turn<'_> {
         {
             let mut s = self.s.lock().unwrap();
             s.messages[index] = message;
+            s.usage_total.add(&usage);
             s.usage = usage;
         }
         persist(self.app, self.s);
@@ -20,6 +21,7 @@ impl Turn<'_> {
         {
             let mut state = self.s.lock().unwrap();
             state.messages[index] = Message::text("assistant", "");
+            state.usage_total.add(usage);
             state.usage = usage.clone();
         }
         persist(self.app, self.s);

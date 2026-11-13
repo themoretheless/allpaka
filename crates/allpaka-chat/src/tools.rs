@@ -455,6 +455,7 @@ mod tests {
             compact_threshold: 24000,
             json_mode: false,
             reasoning_effort: None,
+            budget: Default::default(),
         };
         assert_eq!(schemas(&s, false).len(), 4);
         assert!(execute(

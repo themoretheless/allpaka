@@ -446,7 +446,16 @@ function renderContextStatistics(s){
 function renderUsage(s){
   const u=s.usage||{},input=u.prompt_tokens??u.input_tokens,output=u.completion_tokens??u.output_tokens;
   const last=lastAssistantModel(s);
-  $('usage').textContent=`Модель: ${selectedModelLabel()}`+(last?` · Последний ответ: ${modelLabel(last.provider,last.model)}`:'')+` · Шаг ${s.step} / ${s.settings.max_steps}`+(input!==undefined?` · Последний запрос: ${input} вход / ${output??'?'} выход`:'')+(typeof u.cost==='number'?` · $${u.cost.toFixed(6)}`:'');
+  $('usage').textContent=`Модель: ${selectedModelLabel()}`+(last?` · Последний ответ: ${modelLabel(last.provider,last.model)}`:'')+` · Шаг ${s.step} / ${s.settings.max_steps}`+(input!==undefined?` · Последний запрос: ${input} вход / ${output??'?'} выход`:'')+(typeof u.cost==='number'?` · $${u.cost.toFixed(6)}`:'')+usageTotalLabel(s);
+}
+function usageTotalLabel(s){
+  const t=s.usage_total;
+  if(!t||!Number.isSafeInteger(t.requests)||t.requests<1)return '';
+  const fmt=n=>Number(n).toLocaleString('ru-RU'),b=s.settings.budget||{};
+  let text=` · Всего за беседу: ${fmt(t.input_tokens)} вход / ${fmt(t.output_tokens)} выход за ${fmt(t.requests)} запр.`;
+  if(typeof b.max_tokens==='number')text+=` из ${fmt(b.max_tokens)} токенов`;
+  if(t.cost>0||t.requests_without_cost<t.requests)text+=` · стоимость ${t.cost.toFixed(6)}`+(typeof b.max_cost==='number'?` из ${b.max_cost.toFixed(6)}`:'')+(t.requests_without_cost>0?` (без данных о стоимости: ${fmt(t.requests_without_cost)})`:'');
+  return text;
 }
 function refreshContextModel(){
   if(!current){$('context-statistics-title').textContent=contextHeadline(null);return;}

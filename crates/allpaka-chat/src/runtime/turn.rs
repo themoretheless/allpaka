@@ -128,6 +128,10 @@ pub(crate) async fn turn_traced(
             context::validate_images(&message.images, &settings.provider)?;
         }
         guardrails.check_input(&history, trace, parent_span)?;
+        // A budget stops the turn before the call that would start past it.
+        if let Some(spent) = settings.budget.exhausted(&s.lock().unwrap().usage_total) {
+            bail!("Conversation budget reached ({spent}). Raise the budget to continue.");
+        }
         let buffer_output = guardrails.buffers_output();
         let (mut message, usage) = turn.call_model(&history, index, buffer_output).await?;
         if let Err(blocked) = guardrails.check_output(&message.content, trace, parent_span)? {

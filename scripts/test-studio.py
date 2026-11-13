@@ -193,6 +193,20 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
     process=start()
     try:
         from allpaka_guardrails import policy_manifest, rules_from_manifest, check_guardrails, GuardrailBlocked
+        # Conversation totals and budgets: the mock answers every plain message with 3+4 tokens.
+        budgeted=create(budget=dict(max_tokens=14))
+        assert api('sessions/'+budgeted)['settings']['budget']=={'max_tokens':14} and 'usage_total' not in api('sessions/'+budgeted)
+        for turn_number in [1,2]:
+            act(budgeted,'send',f'budget turn {turn_number}')
+            spent=wait(budgeted,lambda state:state['status']=='idle' and state.get('usage_total',{}).get('requests')==turn_number)
+            assert spent['usage_total']==dict(requests=turn_number,input_tokens=3*turn_number,output_tokens=4*turn_number,cost=0.0,requests_without_cost=turn_number),spent['usage_total']
+        before_budget=len(requests);act(budgeted,'send','budget turn 3')
+        refused=wait(budgeted,lambda state:state['status']=='error')
+        assert 'budget reached (14 of 14 tokens)' in refused['error'] and refused['usage_total']['requests']==2,refused['error']
+        assert len(requests)==before_budget,'a model call was made past the budget'
+        reject('sessions',dict(settings,budget=dict(max_tokens=0)));reject('sessions',dict(settings,budget=dict(max_cost=-1)))
+        unbudgeted=api('sessions/'+create());assert 'budget' not in unbudgeted['settings'] and 'usage_total' not in unbudgeted
+        print('PASS conversation usage totals accumulate per model call, a token budget stops the turn before the next call, unset limits leave the JSON unchanged',flush=True)
         policy_client=Studio(base)
         online_client=Studio(base);online_calls=len(requests)
         online_rule=dict(id='quality',project_id='default',evaluator_id='rubric',evaluator_version=1,sample_rate=0.5,enabled=True)
