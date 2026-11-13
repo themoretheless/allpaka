@@ -28,7 +28,7 @@ struct FusedPlan {
     up_at: usize,
     out_logits_at: usize,
     y_elems: usize,
-    // `x_arena` offsets (f32 elements): rope tables, output norm, then
+    // `dec_x` offsets (f32 elements): rope tables, output norm, then
     // per layer attn_norm[H], ffn_norm[H], q_norm[hd], k_norm[hd] and,
     // when any layer has attn bias, q_bias[q_dim], k_bias[kv], v_bias[kv].
     has_attn_bias: bool,
@@ -98,7 +98,7 @@ impl FusedPlan {
         let amax_at = out_logits_at + align64(vocab);
         let y_elems = amax_at + align64(2);
 
-        // x_arena: rope + output norm + per-layer norms (stable for CUDA graph).
+        // dec_x: rope + output norm + per-layer norms (stable for CUDA graph).
         // Per layer: attn_norm[H], ffn_norm[H], q_norm[hd], k_norm[hd],
         // and when any layer has attn bias: q_bias[q_dim], k_bias[kv], v_bias[kv].
         let has_attn_bias = req.layers.iter().any(|l| l.q_bias.is_some());
@@ -228,7 +228,8 @@ pub(super) fn decode_token_one_fused(
     let out_norm = norm_f32_bytes(req.output_norm, hidden)?;
 
     with_gpu(|gpu| {
-        gpu.ensure_arenas(x_elems * 4, y_elems * 4)?;
+        gpu.ensure_dec_x(x_elems)?;
+        gpu.ensure_arenas(0, y_elems * 4)?;
         let stream = Arc::clone(&gpu.stream);
 
         // One-shot: clear any pending ggml work from prefill before cudarc/graph.
@@ -257,7 +258,7 @@ pub(super) fn decode_token_one_fused(
             p
         };
         let xbase = {
-            let (p, g) = DevicePtr::device_ptr(&gpu.x_arena, &stream);
+            let (p, g) = DevicePtr::device_ptr(&gpu.dec_x, &stream);
             drop(g);
             p
         };
@@ -508,13 +509,13 @@ fn upload_token_inputs(
         stream
             .memcpy_htod(
                 &rope_q,
-                &mut gpu.x_arena.slice_mut(rope_q_at..rope_q_at + rope_q.len()),
+                &mut gpu.dec_x.slice_mut(rope_q_at..rope_q_at + rope_q.len()),
             )
             .ok()?;
         stream
             .memcpy_htod(
                 &rope_k,
-                &mut gpu.x_arena.slice_mut(rope_k_at..rope_k_at + rope_k.len()),
+                &mut gpu.dec_x.slice_mut(rope_k_at..rope_k_at + rope_k.len()),
             )
             .ok()?;
     }
@@ -523,7 +524,7 @@ fn upload_token_inputs(
 }
 
 /// Upload the output norm and every layer's norm / QK-norm / bias vectors into
-/// the `x_arena` and drop graphs captured against the previous contents.
+/// `dec_x` and drop graphs captured against the previous contents.
 fn refresh_layer_norms(
     gpu: &mut CudaGpu,
     req: &TokenReq,
@@ -546,7 +547,7 @@ fn refresh_layer_norms(
     stream
         .memcpy_htod(
             out_norm,
-            &mut gpu.x_arena.slice_mut(out_norm_at..out_norm_at + hidden),
+            &mut gpu.dec_x.slice_mut(out_norm_at..out_norm_at + hidden),
         )
         .ok()?;
     for (li, layer) in req.layers.iter().enumerate() {
@@ -554,12 +555,12 @@ fn refresh_layer_norms(
         let attn_w = norm_f32_bytes(layer.attn_norm, hidden)?;
         let ffn_w = norm_f32_bytes(layer.ffn_norm, hidden)?;
         stream
-            .memcpy_htod(&attn_w, &mut gpu.x_arena.slice_mut(base..base + hidden))
+            .memcpy_htod(&attn_w, &mut gpu.dec_x.slice_mut(base..base + hidden))
             .ok()?;
         stream
             .memcpy_htod(
                 &ffn_w,
-                &mut gpu.x_arena.slice_mut(base + hidden..base + 2 * hidden),
+                &mut gpu.dec_x.slice_mut(base + hidden..base + 2 * hidden),
             )
             .ok()?;
         if let Some(wn) = layer.q_norm {
@@ -570,7 +571,7 @@ fn refresh_layer_norms(
                 .memcpy_htod(
                     &wn[..hd],
                     &mut gpu
-                        .x_arena
+                        .dec_x
                         .slice_mut(base + 2 * hidden..base + 2 * hidden + hd),
                 )
                 .ok()?;
@@ -583,7 +584,7 @@ fn refresh_layer_norms(
                 .memcpy_htod(
                     &wn[..hd],
                     &mut gpu
-                        .x_arena
+                        .dec_x
                         .slice_mut(base + 2 * hidden + hd..base + 2 * hidden + 2 * hd),
                 )
                 .ok()?;
@@ -595,19 +596,19 @@ fn refresh_layer_norms(
             if let Some(b) = layer.q_bias {
                 let qb = norm_f32_bytes(b, q_dim)?;
                 stream
-                    .memcpy_htod(&qb, &mut gpu.x_arena.slice_mut(qb_at..qb_at + q_dim))
+                    .memcpy_htod(&qb, &mut gpu.dec_x.slice_mut(qb_at..qb_at + q_dim))
                     .ok()?;
             }
             if let Some(b) = layer.k_bias {
                 let kb = norm_f32_bytes(b, kv)?;
                 stream
-                    .memcpy_htod(&kb, &mut gpu.x_arena.slice_mut(kb_at..kb_at + kv))
+                    .memcpy_htod(&kb, &mut gpu.dec_x.slice_mut(kb_at..kb_at + kv))
                     .ok()?;
             }
             if let Some(b) = layer.v_bias {
                 let vb = norm_f32_bytes(b, kv)?;
                 stream
-                    .memcpy_htod(&vb, &mut gpu.x_arena.slice_mut(vb_at..vb_at + kv))
+                    .memcpy_htod(&vb, &mut gpu.dec_x.slice_mut(vb_at..vb_at + kv))
                     .ok()?;
             }
         }
@@ -627,7 +628,7 @@ struct FusedCtx<'a> {
     stream: &'a Arc<cudarc::driver::CudaStream>,
     pos: usize,
     n_layers: usize,
-    /// Device base of `y_arena` (activations) and `x_arena` (norms, rope).
+    /// Device base of `y_arena` (activations) and `dec_x` (norms, rope).
     ybase: u64,
     xbase: u64,
     /// Device RoPE frequency table, when the dpos kernels compute sin/cos.

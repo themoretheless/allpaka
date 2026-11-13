@@ -115,6 +115,13 @@ pub struct CudaGpu {
     pub x_cap: usize,
     pub y_arena: CudaSlice<f32>,
     pub y_cap: usize,
+    /// Fused decode's persistent inputs: RoPE tables, the output norm and
+    /// every layer's norm / bias vectors, uploaded once per `decode_norms_key`.
+    /// Its own buffer rather than a range of `x_arena`: prefill and the
+    /// matvec paths use `x_arena` as scratch, and a short prefill chunk landed
+    /// its RoPE table inside the norm weights the next decode token read.
+    pub dec_x: CudaSlice<f32>,
+    pub dec_x_cap: usize,
     pub f16_arena: CudaSlice<f16>,
     pub f16_cap: usize,
     pub pf_x: CudaSlice<f32>,
@@ -409,6 +416,7 @@ pub(super) fn init_device() -> Option<CudaGpu> {
 
     let x_arena = stream.alloc_zeros::<f32>(1 << 20).ok()?;
     let y_arena = stream.alloc_zeros::<f32>(1 << 20).ok()?;
+    let dec_x = stream.alloc_zeros::<f32>(1 << 10).ok()?;
     let f16_arena = stream.alloc_zeros::<f16>(1 << 20).ok()?;
     let pf_x = stream.alloc_zeros::<f32>(1 << 10).ok()?;
     let pf_hs = stream.alloc_zeros::<f32>(1 << 10).ok()?;
@@ -442,6 +450,8 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         x_cap: 1 << 20,
         y_arena,
         y_cap: 1 << 20,
+        dec_x,
+        dec_x_cap: 1 << 10,
         f16_arena,
         f16_cap: 1 << 20,
         pf_x,
@@ -692,6 +702,19 @@ impl CudaGpu {
             self.drop_graphs();
             self.pf_rope_n = 0;
             self.x_f16_n = 0;
+        }
+        Some(())
+    }
+
+    /// Size the fused decode's persistent input buffer (`elems` f32). Growing
+    /// it moves the buffer, so captured graphs and the uploaded norms go.
+    pub fn ensure_dec_x(&mut self, elems: usize) -> Option<()> {
+        if elems > self.dec_x_cap {
+            let _ = self.stream.synchronize();
+            let cap = elems.next_power_of_two();
+            self.dec_x = self.stream.alloc_zeros::<f32>(cap).ok()?;
+            self.dec_x_cap = cap;
+            self.drop_graphs();
         }
         Some(())
     }
