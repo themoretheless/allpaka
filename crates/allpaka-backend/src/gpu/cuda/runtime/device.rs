@@ -532,6 +532,21 @@ impl CudaGpu {
 
     /// Upload `mapping` once and count its owners. A sub-range of an already
     /// uploaded mapping needs no copy and is not counted.
+    /// The scratch arenas' size in bytes, as allocated now. They are grown
+    /// on demand and never shrunk, so this is also their peak.
+    pub fn arena_bytes(&self) -> usize {
+        let f32s = self.x_arena.len()
+            + self.y_arena.len()
+            + self.dec_x.len()
+            + self.pf_x.len()
+            + self.pf_hs.len()
+            + self.w_scratch.len()
+            + self.q8_d.len()
+            + self.attn_part.len();
+        let u32s = self.d_pos.len() + self.d_argmax.len() + self.attn_cnt.len();
+        (f32s + u32s) * 4 + self.f16_arena.len() * 2 + self.q8_q.len()
+    }
+
     pub fn attach_mapping(&mut self, mapping: &[u8]) -> bool {
         let key = (mapping.as_ptr() as usize, mapping.len());
         if let Some(entry) = self.attached.iter_mut().find(|e| (e.0, e.1) == key) {

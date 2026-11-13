@@ -132,8 +132,15 @@ pub fn residency_status() -> (usize, bool) {
         .unwrap_or((0, false))
 }
 
+/// Bytes of VRAM in this backend's scratch arenas: activations, prefill and
+/// decode buffers, quantised-activation staging, attention partials. Weights
+/// are not included, and neither is what `allpaka_ggml.dll` allocates for
+/// itself (its f16 weight cache and ggml's pools).
 pub fn arena_bytes() -> usize {
-    0
+    let Some(Some(cell)) = GPU.get() else {
+        return 0;
+    };
+    cell.lock().map(|gpu| gpu.arena_bytes()).unwrap_or(0)
 }
 
 pub use super::common::{gpu_time_stats, stats};
