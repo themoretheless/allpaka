@@ -33,14 +33,22 @@ impl<'a> Model<'a> {
     /// The costs are activation memory (linear in the chunk) and a coarser
     /// unit of work; `ALLPAKA_PREFILL_CHUNK` overrides it for a machine where
     /// that memory is tight.
+    ///
+    /// On CUDA the default is 2048: a 2 048-token prompt on an RTX 5090
+    /// (Qwen3-32B) prefills faster in one chunk than in four, for about
+    /// 1.3 GiB more activation memory
+    /// (docs/benchmarks/2026-11-13-cuda-prefill-determinism-rtx5090.md). Metal
+    /// and the CPU path keep 512, where the larger chunk was not measured. The
+    /// value is read once, on first use, after the model's weights are attached.
     pub fn prefill_chunk() -> usize {
         static CHUNK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         *CHUNK.get_or_init(|| {
+            let on_cuda = cfg!(not(target_os = "macos")) && allpaka_backend::gpu::is_attached();
             std::env::var("ALLPAKA_PREFILL_CHUNK")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|&n| n > 0)
-                .unwrap_or(512)
+                .unwrap_or(if on_cuda { 2048 } else { 512 })
         })
     }
 

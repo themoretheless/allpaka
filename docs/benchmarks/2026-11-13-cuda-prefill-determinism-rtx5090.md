@@ -119,10 +119,34 @@ pp2048, defaults (four 512-token chunks, each with a longer KV history):
 - **Chunk 2048:** 103.3% of llama.cpp, against 98.2% at 512 and 101.4% at 1024.
 - **Memory:** peak VRAM 28.7 GiB at chunk 2048, about 1.3 GiB more than at 512.
 
-The default was not changed. `cuda_long_prefill`'s check that two identical
-prefills in one process give identical logits failed once in eight runs at
-chunk 2048 (one 1 097-token chunk after a 3-token prefix) and passed at chunk
-2048 with `ALLPAKA_PF_GRAPH=0`, and four times out of four at chunk 512.
-Another process was loading the same model on the card during part of that
-series, so the failure is neither reproduced nor explained; the test now prints
-the cosine and both argmaxes when it fails.
+At the time the default was left at 512: `cuda_long_prefill`'s check that two
+identical prefills in one process give identical logits had failed once at
+chunk 2048 while another process shared the card.
+
+## 2026-11-14: the CUDA default becomes 2048
+
+`2aaa0b1` fixed a prefill graph replay that read another chunk's RoPE staging,
+the likely cause of that one failure. After it, at chunk 2048:
+
+- `cuda_long_prefill` passes in full (both tests, 229 s);
+- its in-process determinism check gave identical logits in 20 runs out of 20,
+  each started on an idle card and peaking at 30.0 GiB, this process alone.
+
+The default for CUDA is now 2048; Metal and the CPU path keep 512. Before
+(`5dbef13`) against after, llama.cpp `97e4ca7` in the same loop, card idle
+before every run, tg128:
+
+| Round | pp2048 before | pp2048 after | llama pp2048 | pp512 before | pp512 after | llama pp512 |
+|---|---|---|---|---|---|---|
+| 1 | 3 538 | 3 729 | 3 597 | 3 774 | 3 801 | 3 468 |
+| 2 | 3 535 | 3 696 | 3 581 | 3 771 | 3 781 | 3 547 |
+| 3 | 3 524 | 3 710 | 3 580 | 3 801 | 3 789 | 3 564 |
+
+- **pp2048:** 103.5% of llama.cpp, up from 98.5%.
+- **pp512:** unchanged (one chunk either way), same logits hash
+  `3848986d…` before and after.
+- **Decode:** 80.6 tok/s and `tokens-fnv=7eb58085…` in all twelve allpaka
+  runs; llama.cpp 71.7 to 72.6.
+- **Hash at pp2048:** `b92fe844…` in all three runs before, `a901c724…` in
+  all three after: a different chunking is different arithmetic, and each is
+  repeatable.
