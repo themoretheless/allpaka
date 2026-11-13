@@ -26,6 +26,18 @@ configuration, allpaka applies a compatible cached autotune result for the
 model and Metal device. An incompatible cache entry is ignored rather than
 partially applied.
 
+Autotune results are per workload. `allpaka autotune <gguf> --workload W`
+measures the three profiles and keeps the one that serves `W` best:
+
+- `latency` (default) - the highest decode rate;
+- `throughput` - the highest rate over a 2 048-token prompt plus a 256-token
+  answer, each at its measured rate, with prefill measured on a 512-token chunk;
+- `memory` - the least GPU working memory among the profiles whose decode is
+  within 10% of the fastest.
+
+`serve` applies the entry for `ALLPAKA_WORKLOAD` (`latency` when unset); a
+model tuned for one workload has no entry for another until it is tuned for it.
+
 ## Scheduling contract
 
 `--max-queued` bounds accepted work. `--max-batch` and

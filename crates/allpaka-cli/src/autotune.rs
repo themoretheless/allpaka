@@ -19,6 +19,114 @@ pub struct AutotuneKey {
     pub model_dimensions: String,
     pub tensor_census_hash: String,
     pub kernel_abi_version: u32,
+    /// What the profile was chosen for. Entries written before workloads
+    /// existed were chosen for decode rate, which is `latency`.
+    #[serde(default = "Workload::default_name")]
+    pub workload: String,
+}
+
+/// What a deployment cares about most; decides which measured profile wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Workload {
+    /// Interactive chat: the decode rate is the token latency a user feels.
+    #[default]
+    Latency,
+    /// Batch and retrieval work: long prompts, short answers; what counts is
+    /// tokens through the engine per second, prompt included.
+    Throughput,
+    /// Shared or small machines: the least working memory among the profiles
+    /// that keep decode within [`MEMORY_SLACK`] of the fastest.
+    Memory,
+}
+
+/// The request shape `Throughput` is scored on: a long prompt and a short answer.
+const THROUGHPUT_PROMPT_TOKENS: f64 = 2048.0;
+const THROUGHPUT_NEW_TOKENS: f64 = 256.0;
+/// How much decode rate `Memory` gives up for a smaller footprint.
+const MEMORY_SLACK: f64 = 0.10;
+
+impl Workload {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Latency => "latency",
+            Self::Throughput => "throughput",
+            Self::Memory => "memory",
+        }
+    }
+
+    fn default_name() -> String {
+        Self::Latency.name().to_owned()
+    }
+
+    /// `ALLPAKA_WORKLOAD`, or `latency` when it is unset.
+    pub fn from_env() -> Result<Self> {
+        match std::env::var("ALLPAKA_WORKLOAD") {
+            Ok(value) => value.parse(),
+            Err(_) => Ok(Self::Latency),
+        }
+    }
+}
+
+impl std::str::FromStr for Workload {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "latency" => Ok(Self::Latency),
+            "throughput" => Ok(Self::Throughput),
+            "memory" => Ok(Self::Memory),
+            other => anyhow::bail!("unknown workload {other:?}: use latency, throughput or memory"),
+        }
+    }
+}
+
+/// One measured profile.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidate {
+    pub profile: String,
+    pub decode_tok_s: f64,
+    pub prefill_tok_s: f64,
+    /// Working memory the run held beyond the weights, when it was measured.
+    pub memory_bytes: Option<u64>,
+}
+
+impl Candidate {
+    /// Tokens per second over the throughput request: prompt and answer
+    /// together, each at its own rate.
+    pub fn request_tok_s(&self) -> f64 {
+        let seconds = THROUGHPUT_PROMPT_TOKENS / self.prefill_tok_s
+            + THROUGHPUT_NEW_TOKENS / self.decode_tok_s;
+        (THROUGHPUT_PROMPT_TOKENS + THROUGHPUT_NEW_TOKENS) / seconds
+    }
+}
+
+/// The candidate that serves `workload` best and the rate it is recorded
+/// with: decode for latency and memory, whole-request rate for throughput.
+/// Earlier candidates win ties, so the order they are measured in is the
+/// order of preference.
+pub fn choose(candidates: &[Candidate], workload: Workload) -> Option<(usize, f64)> {
+    let best_by = |score: &dyn Fn(&Candidate) -> f64| {
+        candidates
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, score(c)))
+            .filter(|(_, score)| score.is_finite())
+            .reduce(|best, next| if next.1 > best.1 { next } else { best })
+    };
+    match workload {
+        Workload::Latency => best_by(&|c| c.decode_tok_s),
+        Workload::Throughput => best_by(&Candidate::request_tok_s),
+        Workload::Memory => {
+            let (_, fastest) = best_by(&|c| c.decode_tok_s)?;
+            candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.decode_tok_s >= fastest * (1.0 - MEMORY_SLACK))
+                // A profile whose memory was not measured cannot win on memory.
+                .min_by_key(|(_, c)| c.memory_bytes.unwrap_or(u64::MAX))
+                .map(|(i, c)| (i, c.decode_tok_s))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,9 +215,14 @@ impl AutotuneCache {
     }
 }
 
-pub fn run(model_path: &Path, cache_path: Option<&Path>, force: bool) -> Result<()> {
+pub fn run(
+    model_path: &Path,
+    cache_path: Option<&Path>,
+    force: bool,
+    workload: Workload,
+) -> Result<()> {
     let file = allpaka_gguf::GgufFile::open(model_path)?;
-    let key = key_for(model_path, &file);
+    let key = key_for(model_path, &file, workload);
     let cache_path = cache_path
         .map(ToOwned::to_owned)
         .unwrap_or_else(default_cache_path);
@@ -117,7 +230,8 @@ pub fn run(model_path: &Path, cache_path: Option<&Path>, force: bool) -> Result<
     if !force {
         if let Some(hit) = cache.get(&key) {
             println!(
-                "autotune cache hit: profile={} objective={:.1} tok/s ({})",
+                "autotune cache hit: workload={} profile={} objective={:.1} tok/s ({})",
+                workload.name(),
                 hit.parameters.command_strategy,
                 hit.objective_tok_s,
                 cache_path.display()
@@ -127,7 +241,13 @@ pub fn run(model_path: &Path, cache_path: Option<&Path>, force: bool) -> Result<
     }
 
     let executable = std::env::current_exe()?;
-    let mut best: Option<(String, BenchmarkReport)> = None;
+    let mut candidates: Vec<Candidate> = Vec::new();
+    // Throughput is about long prompts, so its prefill is measured on one.
+    let prompt_tokens = if workload == Workload::Throughput {
+        "512"
+    } else {
+        "128"
+    };
     for profile in ["balanced", "max-performance", "safe"] {
         let report_path = std::env::temp_dir().join(format!(
             "allpaka-autotune-{}-{profile}.json",
@@ -139,7 +259,7 @@ pub fn run(model_path: &Path, cache_path: Option<&Path>, force: bool) -> Result<
             .arg("--engine")
             .arg(model_path)
             .env("ALLPAKA_PROFILE", profile)
-            .env("ALLPAKA_BENCH_PP", "128")
+            .env("ALLPAKA_BENCH_PP", prompt_tokens)
             .env("ALLPAKA_BENCH_REPORT", &report_path)
             .stdout(Stdio::null())
             .status()
@@ -147,21 +267,29 @@ pub fn run(model_path: &Path, cache_path: Option<&Path>, force: bool) -> Result<
         anyhow::ensure!(status.success(), "autotune candidate {profile} failed");
         let report: BenchmarkReport = serde_json::from_slice(&std::fs::read(&report_path)?)?;
         std::fs::remove_file(&report_path).ok();
-        let decode = measurement(&report, "decode")?.summary.median;
-        let prefill = measurement(&report, "prefill")?.summary.median;
-        println!("  {profile}: decode={decode:.1} prefill={prefill:.1} tok/s");
-        let replace = match best.as_ref() {
-            None => true,
-            Some((_, current)) => measurement(current, "decode")
-                .map(|value| decode > value.summary.median)
-                .unwrap_or(true),
+        let decode = measurement(&report, "decode")?;
+        let prefill = measurement(&report, "prefill")?;
+        let candidate = Candidate {
+            profile: profile.to_string(),
+            decode_tok_s: decode.summary.median,
+            prefill_tok_s: prefill.summary.median,
+            memory_bytes: decode.peak_memory_bytes.max(prefill.peak_memory_bytes),
         };
-        if replace {
-            best = Some((profile.to_string(), report));
-        }
+        println!(
+            "  {profile}: decode={:.1} prefill={:.1} tok/s, request={:.1} tok/s, working memory={}",
+            candidate.decode_tok_s,
+            candidate.prefill_tok_s,
+            candidate.request_tok_s(),
+            match candidate.memory_bytes {
+                Some(bytes) => format!("{:.2} GiB", bytes as f64 / (1u64 << 30) as f64),
+                None => "not measured".to_owned(),
+            }
+        );
+        candidates.push(candidate);
     }
-    let (profile, report) = best.context("autotune produced no successful candidates")?;
-    let decode = measurement(&report, "decode")?.summary.median;
+    let (chosen, objective) =
+        choose(&candidates, workload).context("autotune produced no successful candidates")?;
+    let profile = candidates[chosen].profile.clone();
     let resolved: allpaka_backend::profile::RuntimeProfile = profile.parse()?;
     let policy = resolved.resolve().policy;
     let entry = AutotuneEntry {
@@ -175,7 +303,7 @@ pub fn run(model_path: &Path, cache_path: Option<&Path>, force: bool) -> Result<
             gpu_window_bytes: 0,
             kv_block_tokens: 256,
         },
-        objective_tok_s: decode,
+        objective_tok_s: objective,
         measured_at_unix_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -184,7 +312,8 @@ pub fn run(model_path: &Path, cache_path: Option<&Path>, force: bool) -> Result<
     cache.insert(key, entry);
     cache.save_atomic(&cache_path)?;
     println!(
-        "autotune selected {profile}: {decode:.1} decode tok/s; cached at {}",
+        "autotune selected {profile} for {}: {objective:.1} tok/s; cached at {}",
+        workload.name(),
         cache_path.display()
     );
     Ok(())
@@ -208,7 +337,10 @@ pub fn apply_cached(model_path: &Path, cache_path: Option<&Path>) -> Result<bool
         return Ok(false);
     }
     let file = allpaka_gguf::GgufFile::open(model_path)?;
-    let key = key_for(model_path, &file);
+    // The profile tuned for this deployment's workload, not just for the
+    // model and device: `ALLPAKA_WORKLOAD`, `latency` when unset.
+    let workload = Workload::from_env()?;
+    let key = key_for(model_path, &file, workload);
     let Some(hit) = cache.get(&key) else {
         return Ok(false);
     };
@@ -221,7 +353,8 @@ pub fn apply_cached(model_path: &Path, cache_path: Option<&Path>) -> Result<bool
     let resolved = profile.resolve_with_env();
     let _ = allpaka_backend::runtime::install(resolved.policy);
     println!(
-        "autotune cache applied: profile={} objective={:.1} tok/s ({})",
+        "autotune cache applied: workload={} profile={} objective={:.1} tok/s ({})",
+        workload.name(),
         hit.parameters.command_strategy,
         hit.objective_tok_s,
         cache_path.display()
@@ -229,8 +362,9 @@ pub fn apply_cached(model_path: &Path, cache_path: Option<&Path>) -> Result<bool
     Ok(true)
 }
 
-fn key_for(model_path: &Path, file: &allpaka_gguf::GgufFile) -> AutotuneKey {
+fn key_for(model_path: &Path, file: &allpaka_gguf::GgufFile, workload: Workload) -> AutotuneKey {
     AutotuneKey {
+        workload: workload.name().to_owned(),
         device_registry_id: host_value("sysctl", &["-n", "machdep.cpu.brand_string"]),
         metal_os_version: host_value("sw_vers", &["-productVersion"]),
         model_fingerprint: model_fingerprint(model_path, file),
@@ -286,7 +420,10 @@ fn default_cache_path() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{AutotuneCache, AutotuneEntry, AutotuneKey, TunedParameters, KERNEL_ABI_VERSION};
+    use super::{
+        choose, AutotuneCache, AutotuneEntry, AutotuneKey, Candidate, TunedParameters, Workload,
+        KERNEL_ABI_VERSION,
+    };
 
     fn key(model: &str) -> AutotuneKey {
         AutotuneKey {
@@ -297,6 +434,7 @@ mod tests {
             model_dimensions: "48x2048".into(),
             tensor_census_hash: "q4k-q6k".into(),
             kernel_abi_version: KERNEL_ABI_VERSION,
+            workload: "latency".into(),
         }
     }
 
@@ -335,5 +473,70 @@ mod tests {
         assert!(loaded.get(&key("model-a")).is_some());
         assert!(loaded.get(&key("model-b")).is_none());
         std::fs::remove_file(path).unwrap();
+    }
+
+    fn candidate(profile: &str, decode: f64, prefill: f64, gib: Option<u64>) -> Candidate {
+        Candidate {
+            profile: profile.into(),
+            decode_tok_s: decode,
+            prefill_tok_s: prefill,
+            memory_bytes: gib.map(|g| g << 30),
+        }
+    }
+
+    #[test]
+    fn the_workload_decides_which_profile_wins() {
+        // Fast to decode but slow on prompts; the reverse; and a lean one.
+        let measured = [
+            candidate("balanced", 80.0, 3000.0, Some(6)),
+            candidate("max-performance", 79.0, 3900.0, Some(9)),
+            candidate("safe", 73.0, 2500.0, Some(2)),
+        ];
+        let pick = |workload| {
+            let (i, score) = choose(&measured, workload).unwrap();
+            (measured[i].profile.as_str(), score)
+        };
+        assert_eq!(pick(Workload::Latency), ("balanced", 80.0));
+        let (profile, score) = pick(Workload::Throughput);
+        assert_eq!(profile, "max-performance");
+        // 2304 tokens in 2048/3900 + 256/79 seconds, against 2048/3000 + 256/80.
+        assert!((score - 2304.0 / (2048.0 / 3900.0 + 256.0 / 79.0)).abs() < 1e-9);
+        // 73 is within 10% of 80, and it holds the least memory.
+        assert_eq!(pick(Workload::Memory), ("safe", 73.0));
+    }
+
+    #[test]
+    fn memory_does_not_trade_away_more_than_the_slack() {
+        let measured = [
+            candidate("balanced", 80.0, 3000.0, Some(6)),
+            candidate("safe", 60.0, 2500.0, Some(1)),
+            candidate("max-performance", 79.0, 3900.0, None),
+        ];
+        // 60 is 25% slower: out. The unmeasured one cannot win on memory.
+        let (i, _) = choose(&measured, Workload::Memory).unwrap();
+        assert_eq!(measured[i].profile, "balanced");
+        // Ties go to the profile measured first.
+        let tie = [
+            candidate("a", 50.0, 100.0, Some(1)),
+            candidate("b", 50.0, 100.0, Some(1)),
+        ];
+        for workload in [Workload::Latency, Workload::Throughput, Workload::Memory] {
+            assert_eq!(choose(&tie, workload).unwrap().0, 0);
+        }
+        assert!(choose(&[], Workload::Latency).is_none());
+    }
+
+    #[test]
+    fn an_entry_from_before_workloads_is_a_latency_entry() {
+        let old = r#"{"device_registry_id":"m4-max","metal_os_version":"test","model_fingerprint":"model-a",
+            "model_architecture":"qwen3moe","model_dimensions":"48x2048","tensor_census_hash":"q4k-q6k",
+            "kernel_abi_version":2}"#;
+        let parsed: AutotuneKey = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed, key("model-a"));
+        let mut other = key("model-a");
+        other.workload = "throughput".into();
+        assert_ne!(parsed, other);
+        assert_eq!("memory".parse::<Workload>().unwrap(), Workload::Memory);
+        assert!("fastest".parse::<Workload>().is_err());
     }
 }

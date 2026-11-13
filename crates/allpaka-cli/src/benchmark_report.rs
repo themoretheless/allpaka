@@ -54,6 +54,8 @@ pub struct Measurement {
     pub summary: Distribution,
     pub fast_path: FastPathStats,
     pub phases: Vec<PhaseMetric>,
+    /// Working memory held when the phase ended, weights excluded: the GPU
+    /// scratch arenas, which only grow. `None` when it was not measured.
     pub peak_memory_bytes: Option<u64>,
     pub kv_bytes_per_token: Option<u64>,
 }

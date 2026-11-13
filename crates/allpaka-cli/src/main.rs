@@ -143,6 +143,11 @@ enum Command {
         cache: Option<PathBuf>,
         #[arg(long)]
         force: bool,
+        /// What to tune for: latency (decode rate), throughput (long prompt
+        /// plus short answer) or memory (least working memory within 10% of
+        /// the fastest decode). `serve` picks the entry by ALLPAKA_WORKLOAD.
+        #[arg(long, default_value = "latency")]
+        workload: autotune::Workload,
     },
     /// Print an example allpaka.toml to stdout.
     Init,
@@ -457,7 +462,8 @@ fn dispatch(command: Command) -> Result<()> {
             engine,
             cache,
             force,
-        } => autotune::run(&engine, cache.as_deref(), force),
+            workload,
+        } => autotune::run(&engine, cache.as_deref(), force, workload),
         Command::Init => run_init(),
         Command::PipelinePlan {
             model,

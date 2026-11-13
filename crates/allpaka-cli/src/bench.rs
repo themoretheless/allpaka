@@ -234,6 +234,8 @@ pub fn measure_engine(
     prefill_measurement.context_tokens = Some(0);
     prefill_measurement.input_tokens = prompt[32..].to_vec();
     let mut decode_measurement = Measurement::new("decode", decode_tokens, vec![decode_rate]);
+    // GPU scratch held after the run; arenas only grow, so this is their peak.
+    decode_measurement.peak_memory_bytes = Some(allpaka_backend::gpu::arena_bytes() as u64);
     decode_measurement.phases = decode_phases;
     decode_measurement.context_tokens = Some(1);
     decode_measurement.input_tokens = decode_inputs;
