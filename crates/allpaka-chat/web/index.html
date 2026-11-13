@@ -253,6 +253,8 @@
   <div class="context-settings">
     <label><span><input id="auto-compact" type="checkbox" checked> Автокомпакт</span></label>
     <label>Порог ≈ токенов<input id="compact-threshold" type="number" min="4096" max="1000000" value="24000" step="1024"></label>
+    <label title="Вход + выход по данным провайдера за всю беседу. Пусто — без лимита.">Бюджет беседы, токенов<input id="budget-tokens" type="number" min="1" step="1000" placeholder="без лимита"></label>
+    <label title="Сообщённая провайдером стоимость за всю беседу. Пусто — без лимита.">Бюджет беседы, стоимость<input id="budget-cost" type="number" min="0" step="0.01" placeholder="без лимита"></label>
     <details>
       <summary>Краткий контекст</summary>
       <pre id="compact-summary"></pre>
