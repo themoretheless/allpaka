@@ -161,17 +161,19 @@ def main():
                 'gateway_argv':['allpaka','pipeline-serve','--stages',f'127.0.0.1:{up_first},127.0.0.1:{up_second}',
                     '--tokenizer','/elsewhere/model.gguf','--model-id','fixture','--context','256']}))
             up_log = open(root/'pipeline-up.log','w')
-            group = dict(creationflags=subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == 'nt' else dict(start_new_session=True)
             up = subprocess.Popen([binary,'pipeline-up',str(manifest),'--all','--gateway','--model',str(model),
-                '--bind-host','127.0.0.1','--gateway-bind',f'127.0.0.1:{up_gateway}'], env=env, stdout=up_log, stderr=up_log, **group)
+                '--bind-host','127.0.0.1','--gateway-bind',f'127.0.0.1:{up_gateway}'], env=env, stdout=up_log, stderr=up_log)
             def stop_up():
-                # pipeline-up owns three children; take the whole tree down.
+                # Killed outright, not asked: its three children must still go.
                 if up.poll() is None:
-                    if os.name == 'nt': subprocess.run(['taskkill','/T','/F','/PID',str(up.pid)], capture_output=True)
-                    else: os.killpg(up.pid, 15)
-                    try: up.wait(timeout=5)
-                    except subprocess.TimeoutExpired: up.kill(); up.wait()
+                    up.kill(); up.wait()
                 up_log.close()
+            def watch_split():
+                seen = subprocess.run([binary,'watch','--manifest',str(manifest),'--gateway',f'127.0.0.1:{up_gateway}','--once','--json'],
+                    env=env, capture_output=True, text=True, timeout=30)
+                assert seen.returncode == 0, seen.stderr
+                status = json.loads(seen.stdout)
+                return status['phase'], {c['name']: c['held'] for c in status['conditions']}
             try:
                 for _ in range(400):
                     assert up.poll() is None, 'pipeline-up exited'
@@ -183,6 +185,10 @@ def main():
                 status, launched = call(up_gateway,body)
                 assert status == 200, launched
                 assert json.loads(launched)['choices'] == actual['choices'], (launched, actual)
+                # Everything answers, but nobody measured the a-b link: not Ready.
+                phase, held = watch_split()
+                assert phase == 'Degraded' and held == {'LayersPlaced':True,'StageReachable/a':True,'StageReachable/b':True,
+                    'LinkVerified':False,'GatewayReachable':True}, (phase, held)
             except Exception:
                 up_log.flush()
                 print('pipeline-up', (root/'pipeline-up.log').read_text()[-5000:])
@@ -195,6 +201,8 @@ def main():
                         with socket.create_connection(('127.0.0.1',address), timeout=0.2): time.sleep(0.05)
                     except OSError: break
                 else: raise AssertionError('a pipeline-up child outlived it')
+            phase, held = watch_split()
+            assert phase == 'Stopped' and not held['StageReachable/a'] and not held['GatewayReachable'], (phase, held)
             unknown = subprocess.run([binary,'pipeline-up',str(manifest),'--node','nowhere'], env=env, capture_output=True, text=True)
             assert unknown.returncode != 0 and 'no stage on node nowhere' in unknown.stderr, unknown.stderr
             processes[1][0].terminate()
@@ -217,7 +225,7 @@ def main():
             processes[-1][0].terminate()
             processes[-1][0].wait(timeout=5)
             assert call(gateway,body)[0] == 400
-            print('PASS: two native stage processes match whole-model chat; JSON/SSE, context, model, replay, manifest launch, changed weights and failed worker checked')
+            print('PASS: two native stage processes match whole-model chat; JSON/SSE, context, model, replay, manifest launch and watch, changed weights and failed worker checked')
         except Exception:
             for _,log,name in processes:
                 log.flush()

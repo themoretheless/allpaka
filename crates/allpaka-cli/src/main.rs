@@ -20,6 +20,7 @@ mod report;
 mod serve;
 mod verify;
 mod watch;
+mod watch_split;
 
 use allpaka_core::fleet::FleetMember;
 use allpaka_core::{fleet, plan, presets, replicate, Model, PlanRequest, Speculation, Verdict};
@@ -249,6 +250,20 @@ enum Command {
         /// One JSON object per transition, for scripts.
         #[arg(long)]
         json: bool,
+        /// Watch a layer split instead: the manifest `pipeline-plan` printed.
+        /// Probes every stage endpoint; `--addr` is then ignored.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// With --manifest: the cluster config, to check that every hop between
+        /// two machines was measured.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// With --manifest: the chat gateway's address, to probe it too.
+        #[arg(long)]
+        gateway: Option<String>,
+        /// With --manifest: print the current status and exit.
+        #[arg(long)]
+        once: bool,
     },
 
     /// Send one chat request to a running `allpaka serve`.
@@ -421,6 +436,7 @@ fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     airbug::install();
+    pipeline_up::exit_with_parent();
     dispatch(cli.command)
 }
 
@@ -535,7 +551,24 @@ fn dispatch(command: Command) -> Result<()> {
             addr,
             interval_ms,
             json,
-        } => watch::watch(&addr, std::time::Duration::from_millis(interval_ms), json),
+            manifest,
+            config,
+            gateway,
+            once,
+        } => {
+            let interval = std::time::Duration::from_millis(interval_ms);
+            match manifest {
+                Some(manifest) => watch_split::watch(
+                    &manifest,
+                    config.as_deref(),
+                    gateway.as_deref(),
+                    interval,
+                    json,
+                    once,
+                ),
+                None => watch::watch(&addr, interval, json),
+            }
+        }
         Command::Chat {
             prompt,
             system,

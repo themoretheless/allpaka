@@ -13,6 +13,33 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+/// Set for the children of `pipeline-up`: their stdin is a pipe it holds open.
+const PARENT_PIPE: &str = "ALLPAKA_EXIT_WITH_STDIN";
+
+/// In a child of `pipeline-up`, exit when the parent is gone. The parent holds
+/// the write end of our stdin and never writes; the pipe reaching end-of-file
+/// means it exited or was killed, and a stage nobody supervises must not stay
+/// behind holding a port and the model's memory.
+pub fn exit_with_parent() {
+    if std::env::var_os(PARENT_PIPE).is_none() {
+        return;
+    }
+    std::thread::spawn(|| {
+        use std::io::Read;
+        let mut sink = [0u8; 64];
+        let mut stdin = std::io::stdin();
+        loop {
+            match stdin.read(&mut sink) {
+                Ok(0) | Err(_) => {
+                    eprintln!("pipeline-up is gone; exiting");
+                    std::process::exit(1);
+                }
+                Ok(_) => {}
+            }
+        }
+    });
+}
+
 /// What to start from a manifest on this machine.
 pub struct Options<'a> {
     /// Node names whose stages run here.
@@ -218,6 +245,9 @@ pub fn run(manifest_path: &Path, options: &Options<'_>, wait_secs: u64) -> Resul
         eprintln!("pipeline-up: starting {}", launch.label);
         let child = Command::new(&exe)
             .args(&launch.args)
+            .env(PARENT_PIPE, "1")
+            // Kept open in `Child` for as long as this process lives.
+            .stdin(std::process::Stdio::piped())
             .spawn()
             .with_context(|| format!("starting {}", launch.label))?;
         running.0.push((launch.label, child));

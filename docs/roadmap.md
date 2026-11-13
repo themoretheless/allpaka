@@ -175,20 +175,14 @@ CI-проверка на скачиваемом эталонном чекпои�
 
 ### B1. Квалификация на двух машинах
 
+Запуск (`pipeline-up`) и наблюдение (`watch --manifest`: `StageReachable`,
+`LayersPlaced`, `LinkVerified`) готовы и проверяются на loopback в
+`scripts/test-distributed.py`; на двух машинах не запускались.
+
 **DoD:** одна модель разрезана между mac и PC; greedy-стрим совпадает с
 монолитом; predicted tok/s по `allpaka.toml` против measured в пределах
 заявленного допуска. Хоп односторонний — платится p99, а не среднее;
 неизмеренный стык блокирует разрез.
-
-### B2. Наблюдение за разрезом
-
-Запуск по манифесту есть: `allpaka pipeline-up manifest.json --node <имя>`
-поднимает стадии узла и (с `--gateway`) шлюз; loopback-вариант проверяется в
-`scripts/test-distributed.py`. На двух машинах не запускался (B1).
-
-**DoD:** `allpaka watch` понимает разрез: условия `StageReachable` на каждый
-узел, `LinkVerified` и `LayersPlaced` как функции над измеренным; дети
-`pipeline-up` не переживают его принудительное завершение.
 
 ### B3. Спекуляция на разрезе
 
