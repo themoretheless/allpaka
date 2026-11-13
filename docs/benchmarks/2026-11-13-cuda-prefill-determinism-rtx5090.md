@@ -120,7 +120,7 @@ pp2048, defaults (four 512-token chunks, each with a longer KV history):
 - **Memory:** peak VRAM 28.7 GiB at chunk 2048, about 1.3 GiB more than at 512.
 
 The default was not changed. `cuda_long_prefill`'s check that two identical
-prefills in one process give identical logits failed once in seven runs at
+prefills in one process give identical logits failed once in eight runs at
 chunk 2048 (one 1 097-token chunk after a 3-token prefix) and passed at chunk
 2048 with `ALLPAKA_PF_GRAPH=0`, and four times out of four at chunk 512.
 Another process was loading the same model on the card during part of that
