@@ -194,6 +194,7 @@ pub(super) fn run_inference(
         repeat_penalty,
         parse_tools,
         tool_specs,
+        tool_choice,
         prediction_tokens,
         prompt_lookup_k,
         mut stream,
@@ -253,15 +254,67 @@ pub(super) fn run_inference(
     // Draft length follows acceptance; at k=0 the step below decodes plainly
     // and only advances the controller's cooldown.
     let mut adapt = allpaka_model::speculate::AdaptiveK::new(prompt_lookup_k);
+    // Holds a tool call the model writes to the request's declarations.
+    // `ALLPAKA_TOOL_GRAMMAR=0` leaves generation free and the finished call to
+    // the check in `parse_tool_calls_checked`.
+    let mut grammar = tool_specs
+        .filter(|_| parse_tools && std::env::var("ALLPAKA_TOOL_GRAMMAR").as_deref() != Ok("0"))
+        .map(|tools| ToolGrammar::new(tools, tool_choice));
+    let mut token_bytes: Vec<u8> = Vec::new();
     crate::airbug::span("decode", || -> Result<()> {
         while generated.len() < max_tokens {
             context.control.check()?;
+            if grammar.as_ref().is_some_and(ToolGrammar::must_stop) {
+                finish = "stop";
+                break;
+            }
+            let constrained = grammar.as_ref().is_some_and(ToolGrammar::constraining);
             let next = match greedy_next.take() {
-                Some(t) => t,
+                Some(t) => {
+                    // An on-device argmax arrived while a call is open (a
+                    // speculative round ran into one). Without logits there is
+                    // nothing to choose from, so the call goes unconstrained
+                    // and is checked when it is finished.
+                    if constrained {
+                        grammar = None;
+                    }
+                    t
+                }
                 None => {
                     let active_logits = cached_logits.take();
                     let slice = active_logits.as_deref().unwrap_or(&logits);
-                    sampler.pick(slice, &chat.tokens)
+                    let picked = sampler.pick(slice, &chat.tokens);
+                    match grammar.as_ref().filter(|_| constrained) {
+                        None => picked,
+                        Some(rules) => {
+                            let mut fits = |token: u32| {
+                                if stops.contains(&token) {
+                                    return rules.may_stop();
+                                }
+                                token_bytes.clear();
+                                tok.append_token_bytes(token, &mut token_bytes);
+                                rules.allows(&token_bytes)
+                            };
+                            if fits(picked) {
+                                picked
+                            } else {
+                                // The most likely token the call allows.
+                                let mut ranked: Vec<u32> = (0..slice.len() as u32).collect();
+                                ranked.sort_unstable_by(|a, b| {
+                                    slice[*b as usize].total_cmp(&slice[*a as usize])
+                                });
+                                match ranked.into_iter().find(|&token| fits(token)) {
+                                    Some(token) => token,
+                                    None => {
+                                        // No token continues the call: leave it
+                                        // to the model and to the final check.
+                                        grammar = None;
+                                        picked
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             };
             if stops.contains(&next) {
@@ -269,7 +322,13 @@ pub(super) fn run_inference(
                 break;
             }
             let remaining = max_tokens - generated.len();
-            let k = adapt.k().min(remaining.saturating_sub(1));
+            // No drafting inside a call: drafted tokens are not offered to
+            // the grammar one by one.
+            let k = if constrained {
+                0
+            } else {
+                adapt.k().min(remaining.saturating_sub(1))
+            };
             if use_pld && k == 0 {
                 adapt.record(0, 0);
             }
@@ -304,7 +363,11 @@ pub(super) fn run_inference(
                     }
                     accepted_before_stop += 1;
                     generated.push(emitted_tok);
+                    let from = raw_bytes.len();
                     tok.append_token_bytes(emitted_tok, &mut raw_bytes);
+                    if let Some(rules) = grammar.as_mut() {
+                        rules.feed(&raw_bytes[from..]);
+                    }
                     chat.tokens.push(emitted_tok);
                     if generated.len() >= max_tokens {
                         break;
@@ -334,7 +397,11 @@ pub(super) fn run_inference(
                 continue;
             }
             generated.push(next);
+            let from = raw_bytes.len();
             tok.append_token_bytes(next, &mut raw_bytes);
+            if let Some(rules) = grammar.as_mut() {
+                rules.feed(&raw_bytes[from..]);
+            }
             if let Some(stream) = stream.as_mut() {
                 emit_incremental_sse(
                     stream,
@@ -346,7 +413,10 @@ pub(super) fn run_inference(
                     generated.len(),
                 )?;
             }
-            if greedy {
+            // Choosing under a grammar needs the whole distribution, not
+            // just its argmax.
+            let wants_logits = grammar.as_ref().is_some_and(ToolGrammar::constraining);
+            if greedy && !wants_logits {
                 greedy_next = Some(model.forward_greedy(next, &mut chat.session)?);
             } else {
                 logits = model.forward(next, &mut chat.session)?;

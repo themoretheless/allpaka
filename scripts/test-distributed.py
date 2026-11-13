@@ -132,6 +132,35 @@ def main():
             streamed = ''.join(event['choices'][0].get('delta',{}).get('content','') for event in tool_events)
             assert streamed.strip() == with_tools['message']['content'], (streamed, with_tools)
             assert tool_events[-1]['choices'][0]['finish_reason'] == with_tools['finish_reason']
+            # A model with random weights, made to call a tool: the grammar leaves it
+            # nothing to write but a call that fits the declarations.
+            strict = [{'type':'function','function':{'name':'lookup','parameters':{'type':'object','additionalProperties':False,
+                          'properties':{'mode':{'enum':['fast','slow']},'deep':{'type':'boolean'}},'required':['mode','deep']}}},
+                      {'type':'function','function':{'name':'reset','parameters':{'type':'object','properties':{},'additionalProperties':False}}}]
+            def forced_call(choice, **more):
+                status, reply = call(local,dict(body,tools=strict,tool_choice=choice,max_tokens=400,**more))
+                assert status == 200, reply
+                return reply
+            forced = json.loads(forced_call('required'))['choices'][0]
+            assert forced['finish_reason'] == 'tool_calls' and 'tool_call_rejections' not in forced, forced
+            assert forced['message']['content'] == '' and len(forced['message']['tool_calls']) == 1, forced
+            made = forced['message']['tool_calls'][0]['function']
+            arguments = json.loads(made['arguments'])
+            assert made['name'] in ('lookup','reset'), made
+            if made['name'] == 'lookup':
+                assert set(arguments) == {'mode','deep'} and arguments['mode'] in ('fast','slow') and isinstance(arguments['deep'],bool), made
+            else:
+                assert arguments == {}, made
+            for name in ['lookup','reset']:
+                named = json.loads(forced_call({'type':'function','function':{'name':name}}))['choices'][0]
+                assert [c['function']['name'] for c in named['message']['tool_calls']] == [name], named
+            forced_stream = forced_call('required',stream=True)
+            forced_events = [json.loads(line[6:]) for line in forced_stream.splitlines() if line.startswith('data: {')]
+            streamed_calls = [c for event in forced_events for c in event['choices'][0].get('delta',{}).get('tool_calls',[])]
+            assert [c['function'] for c in streamed_calls] == [made], (streamed_calls, made)
+            assert forced_events[-1]['choices'][0]['finish_reason'] == 'tool_calls'
+            assert call(local,dict(body,tool_choice='required'))[0] == 400
+            assert call(local,dict(body,tools=strict,tool_choice={'type':'function','function':{'name':'absent'}}))[0] == 400
             status, actual = call(gateway,body)
             assert status == 200, actual
             reference, actual = json.loads(reference), json.loads(actual)
@@ -225,7 +254,7 @@ def main():
             processes[-1][0].terminate()
             processes[-1][0].wait(timeout=5)
             assert call(gateway,body)[0] == 400
-            print('PASS: two native stage processes match whole-model chat; JSON/SSE, context, model, replay, manifest launch and watch, changed weights and failed worker checked')
+            print('PASS: two native stage processes match whole-model chat; JSON/SSE, context, model, replay, forced tool calls, manifest launch and watch, changed weights and failed worker checked')
         except Exception:
             for _,log,name in processes:
                 log.flush()

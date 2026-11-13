@@ -23,6 +23,7 @@ mod routes;
 mod sampler;
 mod session;
 mod template;
+mod tool_grammar;
 mod tool_schema;
 
 pub(crate) use http::{read_request, respond, respond_html, write_sse_event, write_sse_headers};
@@ -45,6 +46,7 @@ use rag_tools::{rag_default_tool_schemas, run_rag_tool, RagTools};
 use request_control::{Interrupted, Registry as RequestRegistry, RequestControl};
 use router::*;
 use routes::{Matched, Route};
+use tool_grammar::{ToolChoice, ToolGrammar};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -105,6 +107,8 @@ struct GenerationRequest<'a> {
     parse_tools: bool,
     /// The request's tool declarations; parsed calls are checked against them.
     tool_specs: Option<&'a [Value]>,
+    /// Whether the reply may, or must, be a tool call.
+    tool_choice: tool_grammar::ToolChoice,
     prediction_tokens: &'a [u32],
     prompt_lookup_k: usize,
     stream: Option<&'a mut TcpStream>,

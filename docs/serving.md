@@ -137,9 +137,28 @@ a malformed block does, and the choice carries the reasons:
 
 The field is absent when nothing was refused. With `stream: true` the text is
 streamed up to the first `<tool_call>`, then the parsed calls arrive as one
-`tool_calls` delta and the refusals as one chunk before the final one. The built-in RAG tool loop never executes a refused
-call. Generation itself is not constrained by the schema: this is a check of
-what the model produced, not a grammar.
+`tool_calls` delta and the refusals as one chunk before the final one. The built-in RAG tool loop never executes a refused call.
+
+Generation is held to the declarations too. Once the model has written
+`<tool_call>`, the sampler only accepts tokens that continue
+
+```text
+<tool_call>
+{"name": "<a declared tool>", "arguments": <a value of its schema>}
+</tool_call>
+```
+
+so a call cannot name another tool, miss a required argument, add an
+undeclared one to a closed object, or stop half-written. Outside a call the
+text is free. `tool_choice` forces the matter: `"required"` makes the whole
+reply one call to any declared tool, and
+`{"type": "function", "function": {"name": "..."}}` one call to that tool;
+either without `tools`, or naming an undeclared tool, is a 400, and neither
+works with the built-in RAG loop. Inside a call greedy decoding reads the full
+logits instead of the on-device argmax, and prompt-lookup drafting pauses.
+`enum` is enforced for string members only; schema keywords beyond the six
+above leave their value free-form JSON, and the after-the-fact check still
+applies. `ALLPAKA_TOOL_GRAMMAR=0` turns the constraint off.
 
 ## Request lifetime and sessions
 

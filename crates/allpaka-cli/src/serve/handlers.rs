@@ -144,6 +144,29 @@ pub(super) fn chat_completions(
             &json!({"error": "tools are only supported with the ChatML template"}),
         );
     }
+    let tool_choice = ToolChoice::parse(&req["tool_choice"]);
+    if tool_choice != ToolChoice::Auto {
+        let declared = |name: &str| {
+            tools.is_some_and(|tools| {
+                tools
+                    .iter()
+                    .any(|tool| tool["function"]["name"].as_str() == Some(name))
+            })
+        };
+        let problem = match &tool_choice {
+            _ if tools.is_none() => Some("tool_choice needs tools".to_owned()),
+            _ if rag.cfg.enabled => {
+                Some("tool_choice is not supported with the built-in RAG tool loop".to_owned())
+            }
+            ToolChoice::Named(name) if !declared(name) => Some(format!(
+                "tool_choice names `{name}`, which tools does not declare"
+            )),
+            _ => None,
+        };
+        if let Some(problem) = problem {
+            return respond(stream, 400, &json!({"error": problem}));
+        }
+    }
     let messages = render_messages(raw_messages, tools);
     let max_tokens = req["max_tokens"].as_u64().unwrap_or(256) as usize;
     let temperature = req["temperature"].as_f64().unwrap_or(0.7);
@@ -179,6 +202,7 @@ pub(super) fn chat_completions(
                 repeat_penalty,
                 parse_tools: tools.is_some(),
                 tool_specs: tools,
+                tool_choice: tool_choice.clone(),
                 prediction_tokens: &prediction_tokens,
                 prompt_lookup_k,
                 stream: Some(&mut *stream),
@@ -199,6 +223,7 @@ pub(super) fn chat_completions(
                 repeat_penalty,
                 parse_tools: false,
                 tool_specs: None,
+                tool_choice: ToolChoice::Auto,
                 prediction_tokens: &prediction_tokens,
                 prompt_lookup_k,
                 stream: if streaming { Some(&mut *stream) } else { None },
@@ -216,6 +241,7 @@ pub(super) fn chat_completions(
                 repeat_penalty,
                 parse_tools: true,
                 tool_specs: tools,
+                tool_choice: tool_choice.clone(),
                 prediction_tokens: &prediction_tokens,
                 prompt_lookup_k,
                 stream: if streaming { Some(&mut *stream) } else { None },
@@ -237,6 +263,7 @@ pub(super) fn chat_completions(
                     repeat_penalty,
                     parse_tools: true,
                     tool_specs: tools,
+                    tool_choice: ToolChoice::Auto,
                     prediction_tokens: &prediction_tokens,
                     prompt_lookup_k,
                     stream: if streaming { Some(&mut *stream) } else { None },
