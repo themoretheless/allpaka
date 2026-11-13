@@ -93,8 +93,27 @@ This uses the existing cluster planner and emits a JSON manifest containing
 ordered stage ranges, each worker's argument array and gateway arguments. Node
 names must match the configuration. Memory planning uses the engine's 16-bit KV
 cache representation. Infeasible models and missing worker endpoints fail.
-The manifest does not execute SSH commands or assume remote model paths; copy
-arguments to the named machines and use their corresponding GGUF paths.
+The manifest does not execute SSH commands or assume remote model paths.
+
+Start it with one command per machine instead of copying arguments:
+
+```sh
+allpaka pipeline-plan ... > manifest.json
+# on machine-a (node "mac"); --model is this machine's path to the GGUF
+allpaka pipeline-up manifest.json --node mac --model /models/model.gguf
+# on machine-b, which also runs the gateway
+allpaka pipeline-up manifest.json --node desktop --gateway --model D:\models\model.gguf
+```
+
+`pipeline-up` starts the stages the manifest places on the named node with the
+manifest's own arguments, and with `--gateway` the chat gateway once every
+stage endpoint, local or remote, accepts connections (`--wait-secs`, 300 by
+default). It runs only `allpaka stage` and `allpaka pipeline-serve` entries,
+with its own executable; a manifest naming anything else is refused. It stays
+in the foreground and stops everything it started when one of them exits.
+`--all --bind-host 127.0.0.1` runs the whole split on one machine. A
+`pipeline-up` that is killed outright (not interrupted) leaves its children
+running.
 
 The remote-agent integration test starts a real HTTP worker and a deterministic
 model endpoint. The model requests a file from the worker-owned project; the

@@ -14,6 +14,7 @@ mod serving_runtime;
 use allpaka_gguf as gguf;
 mod airbug_llama;
 mod pipeline;
+mod pipeline_up;
 mod rag_mcp;
 mod report;
 mod serve;
@@ -62,6 +63,32 @@ enum Command {
         endpoints: Vec<String>,
         #[arg(long)]
         context: Option<u32>,
+    },
+    /// Start the stages (and gateway) a pipeline-plan manifest places on this machine.
+    PipelineUp {
+        /// The JSON `pipeline-plan` printed.
+        manifest: PathBuf,
+        /// Start the stages of this node; repeat for several.
+        #[arg(long = "node")]
+        nodes: Vec<String>,
+        /// Start every stage here: a single-machine run.
+        #[arg(long)]
+        all: bool,
+        /// Also start the chat gateway once every stage endpoint is listening.
+        #[arg(long)]
+        gateway: bool,
+        /// This machine's path to the GGUF, when it differs from the manifest's.
+        #[arg(long)]
+        model: Option<PathBuf>,
+        /// Host the stages bind to instead of the manifest's 0.0.0.0.
+        #[arg(long)]
+        bind_host: Option<String>,
+        /// Address the gateway binds to.
+        #[arg(long)]
+        gateway_bind: Option<String>,
+        /// Seconds to wait for the stage endpoints before starting the gateway.
+        #[arg(long, default_value_t = 300)]
+        wait_secs: u64,
     },
     /// Expose a distributed model to Studio through a local chat API.
     PipelineServe {
@@ -423,6 +450,27 @@ fn dispatch(command: Command) -> Result<()> {
             endpoints,
             context,
         } => pipeline::plan_manifest(&model, &config, &model_id, &endpoints, context),
+        Command::PipelineUp {
+            manifest,
+            nodes,
+            all,
+            gateway,
+            model,
+            bind_host,
+            gateway_bind,
+            wait_secs,
+        } => pipeline_up::run(
+            &manifest,
+            &pipeline_up::Options {
+                nodes: &nodes,
+                all,
+                gateway,
+                model: model.as_deref(),
+                bind_host: bind_host.as_deref(),
+                gateway_bind: gateway_bind.as_deref(),
+            },
+            wait_secs,
+        ),
         Command::PipelineServe {
             stages,
             tokenizer,

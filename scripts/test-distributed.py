@@ -139,6 +139,53 @@ def main():
             assert call(gateway,dict(body,temperature=0.5))[0] == 400
             # Independent requests reconnect and replay without contaminating caches.
             assert json.loads(call(gateway,body)[1])['choices'] == actual['choices']
+            # The same split, started from a manifest by one command instead of by hand.
+            up_first, up_second, up_gateway = [port() for _ in range(3)]
+            stage_argv = lambda index, address: ['allpaka','stage','/elsewhere/model.gguf','--first',str(index),'--end',str(index+1),
+                '--model-id','fixture','--context','256','--bind',f'0.0.0.0:{address}']
+            manifest = root/'manifest.json'
+            manifest.write_text(json.dumps({'model_id':'fixture','context':256,
+                'stages':[{'node':'a','endpoint':f'127.0.0.1:{up_first}','first':0,'end':1,'argv':stage_argv(0,up_first)},
+                          {'node':'b','endpoint':f'127.0.0.1:{up_second}','first':1,'end':2,'argv':stage_argv(1,up_second)}],
+                'gateway_argv':['allpaka','pipeline-serve','--stages',f'127.0.0.1:{up_first},127.0.0.1:{up_second}',
+                    '--tokenizer','/elsewhere/model.gguf','--model-id','fixture','--context','256']}))
+            up_log = open(root/'pipeline-up.log','w')
+            group = dict(creationflags=subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == 'nt' else dict(start_new_session=True)
+            up = subprocess.Popen([binary,'pipeline-up',str(manifest),'--all','--gateway','--model',str(model),
+                '--bind-host','127.0.0.1','--gateway-bind',f'127.0.0.1:{up_gateway}'], env=env, stdout=up_log, stderr=up_log, **group)
+            def stop_up():
+                # pipeline-up owns three children; take the whole tree down.
+                if up.poll() is None:
+                    if os.name == 'nt': subprocess.run(['taskkill','/T','/F','/PID',str(up.pid)], capture_output=True)
+                    else: os.killpg(up.pid, 15)
+                    try: up.wait(timeout=5)
+                    except subprocess.TimeoutExpired: up.kill(); up.wait()
+                up_log.close()
+            try:
+                for _ in range(400):
+                    assert up.poll() is None, 'pipeline-up exited'
+                    try:
+                        if call(up_gateway,route='/v1/models')[0] == 200: break
+                    except OSError: pass
+                    time.sleep(0.05)
+                else: raise AssertionError('pipeline-up startup timeout')
+                status, launched = call(up_gateway,body)
+                assert status == 200, launched
+                assert json.loads(launched)['choices'] == actual['choices'], (launched, actual)
+            except Exception:
+                up_log.flush()
+                print('pipeline-up', (root/'pipeline-up.log').read_text()[-5000:])
+                raise
+            finally:
+                stop_up()
+            for address in [up_first, up_second, up_gateway]:
+                for _ in range(100):
+                    try:
+                        with socket.create_connection(('127.0.0.1',address), timeout=0.2): time.sleep(0.05)
+                    except OSError: break
+                else: raise AssertionError('a pipeline-up child outlived it')
+            unknown = subprocess.run([binary,'pipeline-up',str(manifest),'--node','nowhere'], env=env, capture_output=True, text=True)
+            assert unknown.returncode != 0 and 'no stage on node nowhere' in unknown.stderr, unknown.stderr
             processes[1][0].terminate()
             processes[1][0].wait(timeout=5)
             altered = root/'altered.gguf'
@@ -159,7 +206,7 @@ def main():
             processes[-1][0].terminate()
             processes[-1][0].wait(timeout=5)
             assert call(gateway,body)[0] == 400
-            print('PASS: two native stage processes match whole-model chat; JSON/SSE, context, model, replay, changed weights and failed worker checked')
+            print('PASS: two native stage processes match whole-model chat; JSON/SSE, context, model, replay, manifest launch, changed weights and failed worker checked')
         except Exception:
             for _,log,name in processes:
                 log.flush()
