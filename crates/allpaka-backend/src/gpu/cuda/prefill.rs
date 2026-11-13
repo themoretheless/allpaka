@@ -276,14 +276,7 @@ pub(super) fn try_prefill_attn_fused_dev(
         let rope_at = m * hidden;
         let qn_at = rope_at + m * pairs * 2;
         let kn_at = qn_at + hd;
-        let qb_at = kn_at + hd;
-        let kb_at = qb_at + q_dim;
-        let vb_at = kb_at + kv;
-        let x_need = if req.attn_bias.is_some() {
-            (vb_at + kv) * 4
-        } else {
-            (kn_at + hd) * 4
-        };
+        let x_need = (kn_at + hd) * 4;
         gpu.ensure_arenas(x_need, y_need)?;
 
         // attn RMSNorm: pf_x -> pf_hs
@@ -377,23 +370,23 @@ pub(super) fn try_prefill_attn_fused_dev(
             None => None,
         };
         if let Some((qb, kb, vb)) = req.attn_bias {
-            let qb = norm_f32_bytes(qb, q_dim)?;
-            let kb = norm_f32_bytes(kb, kv)?;
-            let vb = norm_f32_bytes(vb, kv)?;
-            stream
-                .memcpy_htod(&qb, &mut gpu.x_arena.slice_mut(qb_at..qb_at + q_dim))
-                .ok()?;
-            stream
-                .memcpy_htod(&kb, &mut gpu.x_arena.slice_mut(kb_at..kb_at + kv))
-                .ok()?;
-            stream
-                .memcpy_htod(&vb, &mut gpu.x_arena.slice_mut(vb_at..vb_at + kv))
-                .ok()?;
+            // Persistent device copies, like the head norms. The per-layer
+            // pageable H2D into `x_arena` this replaces was not replayable:
+            // every layer shared one destination and the source was a host
+            // temporary, so a replayed prefill graph did not add the bias the
+            // uncaptured run added (qwen2 prefill logits changed from run to
+            // run; ALLPAKA_PF_GRAPH=0 was stable).
+            let qb_dev = dev_norm_bytes(gpu, qb, q_dim)?;
+            let kb_dev = dev_norm_bytes(gpu, kb, kv)?;
+            let vb_dev = dev_norm_bytes(gpu, vb, kv)?;
             let f = gpu.func_owned("add_bias_rows_f32")?;
             let (ybase, _yg) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
-            let (xbase, _xg) = DevicePtr::device_ptr(&gpu.x_arena, &stream);
             let m_u = m as u32;
-            for (off, bias_off, n) in [(q_at, qb_at, q_dim), (k_at, kb_at, kv), (v_at, vb_at, kv)] {
+            for (off, bp, n) in [
+                (q_at, qb_dev, q_dim),
+                (k_at, kb_dev, kv),
+                (v_at, vb_dev, kv),
+            ] {
                 let n_u = n as u32;
                 let cfg = LaunchConfig {
                     grid_dim: (n_u.div_ceil(256), m_u, 1),
@@ -401,7 +394,6 @@ pub(super) fn try_prefill_attn_fused_dev(
                     shared_mem_bytes: 0,
                 };
                 let xp = ybase + (off * 4) as u64;
-                let bp = xbase + (bias_off * 4) as u64;
                 unsafe {
                     stream
                         .launch_builder_pdl(&f)

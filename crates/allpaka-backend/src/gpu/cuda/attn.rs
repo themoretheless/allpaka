@@ -259,6 +259,11 @@ pub(super) fn norm_f32_bytes(raw: &[u8], n: usize) -> Option<Vec<f32>> {
 pub(super) fn dev_f32(gpu: &mut CudaGpu, key: usize, host: &[f32]) -> Option<u64> {
     let hit = matches!(gpu.f32_cache.get(&key), Some((h, _)) if h.as_slice() == host);
     if !hit {
+        // An upload from pageable `host` must not end up in a prefill graph:
+        // a replay would read that address again, long after it was freed.
+        if gpu.pf_capturing {
+            gpu.pf_capture_bad = true;
+        }
         let mut d = gpu.stream.alloc_zeros::<f32>(host.len().max(1)).ok()?;
         gpu.stream
             .memcpy_htod(host, &mut d.slice_mut(0..host.len()))
