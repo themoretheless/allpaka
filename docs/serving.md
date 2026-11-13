@@ -170,7 +170,8 @@ works with the built-in RAG loop. Inside a call greedy decoding reads the full
 logits instead of the on-device argmax, and prompt-lookup drafting pauses.
 `enum` is enforced for string members only; schema keywords beyond the six
 above leave their value free-form JSON, and the after-the-fact check still
-applies. `ALLPAKA_TOOL_GRAMMAR=0` turns the constraint off.
+applies. `ALLPAKA_TOOL_GRAMMAR=0` turns the constraint off, and `tool_choice`
+with it: the model is then free to answer in text.
 
 ## Request lifetime and sessions
 
