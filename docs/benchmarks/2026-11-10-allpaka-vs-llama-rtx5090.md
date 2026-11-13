@@ -114,3 +114,21 @@ Same interleaved setup, 3 rounds. This session ran faster overall than the previ
 | 3 | 3 808 | 3 761 | 3 404 | 111.9% (110.5%) | 79.8 | 72.94 | 109.4% |
 
 The graph only replays when the chunk shape and KV base repeat, as they do in the bench. A chunked long prompt never replays, so the "no graph" column is closer to real prompts.
+
+## With working PDL (`ee2730f`), 2026-11-13
+
+PDL is now really active (579 of 579 programmatic edges in the decode graph) and on by default. Same interleaved setup, GPU idle, 3 rounds.
+
+| Model | Round | allpaka pp | llama pp | pp ratio | allpaka tg | llama tg | tg ratio |
+|---|---|---|---|---|---|---|---|
+| Qwen3-32B Q4_K_M | 1 | 3 819 | 3 517 | 108.6% | 80.5 | 72.23 | 111.5% |
+| Qwen3-32B Q4_K_M | 2 | 3 785 | 3 518 | 107.6% | 80.5 | 72.32 | 111.3% |
+| Qwen3-32B Q4_K_M | 3 | 3 801 | 3 567 | 106.5% | 80.5 | 72.51 | 111.0% |
+| Qwen2.5-7B Q4_K_M | 1 | 17 914 | 13 661 | 131% | 305.3 | 274.19 | 111.3% |
+| Qwen2.5-7B Q4_K_M | 2 | 17 935 | 13 829 | 130% | 305.2 | 275.24 | 110.9% |
+| Qwen2.5-7B Q4_K_M | 3 | 17 523 | 13 659 | 128% | 305.2 | 277.24 | 110.1% |
+
+- **32B:** prefill argmax was 201 in all rounds, and 12 of 12 separate runs gave the same `tokens-fnv`.
+- **7B prefill is not trustworthy yet:** its argmax differed in every round (93256, 94030, 18351), so the 7B prefill ratio does not count until that is explained.
+
+**Known problem in `serve`:** the second short request in a row on one server returns garbage on both models (greedy, temperature 0). The first short request, long prompts, and a short request after a long one answer correctly.
