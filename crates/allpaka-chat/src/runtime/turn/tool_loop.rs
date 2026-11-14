@@ -188,6 +188,34 @@ impl Turn<'_> {
                     args["path"] = json!(path);
                     tools::execute_scoped(root, settings, name, &args, Some(app.data.as_ref()))
                 })
+                .map(|mut result| {
+                    // A write's undo record stays with the conversation, not
+                    // in what the model reads.
+                    let record = result
+                        .as_object_mut()
+                        .and_then(|fields| fields.remove(tools::CHECKPOINT_KEY));
+                    if let Some(record) = record {
+                        if let Ok(mut checkpoint) =
+                            serde_json::from_value::<FileCheckpoint>(json!({
+                                "tool": name,
+                                "recorded_ms": crate::storage::now_ms(),
+                                "path": record["path"],
+                                "before": record["before"],
+                                "after_sha256": record["after_sha256"],
+                            }))
+                        {
+                            checkpoint.tool = name.to_owned();
+                            let mut state = s.lock().unwrap();
+                            state.file_checkpoints.push(checkpoint);
+                            let excess = state
+                                .file_checkpoints
+                                .len()
+                                .saturating_sub(FILE_CHECKPOINTS_KEPT);
+                            state.file_checkpoints.drain(..excess);
+                        }
+                    }
+                    result
+                })
         })
     }
 

@@ -157,7 +157,7 @@ pub(crate) async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Act
                         }
                     },
                     // answered by the handler before anything is queued
-                    ActionKind::Rename | ActionKind::Move => {}
+                    ActionKind::Rename | ActionKind::Move | ActionKind::Undo => {}
                 }
                 persist(&app,&s);
                 if let Some(reply)=reply {let _=reply.send(rejection.map_or(Ok(()),Err));}

@@ -2312,6 +2312,17 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         patch_root=root/'patch-check';patch_root.mkdir();(patch_root/'result.txt').write_text('verified write')
         subprocess.run(['git','apply','-'],input=result['diff'].encode(),cwd=patch_root,check=True)
         assert (patch_root/'result.txt').read_bytes()==(workspace/'result.txt').read_bytes()
+        # The undo record never reaches the model, and undo checks what is on disk first.
+        assert '_checkpoint' not in result and edited_state['file_checkpoints'][-1]['before']=='verified write'
+        (workspace/'result.txt').write_text('verified edit, then by hand')
+        reject(f'sessions/{edited}/actions',dict(kind='undo'),409)
+        assert (workspace/'result.txt').read_text()=='verified edit, then by hand'
+        (workspace/'result.txt').write_text('verified edit')
+        undone=act(edited,'undo');assert undone['restored']=='previous content' and undone['remaining']==0,undone
+        assert (workspace/'result.txt').read_bytes()==b'verified write'
+        reject(f'sessions/{edited}/actions',dict(kind='undo'),409)
+        (workspace/'result.txt').write_text('verified edit')  # the state later checks expect
+        print('PASS agent file writes keep an undo record out of the model view; undo restores bytes exactly and refuses after a manual change',flush=True)
         readonly=create(mode='auto',allow_writes=True);act(readonly,'send','TRY_EDIT READONLY')
         denied=wait(readonly,lambda s:s['status']=='idle' and len(s['messages'])>=4)
         assert 'read-only' in next(m['content'] for m in denied['messages'] if m['role']=='tool')

@@ -45,6 +45,7 @@ mod strict_json;
 mod swarm;
 mod tools;
 mod types;
+mod undo;
 
 use anyhow::{bail, Context, Result};
 use api::*;
@@ -166,6 +167,8 @@ enum ActionKind {
     RetryMember,
     Rename,
     Move,
+    /// Restore the file the agent's last write changed, if it is unchanged since.
+    Undo,
 }
 /// A handler failure: an HTTP status and the message sent as `{"error": message}`.
 #[derive(Debug)]

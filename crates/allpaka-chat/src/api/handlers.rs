@@ -420,6 +420,31 @@ pub(crate) async fn action(
     Path(id): Path<String>,
     Json(mut action): Json<Action>,
 ) -> ApiResult<Value> {
+    if action.kind == ActionKind::Undo {
+        let sessions = app.sessions.lock().unwrap();
+        let (shared, _) = sessions
+            .get(&id)
+            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
+        let mut state = shared.lock().unwrap();
+        if state.status == SessionStatus::Running {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Stop generation before undoing a file change",
+            ));
+        }
+        let Some(last) = state.file_checkpoints.last().cloned() else {
+            return Err(error(StatusCode::CONFLICT, "No file change to undo"));
+        };
+        let restored = crate::undo::restore(&last).map_err(|e| error(StatusCode::CONFLICT, &e))?;
+        state.file_checkpoints.pop();
+        save(&app, &state).map_err(crate::internal)?;
+        return Ok(Json(json!({
+            "accepted": true,
+            "path": last.path,
+            "restored": restored,
+            "remaining": state.file_checkpoints.len(),
+        })));
+    }
     if matches!(action.kind, ActionKind::Rename | ActionKind::Move) {
         let sessions = app.sessions.lock().unwrap();
         let (shared, _) = sessions

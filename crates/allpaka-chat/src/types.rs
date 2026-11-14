@@ -398,6 +398,23 @@ pub struct PlanItem {
     #[serde(default)]
     pub evidence: Vec<String>,
 }
+/// What one file write by an agent tool changed, so it can be undone.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct FileCheckpoint {
+    /// Absolute path the tool wrote.
+    pub path: String,
+    /// The file's text before the write; `None` when the tool created it.
+    pub before: Option<String>,
+    /// SHA-256 of what the tool wrote. Undo restores `before` only while the
+    /// file still has exactly these bytes.
+    pub after_sha256: String,
+    pub tool: String,
+    pub recorded_ms: u64,
+}
+
+/// How many file writes a conversation keeps for undo; older ones drop off.
+pub const FILE_CHECKPOINTS_KEPT: usize = 50;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanCheckpoint {
@@ -444,6 +461,9 @@ pub struct Session {
     pub plan_revision: u64,
     #[serde(default)]
     pub plan_checkpoints: Vec<PlanCheckpoint>,
+    /// Agent file writes, newest last, for undo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_checkpoints: Vec<FileCheckpoint>,
     pub error: Option<String>,
     #[serde(default)]
     pub notice: Option<String>,
@@ -495,6 +515,7 @@ impl Session {
             plan: vec![],
             plan_revision: 0,
             plan_checkpoints: vec![],
+            file_checkpoints: vec![],
             error: None,
             notice: None,
             step: 0,

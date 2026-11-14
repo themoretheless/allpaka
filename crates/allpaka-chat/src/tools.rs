@@ -310,8 +310,40 @@ fn edit_file(call: &ToolCall<'_>) -> Result<Value> {
     if after.len() > 131072 {
         bail!("Write exceeds 128 KiB");
     }
-    fs::write(&path, &after)?;
-    Ok(json!({"written":name,"bytes":after.len(),"diff":unified_diff(name,&before,&after)}))
+    write_verified(&path, &after)?;
+    Ok(json!({
+        "written": name,
+        "bytes": after.len(),
+        "diff": unified_diff(name, &before, &after),
+        CHECKPOINT_KEY: checkpoint(&path, Some(&before), &after),
+    }))
+}
+
+/// Result field that carries a write's undo record from the tool to the turn,
+/// which stores it and removes it before the model sees the result.
+pub(crate) const CHECKPOINT_KEY: &str = "_checkpoint";
+
+fn checkpoint(path: &Path, before: Option<&str>, after: &str) -> Value {
+    json!({
+        "path": path.to_string_lossy(),
+        "before": before,
+        "after_sha256": crate::storage::hex_sha256(after.as_bytes()),
+    })
+}
+
+/// Write `content` and read it back: the file must hold exactly these bytes
+/// before the tool reports success.
+pub(crate) fn write_verified(path: &Path, content: &str) -> Result<()> {
+    fs::write(path, content)?;
+    let written = fs::read(path)?;
+    if written != content.as_bytes() {
+        bail!(
+            "The file does not hold what was written ({} bytes read back, {} written); it may be changing under another program",
+            written.len(),
+            content.len()
+        );
+    }
+    Ok(())
 }
 fn write_file(call: &ToolCall<'_>) -> Result<Value> {
     let ToolCall {
@@ -340,15 +372,19 @@ fn write_file(call: &ToolCall<'_>) -> Result<Value> {
     if path.exists() && !path.is_file() {
         bail!("Not a regular file");
     }
-    let before = if path.exists() {
+    let existed = path.exists();
+    let before = if existed {
         read_text(&path, 131072)?
     } else {
         String::new()
     };
-    fs::write(&path, content)?;
-    Ok(
-        json!({"written":args["path"],"bytes":content.len(),"diff":unified_diff(args["path"].as_str().unwrap(),&before,content)}),
-    )
+    write_verified(&path, content)?;
+    Ok(json!({
+        "written": args["path"],
+        "bytes": content.len(),
+        "diff": unified_diff(args["path"].as_str().unwrap(), &before, content),
+        CHECKPOINT_KEY: checkpoint(&path, existed.then_some(before.as_str()), content),
+    }))
 }
 fn agentgrep(call: &ToolCall<'_>) -> Result<Value> {
     crate::code_search::search(call.root, call.args, call.excluded)

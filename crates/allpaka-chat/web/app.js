@@ -2632,7 +2632,7 @@ function render(s) {
   renderBackgroundLauncher(s);renderBackground(s);
   if(traceSession!==s.id){traceSession=s.id;$('trace-results').replaceChildren();}
 
-  $('compact').disabled=s.status==='running'||s.folder&&s.folder!=='active';$('compact-summary').textContent=s.compaction?.summary||'Контекст ещё не сжат.';
+  $('compact').disabled=s.status==='running'||s.folder&&s.folder!=='active';{const last=(s.file_checkpoints||[]).at(-1);$('undo-file').disabled=!last||s.status==='running';$('undo-file').title=last?`Вернуть ${last.path} к состоянию до правки (${last.tool}); откажет, если файл меняли после`:'Правок агента для отмены нет';}$('compact-summary').textContent=s.compaction?.summary||'Контекст ещё не сжат.';
   current=s;$('title').textContent=s.title;renderStatus(s.status);
   $('branch-origin').hidden=!s.parent;
   if(s.parent){const origin=node('button','← Исходный разговор');origin.onclick=()=>openChat(s.parent.session_id).catch(fail);$('branch-origin').replaceChildren(origin,node('span','Независимая ветка · файлы проекта общие'));}
@@ -3104,6 +3104,7 @@ $('swarm-synth-provider').onchange=savePrefs;
 $('swarm-synth-model').oninput=savePrefs;
 $('new-chat').onclick=resetChat;$('search').oninput=()=>listChats().catch(fail);$('history-folder').onchange=()=>listChats().catch(fail);$('history-sort').onchange=()=>listChats().catch(fail);$('history-bookmarked').onchange=()=>listChats().catch(fail);
 $('compact').onclick=()=>control('compact').catch(fail);
+$('undo-file').onclick=async()=>{try{const r=await api(`sessions/${active}/actions`,{kind:'undo',text:''});notify(`${r.path}: ${r.restored==='removed'?'файл удалён':'восстановлено прежнее содержимое'}`);await poll();}catch(e){fail(e);}};
 $('send').onclick=()=>control('send').catch(fail);$('send-now').onclick=()=>control('send_now').catch(fail);$('steer').onclick=()=>control('steer').catch(fail);$('stop').onclick=()=>control('stop').catch(fail);$('resume').onclick=()=>control('resume').catch(fail);
 $('prompt').onkeydown=e=>{
   if(!$('command-menu').hidden){
