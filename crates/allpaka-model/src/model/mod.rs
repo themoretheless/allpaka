@@ -16,6 +16,7 @@ pub(crate) mod gdn;
 pub(crate) mod loader;
 pub(crate) mod moe;
 pub(crate) mod mtp;
+pub(crate) mod multi;
 pub(crate) mod prefill;
 pub(crate) mod session;
 
