@@ -1,4 +1,4 @@
-# serve: two long requests taking turns, Qwen2.5-7B, 2026-11-14
+# serve: long requests taking turns, Qwen2.5-7B, 2026-11-14
 
 `scripts/bench-two-long.py --addr 127.0.0.1:8099` (about 4 000 prompt tokens
 and 512 new tokens each; B starts once A streams), RTX 5090, Q4_K_M.
@@ -11,8 +11,19 @@ and 512 new tokens each; B starts once A streams), RTX 5090, Q4_K_M.
 - B no longer waits for all of A (about 4.9 s): its first token comes after
   its own prefill, 735 ms, while A keeps decoding.
 - While they overlap each streams a token every 8.1 ms: the two take turns, one
-  step each. A short chat alone streams at 3.5 ms per token, so two decoders at
-  8.1 ms is some 15% under back-to-back throughput — the cost of switching
-  sessions every token plus the longer context; no batching yet.
+  step each.
+
+More at once (`--count N`, same server, same sizes):
+
+| requests | median gap each | later first tokens |
+|---|---|---|
+| 1 | 3.96 ms | — |
+| 3 | 12.24 ms | 769, 789 ms |
+| 4 | 16.19 ms | 735, 829, 781 ms |
+| 5 | 16.19 ms for four; the fifth 4.0 ms | the fifth 8 699 ms (queued: at most four take turns) |
+
+N generations at N × 4.0–4.1 ms per token each: switching sessions every token
+costs 2–3% against running them back to back. There is no batching yet, so
+the total rate stays at that of a single request.
 - `bench-concurrent-latency.py` (9 000-token heavy request, 1 024 new tokens):
   the chat's first token is 143–151 ms in both scenarios, largest gap 5–9 ms.

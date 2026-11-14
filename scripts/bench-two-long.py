@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two long chat requests at once: does the second wait for all of the first?
+"""Long chat requests at once: does a later one wait for all of the earlier?
 
     scripts/bench-two-long.py --addr 127.0.0.1:8080 [--prompt-tokens 4000]
         [--new-tokens 512] [--json out.json]
@@ -48,18 +48,21 @@ def main():
     p.add_argument('--addr', default='127.0.0.1:8080')
     p.add_argument('--prompt-tokens', type=int, default=4000)
     p.add_argument('--new-tokens', type=int, default=512)
+    p.add_argument('--count', type=int, default=2, help='requests; each starts once the previous streams')
     p.add_argument('--json')
     a = p.parse_args()
     out = {}
-    a_started, b_started = threading.Event(), threading.Event()
-    ta = threading.Thread(target=stream, args=(a.addr, a.prompt_tokens, a.new_tokens, 'a', a_started, out))
-    tb = threading.Thread(target=stream, args=(a.addr, a.prompt_tokens, a.new_tokens, 'b', b_started, out))
-    ta.start()
-    a_started.wait(timeout=600)
-    tb.start()
-    ta.join()
-    tb.join()
-    for tag in 'ab':
+    tags = 'abcdefgh'[:a.count]
+    threads = []
+    for tag in tags:
+        started = threading.Event()
+        t = threading.Thread(target=stream, args=(a.addr, a.prompt_tokens, a.new_tokens, tag, started, out))
+        t.start()
+        threads.append(t)
+        started.wait(timeout=600)
+    for t in threads:
+        t.join()
+    for tag in tags:
         r = out[tag]
         print(f"{tag}: first token {r['first_token_ms']} ms, median gap {r['median_gap_ms']} ms, "
               f"{r['deltas']} deltas, total {r['total_ms']} ms")

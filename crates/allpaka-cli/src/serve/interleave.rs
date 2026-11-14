@@ -1,4 +1,4 @@
-//! Two long generations taking turns, one step each.
+//! Long generations taking turns, one step each.
 //!
 //! A short request waiting behind a long one is served in between
 //! (`preemptible`). Two long ones cannot be: whichever ran second would wait
@@ -51,11 +51,23 @@ impl Gate {
     }
 }
 
-/// The gate shared with the running worker, if one runs.
-static ACTIVE: StdMutex<Option<Arc<Gate>>> = StdMutex::new(None);
+/// Generations taking turns at most, the dispatcher's own included: each one
+/// more stretches every other's token gap by one step.
+pub(super) const MAX_TURNS: usize = 4;
+
+/// The gate shared with the running workers, and how many run.
+static ACTIVE: StdMutex<Option<(Arc<Gate>, usize)>> = StdMutex::new(None);
 
 pub(super) fn active() -> Option<Arc<Gate>> {
-    ACTIVE.lock().unwrap().clone()
+    ACTIVE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|(gate, _)| Arc::clone(gate))
+}
+
+fn workers() -> usize {
+    ACTIVE.lock().unwrap().as_ref().map_or(0, |(_, n)| *n)
 }
 
 /// What a worker needs to run a generation on its own: the model shared, and
@@ -71,7 +83,7 @@ pub(super) struct Shared {
 
 /// Whether a waiting request should run alongside the current one: a chat
 /// completion for the same model, without a named session, while no worker
-/// runs. (One much shorter than the running request is served in between
+/// fewer than `MAX_TURNS` generations take turns. (One much shorter than the running request is served in between
 /// instead; see `preemptible`.)
 pub(super) fn eligible(requested: &str, shared: &Shared, connection: &QueuedConnection) -> bool {
     matches!(
@@ -79,15 +91,20 @@ pub(super) fn eligible(requested: &str, shared: &Shared, connection: &QueuedConn
         Some(Route::ChatCompletions)
     ) && requested == shared.name
         && connection.request.get("session_id").is_none()
-        && active().is_none()
+        && workers() + 1 < MAX_TURNS
 }
 
 /// Start `connection` on a worker that takes turns with the caller, and return
-/// the gate; the caller holds the first turn and must `pass` after each step
-/// and `leave` when its own generation ends.
+/// the gate. A new gate's first turn is the caller's; on a gate already in
+/// use the caller holds a turn by now. Either way the caller must `pass` after
+/// each step and `leave` when its own generation ends.
 pub(super) fn spawn(shared: Shared, connection: QueuedConnection) -> Arc<Gate> {
-    let gate = Arc::new(Gate::held());
-    *ACTIVE.lock().unwrap() = Some(Arc::clone(&gate));
+    let gate = {
+        let mut active = ACTIVE.lock().unwrap();
+        let (gate, workers) = active.get_or_insert_with(|| (Arc::new(Gate::held()), 0));
+        *workers += 1;
+        Arc::clone(gate)
+    };
     let worker_gate = Arc::clone(&gate);
     std::thread::spawn(move || {
         worker_gate.enter();
@@ -121,11 +138,14 @@ pub(super) fn spawn(shared: Shared, connection: QueuedConnection) -> Arc<Gate> {
     gate
 }
 
-/// The worker is done: stop gating, then give up its turn.
+/// The worker is done: the last one stops gating; then give up its turn.
 fn finish(gate: &Arc<Gate>) {
     let mut active = ACTIVE.lock().unwrap();
-    if active.as_ref().is_some_and(|g| Arc::ptr_eq(g, gate)) {
-        *active = None;
+    if let Some((_, workers)) = active.as_mut().filter(|(g, _)| Arc::ptr_eq(g, gate)) {
+        *workers -= 1;
+        if *workers == 0 {
+            *active = None;
+        }
     }
     drop(active);
     gate.leave();
