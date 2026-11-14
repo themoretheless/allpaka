@@ -10,6 +10,7 @@ mod credentials;
 mod data_lock;
 mod evaluation;
 mod experiments;
+mod extract;
 mod feedback;
 mod files;
 mod guardrail_policies;

@@ -328,6 +328,9 @@ pub(crate) fn routes(app: App) -> Router {
         .route("/api/files/list", post(files::list))
         .route("/api/files/search", post(files::search))
         .route("/api/files/read", post(files::read))
+        .route("/api/extract/upload", post(extract::upload))
+        .route("/api/extract/url", post(extract::url))
+        .route("/api/extract/:id", get(extract::get))
         .route(
             "/api/harness",
             get(harness::get_api).post(harness::save_api),
