@@ -6,6 +6,11 @@ use super::*;
 pub struct SharedRegion {
     pub(super) buf: CudaSlice<u8>,
     pub(crate) len: usize,
+    /// Distinct for every device buffer this process ever wrapped. State
+    /// derived from a region (a captured decode graph, cached KV offsets) is
+    /// keyed by this, never by where the struct lives: a session that is
+    /// replaced in place gets a new buffer at the old address.
+    pub(crate) id: u64,
     #[allow(dead_code)]
     pub(super) host: usize,
 }
@@ -61,9 +66,11 @@ pub fn wrap_region(region: &[u8]) -> Option<SharedRegion> {
     with_gpu(|gpu| {
         let mut buf = unsafe { gpu.stream.alloc::<u8>(region.len()) }.ok()?;
         gpu.stream.memcpy_htod(region, &mut buf).ok()?;
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Some(SharedRegion {
             buf,
             len: region.len(),
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             host: region.as_ptr() as usize,
         })
     })

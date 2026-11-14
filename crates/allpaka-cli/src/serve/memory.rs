@@ -28,7 +28,10 @@ pub(super) fn session_bytes(
     let c = &model.config;
     let layers = u128::from(c.n_layers);
     let page = |bytes: u128| bytes.div_ceil(16384) * 16384;
-    let kv = page(layers * c.kv_dim() as u128 * capacity as u128 * 4);
+    // Keys and values for every layer, plus the zero tail a decode attention
+    // slot may read past the last layer.
+    let tail = allpaka_model::kv::slot_tail_rows(capacity) as u128;
+    let kv = page((layers * capacity as u128 * 2 + tail) * c.kv_dim() as u128 * 2);
     let ssm = c.ssm.as_ref().map_or(0, |s| {
         let channels = u128::from(s.d_inner) + 2 * u128::from(s.n_group) * u128::from(s.d_state);
         let conv = u128::from(s.d_conv.saturating_sub(1)) * channels;

@@ -90,6 +90,11 @@ extern "C" int allpaka_fp8_gemm_q(
 
 extern "C" int allpaka_fa_launch_direct(void * fa_tensor_v);
 
+// Largest decode attention slot, in KV positions. Slots are powers of two, so
+// this is also the longest context the direct flash-attention path serves;
+// past it the caller falls back to a path that is orders of magnitude slower.
+static const int32_t ALLPAKA_FA_MAX_KV = 1 << 17;
+
 namespace {
 
 std::mutex g_mu;
@@ -822,7 +827,7 @@ extern "C" int allpaka_ggml_flash_attn(
         while (n_kv < need) {
             n_kv *= 2;
         }
-        if (n_kv > 8192) {
+        if (n_kv > ALLPAKA_FA_MAX_KV) {
             return -6;
         }
     } else {
@@ -989,7 +994,7 @@ extern "C" int allpaka_hybrid_replay(
     while (n_kv < need) {
         n_kv *= 2;
     }
-    if (n_kv > 8192) {
+    if (n_kv > ALLPAKA_FA_MAX_KV) {
         return -6;
     }
     FaKey key{head_dim, n_q_heads, n_kv_heads, 1, n_kv, kv_dim, scale_bits};

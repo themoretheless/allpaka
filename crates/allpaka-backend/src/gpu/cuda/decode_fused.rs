@@ -118,10 +118,12 @@ impl FusedPlan {
             while fa_bucket < need {
                 fa_bucket *= 2;
             }
-            let cache_id = req.cache as *const SharedRegion as usize as u64;
-            let ssm_id = req
-                .ssm
-                .map_or(0u64, |s| s as *const SharedRegion as usize as u64);
+            // The buffers themselves, not the structs that hold them: a
+            // session rebuilt in place (a longer prompt needs a larger cache)
+            // sits at the same address with new device memory and new layer
+            // offsets, and must not replay what was captured for the old one.
+            let cache_id = req.cache.id;
+            let ssm_id = req.ssm.map_or(0u64, |s| s.id);
             let w0_id = req
                 .layers
                 .first()

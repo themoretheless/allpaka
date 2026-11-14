@@ -483,6 +483,26 @@ pub struct KvCache {
     shared: Option<allpaka_backend::gpu::SharedRegion>,
 }
 
+/// The largest floor a decode attention slot may be given
+/// (`ALLPAKA_FA_KV_FLOOR`); a slot is a power of two no smaller than this.
+const FA_SLOT_FLOOR_MAX: usize = 8192;
+
+/// Rows of zeroes kept after the last layer's values.
+///
+/// The CUDA decode attention reads K and V through a slot whose length is a
+/// power of two at least as large as the context, not the context itself, and
+/// masks the rows past the current position. For every layer but the last
+/// those rows are the next layer's (finite) rows; for the last layer's values
+/// they would lie past the end of the cache, where the memory is not ours and
+/// a stray Inf or NaN turns a masked row's zero weight into NaN. The tail
+/// makes every slot the cache can be asked for land inside it, on zeroes.
+pub fn slot_tail_rows(capacity: usize) -> usize {
+    capacity
+        .next_power_of_two()
+        .max(FA_SLOT_FLOOR_MAX)
+        .saturating_sub(capacity)
+}
+
 impl KvCache {
     pub fn new(n_layers: usize, kv_dim: usize, capacity: usize) -> Self {
         let active = vec![true; n_layers];
@@ -503,7 +523,7 @@ impl KvCache {
         let n_slots = n_active.max(1);
         let layer_stride = kv_dim * capacity;
         let half = n_slots * layer_stride;
-        let store = Region::zeroed(half * 2);
+        let store = Region::zeroed(half * 2 + slot_tail_rows(capacity) * kv_dim);
         let shared = allpaka_backend::gpu::wrap_region(store.as_bytes());
         Self {
             store,
@@ -774,6 +794,29 @@ impl KvCache {
 
 #[cfg(test)]
 mod tests {
+    /// Whatever slot the decode attention is given, the last layer's values
+    /// still end inside the cache, on zeroes.
+    #[test]
+    fn every_attention_slot_ends_inside_the_cache() {
+        let (layers, kv_dim) = (3usize, 8usize);
+        for capacity in [1usize, 132, 300, 5000, 8192, 9000, 16472] {
+            let cache = super::KvCache::new(layers, kv_dim, capacity);
+            let (_, v_off) = cache.layer_offsets(layers - 1);
+            // The slot for the last position, with the largest allowed floor.
+            let slot = capacity.next_power_of_two().max(8192);
+            let end = v_off + slot * kv_dim;
+            let store = cache.store.as_slice();
+            assert!(
+                end <= store.len(),
+                "capacity {capacity}: {end} > {}",
+                store.len()
+            );
+            let tail = &store[v_off + capacity * kv_dim..end];
+            assert!(tail.iter().all(|&bits| bits == 0), "capacity {capacity}");
+            assert_eq!(super::slot_tail_rows(capacity), slot - capacity);
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -812,9 +855,12 @@ mod tests {
         let ssm_mask = [true, true, true, false, true, true, true, false];
         let kv_full = KvCache::new(8, 256, 64);
         let mut kv_compact = KvCache::with_active_layers(&kv_mask, 256, 64);
+        // Two of eight layers hold KV: a quarter of the rows, plus the same
+        // slot tail either way.
+        let tail = slot_tail_rows(64) * 256;
         assert_eq!(
-            kv_compact.store.as_slice().len() * 4,
-            kv_full.store.as_slice().len()
+            (kv_compact.store.as_slice().len() - tail) * 4,
+            kv_full.store.as_slice().len() - tail
         );
         assert_eq!(kv_compact.slot_of(3), 0);
         assert_eq!(kv_compact.slot_of(7), 1);
