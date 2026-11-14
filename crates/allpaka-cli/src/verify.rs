@@ -88,6 +88,11 @@ fn reference_top(addr: &str, tokens: &[u32], n: usize) -> Result<Vec<(u32, f64)>
             "n_probs": n,
             "temperature": 0.0,
             "post_sampling_probs": false,
+            // The server reuses its cached prefix by default, so each step
+            // evaluates only the new token (its decode path);
+            // ALLPAKA_VERIFY_NO_CACHE=1 recomputes the whole context as one
+            // batch (its prefill path).
+            "cache_prompt": std::env::var_os("ALLPAKA_VERIFY_NO_CACHE").is_none(),
         }),
     )?;
     // The shape has drifted across llama.cpp versions; walk the tree and
@@ -132,6 +137,20 @@ fn log_partition_and_argmax(logits: &[f32]) -> (f64, usize) {
 fn log_softmax(logits: &[f32]) -> Vec<f64> {
     let (log_z, _) = log_partition_and_argmax(logits);
     logits.iter().map(|&v| v as f64 - log_z).collect()
+}
+
+/// The decode-step tolerance. Dense models deeper than 32 layers get 0.9:
+/// on Qwen3-32B llama.cpp's own decode and batch paths (same GPU, same
+/// weights) disagree by up to 0.87 at a position, and allpaka's GPU path sits
+/// inside that spread on three prompts
+/// (docs/benchmarks/2026-11-14-verify-qwen3-32b-gpu-rtx5090.md). Otherwise
+/// 1.6x the single-position tolerance.
+fn decode_tolerance(config: &allpaka_model::config::Config, tolerance: f64, explicit: bool) -> f64 {
+    if !explicit && config.moe.is_none() && config.n_layers > 32 {
+        0.9
+    } else {
+        tolerance * 1.6
+    }
 }
 
 pub fn run(
@@ -189,10 +208,14 @@ pub fn run(
     // CPU and CUDA builds differ by up to 0.24 on the default prompt, where
     // Qwen2.5-7B (28 layers) stays within 0.15
     // (docs/benchmarks/matrix-cuda-rtx5090.md).
+    let explicit = tolerance.is_some();
     let tolerance = tolerance.unwrap_or(if model.config.moe.is_some() {
         0.5
     } else if model.config.n_layers > 32 {
-        0.3
+        // llama.cpp's own batch and token-by-token passes over a prompt
+        // differ by up to 0.32 on Qwen3-32B
+        // (docs/benchmarks/2026-11-14-verify-qwen3-32b-gpu-rtx5090.md).
+        0.4
     } else {
         0.15
     });
@@ -256,7 +279,7 @@ pub fn run(
     // 0.73 on exactly the steps where we read 0.70 - the spikes belong to
     // the positions (MoE re-routing on near-ties), not the implementation.
     // 1.6x the single-position tolerance covers that with the same margin.
-    let decode_tolerance = tolerance * 1.6;
+    let decode_tolerance = decode_tolerance(&model.config, tolerance, explicit);
     let mut context = tokens.clone();
     let mut logits = logits;
     let mut worst = 0f64;
@@ -377,14 +400,18 @@ pub fn replay(model_path: &Path, file: &Path, tolerance: Option<f64>) -> Result<
         .collect::<Result<_>>()?;
     let file_model = allpaka_gguf::GgufFile::open(model_path)?;
     let model = allpaka_model::Model::load(&file_model)?;
+    let explicit = tolerance.is_some();
     let tolerance = tolerance.unwrap_or(if model.config.moe.is_some() {
         0.5
     } else if model.config.n_layers > 32 {
-        0.3
+        // llama.cpp's own batch and token-by-token passes over a prompt
+        // differ by up to 0.32 on Qwen3-32B
+        // (docs/benchmarks/2026-11-14-verify-qwen3-32b-gpu-rtx5090.md).
+        0.4
     } else {
         0.15
     });
-    let decode_tolerance = tolerance * 1.6;
+    let decode_tolerance = decode_tolerance(&model.config, tolerance, explicit);
     println!(
         "replaying {} positions of {} on {}",
         steps.len(),
@@ -396,7 +423,17 @@ pub fn replay(model_path: &Path, file: &Path, tolerance: Option<f64>) -> Result<
         }
     );
     let mut session = model.new_session(tokens.len() + steps.len() + 1);
-    let mut logits = model.forward_batch(&tokens, &mut session)?;
+    // ALLPAKA_VERIFY_STEP_PROMPT=1 feeds the prompt one token at a time (the
+    // decode path) instead of as one batch.
+    let mut logits = if std::env::var_os("ALLPAKA_VERIFY_STEP_PROMPT").is_some() {
+        let mut last = Vec::new();
+        for &t in &tokens {
+            last = model.forward(t, &mut session)?;
+        }
+        last
+    } else {
+        model.forward_batch(&tokens, &mut session)?
+    };
     let mut worst = (0f64, 0f64);
     for (step, theirs) in steps.iter().enumerate() {
         let (log_z, ours) = log_partition_and_argmax(&logits);

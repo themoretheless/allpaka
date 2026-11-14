@@ -326,7 +326,7 @@ enum Command {
         #[arg(long, default_value_t = 6)]
         decode: usize,
         /// Maximum acceptable |log-prob| difference. Defaults to 0.15 for a
-        /// dense model of up to 32 layers, 0.3 for a deeper one and 0.5 for a
+        /// dense model of up to 32 layers, 0.4 for a deeper one (0.9 per decode step) and 0.5 for a
         /// MoE: llama.cpp's own backends disagree by up to 0.24 on Qwen3-32B
         /// and 0.45 on Qwen3-30B-A3B, so a tighter default would fail a
         /// correct engine.

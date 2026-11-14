@@ -60,3 +60,26 @@ falls on and that token's reference log-prob):
   CUDA builds differ by 0.54 near this point (`docs/roadmap.md`, P8 history).
 - With the default deep-dense decode tolerance (0.48) the replay fails at
   step 3; with 0.85 it passes. Not changing the default on one prompt.
+
+## llama.cpp against itself, and the tolerance
+
+llama-server reuses its cached prefix, so each recorded step is llama.cpp's
+own decode path; with `ALLPAKA_VERIFY_NO_CACHE=1` the record recomputes the
+whole context as one batch instead. On the same GPU and weights the two
+llama.cpp paths disagree, and allpaka's GPU path sits inside that spread on
+three prompts (33 positions each, argmax agreeing everywhere):
+
+| prompt | llama.cpp decode vs batch (max / median) | allpaka GPU vs llama.cpp decode (max / median) |
+|---|---|---|
+| "The capital of France is" | 0.866 / 0.277 | 0.850 / 0.164 |
+| "def fibonacci(n):" | 0.375 / 0.173 | 0.395 / 0.101 |
+| "Photosynthesis is the process by which" | 0.292 / 0.196 | 0.375 / 0.140 |
+
+At the end of the prose prompt llama.cpp's batch and token-by-token passes
+differ by 0.32 (the code prompt: 0.06); allpaka's batch prefill there reads
+0.375 against llama.cpp's batch, 0.287 when fed token by token.
+
+So `verify` now defaults, for dense models deeper than 32 layers, to 0.4 at
+the prefill position and 0.9 per decode step; all three recorded references
+(`2026-11-14-verify-reference-qwen3-32b*.json`) pass `verify --replay` with
+the defaults.
