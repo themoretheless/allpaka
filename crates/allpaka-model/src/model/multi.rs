@@ -31,7 +31,9 @@ impl Model<'_> {
     /// only (the gated-delta-net recurrence keeps one state per session and
     /// is not batched here).
     pub fn supports_multi(&self) -> bool {
-        self.layer_start == 0 && self.layers.iter().all(|l| l.mixer.gdn().is_none())
+        self.layer_start == 0
+            && self.config.gemma.is_none()
+            && self.layers.iter().all(|l| l.mixer.gdn().is_none())
     }
 
     /// Consume `tokens[i]` in `sessions[i]` for every i, as one batched step;
@@ -88,6 +90,7 @@ impl Model<'_> {
                 let rope = s.rope_cache[pos * pairs..(pos + 1) * pairs].to_vec();
                 let projected = self.run_cpu_attention_from_qkv(
                     AttnLayer {
+                        window: None,
                         aw,
                         q_norm: layer.q_norm.as_deref(),
                         k_norm: layer.k_norm.as_deref(),

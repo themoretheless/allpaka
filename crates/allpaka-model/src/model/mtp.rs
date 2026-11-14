@@ -83,6 +83,7 @@ impl<'a> Model<'a> {
         let li = c.n_layers as usize;
         let projected = self.run_cpu_attention_from_qkv(
             AttnLayer {
+                window: None,
                 aw,
                 q_norm: m.q_norm.as_deref(),
                 k_norm: m.k_norm.as_deref(),

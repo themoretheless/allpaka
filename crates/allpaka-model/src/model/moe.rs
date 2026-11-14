@@ -68,6 +68,9 @@ pub(crate) enum Ffn<'a> {
         w_gate: QuantMat<'a>,
         w_up: QuantMat<'a>,
         w_down: QuantMat<'a>,
+        /// GeGLU with tanh GELU (Gemma) instead of SwiGLU. The fused GPU FFN
+        /// kernels implement SwiGLU only, so this path stays on matmuls.
+        gelu: bool,
     },
     /// The stacked-expert tensors of a MoE layer. Expert `e` is a
     /// `slice_rows` band of each stack; nothing is copied per token.
@@ -106,14 +109,22 @@ impl Ffn<'_> {
                 w_gate,
                 w_up,
                 w_down,
+                gelu,
             } => {
                 // One command buffer for the whole FFN when the GPU takes it.
-                if let Some(mut outs) = QuantMat::ffn_many(&[(w_gate, w_up, w_down, hs)]) {
-                    return Ok(outs.pop().expect("one fused item"));
+                if !*gelu {
+                    if let Some(mut outs) = QuantMat::ffn_many(&[(w_gate, w_up, w_down, hs)]) {
+                        return Ok(outs.pop().expect("one fused item"));
+                    }
                 }
-                let mut gate = w_gate.matmul(hs, m)?;
-                let up = w_up.matmul(hs, m)?;
-                ops::swiglu(&mut gate, &up);
+                let mut gu = QuantMat::matmul_many(&[(w_gate, hs), (w_up, hs)])?;
+                let up = gu.pop().expect("up");
+                let mut gate = gu.pop().expect("gate");
+                if *gelu {
+                    ops::geglu_tanh(&mut gate, &up);
+                } else {
+                    ops::swiglu(&mut gate, &up);
+                }
                 w_down.matmul(&gate, m)
             }
             Ffn::Moe { .. } => {
@@ -405,19 +416,7 @@ impl Ffn<'_> {
     /// stream out.
     pub(crate) fn forward(&self, h: &[f32]) -> Result<Vec<f32>> {
         match self {
-            Ffn::Dense {
-                w_gate,
-                w_up,
-                w_down,
-            } => {
-                if let Some(mut outs) = QuantMat::ffn_many(&[(w_gate, w_up, w_down, h)]) {
-                    return Ok(outs.pop().expect("one fused item"));
-                }
-                let mut gate = w_gate.matmul(h, 1)?;
-                let up = w_up.matmul(h, 1)?;
-                ops::swiglu(&mut gate, &up);
-                w_down.matmul(&gate, 1)
-            }
+            Ffn::Dense { .. } => self.forward_batch(h, 1, h.len()),
             Ffn::Moe {
                 router,
                 router_bias,

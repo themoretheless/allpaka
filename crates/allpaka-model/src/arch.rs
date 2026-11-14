@@ -17,6 +17,7 @@ pub enum Architecture {
     Glm4Moe,
     DeepSeek2,
     DeepSeek3,
+    Gemma3,
     Gemma4,
     /// Any tag this engine does not know; kept verbatim.
     Other(String),
@@ -36,6 +37,7 @@ impl Architecture {
             "glm4moe" | "glm4_moe" | "glm_moe" => Architecture::Glm4Moe,
             "deepseek2" | "deepseek" | "deepseek_mla" => Architecture::DeepSeek2,
             "deepseek3" => Architecture::DeepSeek3,
+            "gemma3" => Architecture::Gemma3,
             "gemma4" => Architecture::Gemma4,
             _ => Architecture::Other(tag.to_string()),
         }
@@ -53,6 +55,7 @@ impl Architecture {
             Architecture::Glm4Moe => "glm4moe",
             Architecture::DeepSeek2 => "deepseek2",
             Architecture::DeepSeek3 => "deepseek3",
+            Architecture::Gemma3 => "gemma3",
             Architecture::Gemma4 => "gemma4",
             Architecture::Other(tag) => tag,
         }
@@ -99,6 +102,7 @@ mod tests {
             ("llama3", "llama"),
             ("glm_moe", "glm4moe"),
             ("deepseek_mla", "deepseek2"),
+            ("gemma3", "gemma3"),
             ("gemma4", "gemma4"),
         ] {
             assert_eq!(Architecture::parse(tag).as_str(), want, "{tag}");

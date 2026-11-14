@@ -104,10 +104,24 @@ impl<'a> Model<'a> {
         for (i, &t) in tokens.iter().enumerate() {
             embd.row_into(t as usize, &mut xs[i * hidden..(i + 1) * hidden])?;
         }
+        if self.embed_scale != 1.0 {
+            xs.iter_mut().for_each(|v| *v *= self.embed_scale);
+        }
         s.ensure_rope_cache(&self.rope_inv_freq, base + m);
-        let prefill_fused_ok = matches!(c.rope_style, RopeStyle::Neox)
+        // Gemma 3's local layers rotate with their own base.
+        let rope_swa: Vec<[f32; 2]> = (base..base + m)
+            .flat_map(|pos| {
+                self.rope_inv_freq_swa
+                    .iter()
+                    .map(move |&freq| (pos as f32 * freq).sin_cos().into())
+            })
+            .collect();
+        // Gemma 3 (sandwich norms, GeGLU, sliding window) is not in the fused
+        // kernels; it takes the step-by-step batch path below.
+        let attn_block_ok = matches!(c.rope_style, RopeStyle::Neox)
             && !cpu_attn_enabled()
             && !no_tokenbuf_enabled();
+        let prefill_fused_ok = c.gemma.is_none() && attn_block_ok;
         drop(embed_span);
 
         // The fully fused prefill: xs lives on the GPU for the whole chunk,
@@ -163,13 +177,18 @@ impl<'a> Model<'a> {
                 continue;
             }
             let aw = layer.mixer.attn().expect("attention layer without weights");
-            let rope_flat =
-                &s.rope_cache[base * s.rope_cache_pairs..(base + m) * s.rope_cache_pairs];
+            let rope_flat = if layer.window.is_some() {
+                rope_swa.as_slice()
+            } else {
+                &s.rope_cache[base * s.rope_cache_pairs..(base + m) * s.rope_cache_pairs]
+            };
             // The whole attention half - qkv, per-row norm+rope, cache
             // store, causal attention, output projection - as one command
             // buffer, mirroring the decode token buffer. Declines fall to
-            // the step-by-step path below.
-            if prefill_fused_ok {
+            // the step-by-step path below. It has no sliding window, so a
+            // Gemma local layer takes it only while the window covers the
+            // whole chunk; the sandwich norms run on the host after it.
+            if attn_block_ok && layer.window.is_none_or(|w| base + m <= w) {
                 let fused = {
                     let _s = profile::span(profile::Phase::Attend);
                     let scale = 1.0 / (head_dim as f32).sqrt();
@@ -203,7 +222,12 @@ impl<'a> Model<'a> {
                         )
                     })
                 };
-                if let Some(projected) = fused {
+                if let Some(mut projected) = fused {
+                    if let Some(w) = &layer.post_attn_norm {
+                        projected
+                            .chunks_mut(hidden)
+                            .for_each(|row| ops::rmsnorm(row, w, c.rms_eps));
+                    }
                     {
                         let _s = profile::span(profile::Phase::AttnOut);
                         ops::add_assign_par(&mut xs, &projected);
@@ -213,7 +237,11 @@ impl<'a> Model<'a> {
                         ops::rmsnorm_rows_into(&mut hs_scratch, &xs, &layer.ffn_norm, c.rms_eps);
                         &hs_scratch
                     };
-                    let down = layer.ffn.forward_batch(hs, m, hidden)?;
+                    let mut down = layer.ffn.forward_batch(hs, m, hidden)?;
+                    if let Some(w) = &layer.post_ffn_norm {
+                        down.chunks_mut(hidden)
+                            .for_each(|row| ops::rmsnorm(row, w, c.rms_eps));
+                    }
                     {
                         let _s = profile::span(profile::Phase::FfnCombine);
                         ops::add_assign_par(&mut xs, &down);
@@ -235,6 +263,7 @@ impl<'a> Model<'a> {
 
             let mut projected = self.run_cpu_attention_from_qkv(
                 AttnLayer {
+                    window: layer.window,
                     aw,
                     q_norm: layer.q_norm.as_deref(),
                     k_norm: layer.k_norm.as_deref(),
@@ -257,6 +286,11 @@ impl<'a> Model<'a> {
             if attn_zero_enabled() {
                 projected.iter_mut().for_each(|v| *v = 0.0);
             }
+            if let Some(w) = &layer.post_attn_norm {
+                projected
+                    .chunks_mut(hidden)
+                    .for_each(|row| ops::rmsnorm(row, w, c.rms_eps));
+            }
             trace("attn_output", li, &projected[..hidden]);
             ops::add_assign_slice(&mut xs, &projected);
             trace("attn_residual", li, &xs[..hidden]);
@@ -268,11 +302,15 @@ impl<'a> Model<'a> {
                 trace("attn_post_norm", li, &hs_scratch[..hidden]);
                 &hs_scratch
             };
-            let down = if moe_zero_enabled() {
+            let mut down = if moe_zero_enabled() {
                 vec![0f32; m * hidden]
             } else {
                 layer.ffn.forward_batch(hs, m, hidden)?
             };
+            if let Some(w) = &layer.post_ffn_norm {
+                down.chunks_mut(hidden)
+                    .for_each(|row| ops::rmsnorm(row, w, c.rms_eps));
+            }
             trace("ffn_out", li, &down[..hidden]);
             {
                 let _s = profile::span(profile::Phase::FfnCombine);

@@ -254,6 +254,7 @@ impl<'a> Model<'a> {
                     w_gate,
                     w_up,
                     w_down,
+                    ..
                 } => TokenFfn::Dense {
                     gate: w_gate.desc(),
                     up: w_up.desc(),
@@ -402,7 +403,11 @@ impl<'a> Model<'a> {
         if token >= self.config.vocab {
             bail!("token {token} out of vocabulary {}", self.config.vocab);
         }
-        self.embedding()?.row(token as usize)
+        let mut row = self.embedding()?.row(token as usize)?;
+        if self.embed_scale != 1.0 {
+            row.iter_mut().for_each(|v| *v *= self.embed_scale);
+        }
+        Ok(row)
     }
 
     /// Execute a contiguous stage. Each stage owns a separate session and
@@ -433,6 +438,12 @@ impl<'a> Model<'a> {
         let mut h = vec![0.0f32; c.hidden as usize];
         s.ensure_rope_cache(&self.rope_inv_freq, pos + 1);
         let cpu_attn = cpu_attn_enabled();
+        // Gemma 3's local layers rotate with their own base: one row, here.
+        let rope_swa: Vec<[f32; 2]> = self
+            .rope_inv_freq_swa
+            .iter()
+            .map(|&freq| (pos as f32 * freq).sin_cos().into())
+            .collect();
 
         for (li, layer) in self
             .layers
@@ -455,8 +466,11 @@ impl<'a> Model<'a> {
                 continue;
             }
             let aw = layer.mixer.attn().expect("attention layer without weights");
-            let rope_pairs =
-                &s.rope_cache[pos * s.rope_cache_pairs..(pos + 1) * s.rope_cache_pairs];
+            let rope_pairs = if layer.window.is_some() {
+                rope_swa.as_slice()
+            } else {
+                &s.rope_cache[pos * s.rope_cache_pairs..(pos + 1) * s.rope_cache_pairs]
+            };
 
             // The whole attention half - qkv, norms, rope, cache store,
             // attention, output projection - as one GPU command buffer. By
@@ -466,6 +480,7 @@ impl<'a> Model<'a> {
             // step-by-step path below.
             if matches!(c.rope_style, RopeStyle::Neox)
                 && !cpu_attn
+                && layer.window.is_none_or(|w| pos < w)
                 && pos < s.kv.capacity()
                 && allpaka_backend::gpu::decode_attention_capacity_safe(s.kv.capacity())
             {
@@ -496,7 +511,10 @@ impl<'a> Model<'a> {
                         )
                     })
                 };
-                if let Some(projected) = blocked {
+                if let Some(mut projected) = blocked {
+                    if let Some(w) = &layer.post_attn_norm {
+                        ops::rmsnorm(&mut projected, w, c.rms_eps);
+                    }
                     ops::add_assign_slice(&mut x, &projected);
                     ffn_residual(layer, &mut x, &mut h, c.rms_eps, false)?;
                     continue;
@@ -521,6 +539,7 @@ impl<'a> Model<'a> {
                     q_norm: layer.q_norm.as_deref(),
                     k_norm: layer.k_norm.as_deref(),
                     bias: layer.bias.as_ref(),
+                    window: layer.window,
                 },
                 AttnInputs {
                     q,
@@ -536,6 +555,9 @@ impl<'a> Model<'a> {
             )?;
             if attn_zero_enabled() {
                 projected.iter_mut().for_each(|v| *v = 0.0);
+            }
+            if let Some(w) = &layer.post_attn_norm {
+                ops::rmsnorm(&mut projected, w, c.rms_eps);
             }
             ops::add_assign_slice(&mut x, &projected);
 
@@ -717,11 +739,14 @@ fn ffn_residual(
         let _s = profile::span(profile::Phase::FfnNorm);
         ops::rmsnorm_into(h, x, &layer.ffn_norm, eps);
     }
-    let down = if zero_ffn {
+    let mut down = if zero_ffn {
         vec![0f32; h.len()]
     } else {
         layer.ffn.forward(h)?
     };
+    if let Some(w) = &layer.post_ffn_norm {
+        ops::rmsnorm(&mut down, w, eps);
+    }
     let _s = profile::span(profile::Phase::FfnCombine);
     ops::add_assign_slice(x, &down);
     Ok(())
@@ -732,6 +757,12 @@ fn ffn_residual(
 /// regions) are still checked per call in `token_layers`.
 pub(crate) fn token_path_decline(layers: &[super::Layer<'_>]) -> Option<&'static str> {
     for layer in layers {
+        if layer.post_attn_norm.is_some() || layer.window.is_some() {
+            return Some("Gemma sandwich norms / sliding window are not in the token kernels");
+        }
+        if matches!(layer.ffn, Ffn::Dense { gelu: true, .. }) {
+            return Some("GeGLU FFN is not in the token kernels");
+        }
         if layer.attn_norm_raw.is_empty() || layer.ffn_norm_raw.is_empty() {
             return Some("a layer norm is not raw F32");
         }

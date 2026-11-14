@@ -15,6 +15,10 @@ pub(crate) struct AttnLayer<'l, 'a> {
     pub q_norm: Option<&'l [f32]>,
     pub k_norm: Option<&'l [f32]>,
     pub bias: Option<&'l AttnBias<'a>>,
+    /// Sliding-window attention (Gemma 3's local layers): a row at position
+    /// `p` sees only positions `p - window + 1 ..= p`, as llama.cpp's
+    /// `LLAMA_SWA_TYPE_STANDARD` masks. None = full causal attention.
+    pub window: Option<usize>,
 }
 
 /// Projected q/k/v for `m` rows starting at `base_pos`, and their RoPE table.
@@ -84,6 +88,7 @@ impl<'a> Model<'a> {
             q_norm,
             k_norm,
             bias,
+            window,
         } = layer;
         let AttnInputs {
             mut q,
@@ -194,7 +199,11 @@ impl<'a> Model<'a> {
         };
 
         let scale = 1.0 / (head_dim as f32).sqrt();
-        let cpu_only = !allow_gpu_attend || cpu_attn_enabled();
+        // The GPU attend kernels have no window; once a row's window starts
+        // past position 0, attention runs on the CPU.
+        let windowed = window.is_some_and(|w| base_pos + m > w);
+        let cpu_only = !allow_gpu_attend || cpu_attn_enabled() || windowed;
+        let first_seen = |pos: usize| window.map_or(0, |w| (pos + 1).saturating_sub(w));
 
         // Single-token decode path: try fused attend + wo projection on GPU when !gate_in_q.
         if m == 1 && trace_layer.is_none() && !cpu_only && !aw.gate_in_q {
@@ -260,6 +269,7 @@ impl<'a> Model<'a> {
                             c,
                             kv_ref,
                             kv_layer,
+                            first_seen(base_pos),
                             base_pos,
                             &q_ref[kv_head * group_span..(kv_head + 1) * group_span],
                             kv_head,
@@ -280,6 +290,7 @@ impl<'a> Model<'a> {
                                 c,
                                 kv_ref,
                                 kv_layer,
+                                first_seen(base_pos + row),
                                 base_pos + row,
                                 &q_ref[row * q_dim..(row + 1) * q_dim],
                                 out_row,
@@ -314,6 +325,7 @@ pub(crate) fn attend_group(
     c: &Config,
     kv: &KvCache,
     layer: usize,
+    first: usize,
     pos: usize,
     q_group: &[f32],
     kv_head: usize,
@@ -337,7 +349,7 @@ pub(crate) fn attend_group(
         (&mut heap_maxes, &mut heap_denoms)
     };
 
-    for t in 0..=pos {
+    for t in first..=pos {
         let kt = kv.k_at(layer, t, kv_head, head_dim);
         let vt = kv.v_at(layer, t, kv_head, head_dim);
 
@@ -374,10 +386,12 @@ pub(crate) fn attend_group(
 }
 
 /// All heads of one token row attending over the cache: one group pass per kv head.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn attend_one(
     c: &Config,
     kv: &KvCache,
     layer: usize,
+    first: usize,
     pos: usize,
     q_row: &[f32],
     out_row: &mut [f32],
@@ -391,6 +405,7 @@ pub(crate) fn attend_one(
             c,
             kv,
             layer,
+            first,
             pos,
             &q_row[at..at + group * head_dim],
             kv_head,
@@ -485,6 +500,7 @@ mod attention_tests {
             ssm: None,
             has_qk_norm: false,
             moe: None,
+            gemma: None,
             has_attn_bias: false,
             rope_dim: head_dim as u32,
             nextn: false,
@@ -527,7 +543,7 @@ mod attention_tests {
         };
 
         let mut want = vec![0f32; c.q_dim()];
-        attend_one(&c, &kv, 0, pos, &q, &mut want, scale);
+        attend_one(&c, &kv, 0, 0, pos, &q, &mut want, scale);
 
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
             assert!(
@@ -557,6 +573,7 @@ mod attention_tests {
             ssm: None,
             has_qk_norm: false,
             moe: None,
+            gemma: None,
             has_attn_bias: false,
             rope_dim: head_dim as u32,
             nextn: false,
@@ -579,7 +596,7 @@ mod attention_tests {
         let pos = positions - 1;
 
         let mut got = vec![0f32; c.q_dim()];
-        attend_one(&c, &kv, 0, pos, &q, &mut got, scale);
+        attend_one(&c, &kv, 0, 0, pos, &q, &mut got, scale);
 
         let mut want = vec![0f32; c.q_dim()];
         for qi in 0..n_heads as usize {

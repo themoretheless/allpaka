@@ -64,6 +64,31 @@ pub struct MoeConfig {
     pub weights_scale: f32,
 }
 
+/// Gemma 3's departures from the Llama graph, all read from the file:
+/// embeddings scaled by sqrt(hidden), sandwich norms around attention and
+/// the FFN, GeGLU (tanh GELU) instead of SwiGLU, and sliding-window local
+/// layers with their own RoPE base.
+#[derive(Debug, Clone)]
+pub struct GemmaConfig {
+    /// Local layers attend over this many positions (`attention.sliding_window`).
+    pub swa_window: u32,
+    /// Every `swa_pattern`-th layer (index % pattern == pattern - 1) is
+    /// global; the rest are local. llama.cpp's default is 6.
+    pub swa_pattern: u32,
+    /// RoPE base of the local layers (`rope.freq_base_swa`, default 10000,
+    /// no scaling).
+    pub swa_rope_base: f32,
+    /// Linear RoPE scaling of the global layers (`rope.scaling.factor`):
+    /// their frequencies are divided by it.
+    pub rope_scale: f32,
+}
+
+impl GemmaConfig {
+    pub fn is_local(&self, layer: usize) -> bool {
+        self.swa_window > 0 && (layer as u32) % self.swa_pattern < self.swa_pattern - 1
+    }
+}
+
 /// Gated delta net (linear attention) layer parameters, qwen35moe. Layers
 /// with `(index + 1) % full_attention_interval != 0` are GDN; the rest are
 /// full attention.
@@ -115,6 +140,8 @@ pub struct Config {
     /// Present for a mixture of experts; the FFN then routes instead of being
     /// one dense block.
     pub moe: Option<MoeConfig>,
+    /// Present for Gemma 3.
+    pub gemma: Option<GemmaConfig>,
 }
 
 impl Config {
@@ -138,6 +165,10 @@ impl Config {
             A::DeepSeek2 | A::DeepSeek3 => ModelCapability {
                 support: ModelSupport::Unsupported,
                 reason: "MLA KV cache and attention kernels are not implemented",
+            },
+            A::Gemma3 => ModelCapability {
+                support: ModelSupport::Experimental,
+                reason: "GeGLU, sandwich norms, sliding-window attention on the per-layer path",
             },
             A::Gemma4 => ModelCapability {
                 support: ModelSupport::Unsupported,
@@ -270,6 +301,18 @@ impl Config {
                 .any(|i| f.tensor(&format!("blk.{i}.attn_q_norm.weight")).is_some()),
             has_attn_bias: f.tensor("blk.0.attn_q.bias").is_some(),
             rope_dim,
+            gemma: (Architecture::parse(&arch) == Architecture::Gemma3).then(|| GemmaConfig {
+                swa_window: f.meta_u32(&key("attention.sliding_window")).unwrap_or(0),
+                swa_pattern: f
+                    .meta_u32(&key("attention.sliding_window_pattern"))
+                    .unwrap_or(6)
+                    .max(1),
+                swa_rope_base: f.meta_f32(&key("rope.freq_base_swa")).unwrap_or(10000.0),
+                rope_scale: match f.meta_str(&key("rope.scaling.type")) {
+                    Some("linear") => f.meta_f32(&key("rope.scaling.factor")).unwrap_or(1.0),
+                    _ => 1.0,
+                },
+            }),
             architecture: Architecture::parse(&arch),
             n_heads,
             hidden,
@@ -316,6 +359,7 @@ mod capability_tests {
             has_attn_bias: false,
             rope_dim: 8,
             moe: None,
+            gemma: None,
         }
     }
 

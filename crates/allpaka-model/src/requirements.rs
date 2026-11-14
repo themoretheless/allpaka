@@ -9,6 +9,7 @@ pub enum ModelFamily {
     Qwen35Moe,
     Llama3,
     Mistral,
+    Gemma3,
     Glm4Moe,
     DeepSeekMla,
 }
@@ -70,6 +71,16 @@ impl ModelRequirements {
                 vec![
                     Feature::DenseFfn,
                     Feature::GqaAttention,
+                    Feature::StandardKv,
+                ],
+                vec![Feature::PagedKv],
+            ),
+            A::Gemma3 => (
+                ModelFamily::Gemma3,
+                vec![
+                    Feature::DenseFfn,
+                    Feature::GqaAttention,
+                    Feature::QkNorm,
                     Feature::StandardKv,
                 ],
                 vec![Feature::PagedKv],

@@ -52,6 +52,13 @@ pub(crate) struct Layer<'a> {
     pub(crate) k_norm: Option<Vec<f32>>,
     pub(crate) ffn_norm: Vec<f32>,
     pub(crate) ffn: Ffn<'a>,
+    /// Gemma 3's sandwich norms: applied to the attention output and to the
+    /// FFN output before each is added to the residual stream.
+    pub(crate) post_attn_norm: Option<Vec<f32>>,
+    pub(crate) post_ffn_norm: Option<Vec<f32>>,
+    /// Gemma 3 local layer: sliding-window attention over this many
+    /// positions, rotated with `Model::rope_inv_freq_swa`.
+    pub(crate) window: Option<usize>,
 }
 
 pub(crate) enum Mixer<'a> {
@@ -98,6 +105,10 @@ pub struct Model<'a> {
     pub(crate) output: Option<QuantMat<'a>>,
     /// `base^(-2i/d)` per rotary pair, hoisted out of the per-head loops.
     pub(crate) rope_inv_freq: Vec<f32>,
+    /// The local layers' RoPE frequencies (Gemma 3), empty otherwise.
+    pub(crate) rope_inv_freq_swa: Vec<f32>,
+    /// Multiplier on the token embedding (Gemma: sqrt(hidden)), else 1.
+    pub(crate) embed_scale: f32,
     /// File mappings this model handed to `gpu::attach`; released on drop.
     pub(crate) attached: Vec<&'a [u8]>,
     /// Set when the weights rule out the whole-token GPU decode.

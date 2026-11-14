@@ -104,7 +104,8 @@ impl<'a> Model<'a> {
         let mut layers = Vec::with_capacity(end - first);
         for i in first as u32..end as u32 {
             let name = |part: &str| format!("blk.{i}.{part}.weight");
-            // GLM calls the pre-FFN norm "post_attention_norm".
+            // GLM calls the pre-FFN norm "post_attention_norm" (Gemma has
+            // both: there it is the post-attention sandwich norm).
             let ffn_norm = if f.tensor(&name("ffn_norm")).is_some() {
                 name("ffn_norm")
             } else {
@@ -176,6 +177,19 @@ impl<'a> Model<'a> {
                     }
                     _ => dense_ffn(f, &name, ffn, hidden)?,
                 },
+                post_attn_norm: match &config.gemma {
+                    Some(_) => Some(norm_vec(f, &name("post_attention_norm"), hidden)?),
+                    None => None,
+                },
+                post_ffn_norm: match &config.gemma {
+                    Some(_) => Some(norm_vec(f, &name("post_ffw_norm"), hidden)?),
+                    None => None,
+                },
+                window: config
+                    .gemma
+                    .as_ref()
+                    .filter(|g| g.is_local(i as usize))
+                    .map(|g| g.swa_window as usize),
             });
         }
 
@@ -238,6 +252,15 @@ impl<'a> Model<'a> {
             mtp,
             output,
             rope_inv_freq: rope_inv_freq_with_factors(f, &config)?,
+            rope_inv_freq_swa: match &config.gemma {
+                Some(g) => ops::rope_inv_freq(config.rope_dim as usize, g.swa_rope_base),
+                None => Vec::new(),
+            },
+            embed_scale: if config.gemma.is_some() {
+                (config.hidden as f32).sqrt()
+            } else {
+                1.0
+            },
             token_path_decline,
             config,
             attached,
@@ -411,6 +434,7 @@ fn dense_ffn<'a>(
         w_gate: qmat(f, &name("ffn_gate"), ffn, hidden)?,
         w_up: qmat(f, &name("ffn_up"), ffn, hidden)?,
         w_down: qmat(f, &name("ffn_down"), hidden, ffn)?,
+        gelu: f.architecture() == "gemma3",
     })
 }
 
@@ -556,6 +580,12 @@ fn rope_inv_freq_with_factors(f: &GgufFile, config: &Config) -> Result<Vec<f32>>
         let factors = norm_vec(f, "rope_freqs.weight", inv.len())?;
         for (v, factor) in inv.iter_mut().zip(factors) {
             *v /= factor;
+        }
+    }
+    // Gemma 3's global layers: linear scaling divides every frequency.
+    if let Some(g) = &config.gemma {
+        for v in inv.iter_mut() {
+            *v /= g.rope_scale;
         }
     }
     Ok(inv)

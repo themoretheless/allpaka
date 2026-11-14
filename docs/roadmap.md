@@ -21,7 +21,7 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 
 | Мешает | Пункты |
 |---|---|
-| Можно делать здесь (Windows + RTX 5090) | P8 (Gemma: новая архитектура, GGUF Gemma 3 12B скачан) |
+| Можно делать здесь (Windows + RTX 5090) | P8 (скорость Gemma 3 в fused-ядрах) |
 | Нужен Mac (Metal) | P4, P5, P6, P7, D3, D4, A7, D2 (Metal-раннер) |
 | Нужна вторая машина | B1 → B3 |
 | Нужны вы | D1 (push и зелёный CI), D2, D6, раздел «Ждёт решения владельца» |
@@ -105,10 +105,12 @@ pp480 — 481 dispatch в одном command buffer, GPU занят 321/322 мс
 Dense Qwen на CUDA — в матрице с паритетом (`docs/benchmarks/matrix-cuda-rtx5090.md`:
 Qwen3-32B, Qwen2.5-7B). Осталось:
 
-1. Gemma — архитектуры `gemma3`/`gemma4` не зарегистрированы вовсе (нет
-   загрузчика, GELU-FFN, sandwich-норм, sliding-window attention; у Gemma 4 ещё
-   head_dim=512). На машине есть `google_gemma-3-12b-it-Q4_K_M.gguf` (bartowski).
-   Llama-3.1-8B уже в матрице (`2026-11-14-verify-llama31-8b-rtx5090.md`).
+1. Gemma 3 — в матрице с паритетом, но медленно
+   (`2026-11-15-verify-gemma3-12b-rtx5090.md`: prefill 0.5%, decode 12–14% от
+   llama.cpp). Нужны GeGLU, sandwich-нормы, вторая RoPE-таблица и sliding
+   window в fused-ядрах CUDA (token decode, fused prefill, FA с окном).
+   **DoD:** Gemma-3-12B decode ≥ 100% и prefill ≥ 90% от llama.cpp при
+   прежнем паритете. Gemma 4 (head_dim=512) — отдельно, GGUF нет.
 2. Опционально MTP-35B для паритета спекуляции.
 
 **DoD:** модель проходит greedy-паритет и попадает в матрицу с артефактом.
