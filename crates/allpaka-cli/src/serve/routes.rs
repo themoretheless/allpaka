@@ -4,15 +4,16 @@
 //! Patterns see the raw request line after the method and its space, HTTP
 //! version included. That is what the server has always matched on, and some
 //! routes depend on it: `/health` and the cancel route only answer
-//! `HTTP/1.1`, `/resources` needs the space after the path, and the prefix
-//! routes also accept a query string or a longer path (`/v1/models/qwen3`).
+//! `HTTP/1.1`, `/resources` needs the space after the path, and the API
+//! routes (`Path`) accept a query string or a longer path (`/v1/models/qwen3`)
+//! but not a longer name (`/statsx`, `/v1/modelsx`).
 //!
 //! Which stage answers a route is decided by the caller, not here: the reader
 //! answers `Health`, `Resources` and `CancelRequest` before the queue, the
 //! dispatcher answers `Catalog`, `Launch` and `Models` before model
-//! resolution, and everything else is answered under the model lock. A line
-//! that matches no entry still goes through model resolution and ends in the
-//! "unknown route" 404 there; there is no 405.
+//! resolution, and everything else is answered under the model lock. A known
+//! path with the wrong method is answered 405 with `Allow` ([`allowed`]); any
+//! other unmatched line ends in the "unknown route" 404.
 
 /// An endpoint the server answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +39,9 @@ enum Target {
     Exact(&'static str),
     /// The rest of the line starts with this.
     Prefix(&'static str),
+    /// This path, then a space, `?` or `/` (a query or a longer path, never a
+    /// longer name).
+    Path(&'static str),
     /// Starts with the first part and ends with the second; what lies between
     /// is the route parameter.
     Around(&'static str, &'static str),
@@ -49,6 +53,10 @@ impl Target {
         match *self {
             Target::Exact(exact) => (rest == exact).then_some(""),
             Target::Prefix(prefix) => rest.starts_with(prefix).then_some(""),
+            Target::Path(path) => {
+                let after = rest.strip_prefix(path)?;
+                matches!(after.chars().next(), None | Some(' ' | '?' | '/')).then_some("")
+            }
             Target::Around(prefix, suffix) => rest.strip_prefix(prefix)?.strip_suffix(suffix),
         }
     }
@@ -57,7 +65,10 @@ impl Target {
     #[cfg(test)]
     fn lead(&self) -> &'static str {
         match *self {
-            Target::Exact(lead) | Target::Prefix(lead) | Target::Around(lead, _) => lead,
+            Target::Exact(lead)
+            | Target::Prefix(lead)
+            | Target::Path(lead)
+            | Target::Around(lead, _) => lead,
         }
     }
 }
@@ -88,29 +99,28 @@ const ROUTES: &[Entry] = &[
         Target::Around("/v1/requests/", "/cancel HTTP/1.1"),
         Route::CancelRequest,
     ),
-    entry("GET", Target::Prefix("/v1/catalog"), Route::Catalog),
-    entry("POST", Target::Prefix("/v1/launch"), Route::Launch),
-    entry("GET", Target::Prefix("/v1/models"), Route::Models),
-    // Prefix match, deliberately: `/stats?ts=...` is a normal request from a
-    // polling client. Tightening it to an exact line is a separate call.
-    entry("GET", Target::Prefix("/stats"), Route::Stats),
+    entry("GET", Target::Path("/v1/catalog"), Route::Catalog),
+    entry("POST", Target::Path("/v1/launch"), Route::Launch),
+    entry("GET", Target::Path("/v1/models"), Route::Models),
+    // `/stats?ts=...` is a normal request from a polling client.
+    entry("GET", Target::Path("/stats"), Route::Stats),
     entry("GET", Target::Prefix("/ "), Route::ChatPage),
     entry("GET", Target::Prefix("/index"), Route::ChatPage),
     // CORS preflight for any path.
     entry("OPTIONS", Target::Prefix(""), Route::Options),
     entry(
         "POST",
-        Target::Prefix("/v1/prompt/predict"),
+        Target::Path("/v1/prompt/predict"),
         Route::PromptPredict,
     ),
     entry(
         "POST",
-        Target::Prefix("/v1/prompt/prewarm"),
+        Target::Path("/v1/prompt/prewarm"),
         Route::PromptPrewarm,
     ),
     entry(
         "POST",
-        Target::Prefix("/v1/chat/completions"),
+        Target::Path("/v1/chat/completions"),
         Route::ChatCompletions,
     ),
 ];
@@ -136,6 +146,23 @@ pub(super) fn classify(request_line: &str) -> Option<Matched<'_>> {
             param,
         })
     })
+}
+
+/// The methods a line's path answers to, when no entry matched it with its
+/// own method: non-empty means 405 rather than 404. CORS preflight (`OPTIONS`,
+/// any path) is not offered as an alternative.
+pub(super) fn allowed(request_line: &str) -> Vec<&'static str> {
+    let Some((method, rest)) = request_line.split_once(' ') else {
+        return Vec::new();
+    };
+    let mut methods: Vec<&'static str> = ROUTES
+        .iter()
+        .filter(|entry| entry.method != method && entry.method != "OPTIONS")
+        .filter(|entry| entry.target.matches(rest).is_some())
+        .map(|entry| entry.method)
+        .collect();
+    methods.dedup();
+    methods
 }
 
 #[cfg(test)]
@@ -175,11 +202,10 @@ mod tests {
     fn prefix_routes_accept_longer_paths_queries_and_other_versions() {
         let cases = [
             ("GET /v1/models/qwen3 HTTP/1.1", Route::Models),
-            ("GET /v1/modelsx HTTP/1.0", Route::Models),
+            ("GET /v1/models HTTP/1.0", Route::Models),
             ("GET /v1/catalog?all=1 HTTP/1.1", Route::Catalog),
             ("POST /v1/launch/now HTTP/1.1", Route::Launch),
             ("GET /stats?ts=1 HTTP/1.1", Route::Stats),
-            ("GET /statsx HTTP/1.1", Route::Stats),
             ("GET / HTTP/1.0", Route::ChatPage),
             ("GET /indexes HTTP/1.1", Route::ChatPage),
             ("GET /resources HTTP/1.0", Route::Resources),
@@ -189,7 +215,7 @@ mod tests {
                 "POST /v1/chat/completions?x=1 HTTP/1.1",
                 Route::ChatCompletions,
             ),
-            ("POST /v1/prompt/predictions HTTP/1.1", Route::PromptPredict),
+            ("POST /v1/prompt/predict/ HTTP/1.1", Route::PromptPredict),
         ];
         for (line, expected) in cases {
             assert_eq!(route(line), Some(expected), "{line:?}");
@@ -240,6 +266,29 @@ mod tests {
         ] {
             assert_eq!(route(line), None, "{line:?}");
         }
+    }
+
+    #[test]
+    fn api_paths_do_not_match_longer_names() {
+        for line in [
+            "GET /statsx HTTP/1.1",
+            "GET /v1/modelsx HTTP/1.0",
+            "GET /v1/catalogue HTTP/1.1",
+            "POST /v1/prompt/predictions HTTP/1.1",
+            "POST /v1/chat/completionsx HTTP/1.1",
+        ] {
+            assert_eq!(route(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn known_paths_with_other_methods_are_405() {
+        assert_eq!(allowed("POST /stats HTTP/1.1"), ["GET"]);
+        assert_eq!(allowed("GET /v1/chat/completions HTTP/1.1"), ["POST"]);
+        assert_eq!(allowed("DELETE /v1/models/qwen HTTP/1.1"), ["GET"]);
+        assert!(allowed("GET /nope HTTP/1.1").is_empty());
+        assert!(allowed("GET /statsx HTTP/1.1").is_empty());
+        assert!(allowed("GET /stats HTTP/1.1").is_empty());
     }
 
     #[test]

@@ -28,7 +28,9 @@ mod template;
 mod tool_grammar;
 mod tool_schema;
 
-pub(crate) use http::{read_request, respond, respond_html, write_sse_event, write_sse_headers};
+pub(crate) use http::{
+    read_request, respond, respond_html, respond_with_headers, write_sse_event, write_sse_headers,
+};
 pub(crate) use messages::{
     append_valid_utf8, image_part_count, parse_tool_calls, parse_tool_calls_checked,
     render_messages, stream_safe_len,

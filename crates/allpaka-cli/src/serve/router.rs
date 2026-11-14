@@ -139,6 +139,18 @@ pub(super) fn dispatch_connection(
     interrupt: Option<Interrupt<'_>>,
 ) -> Result<()> {
     let route = routes::classify(&connection.request_line).map(|matched| matched.route);
+    if route.is_none() {
+        let allow = routes::allowed(&connection.request_line);
+        if !allow.is_empty() {
+            let mut stream = connection.stream;
+            return respond_with_headers(
+                &mut stream,
+                405,
+                &[("Allow", &allow.join(", "))],
+                &json!({"error": "method not allowed", "allow": allow}),
+            );
+        }
+    }
     match route {
         Some(Route::Catalog) => return catalog(&connection.stream),
         Some(Route::Launch) => return relaunch(connection),

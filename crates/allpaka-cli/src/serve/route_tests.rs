@@ -158,9 +158,29 @@ fn models_list_is_a_prefix_route_answered_before_model_resolution() {
     for line in [
         "GET /v1/models HTTP/1.1",
         "GET /v1/models/qwen3 HTTP/1.1",
-        "GET /v1/modelsx HTTP/1.1",
+        "GET /v1/models?x=1 HTTP/1.1",
     ] {
         assert_eq!(dispatched(line, ""), empty, "{line:?}");
+    }
+}
+
+#[test]
+fn wrong_methods_for_known_paths_are_405_with_allow() {
+    for (line, allow) in [
+        ("GET /v1/chat/completions HTTP/1.1", "POST"),
+        ("POST /v1/models HTTP/1.1", "GET"),
+        ("GET /v1/launch HTTP/1.1", "POST"),
+        ("DELETE /stats HTTP/1.1", "GET"),
+    ] {
+        let response = dispatched(line, "");
+        assert!(
+            response.starts_with("HTTP/1.1 405 "),
+            "{line:?}: {response:?}"
+        );
+        assert!(
+            response.contains(&format!("\r\nAllow: {allow}\r\n")),
+            "{response:?}"
+        );
     }
 }
 
@@ -202,13 +222,11 @@ fn every_other_line_needs_a_resolved_model_first() {
         "POST /v1/prompt/predict HTTP/1.1",
         "POST /v1/prompt/prewarm HTTP/1.1",
         "POST /v1/chat/completions HTTP/1.1",
-        // Unknown paths and wrong methods for known paths.
+        // Unknown paths, including longer names of known ones.
         "GET /nope HTTP/1.1",
         "GET /healthz HTTP/1.1",
-        "GET /v1/chat/completions HTTP/1.1",
-        "POST /v1/models HTTP/1.1",
-        "GET /v1/launch HTTP/1.1",
-        "DELETE /stats HTTP/1.1",
+        "GET /v1/modelsx HTTP/1.1",
+        "GET /statsx HTTP/1.1",
         "POST /v1/requests/x HTTP/1.1",
     ] {
         assert_eq!(dispatched(line, ""), unknown, "{line:?}");
