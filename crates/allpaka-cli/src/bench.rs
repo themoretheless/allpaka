@@ -79,10 +79,34 @@ pub fn measure_engine(
         (1..=32768).contains(&decode_tokens),
         "TG must be in 1..=32768"
     );
+    // ALLPAKA_BENCH_TOKENS names a JSON array of token ids: the exact stream
+    // to prefill, so another engine can be fed the same one. Decode then
+    // continues greedily from the end of that prompt instead of from an
+    // empty cache, as a server would. Its length replaces ALLPAKA_BENCH_PP.
+    let replay: Option<Vec<u32>> = match std::env::var("ALLPAKA_BENCH_TOKENS") {
+        Ok(path) => {
+            let ids: Vec<u32> = serde_json::from_slice(
+                &std::fs::read(&path).with_context(|| format!("reading {path}"))?,
+            )
+            .with_context(|| format!("{path} must be a JSON array of token ids"))?;
+            anyhow::ensure!(
+                !ids.is_empty() && ids.len() <= 32768 && ids.iter().all(|&t| t < c.vocab),
+                "{path}: 1..=32768 token ids below the vocabulary size {}",
+                c.vocab
+            );
+            Some(ids)
+        }
+        Err(_) => None,
+    };
+    let measured_pp = replay.as_ref().map_or(measured_pp, |ids| ids.len() as u32);
     let pp = measured_pp + 32;
-    let prompt: Vec<u32> = (0..pp)
+    let mut prompt: Vec<u32> = (0..32u32)
         .map(|i| (i * 733 + 17) % c.vocab.min(30000))
         .collect();
+    match &replay {
+        Some(ids) => prompt.extend_from_slice(ids),
+        None => prompt.extend((32..pp).map(|i| (i * 733 + 17) % c.vocab.min(30000))),
+    }
     let mut session = model.new_session(prompt.len() + decode_tokens + 1);
 
     let warm = model.forward_batch(&prompt[..32], &mut session)?;
@@ -144,28 +168,39 @@ pub fn measure_engine(
     );
     let prefill_phases = report_phases("prefill", prefill_secs, prompt.len() - 32);
 
-    // Decode from near-empty KV, matching llama-bench tg (n_prompt=0, n_depth=0).
+    // Decode from near-empty KV, matching llama-bench tg (n_prompt=0, n_depth=0);
+    // under replay, from the end of the replayed prompt.
+    let replay_start = argmax_token(&logits);
+    let prompt_len = prompt.len() - 32;
     if let Ok(ms) = std::env::var("ALLPAKA_BENCH_BETWEEN_MS") {
         let ms = ms
             .parse::<u64>()
             .context("ALLPAKA_BENCH_BETWEEN_MS must be an integer")?;
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
-    session = model.new_session(decode_tokens + 4);
-    let warm_seed_logits = model.forward_batch(&[1u32], &mut session)?;
-    let warm_next = argmax_token(&warm_seed_logits);
-    let warm = model.forward_greedy_n(warm_next, &mut session, decode_tokens)?;
-    drop(warm);
-    session.truncate(0);
-    let seed = [1u32];
-    let seed_logits = model.forward_batch(&seed, &mut session)?;
+    let next = if replay.is_some() {
+        // The session still holds the prompt. Warm the decode path on it,
+        // then roll back to the prompt's end for the measured pass.
+        let warm = model.forward_greedy_n(replay_start, &mut session, decode_tokens)?;
+        drop(warm);
+        session.truncate(prompt_len);
+        replay_start
+    } else {
+        session = model.new_session(decode_tokens + 4);
+        let warm_seed_logits = model.forward_batch(&[1u32], &mut session)?;
+        let warm_next = argmax_token(&warm_seed_logits);
+        let warm = model.forward_greedy_n(warm_next, &mut session, decode_tokens)?;
+        drop(warm);
+        session.truncate(0);
+        let seed = [1u32];
+        argmax_token(&model.forward_batch(&seed, &mut session)?)
+    };
     let gpu_before = allpaka_backend::gpu::stats();
     let clock_before = allpaka_backend::gpu::gpu_time_stats();
     allpaka_model::profile::reset();
     allpaka_backend::telemetry::reset_global();
     let decode_stats_before = allpaka_backend::gpu::decode_path_stats();
     let mut decode_inputs = Vec::with_capacity(decode_tokens);
-    let next = argmax_token(&seed_logits);
     let t1 = std::time::Instant::now();
     let outs = crate::airbug::span("decode", || {
         model.forward_greedy_n(next, &mut session, decode_tokens)
@@ -237,7 +272,7 @@ pub fn measure_engine(
     // GPU scratch held after the run; arenas only grow, so this is their peak.
     decode_measurement.peak_memory_bytes = Some(allpaka_backend::gpu::arena_bytes() as u64);
     decode_measurement.phases = decode_phases;
-    decode_measurement.context_tokens = Some(1);
+    decode_measurement.context_tokens = Some(if replay.is_some() { prompt_len } else { 1 });
     decode_measurement.input_tokens = decode_inputs;
     decode_measurement.fast_path = FastPathStats {
         attempts: gpu_attempts,

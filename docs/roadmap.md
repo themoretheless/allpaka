@@ -21,7 +21,7 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 
 | Мешает | Пункты |
 |---|---|
-| Можно делать здесь (Windows + RTX 5090) | A1, A3 → A4, C1\*, C2, C3\*, C5, P8 (dense Qwen) |
+| Можно делать здесь (Windows + RTX 5090) | A3 → A4, C1\*, C2, C3\*, C5, P8 (dense Qwen) |
 | Нужен Mac (Metal) | P4, P5, P6, P7, D3, D4, A7, D2 (Metal-раннер) |
 | Нужна вторая машина | B1 → B3 |
 | Нужен настоящий GGUF Llama/Mistral | P9 |
@@ -124,15 +124,6 @@ llama-server.
 ---
 
 ## Трек A — сервинг
-
-### A1. Сопоставимые бенчмарки: token replay против llama.cpp
-
-Есть: метаданные нагрузки, строгий GPU-coverage, alternating context-matched
-прогоны, `scripts/llama-matched-bench.cpp`.
-
-**DoD:** replay одного и того же токен-стрима в обоих движках; артефакт по
-стабильной JSON-схеме с флагом comparability; для MoE в отчёте отражено, что
-одинаковые формы тензоров не означают одинаковый роутинг экспертов.
 
 ### A3. Step scheduler + chunked prefill
 
