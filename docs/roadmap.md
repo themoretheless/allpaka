@@ -42,11 +42,6 @@
 
 **Пруф:** `docs/benchmarks/qwen3-30b-m4-max-2026-09-02.md`, `docs/benchmarks/*.json`.
 
-### A2. Изолированные сессии, отмена, дедлайны, backpressure — сделано
-
-**Пруф:** `scripts/test-serving-controls.py`; контракт — `docs/serving.md`
-(`request_id`, `timeout_ms`, `session_id`, `POST /v1/requests/{id}/cancel`, 408/429).
-
 ### A3. Единый бюджет памяти — в работе
 
 Сделано: reservations для mapped-весов, полной capacity prefix-cache и живых
@@ -58,10 +53,6 @@
 
 **DoD:** либо покрыть эти статьи, либо честно назвать границу в `docs/serving.md`
 и в самом ответе API (сейчас формулировка уже честная — довести до конца).
-
-### A4. KV-блочный prefix cache + hit/miss — сделано
-
-DoD выполнен: hit/miss и reused-token счётчики отдаются через `/stats` (`prefix_cache_hits`, `prefix_cache_misses`, `prefix_cache_reused_tokens`); reuse наблюдаем через `usage.prompt_tokens_details.cached_tokens`. Покрыто тестами `telemetry_tracks_hits_misses_and_reused_tokens` и `exact_hits_are_model_namespaced`.
 
 ### A5. Step scheduler + chunked prefill — ожидает
 
@@ -213,19 +204,6 @@ GPU-зависимые `scripts/test-serving-controls.py`, `scripts/test-serving
 **DoD:** CI покрывает GPU-кернелы и smoke-тесты с настоящими моделями, а не
 только CPU-часть.
 
-### D3. Распил `crates/allpaka-backend/src/gpu/` — сделано
-
-`metal.rs` разложен на `gpu/metal/{device,region,select,telemetry,matvec,attn,args,ffn_grouped,decode,verify,prefill,mega}.rs`, шейдеры подключаются из единого источника `shaders/kernels.metal` (`2d8cc16`),
-`cuda/mod.rs` и `cuda/runtime.rs` — на `gpu/cuda/{region,attn,decode,decode_fused,prefill,ffn_grouped}` и
-`gpu/cuda/runtime/{device,select,embed,gemm,q8,l2,matvec}`, общие таблицы вынесены в `gpu/common.rs`.
-Все parity-тесты и `scripts/check-backends.sh` зелёные.
-
-### D4. Clippy-долг backend/model — сделано
-
-`cargo clippy --workspace --all-targets -- -D warnings` и кросс-проверка
-`cargo clippy -p allpaka-backend --target x86_64-pc-windows-msvc --features allpaka-backend/cuda -- -D warnings`
-проходят с нулём предупреждений и подключены в `.github/workflows/ci.yml` (D1).
-
 ### Допущения, требующие подтверждения
 
 - Паритет Windows/CUDA проверяется по релизным пунктам, а не на каждом этапе.
@@ -233,53 +211,3 @@ GPU-зависимые `scripts/test-serving-controls.py`, `scripts/test-serving
 - Порядок исполнения по умолчанию: A → B → C, при этом D1 идёт первым как
   самый дешёвый и разблокирующий.
 
----
-
-### D6. Оставшийся stringly-статус: `PlanItem.status` — сделано
-
-`PlanItem.status` переведён на `PlanStatus` (`Pending | InProgress | Completed`,
-`#[serde(rename_all = "snake_case")]`) в `crates/allpaka-chat/src/types.rs` с
-сохранением проволочного контракта, покрыт `status_wire_tests` и сквозными тестами Studio.
-
-## Приложение: предлагаемый CI (черновик, не применён)
-
-```yaml
-name: ci
-on:
-  push: { branches: [main] }
-  pull_request: {}
-
-jobs:
-  test:                       # без GPU: быстро, кандидат в обязательные
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { components: "rustfmt, clippy" }
-      - name: Cargo cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
-      - run: cargo fmt --all -- --check
-      - run: cargo test --workspace
-      - run: cargo test -p allpaka-chat --offline
-      - run: cargo build -p allpaka-cli --no-default-features --offline
-      - run: python3 scripts/test-studio.py
-      - run: node --check crates/allpaka-chat/web/app.js
-      - run: node scripts/test-studio-content.cjs
-      # после D4: cargo clippy --workspace --all-targets -- -D warnings
-
-  gpu:                        # self-hosted Metal; цель D2, до неё не блокирует PR
-    if: github.event_name == 'push'
-    runs-on: [self-hosted, macos, metal]
-    steps:
-      - uses: actions/checkout@v4
-      - run: cargo test --workspace -- --test-threads=1
-      - run: python3 scripts/test-serving-controls.py
-      - run: python3 scripts/test-serving-memory.py
-```
