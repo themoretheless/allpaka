@@ -395,6 +395,10 @@ std::unordered_map<FaKey, FaSlot, FaKeyHash> g_fa;
 // Decode hot path: last m=1 slot (shared across layers).
 static FaKey g_fa_decode_key{};
 static FaSlot * g_fa_decode_slot = nullptr;
+// Decode (m=1) KV slots no smaller than this: a batched decode step sets it to
+// the bucket of its longest session, so every row of the step uses one slot
+// (rows in different slots corrupted the first, see allpaka_fa_set_min_kv).
+static int32_t g_fa_min_kv = 0;
 static bool g_fa_decode_valid = false;
 
 static void free_fa_slot(FaSlot & s) {
@@ -718,8 +722,22 @@ extern "C" int allpaka_ggml_mul_mat(
     if (!w_dev || !x_dev || !y_dev || n_in <= 0 || n_out <= 0 || m <= 0) {
         return -2;
     }
-    if (m > 1 && m < 32) {
-        return -10;
+    // 2..31 rows: a batched decode step (one row per session). The weights
+    // stay quantized so ggml's batched MMVQ/MMQ reads them once for all rows;
+    // the f16 cache below only pays off for large prefill chunks.
+    const bool small_batch = m > 1 && m < 32;
+    if (small_batch && m <= 8) {
+        extern int allpaka_direct_mmvq_m(
+            void * cuda_ctx_v, const void * w_dev, const float * x_dev, float * y_dev,
+            int32_t n_in, int32_t n_out, int32_t m, int32_t w_type);
+        if (allpaka_ggml_init(g_device) != 0) {
+            return -1;
+        }
+        std::lock_guard<std::mutex> lock(g_mu);
+        if (g_be && g_be->context &&
+            allpaka_direct_mmvq_m(g_be->context, w_dev, x_dev, y_dev, n_in, n_out, m, w_type) == 0) {
+            return 0;
+        }
     }
     if (allpaka_ggml_init(g_device) != 0) {
         return -1;
@@ -740,7 +758,7 @@ extern "C" int allpaka_ggml_mul_mat(
         return 0;
     }
     int32_t ty_use = w_type;
-    const void * w_use = f16_weight(w_dev, n_in, n_out, w_type, &ty_use);
+    const void * w_use = small_batch ? w_dev : f16_weight(w_dev, n_in, n_out, w_type, &ty_use);
     ShapeKey key{n_in, n_out, m, ty_use};
     Slot * slot = get_or_create_slot(key);
     if (!slot) {
@@ -769,6 +787,10 @@ extern "C" int allpaka_ggml_mul_mat(
 
     enum ggml_status st = ggml_backend_graph_compute_async(g_be, slot->gf);
     return st == GGML_STATUS_SUCCESS ? 0 : -7;
+}
+
+extern "C" void allpaka_fa_set_min_kv(int32_t n) {
+    g_fa_min_kv = n > 0 ? n : 0;
 }
 
 extern "C" void allpaka_fa_reset_mask_lim(void) {
@@ -824,7 +846,7 @@ extern "C" int allpaka_ggml_flash_attn(
             }
         }
         n_kv = floor_kv;
-        while (n_kv < need) {
+        while (n_kv < need || n_kv < g_fa_min_kv) {
             n_kv *= 2;
         }
         if (n_kv > ALLPAKA_FA_MAX_KV) {

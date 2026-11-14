@@ -43,9 +43,19 @@ model tuned for one workload has no entry for another until it is tuned for it.
 `--max-queued` bounds accepted work. `--max-batch` and
 `--batch-context-tokens` bound each model-aware scheduling decision. The
 current batching mode is `model-aware-admission`: requests are grouped fairly
-by model, then executed serially by the inference owner. It is not yet a
-multi-session fused GPU kernel, and `GET /stats` reports
-`"kernel_batching": false` explicitly.
+by model and admitted by the inference owner.
+
+Up to four long chat completions for the same model (no `session_id`) run at
+once, each in its own session: the first on the owner thread, the others on
+worker threads. They take turns through a FIFO gate at every prefill chunk,
+and their decode steps are batched: whichever generation holds the turn runs
+one step for every generation then waiting to decode, as one pass over the
+weights (`Model::forward_multi`, a captured CUDA graph per set of sessions).
+`GET /stats` reports `"kernel_batching": true` for models this covers (dense
+attention layers); others decode the waiting steps one after another. On
+Qwen2.5-7B, four concurrent requests decode at 10.8-12.2 ms per token each
+instead of 16.2 ms taking turns
+(`docs/benchmarks/2026-11-14-serve-two-long-7b-rtx5090.md`).
 
 A short chat request does not wait for a long one to finish. Between the
 steps of a running generation (each prefill chunk and each decode token),

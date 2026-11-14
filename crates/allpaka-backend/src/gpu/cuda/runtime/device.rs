@@ -179,6 +179,11 @@ pub struct CudaGpu {
     pub pf_rope_pinned: (usize, usize),
     /// The same for chunks that are not being captured (see `upload_rope_pinned`).
     pub pf_rope_scratch: (usize, usize),
+    /// Batched decode (`MultiRow`): each row's position, page-locked on the
+    /// host and copied into `multi_dpos_dev` inside the step, so a captured
+    /// step replays with the positions staged before it (`multi_stage`).
+    pub multi_dpos_pinned: usize,
+    pub multi_dpos_dev: Option<CudaSlice<u32>>,
     /// Hybrid FA decode: per-layer (pre-attend, post-attend) graphs + final tail.
     /// Used when ALLPAKA_CUDA_GRAPH=1 and ggml FA is available.
     pub decode_fa_graphs: Option<(Vec<CudaGraph>, Vec<CudaGraph>, CudaGraph)>,
@@ -502,6 +507,8 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         pf_graph_failed: false,
         pf_rope_pinned: (0, 0),
         pf_rope_scratch: (0, 0),
+        multi_dpos_pinned: 0,
+        multi_dpos_dev: None,
         decode_fa_graphs: None,
         decode_fa_attn: None,
         decode_fa_execs: None,

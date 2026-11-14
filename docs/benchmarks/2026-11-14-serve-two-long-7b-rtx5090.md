@@ -27,3 +27,22 @@ costs 2–3% against running them back to back. There is no batching yet, so
 the total rate stays at that of a single request.
 - `bench-concurrent-latency.py` (9 000-token heavy request, 1 024 new tokens):
   the chat's first token is 143–151 ms in both scenarios, largest gap 5–9 ms.
+
+## With batched decode steps
+
+The same benchmark after decode steps of concurrent generations were batched
+into one pass over the weights (`Model::forward_multi`, captured CUDA graph).
+The GPU carried a steady 9-10% load from elsewhere during these runs.
+
+| requests | median gap each, taking turns | median gap each, batched |
+|---|---|---|
+| 1 | 3.96 ms | 4.42-4.80 ms |
+| 2 | 8.1 ms | 7.84 ms |
+| 4 | 16.19 ms | 10.8-12.2 ms |
+
+Four requests finish in about two thirds of the time. The batched step alone
+(`tests/cuda_decode_multi_parity.rs`, no HTTP) takes 7.2 ms for four sessions,
+1.79 ms per token against 3.67 ms one at a time; the rest of the gap in
+`serve` is per-token work outside the step (sampling, streaming, the turn
+itself). Single-session decode is unchanged: `allpaka bench` 256.7 tok/s
+against llama.cpp `tg128` 242.7 tok/s in the same session.

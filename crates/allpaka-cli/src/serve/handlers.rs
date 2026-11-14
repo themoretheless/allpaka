@@ -30,7 +30,9 @@ pub(super) fn stats(stream: &mut TcpStream, context: &ServeRequestContext<'_>) -
             "memory_admission": memory::snapshot(&context.inference.chat.memory.budget()),
             "prefix_cache_pinned_bytes": context.inference.prefixes.pinned_bytes(),
             "batching_mode": "model-aware-admission",
-            "kernel_batching": false,
+            // Concurrent generations decode in one batched step on a model
+            // `forward_multi` batches (dense attention); see `interleave`.
+            "kernel_batching": context.inference.model.supports_multi(),
             "gpu_fallback": "runtime-policy-controlled",
         }),
     )

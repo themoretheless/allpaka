@@ -318,6 +318,19 @@ pub struct PrefillAttnReq<'a> {
     pub base: usize,
     pub scale: f32,
     pub fusion: Option<PrefillFusion<'a>>,
+    /// Row `i` is one decode token of a different session: its K/V go to
+    /// `multi[i].cache` at `multi[i].pos` and it attends over that cache's
+    /// first `pos + 1` positions. `cache`, `k_off`, `v_off` and `base` are
+    /// then ignored. Fused (`fusion`) path only.
+    pub multi: Option<&'a [MultiRow<'a>]>,
+}
+
+/// One session's row in a batched decode step; see [`PrefillAttnReq::multi`].
+pub struct MultiRow<'a> {
+    pub cache: &'a SharedRegion,
+    pub k_off: usize,
+    pub v_off: usize,
+    pub pos: usize,
 }
 
 /// A prefill chunk of one gated-delta-net layer (qwen35moe linear

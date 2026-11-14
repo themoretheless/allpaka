@@ -105,7 +105,10 @@ struct InferenceContext<'a> {
 
 /// What a generation hands the step hook: the model it is running on, so a
 /// request served in between uses the same weights.
-type Interrupt<'a> = &'a dyn Fn(&Model<'static>, &Tokenizer, &Template, &memory::Budget, usize);
+/// The last argument says the call comes from the decode loop, whose steps
+/// take the turn through `interleave::decode_step` instead.
+type Interrupt<'a> =
+    &'a dyn Fn(&Model<'static>, &Tokenizer, &Template, &memory::Budget, usize, bool);
 
 struct GenerationRequest<'a> {
     messages: &'a [(String, String)],
@@ -239,17 +242,21 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
                 });
                 // A worker generation may already run (started during an
                 // earlier request): take turns with it from the first step.
-                let turn = std::cell::RefCell::new(interleave::active());
-                if let Some(gate) = turn.borrow().as_ref() {
+                // The gate is this thread's (`interleave::current`): the
+                // decode loop batches its steps through it.
+                let gate = interleave::active();
+                if let Some(gate) = &gate {
                     gate.enter();
                 }
+                interleave::set_turn(gate);
                 let interrupt = |model: &Model<'static>,
                                  tok: &Tokenizer,
                                  template: &Template,
                                  budget: &memory::Budget,
-                                 running_tokens: usize| {
-                    if let Some(gate) = turn.borrow().as_ref() {
-                        gate.pass();
+                                 running_tokens: usize,
+                                 in_decode: bool| {
+                    if !in_decode {
+                        interleave::pass_turn();
                     }
                     while let Ok((name, context_tokens, connection)) = incoming.try_recv() {
                         if preemptible::eligible(
@@ -266,8 +273,10 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
                             .as_ref()
                             .filter(|s| interleave::eligible(&name, s, &connection))
                         {
-                            *turn.borrow_mut() =
-                                Some(interleave::spawn(shared.clone(), connection));
+                            interleave::set_turn(Some(interleave::spawn(
+                                shared.clone(),
+                                connection,
+                            )));
                         } else {
                             pending
                                 .borrow_mut()
@@ -284,9 +293,10 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
                 ) {
                     println!("request failed: {error:#}");
                 }
-                if let Some(gate) = turn.take() {
+                if let Some(gate) = interleave::current() {
                     gate.leave();
                 }
+                interleave::set_turn(None);
                 for (name, context_tokens, connection) in pending.into_inner() {
                     let mut rejection_stream = connection.stream.try_clone()?;
                     if let Err(error) = runtime.enqueue(name, context_tokens, connection) {

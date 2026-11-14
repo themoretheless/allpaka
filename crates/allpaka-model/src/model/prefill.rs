@@ -199,6 +199,7 @@ impl<'a> Model<'a> {
                             base,
                             scale,
                             None,
+                            None,
                         )
                     })
                 };
@@ -446,6 +447,7 @@ impl<'a> Model<'a> {
                     base,
                     scale,
                     fusion,
+                    None,
                 )?
             };
 

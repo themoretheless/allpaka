@@ -564,6 +564,7 @@ impl<'a> QuantMat<'a> {
         base: usize,
         scale: f32,
         fusion: Option<crate::gpu::PrefillFusion>,
+        multi: Option<&[crate::gpu::MultiRow]>,
     ) -> Option<Vec<f32>> {
         let (kv_dim, head_dim, n_heads, n_kv_heads) = dims;
         crate::gpu::prefill_attn_block(&crate::gpu::PrefillAttnReq {
@@ -590,6 +591,7 @@ impl<'a> QuantMat<'a> {
             base,
             scale,
             fusion,
+            multi,
         })
     }
 

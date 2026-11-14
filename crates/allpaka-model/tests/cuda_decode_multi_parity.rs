@@ -42,48 +42,61 @@ fn batched_decode_matches_one_at_a_time() {
         (s, t)
     };
 
-    // One at a time, through the ordinary decode path.
-    let mut alone = Vec::new();
+    // One at a time, through the ordinary decode path; keep every step's
+    // logits and the token fed.
+    let mut alone: Vec<(Vec<u32>, Vec<Vec<f32>>)> = Vec::new();
     let mut alone_secs = 0.0;
     for p in &prompts {
         let (mut s, mut t) = prefilled(p);
+        let (mut fed, mut logits) = (Vec::new(), Vec::new());
         let started = Instant::now();
-        let mut out = Vec::new();
         for _ in 0..steps {
-            t = argmax(&model.forward(t, &mut s).unwrap());
-            out.push(t);
+            fed.push(t);
+            let l = model.forward(t, &mut s).unwrap();
+            t = argmax(&l);
+            logits.push(l);
         }
         alone_secs += started.elapsed().as_secs_f64();
-        alone.push(out);
+        alone.push((fed, logits));
     }
 
-    // All four together.
-    let (mut sessions, mut tokens): (Vec<_>, Vec<_>) = prompts.iter().map(|p| prefilled(p)).unzip();
-    let mut batched = vec![Vec::new(); prompts.len()];
+    // All four together, fed the same tokens (teacher forcing): a greedy
+    // chain diverges for good after one near-tie flips, which says nothing
+    // about the step itself.
+    let mut sessions: Vec<_> = prompts.iter().map(|p| prefilled(p).0).collect();
+    let mut agree = vec![0usize; prompts.len()];
+    let mut max_rel = 0f32;
     let started = Instant::now();
-    for _ in 0..steps {
+    for step in 0..steps {
+        let tokens: Vec<u32> = alone.iter().map(|(fed, _)| fed[step]).collect();
         let mut refs: Vec<_> = sessions.iter_mut().collect();
         let logits = model.forward_multi(&tokens, &mut refs).unwrap();
         for (i, l) in logits.iter().enumerate() {
-            tokens[i] = argmax(l);
-            batched[i].push(tokens[i]);
+            let want = &alone[i].1[step];
+            agree[i] += (argmax(l) == argmax(want)) as usize;
+            let scale = want.iter().fold(0f32, |m, v| m.max(v.abs()));
+            let diff = l
+                .iter()
+                .zip(want)
+                .fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+            max_rel = max_rel.max(diff / scale);
+            if std::env::var_os("MULTI_TRACE").is_some() && diff / scale > 0.05 {
+                eprintln!("step {step} session {i}: {:.3}", diff / scale);
+            }
         }
     }
     let batched_secs = started.elapsed().as_secs_f64();
-
-    let mut agree_prefix = Vec::new();
-    for (a, b) in alone.iter().zip(&batched) {
-        agree_prefix.push(a.iter().zip(b).take_while(|(x, y)| x == y).count());
-    }
     eprintln!(
-        "one at a time: {:.2} ms per token; batched x{}: {:.2} ms per step ({:.2} ms per token); \
-         tokens agreeing before the first difference: {agree_prefix:?} of {steps}",
+        "one at a time: {:.2} ms per token; batched x{}: {:.2} ms per step ({:.2} ms per token);          greedy agreement per session {agree:?} of {steps}; largest logit difference {:.4} of the logit range",
         alone_secs * 1e3 / (steps * prompts.len()) as f64,
         prompts.len(),
         batched_secs * 1e3 / steps as f64,
         batched_secs * 1e3 / (steps * prompts.len()) as f64,
+        max_rel,
     );
-    // Greedy chains diverge for good after one near-tie flips; require the
-    // opening stretch to agree in every session.
-    assert!(agree_prefix.iter().all(|&n| n >= 16), "{agree_prefix:?}");
+    assert!(agree.iter().all(|&n| n * 100 >= steps * 95), "{agree:?}");
+    // The per-layer reference batch (ALLPAKA_NO_MULTI_FUSED=1) differs from
+    // single-session decode by up to 0.195 of the logit range on low-ranked
+    // tokens (matmul vs matvec rounding); the fused step by 0.10.
+    assert!(max_rel < 0.25, "logits differ by {max_rel}");
 }

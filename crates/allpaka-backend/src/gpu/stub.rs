@@ -174,6 +174,11 @@ pub fn prefill_replay(_xs: &[f32]) -> Option<Vec<f32>> {
 
 pub fn prefill_graph_key(_key: u64) {}
 
+/// Batched decode staging; CUDA only (`MultiRow` declines elsewhere).
+pub fn multi_stage(_key: u64, _positions: &[u32], _ropes: &[f32]) -> Option<()> {
+    None
+}
+
 pub fn prefill_end(_xs: &mut [f32]) -> Option<()> {
     None
 }

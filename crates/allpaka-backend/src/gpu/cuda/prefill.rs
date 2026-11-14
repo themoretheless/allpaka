@@ -201,6 +201,51 @@ pub fn prefill_abort() {
 /// sharing one buffer let a 32..63-token chunk (no graph key, so the graph of
 /// the larger chunk survives it) leave its own positions there, and the next
 /// replay rotated its first rows by them.
+/// Most sessions one batched decode step takes (llama's MMVQ batches up to 8).
+pub const MULTI_MAX: usize = 8;
+
+/// Stage a batched decode step before [`prefill_replay`] or [`prefill_begin`]:
+/// each row's position into the page-locked buffer the step copies to the
+/// device, and, when the captured graph for `key` is the live one, the RoPE
+/// rows into the staging its captured copy re-reads.
+pub fn multi_stage(key: u64, positions: &[u32], ropes: &[f32]) -> Option<()> {
+    if positions.is_empty() || positions.len() > MULTI_MAX {
+        return None;
+    }
+    with_gpu(|gpu| {
+        if gpu.multi_dpos_pinned == 0 {
+            // SAFETY: plain page-locked allocation of MULTI_MAX u32, written
+            // below before any copy reads it; kept for the process.
+            gpu.multi_dpos_pinned =
+                unsafe { cudarc::driver::result::malloc_host(MULTI_MAX * 4, 0) }.ok()? as usize;
+        }
+        if gpu.multi_dpos_dev.is_none() {
+            gpu.multi_dpos_dev = Some(gpu.stream.alloc_zeros::<u32>(MULTI_MAX).ok()?);
+        }
+        // A replay launched earlier may still be copying from the staging.
+        gpu.stream.synchronize().ok()?;
+        // SAFETY: the allocation above holds MULTI_MAX u32 and no copy reads
+        // it now (synchronized).
+        unsafe {
+            std::slice::from_raw_parts_mut(gpu.multi_dpos_pinned as *mut u32, positions.len())
+                .copy_from_slice(positions);
+        }
+        let (ptr, cap) = gpu.pf_rope_pinned;
+        if key != 0
+            && gpu.pf_graph_key == key
+            && gpu.pf_graph.is_some()
+            && ptr != 0
+            && cap >= ropes.len()
+        {
+            // SAFETY: live page-locked staging of `cap` f32, idle (synchronized).
+            unsafe {
+                std::slice::from_raw_parts_mut(ptr as *mut f32, ropes.len()).copy_from_slice(ropes);
+            }
+        }
+        Some(())
+    })
+}
+
 fn upload_rope_pinned(gpu: &mut CudaGpu, rope: &[f32], at: usize) -> Option<()> {
     let for_graph = gpu.pf_capturing;
     let (mut ptr, cap) = if for_graph {
@@ -429,7 +474,9 @@ pub(super) fn try_prefill_attn_fused_dev(
             let (ybase, _yg) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
             let (xbase, _xg) = DevicePtr::device_ptr(&gpu.x_arena, &stream);
 
-            let fused_nr = crate::runtime::get().cuda_pf_norm_rope
+            // Batched decode rows store K per session below, after RoPE.
+            let fused_nr = req.multi.is_none()
+                && crate::runtime::get().cuda_pf_norm_rope
                 && matches!(
                     (hd, rot),
                     (128, 128) | (128, 64) | (64, 64) | (256, 256) | (256, 128)
@@ -604,7 +651,137 @@ pub(super) fn try_prefill_attn_fused_dev(
                 }
                 .ok()?;
             }
-            if !fused_nr {
+            if let Some(rows) = req.multi {
+                // One decode token per session: store its K/V in that
+                // session's cache and attend over that cache alone.
+                if rows.len() != m {
+                    return None;
+                }
+                let f_store = gpu.func_owned("store_kv_pair_f16_dpos")?;
+                let f_attn = gpu.func_owned("attend_gqa_batch")?;
+                let kv_u = kv as u32;
+                let one = 1u32;
+                let kv_dim = req.kv_dim as u32;
+                let head_dim = hd as u32;
+                let n_q = req.n_heads as u32;
+                let group = (req.n_heads / req.n_kv_heads.max(1)) as u32;
+                let scale = req.scale;
+                // Each row's position on the device, from the staging
+                // `multi_stage` filled: the K/V stores and the FA mask read it
+                // there, so a captured step replays at new positions (and the
+                // bridge's host-written mask cannot race queued rows).
+                if gpu.multi_dpos_pinned == 0 || rows.len() > MULTI_MAX {
+                    return None;
+                }
+                let d_pos_base = {
+                    let dev = gpu.multi_dpos_dev.as_ref()?;
+                    let (p, dg) = DevicePtr::device_ptr(dev, &stream);
+                    drop(dg);
+                    p
+                };
+                // SAFETY: page-locked staging of MULTI_MAX u32 (rows.len() checked).
+                unsafe {
+                    let staging =
+                        std::slice::from_raw_parts(gpu.multi_dpos_pinned as *const u32, rows.len());
+                    cudarc::driver::result::memcpy_htod_async(
+                        d_pos_base,
+                        staging,
+                        stream.cu_stream(),
+                    )
+                }
+                .ok()?;
+                // Every row in one FA slot (the longest row's bucket): rows in
+                // different slots corrupted one another's first step.
+                let longest = rows.iter().map(|r| r.pos + 1).max().unwrap_or(1);
+                let fa_one_slot = crate::gpu::cuda::ggml::enabled()
+                    && crate::gpu::cuda::ggml::fa_set_min_kv(longest.next_power_of_two());
+                let store_cfg = LaunchConfig {
+                    grid_dim: (kv_u.div_ceil(256), 1, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                if !fa_one_slot && gpu.pf_capturing {
+                    // The fallback attention below takes positions from the host.
+                    gpu.pf_capture_bad = true;
+                }
+                for (i, row) in rows.iter().enumerate() {
+                    let pos_u = row.pos as u32;
+                    let k_off = row.k_off as u64;
+                    let v_off = row.v_off as u64;
+                    let kp = ybase + ((k_at + i * kv) * 4) as u64;
+                    let vp = ybase + ((v_at + i * kv) * 4) as u64;
+                    let dp = d_pos_base + (i * 4) as u64;
+                    unsafe {
+                        stream
+                            .launch_builder_pdl(&f_store)
+                            .arg(&row.cache.buf)
+                            .arg(&kp)
+                            .arg(&vp)
+                            .arg(&k_off)
+                            .arg(&v_off)
+                            .arg(&dp)
+                            .arg(&kv_u)
+                            .arg(&kv_u)
+                            .launch_pdl(store_cfg)
+                    }
+                    .ok()?;
+                    let qp = ybase + ((q_at + i * q_dim) * 4) as u64;
+                    let op = ybase + ((attn_at + i * q_dim) * 4) as u64;
+                    // llama.cpp's split-KV flash attention, as the
+                    // single-session decode uses; the prefill kernel below
+                    // parallelises a single row poorly (387 us a call).
+                    if fa_one_slot {
+                        // Each row's mask from its own device position: the
+                        // bridge skips the rebuild when the host base repeats.
+                        crate::gpu::cuda::ggml::reset_mask_lim();
+                        crate::gpu::cuda::ggml::prepare_from_cudarc(&stream);
+                        let (cache_p, cg) = DevicePtr::device_ptr(&row.cache.buf, &stream);
+                        drop(cg);
+                        if crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
+                            q: qp,
+                            k: cache_p + k_off * 2,
+                            v: cache_p + v_off * 2,
+                            out: op,
+                            m: 1,
+                            shape: FaShape {
+                                head_dim: hd,
+                                n_q_heads: req.n_heads,
+                                n_kv_heads: req.n_kv_heads.max(1),
+                                base: row.pos,
+                                kv_dim: req.kv_dim,
+                                scale,
+                            },
+                            d_pos: Some(d_pos_base + (i * 4) as u64),
+                        }) {
+                            crate::gpu::cuda::ggml::mark_cudarc_dirty();
+                            continue;
+                        }
+                    }
+                    unsafe {
+                        stream
+                            .launch_builder_pdl(&f_attn)
+                            .arg(&qp)
+                            .arg(&row.cache.buf)
+                            .arg(&op)
+                            .arg(&k_off)
+                            .arg(&v_off)
+                            .arg(&kv_dim)
+                            .arg(&head_dim)
+                            .arg(&n_q)
+                            .arg(&group)
+                            .arg(&one)
+                            .arg(&pos_u)
+                            .arg(&scale)
+                            .launch_pdl(attend_gqa_launch_cfg(n_q, 1))
+                    }
+                    .ok()?;
+                }
+                if fa_one_slot {
+                    crate::gpu::cuda::ggml::fa_set_min_kv(0);
+                }
+                crate::gpu::cuda::ggml::mark_cudarc_dirty();
+            }
+            if !fused_nr && req.multi.is_none() {
                 let f = gpu.func_owned("store_kv_batch_f16")?;
                 let kv_u = kv as u32;
                 let m_u = m as u32;
@@ -643,7 +820,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                 }
                 .ok()?;
             }
-            {
+            if req.multi.is_none() {
                 let group_usz = req.n_heads / req.n_kv_heads.max(1);
                 let k_off = req.k_off as u64;
                 let v_off = req.v_off as u64;
@@ -941,7 +1118,9 @@ pub(super) fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
 pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
     let hidden = req.hs.len() / req.m.max(1);
     let hd = req.head_dim;
-    if !matches!(hd, 64 | 128 | 256) || req.m < MM_MIN_M {
+    // A batched decode step (`multi`) is small by nature; the per-row
+    // attention it needs exists only on the fused path below.
+    if !matches!(hd, 64 | 128 | 256) || (req.m < MM_MIN_M && req.multi.is_none()) {
         return None;
     }
     let q_dim = req.n_heads * hd;
@@ -957,6 +1136,9 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
         if !req.gate_in_q {
             if let Some(out) = try_prefill_attn_fused_dev(req, f) {
                 return Some(out);
+            }
+            if req.multi.is_some() {
+                return None;
             }
         }
     }

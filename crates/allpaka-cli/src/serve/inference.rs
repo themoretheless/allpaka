@@ -109,6 +109,7 @@ pub(super) fn prefill_prompt(
                         context.template,
                         &chat.memory.budget(),
                         running,
+                        false,
                     );
                 }
             }
@@ -277,7 +278,7 @@ pub(super) fn run_inference(
             context.control.check()?;
             if let Some(interrupt) = interrupt {
                 let running = prompt.len() + max_tokens;
-                interrupt(model, tok, template, &chat.memory.budget(), running);
+                interrupt(model, tok, template, &chat.memory.budget(), running, true);
             }
             if grammar.as_ref().is_some_and(ToolGrammar::must_stop) {
                 finish = "stop";
@@ -348,6 +349,7 @@ pub(super) fn run_inference(
                 adapt.record(0, 0);
             }
             if use_pld && k > 0 {
+                super::interleave::pass_turn();
                 let mut spec = allpaka_model::speculate::PromptLookupSpeculator {
                     model,
                     session: &mut chat.session,
@@ -431,10 +433,19 @@ pub(super) fn run_inference(
             // Choosing under a grammar needs the whole distribution, not
             // just its argmax.
             let wants_logits = grammar.as_ref().is_some_and(ToolGrammar::constraining);
-            if greedy && !wants_logits {
-                greedy_next = Some(model.forward_greedy(next, &mut chat.session)?);
-            } else {
-                logits = model.forward(next, &mut chat.session)?;
+            let batched = super::interleave::decode_step(
+                model,
+                next,
+                &mut chat.session,
+                greedy && !wants_logits,
+            );
+            match batched.transpose()? {
+                Some(super::interleave::Next::Token(t)) => greedy_next = Some(t),
+                Some(super::interleave::Next::Logits(l)) => logits = l,
+                None if greedy && !wants_logits => {
+                    greedy_next = Some(model.forward_greedy(next, &mut chat.session)?);
+                }
+                None => logits = model.forward(next, &mut chat.session)?,
             }
             chat.tokens.push(next);
         }
