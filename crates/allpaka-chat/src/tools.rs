@@ -115,6 +115,14 @@ const TOOLS: &[Tool] = &[
         offer: Offer::Always,
         kind: Kind::Read(agentgrep),
     },
+    Tool {
+        name: "git_diff",
+        description: "Show uncommitted changes in the git repository that contains a context path: `git diff` of the working tree, or of the index with staged=true, limited to that path. Read-only; output at most 128 KiB.",
+        properties: || json!({"path":{"type":"string"},"staged":{"type":"boolean"}}),
+        required: &["path"],
+        offer: Offer::Always,
+        kind: Kind::Read(git_diff),
+    },
 ];
 fn tool(name: &str) -> Option<&'static Tool> {
     TOOLS.iter().find(|tool| tool.name == name)
@@ -386,6 +394,65 @@ fn write_file(call: &ToolCall<'_>) -> Result<Value> {
         CHECKPOINT_KEY: checkpoint(&path, existed.then_some(before.as_str()), content),
     }))
 }
+/// `git diff` for one path, run without a shell and without anything the
+/// repository's config could turn into a program: no external diff tool, no
+/// text conversion filters, no pager, no colour.
+fn git_diff(call: &ToolCall<'_>) -> Result<Value> {
+    let ToolCall { root, args, .. } = *call;
+    let path = resolve(
+        root,
+        args["path"].as_str().context("path is required")?,
+        false,
+    )?;
+    let staged = args
+        .get("staged")
+        .map(|v| v.as_bool().context("staged must be a boolean"))
+        .transpose()?
+        .unwrap_or(false);
+    let dir = if path.is_dir() {
+        path.clone()
+    } else {
+        path.parent().context("path has no parent")?.to_path_buf()
+    };
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(&dir)
+        .args([
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "diff.external=",
+            "--no-pager",
+            "diff",
+        ])
+        .args(["--no-color", "--no-ext-diff", "--no-textconv"]);
+    if staged {
+        command.arg("--cached");
+    }
+    let output = command
+        .arg("--")
+        .arg(&path)
+        .env("GIT_PAGER", "cat")
+        .env_remove("GIT_EXTERNAL_DIFF")
+        .output()
+        .context("git is not available")?;
+    if !output.status.success() {
+        bail!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    const LIMIT: usize = 131072;
+    let truncated = output.stdout.len() > LIMIT;
+    let shown = &output.stdout[..output.stdout.len().min(LIMIT)];
+    Ok(json!({
+        "diff": String::from_utf8_lossy(shown),
+        "staged": staged,
+        "truncated": truncated,
+        "clean": output.stdout.is_empty(),
+    }))
+}
 fn agentgrep(call: &ToolCall<'_>) -> Result<Value> {
     crate::code_search::search(call.root, call.args, call.excluded)
 }
@@ -493,7 +560,7 @@ mod tests {
             reasoning_effort: None,
             budget: Default::default(),
         };
-        assert_eq!(schemas(&s, false).len(), 4);
+        assert_eq!(schemas(&s, false).len(), 5);
         assert!(execute(
             Path::new("/tmp"),
             &s,
@@ -594,7 +661,7 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(s.mode, Mode::Swarm));
-        assert_eq!(schemas(&s, false).len(), 4);
+        assert_eq!(schemas(&s, false).len(), 5);
         assert!(execute(
             Path::new("/tmp"),
             &s,
@@ -603,7 +670,7 @@ mod tests {
         )
         .is_err());
         s.mode = Mode::Chat;
-        assert_eq!(schemas(&s, false).len(), 3);
+        assert_eq!(schemas(&s, false).len(), 4);
     }
     #[test]
     fn concurrent_edits_preserve_every_change() {
@@ -704,21 +771,103 @@ mod registry {
             .map(|schema| schema["function"]["name"].as_str().unwrap().to_owned())
             .collect()
     }
+    /// The diff of a real repository: a change shows, a clean tree says so,
+    /// and staged changes are reported only when asked for.
+    #[test]
+    fn git_diff_reports_working_tree_and_index_changes() {
+        let root =
+            std::env::temp_dir().join(format!("allpaka-gitdiff-{}", crate::evaluation::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        // The temp directory may be reached through a short or linked name.
+        let root = root.canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "test"]);
+        fs::write(
+            root.join("a.txt"),
+            "one
+",
+        )
+        .unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let settings: Settings =
+            serde_json::from_value(json!({"provider": "local", "model": "mock"})).unwrap();
+        let diff = |staged: bool| {
+            execute(
+                &root,
+                &settings,
+                "git_diff",
+                &json!({"path": "a.txt", "staged": staged}),
+            )
+            .unwrap()
+        };
+        assert_eq!(diff(false)["clean"], true);
+        fs::write(
+            root.join("a.txt"),
+            "one
+two
+",
+        )
+        .unwrap();
+        let unstaged = diff(false);
+        assert!(
+            unstaged["diff"].as_str().unwrap().contains("+two"),
+            "{unstaged}"
+        );
+        assert_eq!(diff(true)["clean"], true);
+        git(&["add", "a.txt"]);
+        assert!(diff(true)["diff"].as_str().unwrap().contains("+two"));
+        assert_eq!(diff(false)["clean"], true);
+        fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn offers_tools_by_mode_in_a_stable_order() {
-        let read_only = ["list_files", "read_file", "agentgrep"];
+        let read_only = ["list_files", "read_file", "agentgrep", "git_diff"];
         assert_eq!(offered("chat", true, true), read_only);
         assert_eq!(
             offered("plan", true, true),
-            ["list_files", "read_file", "set_plan", "agentgrep"]
+            [
+                "list_files",
+                "read_file",
+                "set_plan",
+                "agentgrep",
+                "git_diff"
+            ]
         );
         assert_eq!(
             offered("swarm", true, true),
-            ["list_files", "read_file", "set_plan", "agentgrep"]
+            [
+                "list_files",
+                "read_file",
+                "set_plan",
+                "agentgrep",
+                "git_diff"
+            ]
         );
         assert_eq!(
             offered("auto", false, false),
-            ["list_files", "read_file", "set_plan", "agentgrep"]
+            [
+                "list_files",
+                "read_file",
+                "set_plan",
+                "agentgrep",
+                "git_diff"
+            ]
         );
         assert_eq!(
             offered("goal", true, true),
@@ -729,7 +878,8 @@ mod registry {
                 "edit_file",
                 "write_file",
                 "run_command",
-                "agentgrep"
+                "agentgrep",
+                "git_diff"
             ]
         );
     }
@@ -748,7 +898,7 @@ mod registry {
             let error = execute(&root, &settings, name, &json!({})).unwrap_err();
             assert_eq!(error.to_string(), format!("Unknown tool: {name}"));
         }
-        for name in ["list_files", "read_file", "agentgrep"] {
+        for name in ["list_files", "read_file", "agentgrep", "git_diff"] {
             assert!(reads(name) && !writes(name), "{name}");
         }
         for name in ["edit_file", "write_file"] {
