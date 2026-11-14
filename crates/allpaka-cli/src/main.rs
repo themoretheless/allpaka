@@ -332,6 +332,16 @@ enum Command {
         /// correct engine.
         #[arg(long)]
         tol: Option<f64>,
+        /// Record the reference alone into this file (prompt tokens and its
+        /// top log-probs along its own greedy continuation), without loading
+        /// the model here. With `--replay` later, a model too large to sit
+        /// next to llama-server is still compared on the GPU.
+        #[arg(long, conflicts_with = "replay")]
+        record: Option<PathBuf>,
+        /// Compare against a reference recorded with `--record`, without a
+        /// running llama-server.
+        #[arg(long)]
+        replay: Option<PathBuf>,
     },
 
     /// Split one model across the cluster by layers.
@@ -551,7 +561,13 @@ fn dispatch(command: Command) -> Result<()> {
             top,
             tol,
             decode,
-        } => verify::run(&model, &addr, &prompt, top, tol, decode),
+            record,
+            replay,
+        } => match (record, replay) {
+            (Some(file), _) => verify::record(&addr, &prompt, top, decode, &file),
+            (None, Some(file)) => verify::replay(&model, &file, tol),
+            (None, None) => verify::run(&model, &addr, &prompt, top, tol, decode),
+        },
         Command::Serve(args) => run_serve(args),
         Command::Status { addr } => client::status(&addr),
         Command::Watch {
