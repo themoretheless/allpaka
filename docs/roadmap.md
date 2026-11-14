@@ -49,6 +49,16 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 
 ## Трек P — производительность движка
 
+### P2. CUDA: decode на 7B отстаёт от llama.cpp на 15–20%
+
+На Qwen2.5-7B через `serve` decode — 80–86% llama.cpp при любой глубине
+контекста (199 против 238 tok/s на 1k, 160 против 198 на 29k;
+`scripts/bench-decode-vs-context.py`), тогда как на Qwen3-32B — 111%. До
+`7792000` контекст длиннее 8k вообще падал в медленный путь.
+
+**DoD:** decode на 7B ≥ llama.cpp на 1k и 16k в парном замере; причина
+отставания названа (размер модели, launch overhead или ядро).
+
 ### P4. Metal: GLM-Air decode ≥ llama
 
 Эксперты доминируют (down ~33%, gate_up ~25%), shared expert добавляет Q5+Q8
