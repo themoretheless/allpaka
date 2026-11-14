@@ -85,6 +85,23 @@ pub(super) const KERNEL_NAMES: &[&str] = &[
     "ssm_load_f32",
 ];
 
+/// One session's captured decode graphs, set aside while another decodes.
+pub struct ParkedDecodeGraphs {
+    pub key: u64,
+    pub graph: Option<CudaGraph>,
+    pub fa_graphs: Option<(Vec<CudaGraph>, Vec<CudaGraph>, CudaGraph)>,
+    pub fa_attn: Option<Vec<CudaGraph>>,
+    pub fa_execs: Option<(
+        Vec<*mut std::ffi::c_void>,
+        Vec<*mut std::ffi::c_void>,
+        *mut std::ffi::c_void,
+    )>,
+    pub fa_kv_offs: Option<(Vec<i32>, Vec<i32>)>,
+}
+
+/// How many sessions' decode graphs are kept besides the active one.
+pub const DECODE_GRAPHS_PARKED: usize = 4;
+
 pub struct WeightChunk {
     pub buf: CudaSlice<u8>,
     pub start: usize,
@@ -176,6 +193,10 @@ pub struct CudaGpu {
     pub decode_fa_kv_offs: Option<(Vec<i32>, Vec<i32>)>,
     pub decode_graph_key: u64,
     pub decode_norms_key: u64,
+    /// Decode graphs of other sessions, newest last, kept while another
+    /// session decodes so alternating between them replays instead of
+    /// recapturing (a recapture per switch cost +186% on Qwen2.5-7B).
+    pub decode_graphs_parked: Vec<ParkedDecodeGraphs>,
     /// Persistent scratch for RMSNorm weights (avoids cudaMalloc per layer).
     pub w_scratch: CudaSlice<f32>,
     pub w_scratch_cap: usize,
@@ -486,6 +507,7 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         decode_fa_execs: None,
         decode_fa_kv_offs: None,
         decode_graph_key: 0,
+        decode_graphs_parked: Vec::new(),
         decode_norms_key: 0,
         w_scratch,
         w_scratch_cap: 1 << 14,
@@ -603,11 +625,62 @@ impl CudaGpu {
     /// Drop every captured decode graph (whole-token, hybrid segments, FA
     /// graphs and their KV offsets); the selecting keys are left to the caller.
     pub fn clear_decode_graphs(&mut self) {
+        self.clear_active_decode_graphs();
+        self.decode_graphs_parked.clear();
+    }
+
+    /// Drop the active session's decode graphs only, before capturing new
+    /// ones for it; graphs other sessions parked stay valid.
+    pub fn clear_active_decode_graphs(&mut self) {
         self.decode_graph = None;
         self.decode_fa_graphs = None;
         self.decode_fa_attn = None;
         self.decode_fa_kv_offs = None;
         self.decode_fa_execs = None;
+    }
+
+    /// Switch the active decode graphs to those captured for `key`: set the
+    /// current ones aside (if any) and bring back `key`'s if they were set
+    /// aside earlier. Afterwards `decode_graph_key == key` exactly when graphs
+    /// for `key` are active; otherwise the caller captures as before.
+    pub fn select_decode_graphs(&mut self, key: u64) {
+        if self.decode_graph_key == key {
+            return;
+        }
+        let active = self.decode_graph.is_some()
+            || self.decode_fa_graphs.is_some()
+            || self.decode_fa_attn.is_some();
+        if self.decode_graph_key != 0 && active {
+            let parked = ParkedDecodeGraphs {
+                key: self.decode_graph_key,
+                graph: self.decode_graph.take(),
+                fa_graphs: self.decode_fa_graphs.take(),
+                fa_attn: self.decode_fa_attn.take(),
+                fa_execs: self.decode_fa_execs.take(),
+                fa_kv_offs: self.decode_fa_kv_offs.take(),
+            };
+            self.decode_graphs_parked.retain(|p| p.key != parked.key);
+            self.decode_graphs_parked.push(parked);
+            if self.decode_graphs_parked.len() > DECODE_GRAPHS_PARKED {
+                self.decode_graphs_parked.remove(0);
+            }
+        } else {
+            self.decode_graph = None;
+            self.decode_fa_graphs = None;
+            self.decode_fa_attn = None;
+            self.decode_fa_execs = None;
+            self.decode_fa_kv_offs = None;
+        }
+        self.decode_graph_key = 0;
+        if let Some(at) = self.decode_graphs_parked.iter().position(|p| p.key == key) {
+            let back = self.decode_graphs_parked.remove(at);
+            self.decode_graph = back.graph;
+            self.decode_fa_graphs = back.fa_graphs;
+            self.decode_fa_attn = back.fa_attn;
+            self.decode_fa_execs = back.fa_execs;
+            self.decode_fa_kv_offs = back.fa_kv_offs;
+            self.decode_graph_key = key;
+        }
     }
 
     pub fn add_mapping(&mut self, mapping: &[u8]) -> bool {

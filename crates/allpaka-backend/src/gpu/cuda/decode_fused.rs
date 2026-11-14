@@ -40,6 +40,8 @@ struct FusedPlan {
     x_elems: usize,
     /// Identity of everything a captured graph bakes in; a change re-captures.
     graph_key: u64,
+    /// Identity of the model-only decode inputs; see `FusedPlan::new`.
+    norms_key: u64,
     // Attention / graph mode, from the runtime policy.
     use_fa: bool,
     fa_inline: bool,
@@ -110,6 +112,32 @@ impl FusedPlan {
         let per_layer_norms = 2 * hidden + 2 * hd + bias_stride;
         let x_elems = norms_base + req.layers.len() * per_layer_norms;
 
+        // What the persistent decode inputs (norms, biases, RoPE tables in
+        // `dec_x`) depend on: the model, not the session. Two sessions of one
+        // model share them, so switching sessions does not re-upload them.
+        let norms_key = {
+            let mut h = 0xcbf29ce484222325u64;
+            let w0_id = req
+                .layers
+                .first()
+                .map_or(0u64, |l| l.wq.1.as_ptr() as usize as u64);
+            for &v in &[
+                req.layers.len() as u64,
+                hidden as u64,
+                q_dim as u64,
+                kv as u64,
+                vocab as u64,
+                ffn_dim as u64,
+                req.kv_dim as u64,
+                hd as u64,
+                w0_id,
+                req.output.1.as_ptr() as usize as u64,
+            ] {
+                h ^= v;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h.max(1)
+        };
         let graph_key = {
             let mut h = 0xcbf29ce484222325u64;
             // Include FA pow2 KV bucket so hybrid FA graphs invalidate on resize.
@@ -191,6 +219,7 @@ impl FusedPlan {
             per_layer_norms,
             x_elems,
             graph_key,
+            norms_key,
             use_fa,
             fa_inline,
             native_shallow,
@@ -244,9 +273,12 @@ pub(super) fn decode_token_one_fused(
             && gpu.fns.contains_key("rmsnorm_rope_freq_dpos");
         upload_token_inputs(gpu, req, &plan, x_in, rope, pos, use_freq_rope)?;
 
-        if gpu.decode_norms_key != graph_key {
+        if gpu.decode_norms_key != plan.norms_key {
             refresh_layer_norms(gpu, req, &plan, &out_norm)?;
         }
+        // Graphs captured for another session are set aside, and this
+        // session's brought back, instead of being thrown away.
+        gpu.select_decode_graphs(plan.graph_key);
 
         let t0 = Instant::now();
         let mut launches = 0u64;
@@ -314,7 +346,7 @@ pub(super) fn decode_token_one_fused(
         };
 
         if capturing_whole {
-            gpu.clear_decode_graphs();
+            gpu.clear_active_decode_graphs();
             // Abort a stale capture left by a prior failed attempt.
             if let Ok(status) = stream.capture_status() {
                 use cudarc::driver::sys::CUstreamCaptureStatus::*;
@@ -367,7 +399,7 @@ pub(super) fn decode_token_one_fused(
                 return ctx.finish_token(gpu, t0, (n_layers * 2 + 1) as u64);
             }
             // Key mismatch or empty: fall through to segment capture.
-            gpu.clear_decode_graphs();
+            gpu.clear_active_decode_graphs();
         }
 
         // Always end_capture on exit if we began — leave the stream clean even
@@ -542,7 +574,6 @@ fn refresh_layer_norms(
         out_norm_at,
         norms_base,
         per_layer_norms,
-        graph_key,
         ..
     } = *plan;
     let stream = Arc::clone(&gpu.stream);
@@ -615,7 +646,7 @@ fn refresh_layer_norms(
             }
         }
     }
-    gpu.decode_norms_key = graph_key;
+    gpu.decode_norms_key = plan.norms_key;
     gpu.clear_decode_graphs();
     gpu.decode_graph_key = 0;
     Some(())
