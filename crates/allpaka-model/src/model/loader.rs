@@ -237,7 +237,7 @@ impl<'a> Model<'a> {
             layers,
             mtp,
             output,
-            rope_inv_freq: ops::rope_inv_freq(config.rope_dim as usize, config.rope_freq_base),
+            rope_inv_freq: rope_inv_freq_with_factors(f, &config)?,
             token_path_decline,
             config,
             attached,
@@ -541,6 +541,24 @@ fn norm_raw<'a>(f: &'a GgufFile, name: &str) -> &'a [u8] {
         .filter(|t| t.ggml_type == allpaka_gguf::GgmlType::F32)
         .and_then(|t| f.data(t).ok())
         .unwrap_or(&[])
+}
+
+/// RoPE inverse frequencies, divided by the per-pair factors in
+/// `rope_freqs.weight` when the file carries them (Llama 3.1+ "llama3" rope
+/// scaling), as llama.cpp's `freq_factors` do: theta_i = pos * inv_freq_i / f_i.
+/// Pair index `i` is the same in NORM and NEOX order, so this holds after the
+/// loader's Wq/Wk permutation too.
+fn rope_inv_freq_with_factors(f: &GgufFile, config: &Config) -> Result<Vec<f32>> {
+    let mut inv = ops::rope_inv_freq(config.rope_dim as usize, config.rope_freq_base);
+    if f.tensor("rope_freqs.weight").is_some()
+        && std::env::var_os("ALLPAKA_NO_ROPE_FREQS").is_none()
+    {
+        let factors = norm_vec(f, "rope_freqs.weight", inv.len())?;
+        for (v, factor) in inv.iter_mut().zip(factors) {
+            *v /= factor;
+        }
+    }
+    Ok(inv)
 }
 
 fn norm_vec(f: &GgufFile, name: &str, len: usize) -> Result<Vec<f32>> {

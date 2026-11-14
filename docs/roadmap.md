@@ -21,10 +21,9 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 
 | Мешает | Пункты |
 |---|---|
-| Можно делать здесь (Windows + RTX 5090) | — |
+| Можно делать здесь (Windows + RTX 5090) | P8 (Gemma: новая архитектура, GGUF Gemma 3 12B скачан) |
 | Нужен Mac (Metal) | P4, P5, P6, P7, D3, D4, A7, D2 (Metal-раннер) |
 | Нужна вторая машина | B1 → B3 |
-| Нужен GGUF, которого нет на машине | P9 (Llama/Mistral), P8 (Gemma) |
 | Нужны вы | D1 (push и зелёный CI), D2, D6, раздел «Ждёт решения владельца» |
 
 
@@ -106,22 +105,13 @@ pp480 — 481 dispatch в одном command buffer, GPU занят 321/322 мс
 Dense Qwen на CUDA — в матрице с паритетом (`docs/benchmarks/matrix-cuda-rtx5090.md`:
 Qwen3-32B, Qwen2.5-7B). Осталось:
 
-1. Gemma — нужен GGUF на машине (и attention с head_dim=512).
+1. Gemma — архитектуры `gemma3`/`gemma4` не зарегистрированы вовсе (нет
+   загрузчика, GELU-FFN, sandwich-норм, sliding-window attention; у Gemma 4 ещё
+   head_dim=512). На машине есть `google_gemma-3-12b-it-Q4_K_M.gguf` (bartowski).
+   Llama-3.1-8B уже в матрице (`2026-11-14-verify-llama31-8b-rtx5090.md`).
 2. Опционально MTP-35B для паритета спекуляции.
 
 **DoD:** модель проходит greedy-паритет и попадает в матрицу с артефактом.
-
-### P9. Llama/Mistral на GPU: проверка на настоящей модели
-
-Загрузчик теперь переставляет строки Wq/Wk моделей с NORM-RoPE (Llama,
-Mistral) в порядок NEOX, и дальше такая модель идёт по тем же быстрым путям,
-что и Qwen; `ALLPAKA_ROPE_NORM=1` оставляет порядок файла. На синтетической
-модели логиты совпадают с эталоном в порядке файла (step decode и prefill,
-`tests/llama_rope_order.rs`). Настоящего GGUF Llama/Mistral на машине нет.
-
-**DoD:** Llama- или Mistral-модель идёт по GPU-пути (`allpaka explain`,
-счётчик `gpu path decode`) и `allpaka verify --decode 32` проходит против
-llama-server.
 
 ---
 
