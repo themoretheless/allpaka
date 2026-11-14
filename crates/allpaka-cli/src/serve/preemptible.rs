@@ -40,6 +40,8 @@ pub(super) fn eligible(
 
 /// Serve `connection` to completion on `model` in a temporary session that
 /// neither reads nor fills the prefix cache, then close it.
+// The engine pieces a dispatcher otherwise takes from a locked service.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn serve(
     model_name: &str,
     connection: QueuedConnection,
@@ -48,6 +50,7 @@ pub(super) fn serve(
     template: &Template,
     budget: &memory::Budget,
     rag: &RagTools,
+    interrupt: Option<Interrupt<'_>>,
 ) {
     let QueuedConnection {
         stream,
@@ -81,8 +84,9 @@ pub(super) fn serve(
                 prefixes: &mut no_prefixes,
                 prefix_namespace: 0,
                 control: &control,
-                // Served in between; it does not serve others in turn.
-                interrupt: None,
+                // Served in between, it serves no others; a worker passes the turn
+                // here instead (see `interleave`).
+                interrupt,
             },
             rag,
         },

@@ -77,8 +77,10 @@ pub(crate) struct PrefixSnap {
 }
 
 pub(crate) struct ModelService {
-    pub(crate) model: Model<'static>,
-    pub(crate) tokenizer: Tokenizer,
+    /// Shared so a worker generation (see `interleave`) can run on it while
+    /// the service is locked by another request.
+    pub(crate) model: Arc<Model<'static>>,
+    pub(crate) tokenizer: Arc<Tokenizer>,
     pub(crate) force_think: bool,
     pub(crate) chat: ChatState,
     pub(crate) sessions: std::collections::HashMap<String, (ChatState, std::time::Instant)>,

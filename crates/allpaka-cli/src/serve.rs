@@ -9,6 +9,7 @@ mod handlers;
 mod http;
 mod inference;
 mod ingress;
+mod interleave;
 mod launch;
 mod memory;
 mod messages;
@@ -225,11 +226,31 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
                 // served between its steps instead of after it (roadmap A3).
                 let pending = std::cell::RefCell::new(Vec::new());
                 let serving = scheduled.model.clone();
+                // What a worker would need, taken before dispatch locks the service.
+                let shared = runtime.model(&serving).map(|service| {
+                    let service = service.lock().unwrap();
+                    interleave::Shared {
+                        name: serving.clone(),
+                        model: Arc::clone(&service.model),
+                        tokenizer: Arc::clone(&service.tokenizer),
+                        force_think: service.force_think,
+                        budget: service.chat.memory.budget(),
+                    }
+                });
+                // A worker generation may already run (started during an
+                // earlier request): take turns with it from the first step.
+                let turn = std::cell::RefCell::new(interleave::active());
+                if let Some(gate) = turn.borrow().as_ref() {
+                    gate.enter();
+                }
                 let interrupt = |model: &Model<'static>,
                                  tok: &Tokenizer,
                                  template: &Template,
                                  budget: &memory::Budget,
                                  running_tokens: usize| {
+                    if let Some(gate) = turn.borrow().as_ref() {
+                        gate.pass();
+                    }
                     while let Ok((name, context_tokens, connection)) = incoming.try_recv() {
                         if preemptible::eligible(
                             &name,
@@ -239,8 +260,14 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
                             running_tokens,
                         ) {
                             preemptible::serve(
-                                &name, connection, model, tok, template, budget, &rag_tools,
+                                &name, connection, model, tok, template, budget, &rag_tools, None,
                             );
+                        } else if let Some(shared) = shared
+                            .as_ref()
+                            .filter(|s| interleave::eligible(&name, s, &connection))
+                        {
+                            *turn.borrow_mut() =
+                                Some(interleave::spawn(shared.clone(), connection));
                         } else {
                             pending
                                 .borrow_mut()
@@ -256,6 +283,9 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
                     Some(&interrupt),
                 ) {
                     println!("request failed: {error:#}");
+                }
+                if let Some(gate) = turn.take() {
+                    gate.leave();
                 }
                 for (name, context_tokens, connection) in pending.into_inner() {
                     let mut rejection_stream = connection.stream.try_clone()?;
@@ -309,8 +339,8 @@ fn load_model_service(
     Ok((
         name,
         ModelService {
-            model,
-            tokenizer,
+            model: Arc::new(model),
+            tokenizer: Arc::new(tokenizer),
             force_think,
             chat,
             sessions: std::collections::HashMap::new(),
