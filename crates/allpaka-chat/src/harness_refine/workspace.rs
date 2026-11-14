@@ -601,6 +601,7 @@ impl Engine for StudioEngine {
                             path: path.canonicalize()?,
                             writable,
                             repository: false,
+                            ssh: None,
                         })
                     };
                 let project = context::Project {
@@ -797,6 +798,7 @@ impl StudioEngine {
                     path: evidence.canonicalize()?,
                     writable: false,
                     repository: false,
+                    ssh: None,
                 },
             );
             let project = context::Project {

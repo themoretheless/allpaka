@@ -47,6 +47,7 @@ pub(crate) fn routes(app: App) -> Router {
         )
         .route("/api/worker/run", post(remote_worker::run))
         .route("/api/config", get(config))
+        .route("/api/permission-presets", get(sandbox::presets_api))
         .route("/api/memory/notes", get(memory::list).post(memory::save))
         .route("/api/memory/expiry", get(memory::expiry))
         .route(
@@ -378,6 +379,58 @@ pub(crate) fn routes(app: App) -> Router {
             axum::routing::delete(bookmarks::remove),
         )
         .route("/api/sessions/:id/actions", post(action))
+        .route(
+            "/api/sessions/:id/interaction",
+            post(interaction::respond_api),
+        )
+        .route("/api/sessions/:id/spills", get(spill::list_api))
+        .route("/api/sessions/:id/spills/:spill_id", get(spill::get_api))
+        .route("/api/sessions/:id/checkpoints", get(patch::list_api))
+        .route("/api/sessions/:id/checkpoints/:cid/undo", post(patch::undo_api))
+        .route(
+            "/api/sessions/:id/terminals",
+            get(terminal::list_api).post(terminal::create_api),
+        )
+        .route(
+            "/api/sessions/:id/terminals/:tid",
+            get(terminal::read_api).delete(terminal::close_api),
+        )
+        .route(
+            "/api/sessions/:id/terminals/:tid/input",
+            post(terminal::input_api),
+        )
+        .route(
+            "/api/sessions/:id/terminals/:tid/resize",
+            post(terminal::resize_api),
+        )
+        .route("/api/sessions/:id/worktrees", get(worktree::list_api))
+        .route("/api/sessions/:id/worktree", post(worktree::action_api))
+        .route(
+            "/api/sessions/:id/forge-pr",
+            get(forge::get_api).post(forge::post_api),
+        )
+        .route("/api/sessions/:id/agents", get(crate::runtime::subagent::list_api))
+        .route(
+            "/api/sessions/:id/agents/:aid/message",
+            post(crate::runtime::subagent::message_api),
+        )
+        .route(
+            "/api/sessions/:id/agents/:aid/interrupt",
+            post(crate::runtime::subagent::interrupt_api),
+        )
+        .route(
+            "/api/sessions/:id/team",
+            get(agent_team::get_api).post(agent_team::post_api),
+        )
+        .route(
+            "/api/workflows",
+            get(workflow::list_api).post(workflow::save_api),
+        )
+        .route("/api/workflows/:wid", axum::routing::delete(workflow::delete_api))
+        .route("/api/sessions/:id/workflow", post(workflow::run_session_api))
+        .route("/api/ssh/test", post(ssh::test_api))
+        .route("/api/documents/extract", post(documents::extract_api))
+        .route("/api/voice/transcribe", post(automation_seams::transcribe_api))
         .route("/api/sessions/:id/plan", get(read_plan).post(save_plan))
         .layer(DefaultBodyLimit::max(10_000_000))
         .layer(middleware::from_fn_with_state(app.clone(), guard))

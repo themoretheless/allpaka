@@ -12,6 +12,12 @@ pub enum Mode {
     Swarm,
 }
 
+impl Mode {
+    pub fn is_read_only(self) -> bool {
+        matches!(self, Self::Chat | Self::Plan | Self::Swarm)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryFolder {
@@ -203,6 +209,14 @@ pub struct Settings {
     /// Requested reasoning depth; None keeps the provider default.
     #[serde(default)]
     pub reasoning_effort: Option<Effort>,
+    #[serde(default)]
+    pub sandbox_mode: crate::sandbox::SandboxMode,
+    #[serde(default)]
+    pub approval_policy: crate::sandbox::ApprovalPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_preset: Option<String>,
+    #[serde(default)]
+    pub team_mode: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -365,6 +379,18 @@ pub struct Session {
     pub notice: Option<String>,
     pub step: usize,
     pub usage: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_approval: Option<crate::interaction::PendingApproval>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_question: Option<crate::interaction::PendingQuestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scheduled_origin: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forge_pr: Option<crate::forge::ForgePrState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub team_tasks: Vec<crate::agent_team::TeamTask>,
     /// Set for headless runs (subagents, harness probes): never written to
     /// disk and resolved against its own project and harness.
     #[serde(skip)]
@@ -412,6 +438,12 @@ impl Session {
             notice: None,
             step: 0,
             usage: Value::Null,
+            pending_approval: None,
+            pending_question: None,
+            working_dir: None,
+            scheduled_origin: false,
+            forge_pr: None,
+            team_tasks: Vec::new(),
             ephemeral: None,
         }
     }

@@ -207,6 +207,7 @@ mod tests {
                 path: dir.canonicalize().unwrap(),
                 writable: false,
                 repository: false,
+                ssh: None,
             }],
         };
         let mut q = Request {

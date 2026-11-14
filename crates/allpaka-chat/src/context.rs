@@ -10,6 +10,8 @@ pub struct Root {
     pub writable: bool,
     #[serde(default)]
     pub repository: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<crate::ssh::SshTarget>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Project {
@@ -41,17 +43,22 @@ impl Project {
             {
                 bail!("Context aliases must be unique letters, digits, - or _");
             }
-            r.path = r
-                .path
-                .canonicalize()
-                .with_context(|| format!("Folder unavailable: {}", r.path.display()))?;
-            if !r.path.is_dir() {
-                bail!("Context must be a folder or local repository");
+            if let Some(target) = &r.ssh {
+                crate::ssh::validate_target(target)?;
+                crate::ssh::validate_remote_root(&r.path)?;
+            } else {
+                r.path = r
+                    .path
+                    .canonicalize()
+                    .with_context(|| format!("Folder unavailable: {}", r.path.display()))?;
+                if !r.path.is_dir() {
+                    bail!("Context must be a folder or local repository");
+                }
+                if r.path == history || r.path.starts_with(history) {
+                    bail!("Conversation storage cannot be a context root");
+                }
+                r.repository = r.path.join(".git").exists();
             }
-            if r.path == history || r.path.starts_with(history) {
-                bail!("Conversation storage cannot be a context root");
-            }
-            r.repository = r.path.join(".git").exists();
         }
         Ok(())
     }
@@ -118,12 +125,14 @@ mod tests {
                     path: PathBuf::from("/tmp/source"),
                     writable: true,
                     repository: true,
+                    ssh: None,
                 },
                 Root {
                     alias: "reference".into(),
                     path: PathBuf::from("/tmp/reference"),
                     writable: false,
                     repository: false,
+                    ssh: None,
                 },
             ],
         };

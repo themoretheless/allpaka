@@ -206,7 +206,7 @@ pub(crate) fn resolve(root: &Path, path: &str, write: bool) -> Result<PathBuf> {
 }
 /// Create the missing directories of a new file, one checked level at a
 /// time: only plain, non-hidden names, never through a symlink or a file.
-fn create_parents(root: &Path, path: &str) -> Result<()> {
+pub(crate) fn create_parents(root: &Path, path: &str) -> Result<()> {
     let relative = Path::new(path);
     let Some(parent) = relative.parent() else {
         return Ok(());
@@ -232,7 +232,7 @@ fn create_parents(root: &Path, path: &str) -> Result<()> {
     Ok(())
 }
 // Shared across sessions: hold a path lock throughout each read-modify-write.
-fn mutation_lock(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+pub(crate) fn mutation_lock(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
     use std::sync::{Arc, Mutex, OnceLock, Weak};
     static LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
         OnceLock::new();
@@ -402,7 +402,7 @@ pub(crate) fn read_text(path: &Path, max: usize) -> Result<String> {
     }
     String::from_utf8(bytes).context("Not a UTF-8 text file")
 }
-fn unified_diff(path: &str, before: &str, after: &str) -> String {
+pub(crate) fn unified_diff(path: &str, before: &str, after: &str) -> String {
     if before == after {
         return String::new();
     }
@@ -475,6 +475,10 @@ mod tests {
             compact_threshold: 24000,
             json_mode: false,
             reasoning_effort: None,
+            sandbox_mode: Default::default(),
+            approval_policy: Default::default(),
+            permission_preset: None,
+            team_mode: false,
         };
         assert_eq!(schemas(&s, false).len(), 4);
         assert!(execute(

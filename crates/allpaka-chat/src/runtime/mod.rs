@@ -2,7 +2,7 @@
 
 mod actor;
 mod exec;
-mod subagent;
+pub(crate) mod subagent;
 mod turn;
 
 pub(crate) use actor::*;

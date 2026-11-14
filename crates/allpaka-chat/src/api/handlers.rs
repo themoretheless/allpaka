@@ -4,9 +4,14 @@
 use crate::*;
 
 pub(crate) async fn config(State(app): State<App>) -> Json<Value> {
-    Json(
-        json!({"credential_storage":credentials::AVAILABLE,"providers":app.providers.lock().unwrap().iter().map(|p|p.public()).collect::<Vec<_>>(),"workspace":app.workspace.display().to_string(),"projects":*app.projects.lock().unwrap()}),
-    )
+    Json(json!({
+        "credential_storage": credentials::AVAILABLE,
+        "providers": app.providers.lock().unwrap().iter().map(|p| p.public()).collect::<Vec<_>>(),
+        "workspace": app.workspace.display().to_string(),
+        "projects": *app.projects.lock().unwrap(),
+        "sandbox": sandbox::capabilities(),
+        "permission_presets": sandbox::presets(),
+    }))
 }
 pub(crate) fn validate_settings(s: &Settings, app: &App) -> Result<()> {
     if let Some(selection) = &s.guardrails {
@@ -19,6 +24,11 @@ pub(crate) fn validate_settings(s: &Settings, app: &App) -> Result<()> {
             bail!("Guardrails for remote Swarm workers are not yet supported");
         }
         selection.prepare(&guardrail_policies::Store::open(&app.data)?)?;
+    }
+    if let Some(preset) = s.permission_preset.as_deref() {
+        if preset != "custom" && sandbox::resolve_preset(preset).is_none() {
+            bail!("Unknown permission preset: {preset}");
+        }
     }
     if !(4096..=1000000).contains(&s.compact_threshold) {
         bail!("Compaction threshold must be between 4096 and 1000000 estimated tokens");
@@ -211,6 +221,9 @@ pub(crate) async fn session(State(app): State<App>, Path(id): Path<String>) -> A
     };
     value["context_stats"] = stats;
     value["background"] = app.background.list(&id);
+    value["terminals"] = json!(app.ext.terminals.list(&id, None));
+    value["checkpoints"] = json!(app.ext.checkpoints.list(&app.data, &id).unwrap_or_default());
+    value["agents"] = json!(app.ext.agents.list(&id));
     Ok(Json(value))
 }
 pub(crate) async fn background_action(
@@ -265,14 +278,37 @@ pub(crate) async fn execute_background(
     cwd: &std::path::Path,
     args: &Value,
 ) -> Result<Value> {
-    let epoch = app
+    let (epoch, settings) = app
         .sessions
         .lock()
         .unwrap()
         .get(owner)
-        .map(|(session, _)| session.lock().unwrap().background_continuation_epoch)
+        .map(|(session, _)| {
+            let s = session.lock().unwrap();
+            (s.background_continuation_epoch, s.settings.clone())
+        })
         .context("Conversation not found")?;
-    let result = app.background.execute(owner, cwd, args).await?;
+    let writable_roots: Vec<PathBuf> = if settings.allow_writes {
+        app.projects
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.id == settings.project_id)
+            .map(|p| {
+                p.roots
+                    .iter()
+                    .filter(|r| r.writable)
+                    .map(|r| r.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let result = app
+        .background
+        .execute_sandboxed(owner, cwd, args, settings.sandbox_mode, &writable_roots)
+        .await?;
     if args["action"] == "start" {
         if let (Some(text), Some(id)) = (args["follow_up"].as_str(), result["id"].as_str()) {
             let app = app.clone();
@@ -343,9 +379,20 @@ pub(crate) async fn delete_session(
         ));
     }
     app.background.cancel_owned(&id);
+    app.interactions.clear_session(&id);
+    app.ext.terminals.purge_session(&id);
+    app.ext.agents.purge_session(&id);
     app.sessions.lock().unwrap().remove(&id);
     let path = app.data.join(format!("{id}.json"));
-    let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+    let data = app.data.clone();
+    let sid = id.clone();
+    let checkpoints = app.ext.checkpoints.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = std::fs::remove_file(path);
+        let _ = spill::delete_session_spills(&data, &sid);
+        let _ = checkpoints.delete_session(&data, &sid);
+    })
+    .await;
     Ok(Json(json!({"deleted": id})))
 }
 #[derive(Deserialize)]

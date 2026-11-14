@@ -297,6 +297,7 @@ mod tests {
                     path: workspace.clone(),
                     writable: true,
                     repository: false,
+                    ssh: None,
                 }],
                 instructions: String::new(),
             }])),
@@ -321,6 +322,8 @@ mod tests {
             origin: format!("http://{worker_address}"),
             plugins: Default::default(),
             harness_jobs: Default::default(),
+            interactions: Default::default(),
+            ext: Default::default(),
         };
         let remote_settings: Settings = serde_json::from_value(json!({
             "provider":"fixture","model":"tiny","project_id":"worker-repo","mode":"swarm",

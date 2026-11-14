@@ -40,12 +40,19 @@ pub(crate) enum TurnOutcome {
     Compacted,
 }
 
-pub(crate) async fn cancel(task: &mut Option<JoinHandle<Result<TurnOutcome>>>, s: &SharedSession) {
+pub(crate) async fn cancel(
+    app: &App,
+    task: &mut Option<JoinHandle<Result<TurnOutcome>>>,
+    s: &SharedSession,
+) {
     if let Some(t) = task.take() {
         t.abort();
         let _ = t.await;
     }
+    let id = s.lock().unwrap().id.clone();
+    app.interactions.cancel_waiters(&id);
     let mut s = s.lock().unwrap();
+    interaction::clear_pending_fields(&mut s);
     s.background_continuation_epoch = s.background_continuation_epoch.wrapping_add(1);
     s.close_pending_tools();
     // A stopped swarm wave leaves reports that will never finish; say so instead
@@ -117,7 +124,7 @@ pub(crate) async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Act
         }
         tokio::select! {
             command=rx.recv() => {
-                let Some(mut a)=command else { cancel(&mut task,&s).await;break; };
+                let Some(mut a)=command else { cancel(&app,&mut task,&s).await;break; };
                 let reply=a.reply.take();
                 let mut rejection=None;
                 let mut retry_member=None;
@@ -145,7 +152,7 @@ pub(crate) async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Act
                             let settings=state.settings.clone();state.queue.push(Pending{continuation:true,images:vec![],text:a.text,settings});
                         }
                     },
-                    ActionKind::Stop => { cancel(&mut task,&s).await;paused=true; },
+                    ActionKind::Stop => { cancel(&app,&mut task,&s).await;paused=true; },
                     ActionKind::Resume => {
                         paused=false;
                         let mut s=s.lock().unwrap();
@@ -161,7 +168,7 @@ pub(crate) async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Act
                     ActionKind::ClearQueue => { let mut s=s.lock().unwrap();s.queue.clear();s.steering.clear(); },
                     ActionKind::Steer if task.is_some() => { let mut s=s.lock().unwrap();if s.steering.len()<32 {s.steering.push(a.text);}else{rejection=Some("Steering queue is full".to_string());s.error=rejection.clone();} },
                     ActionKind::Send | ActionKind::SendNow | ActionKind::Steer => {
-                        if a.kind==ActionKind::SendNow {cancel(&mut task,&s).await;}
+                        if a.kind==ActionKind::SendNow {cancel(&app,&mut task,&s).await;}
                         let mut s=s.lock().unwrap();
                         let settings=a.settings.unwrap_or_else(||s.settings.clone());
                         let p=Pending{continuation:a.kind==ActionKind::Steer,images:a.images,text:a.text,settings};

@@ -309,8 +309,19 @@ impl Manager {
         json!({"tasks":rows,"persistent":self.1.is_some(),"automatic_replay":false,"summary":{"status_counts":status_counts,"known_duration_ms":known_duration_ms,"unknown_duration_count":unknown_duration_count,"duration_semantics":"sum_task_elapsed"}})
     }
     pub(crate) async fn execute(&self, owner: &str, cwd: &Path, args: &Value) -> Result<Value> {
+        self.execute_sandboxed(owner, cwd, args, crate::sandbox::SandboxMode::Unsandboxed, &[])
+            .await
+    }
+    pub(crate) async fn execute_sandboxed(
+        &self,
+        owner: &str,
+        cwd: &Path,
+        args: &Value,
+        sandbox_mode: crate::sandbox::SandboxMode,
+        writable_roots: &[PathBuf],
+    ) -> Result<Value> {
         match args["action"].as_str().context("action is required")? {
-            "start" => self.start(owner, cwd, args),
+            "start" => self.start(owner, cwd, args, sandbox_mode, writable_roots),
             "list" => Ok(self.list(owner)),
             "export" => {
                 let include_outputs = match args.get("include_outputs") {
@@ -393,7 +404,14 @@ impl Manager {
             _ => bail!("Unknown background action"),
         }
     }
-    fn start(&self, owner: &str, cwd: &Path, args: &Value) -> Result<Value> {
+    fn start(
+        &self,
+        owner: &str,
+        cwd: &Path,
+        args: &Value,
+        sandbox_mode: crate::sandbox::SandboxMode,
+        writable_roots: &[PathBuf],
+    ) -> Result<Value> {
         if let Some(follow_up) = args.get("follow_up") {
             if !follow_up
                 .as_str()
@@ -429,17 +447,23 @@ impl Manager {
             bail!("Background task capacity reached; cancel or clean up tasks");
         }
         #[cfg(unix)]
-        let mut process = {
-            let mut c = tokio::process::Command::new("/bin/sh");
-            c.arg("-c").arg(command);
-            c
-        };
+        let (program, prog_args) = ("/bin/sh", vec!["-c".to_string(), command.to_string()]);
         #[cfg(windows)]
-        let mut process = {
-            let mut c = tokio::process::Command::new("cmd.exe");
-            c.arg("/C").arg(command);
-            c
-        };
+        let (program, prog_args) = ("cmd.exe", vec!["/C".to_string(), command.to_string()]);
+        let data_dir = self
+            .1
+            .as_deref()
+            .and_then(|p| p.parent())
+            .unwrap_or_else(|| Path::new("/nonexistent"));
+        let mut process = crate::sandbox::build_command(
+            program,
+            &prog_args,
+            cwd,
+            sandbox_mode,
+            writable_roots,
+            data_dir,
+            false,
+        )?;
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;

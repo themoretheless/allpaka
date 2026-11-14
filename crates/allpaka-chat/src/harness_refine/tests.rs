@@ -1227,6 +1227,7 @@ async fn fixture(model: fn(&Value) -> Value) -> Fixture {
             path: workspace.clone(),
             writable: true,
             repository: false,
+            ssh: None,
         }],
         instructions: String::new(),
     };
@@ -1253,6 +1254,8 @@ async fn fixture(model: fn(&Value) -> Value) -> Fixture {
         origin: "http://127.0.0.1:1".into(),
         plugins: Default::default(),
         harness_jobs: Default::default(),
+        interactions: Default::default(),
+        ext: Default::default(),
     };
     Fixture {
         root,
@@ -1418,6 +1421,7 @@ fn workspace_snapshots_are_byte_reproducible() {
             path: original.canonicalize().unwrap(),
             writable: true,
             repository: false,
+            ssh: None,
         }],
         instructions: String::new(),
     };

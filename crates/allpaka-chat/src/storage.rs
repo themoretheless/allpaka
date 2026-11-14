@@ -137,6 +137,86 @@ pub fn atomic_create_new_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
+const B64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Encode arbitrary bytes using standard RFC 4648 base64 with `=` padding.
+pub fn base64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64_ALPHABET[(n >> 18) & 0x3f] as char);
+        out.push(B64_ALPHABET[(n >> 12) & 0x3f] as char);
+        if chunk.len() > 1 {
+            out.push(B64_ALPHABET[(n >> 6) & 0x3f] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(B64_ALPHABET[n & 0x3f] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Decode standard RFC 4648 base64 (ignoring ASCII whitespace).
+pub fn base64_decode(input: &str) -> Result<Vec<u8>> {
+    let compact: Vec<u8> = input
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    if compact.is_empty() {
+        return Ok(Vec::new());
+    }
+    if compact.len() % 4 != 0 {
+        anyhow::bail!("invalid base64 length");
+    }
+    fn val(byte: u8) -> Result<u8> {
+        match byte {
+            b'A'..=b'Z' => Ok(byte - b'A'),
+            b'a'..=b'z' => Ok(byte - b'a' + 26),
+            b'0'..=b'9' => Ok(byte - b'0' + 52),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => anyhow::bail!("invalid base64 byte"),
+        }
+    }
+    let mut out = Vec::with_capacity(compact.len() / 4 * 3);
+    let chunks = compact.len() / 4;
+    for (idx, chunk) in compact.chunks_exact(4).enumerate() {
+        let is_last = idx + 1 == chunks;
+        if chunk[0] == b'=' || chunk[1] == b'=' {
+            anyhow::bail!("invalid base64 padding");
+        }
+        if !is_last && (chunk[2] == b'=' || chunk[3] == b'=') {
+            anyhow::bail!("unexpected mid-stream base64 padding");
+        }
+        let a = val(chunk[0])? as u32;
+        let b = val(chunk[1])? as u32;
+        let pad2 = chunk[2] == b'=';
+        let pad3 = chunk[3] == b'=';
+        if pad2 && !pad3 {
+            anyhow::bail!("invalid base64 padding sequence");
+        }
+        let c = if pad2 { 0 } else { val(chunk[2])? as u32 };
+        let d = if pad3 { 0 } else { val(chunk[3])? as u32 };
+        let n = (a << 18) | (b << 12) | (c << 6) | d;
+        out.push(((n >> 16) & 0xff) as u8);
+        if !pad2 {
+            out.push(((n >> 8) & 0xff) as u8);
+        }
+        if !pad3 {
+            out.push((n & 0xff) as u8);
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +236,26 @@ mod tests {
         assert!(!valid_id("../bad"));
         assert!(valid_hex_id("abc-123"));
         assert!(!valid_hex_id("xyz"));
+    }
+
+    #[test]
+    fn base64_roundtrip_handles_padding_and_errors() {
+        for sample in [
+            b"".as_slice(),
+            b"a",
+            b"ab",
+            b"abc",
+            b"hello world\x00\xff",
+            &[0u8, 1, 2, 250, 251, 252, 253, 254, 255],
+        ] {
+            let encoded = base64_encode(sample);
+            assert_eq!(base64_decode(&encoded).unwrap(), sample);
+        }
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_decode("Zm9v\nYmFy").unwrap(), b"foobar");
+        assert!(base64_decode("abc").is_err());
+        assert!(base64_decode("ab*=").is_err());
+        assert!(base64_decode("a=aa").is_err());
+        assert!(base64_decode("aa=a").is_err());
     }
 }

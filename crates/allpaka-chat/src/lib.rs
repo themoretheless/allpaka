@@ -1,4 +1,6 @@
+mod agent_team;
 mod api;
+mod automation_seams;
 mod background;
 mod bookmarks;
 mod cancel;
@@ -8,19 +10,24 @@ mod context;
 mod conversation_search;
 mod credentials;
 mod data_lock;
+mod documents;
 mod evaluation;
 mod experiments;
+mod ext;
 mod feedback;
 mod files;
+mod forge;
 mod guardrail_policies;
 mod harness;
 mod harness_library;
 mod harness_prompts;
 mod harness_refine;
 mod history;
+mod interaction;
 mod judge;
 mod judge_presets;
 mod judge_runs;
+mod lsp;
 mod mcp;
 mod memory;
 mod memory_extract;
@@ -28,22 +35,31 @@ mod model_evaluators;
 mod observability;
 mod online_evaluation;
 mod online_sources;
+mod patch;
 mod plan;
 mod plugins;
 mod progress;
 mod prompts;
 mod provider;
+mod ptc;
 mod quality_jobs;
 mod rag;
 mod remote_worker;
 mod review_queues;
 mod runtime;
+mod sandbox;
+mod spill;
+mod ssh;
 mod state_file;
 pub mod storage;
 mod strict_json;
 mod swarm;
+mod terminal;
 mod tools;
 mod types;
+mod web_tools;
+mod workflow;
+mod worktree;
 
 use anyhow::{bail, Context, Result};
 use api::*;
@@ -94,10 +110,13 @@ pub(crate) struct App {
     pub(crate) key_mutations: Arc<tokio::sync::Mutex<()>>,
     pub(crate) plugins: plugins::Registry,
     pub(crate) harness_jobs: harness_refine::Manager,
+    pub(crate) interactions: interaction::Broker,
+    pub(crate) ext: ext::RuntimeExt,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CommandExecution {
     Disabled,
+    Sandboxed(sandbox::SandboxMode),
     TrustedUnsandboxed,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +134,12 @@ impl ExecutionPolicy {
     pub(crate) const fn trusted_unsandboxed() -> Self {
         Self {
             commands: CommandExecution::TrustedUnsandboxed,
+            external_tools: true,
+        }
+    }
+    pub(crate) const fn sandboxed(mode: sandbox::SandboxMode) -> Self {
+        Self {
+            commands: CommandExecution::Sandboxed(mode),
             external_tools: true,
         }
     }
@@ -192,6 +217,15 @@ pub(crate) fn bad_request(message: impl ToString) -> ApiError {
 pub(crate) fn not_found(message: impl ToString) -> ApiError {
     error(StatusCode::NOT_FOUND, message)
 }
+pub(crate) fn conflict(message: impl ToString) -> ApiError {
+    error(StatusCode::CONFLICT, message)
+}
+pub(crate) fn forbidden(message: impl ToString) -> ApiError {
+    error(StatusCode::FORBIDDEN, message)
+}
+pub(crate) fn unauthorized(message: impl ToString) -> ApiError {
+    error(StatusCode::UNAUTHORIZED, message)
+}
 pub(crate) fn internal(message: impl ToString) -> ApiError {
     error(StatusCode::INTERNAL_SERVER_ERROR, message)
 }
@@ -243,6 +277,7 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                         path: workspace.clone(),
                         writable: false,
                         repository: workspace.join(".git").exists(),
+                        ssh: None,
                     }],
                     instructions: String::new(),
                 }]
@@ -325,6 +360,8 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                 origin: format!("http://{addr}"),
                 plugins: plugin_registry,
                 harness_jobs: Default::default(),
+                interactions: Default::default(),
+                ext: Default::default(),
             };
             app.judge_runs.recover()?;
             let recovered_traces = app.observability.recover()?;
@@ -363,6 +400,10 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                             "Server restarted. Partial output retained; resume explicitly.".into(),
                         );
                         session.close_pending_tools();
+                    }
+                    if session.pending_approval.is_some() || session.pending_question.is_some() {
+                        interaction::clear_pending_fields(&mut session);
+                        let _ = save(&app, &session);
                     }
                     if session.error.as_deref().is_some_and(|e|e == "Provider stopped: length" || e == "Provider stopped: max_tokens") {
                     session.error=None;session.status=SessionStatus::Paused;

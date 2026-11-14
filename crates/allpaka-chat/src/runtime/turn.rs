@@ -228,6 +228,12 @@ impl TurnContext {
         let mut schemas = tools::schemas(&tool_settings, cmd_enabled);
         schemas.push(conversation_search::schema());
         schemas.push(memory::schema());
+        if ephemeral.is_none() {
+            schemas.push(spill::schema());
+            if matches!(settings.mode, Mode::Plan | Mode::Auto | Mode::Goal) {
+                schemas.push(interaction::ask_question_schema());
+            }
+        }
         if matches!(settings.mode, Mode::Auto | Mode::Goal) && cmd_enabled && ephemeral.is_none() {
             schemas.push(background::schema());
         }
@@ -242,6 +248,43 @@ impl TurnContext {
                 if let Some(client) = &state.client {
                     let read_only = matches!(settings.mode, Mode::Chat | Mode::Plan | Mode::Swarm);
                     schemas.extend(client.tool_schemas(&format!("mcp_{id}_"), read_only));
+                }
+            }
+            if ephemeral.is_none() && matches!(settings.mode, Mode::Plan | Mode::Auto | Mode::Goal)
+            {
+                schemas.push(crate::patch::glob_files_schema());
+                schemas.push(crate::patch::working_directory_schema());
+                schemas.push(crate::lsp::schema());
+                schemas.push(crate::web_tools::web_fetch_schema());
+                schemas.push(crate::web_tools::web_search_schema());
+                schemas.push(crate::documents::schema());
+                for s in crate::terminal::schema_list() {
+                    let n = s["function"]["name"].as_str().unwrap_or("");
+                    if n == "user_terminal_list" || n == "user_terminal_read" {
+                        schemas.push(s);
+                    }
+                }
+                if !settings.mode.is_read_only() && tool_settings.allow_writes {
+                    schemas.push(crate::patch::apply_patch_schema());
+                }
+                if matches!(settings.mode, Mode::Auto | Mode::Goal) && cmd_enabled {
+                    for s in crate::terminal::schema_list() {
+                        let n = s["function"]["name"].as_str().unwrap_or("");
+                        if n != "user_terminal_list" && n != "user_terminal_read" {
+                            schemas.push(s);
+                        }
+                    }
+                    schemas.push(crate::worktree::schema());
+                    schemas.push(crate::forge::schema());
+                    schemas.push(crate::ptc::schema());
+                    schemas.push(crate::workflow::ralph_schema());
+                    schemas.push(crate::workflow::workflow_schema());
+                    schemas.push(crate::automation_seams::browser_schema());
+                    schemas.push(crate::automation_seams::computer_schema());
+                    schemas.extend(crate::runtime::subagent::tree_schemas());
+                }
+                if settings.team_mode {
+                    schemas.extend(crate::agent_team::schemas());
                 }
             }
         }
@@ -634,6 +677,52 @@ impl TurnContext {
         {
             bail!("Blocked by a harness hook: {reason}");
         }
+        if self.ephemeral.is_none() {
+            interaction::request_approval_if_needed(
+                &self.app,
+                &self.s,
+                self.settings.approval_policy,
+                name,
+                &args,
+            )
+            .await?;
+        }
+        if name == "read_spill" {
+            if self.ephemeral.is_some() {
+                bail!("Spill inspection is unavailable in headless turns");
+            }
+            let sid = self.s.lock().unwrap().id.clone();
+            return spill::execute_read_tool(&self.app.data, &sid, &args);
+        }
+        if name == "ask_user_question" {
+            if self.ephemeral.is_some() {
+                bail!("Interactive questions require a non-headless session");
+            }
+            return interaction::ask_user_question(&self.app, &self.s, &args).await;
+        }
+        let effective_sandbox = match self.policy.commands {
+            CommandExecution::Disabled => crate::sandbox::SandboxMode::ReadOnly,
+            CommandExecution::Sandboxed(m) => m,
+            CommandExecution::TrustedUnsandboxed => self.settings.sandbox_mode,
+        };
+        let writable_roots: Vec<PathBuf> = if self.settings.allow_writes {
+            self.project
+                .roots
+                .iter()
+                .filter(|r| r.writable)
+                .map(|r| r.path.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let session_id_owned = self.s.lock().unwrap().id.clone();
+        let exec_ctx = crate::ExecContext {
+            data: Some(self.app.data.as_ref()),
+            session_id: self.ephemeral.is_none().then_some(session_id_owned.as_str()),
+            sandbox_mode: effective_sandbox,
+            writable_roots: &writable_roots,
+            allow_loopback_ipc: false,
+        };
         if name == "background" {
             if !matches!(self.settings.mode, Mode::Auto | Mode::Goal)
                 || !self.cmd_enabled
@@ -678,12 +767,13 @@ impl TurnContext {
                 &self.harness_tree,
                 args["path"].as_str().unwrap_or(""),
             )?;
-            return execute_command(
+            return execute_command_ctx(
                 root,
                 &json!({
                     "command": harness::script_command(&path, &script_args),
                     "timeout": args.get("timeout").cloned().unwrap_or(json!(30)),
                 }),
+                &exec_ctx,
             )
             .await;
         }
@@ -717,6 +807,314 @@ impl TurnContext {
                 json!({"updated":true,"revision":state.plan_revision,"steps":state.plan,"evidence_basis":"reported"}),
             );
         }
+        if name == "glob_files" {
+            if self.restricted {
+                bail!("glob_files is unavailable in restricted sessions");
+            }
+            let wd = self.s.lock().unwrap().working_dir.clone();
+            return crate::patch::glob_files(&self.project, wd.as_deref(), self.app.data.as_ref(), &args);
+        }
+        if name == "working_directory" {
+            if self.restricted || self.ephemeral.is_some() {
+                bail!("working_directory requires a non-ephemeral session");
+            }
+            return crate::patch::working_directory_tool(&self.app, &self.s, &self.project, &args);
+        }
+        if name == "apply_patch" {
+            if self.restricted || self.ephemeral.is_some() {
+                bail!("apply_patch requires a non-ephemeral session");
+            }
+            let allow = !self.settings.mode.is_read_only()
+                && self.settings.allow_writes
+                && self.project.roots.iter().any(|r| r.writable);
+            let wd = self.s.lock().unwrap().working_dir.clone();
+            let sid = self.s.lock().unwrap().id.clone();
+            return crate::patch::apply_patch(
+                &self.project,
+                wd.as_deref(),
+                self.app.data.as_ref(),
+                &self.app.ext.checkpoints,
+                Some(&sid),
+                allow,
+                &args,
+            );
+        }
+        if name == "lsp" {
+            if self.restricted || self.ephemeral.is_some() {
+                bail!("lsp requires a non-ephemeral session");
+            }
+            return self.app.ext.lsp.execute(&self.project, self.app.data.as_ref(), &args).await;
+        }
+        if matches!(
+            name,
+            "terminal_open"
+                | "terminal_send"
+                | "terminal_read"
+                | "terminal_signal"
+                | "terminal_close"
+                | "terminal_list"
+                | "user_terminal_list"
+                | "user_terminal_read"
+        ) {
+            if self.restricted || self.ephemeral.is_some() {
+                bail!("Terminal tools require a non-ephemeral session");
+            }
+            if !matches!(name, "user_terminal_list" | "user_terminal_read")
+                && (!matches!(self.settings.mode, Mode::Auto | Mode::Goal) || !self.cmd_enabled)
+            {
+                bail!("Model terminals require an Auto/Goal turn with command execution enabled");
+            }
+            let base_root = self
+                .project
+                .roots
+                .first()
+                .map(|r| r.path.clone())
+                .context("No project root available")?;
+            let wd = self.s.lock().unwrap().working_dir.clone();
+            let default_cwd = match wd.as_deref() {
+                Some(w) => crate::ext::resolve_project_root(&self.project, w, false)
+                    .and_then(|(r, rel)| tools::resolve(&r.path, &rel, false))
+                    .unwrap_or(base_root),
+                None => base_root,
+            };
+            return crate::terminal::execute_tool(
+                &self.app,
+                &session_id_owned,
+                &default_cwd,
+                effective_sandbox,
+                &writable_roots,
+                name,
+                &args,
+            )
+            .await;
+        }
+        if name == "create_worktree" {
+            if self.restricted
+                || self.ephemeral.is_some()
+                || !matches!(self.settings.mode, Mode::Auto | Mode::Goal)
+                || !self.cmd_enabled
+            {
+                bail!("create_worktree requires a non-ephemeral Auto/Goal turn with command execution enabled");
+            }
+            let allow = self.settings.allow_writes && self.project.roots.iter().any(|r| r.writable);
+            return crate::worktree::execute(&self.app, &session_id_owned, &self.s, &self.project, allow, &args);
+        }
+        if name == "forge_pr" {
+            if self.restricted
+                || self.ephemeral.is_some()
+                || !matches!(self.settings.mode, Mode::Auto | Mode::Goal)
+                || !self.cmd_enabled
+            {
+                bail!("forge_pr requires a non-ephemeral Auto/Goal turn with command execution enabled");
+            }
+            let allow = self.settings.allow_writes && self.project.roots.iter().any(|r| r.writable);
+            return crate::forge::execute(&self.app, &self.s, &self.project, allow, &args).await;
+        }
+        if matches!(
+            name,
+            "subagent_spawn" | "list_agents" | "send_agent_message" | "wait_agent" | "interrupt_agent"
+        ) {
+            if self.restricted || self.ephemeral.is_some() || self.nested {
+                bail!("Collaborative subagent tree tools require a non-ephemeral root session");
+            }
+            if !matches!(self.settings.mode, Mode::Auto | Mode::Goal) || !self.cmd_enabled {
+                bail!("Subagent spawning requires an Auto/Goal turn with command execution enabled");
+            }
+            return match name {
+                "subagent_spawn" => {
+                    let parent = SubagentParent {
+                        settings: &self.settings,
+                        project: &self.project,
+                        tree: &self.harness_tree,
+                        policy: self.policy,
+                    };
+                    self.app
+                        .ext
+                        .agents
+                        .spawn(self.app.clone(), &session_id_owned, &self.s, parent, &args)
+                        .await
+                }
+                "list_agents" => Ok(json!({ "agents": self.app.ext.agents.list(&session_id_owned) })),
+                "send_agent_message" => {
+                    let aid = args["agent_id"].as_str().context("agent_id is required")?;
+                    let msg = args["message"].as_str().context("message is required")?;
+                    let wake = args.get("wake").and_then(Value::as_bool).unwrap_or(true);
+                    self.app
+                        .ext
+                        .agents
+                        .send_message(&self.app, &session_id_owned, aid, msg, wake)
+                }
+                "wait_agent" => {
+                    let aid = args["agent_id"].as_str().context("agent_id is required")?;
+                    let ms = args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(5000);
+                    self.app.ext.agents.wait(&session_id_owned, aid, ms).await
+                }
+                "interrupt_agent" => {
+                    let aid = args["agent_id"].as_str().context("agent_id is required")?;
+                    self.app.ext.agents.interrupt(&session_id_owned, aid)
+                }
+                _ => unreachable!(),
+            };
+        }
+        if matches!(
+            name,
+            "team_task_create" | "team_task_list" | "team_task_get" | "team_task_update"
+        ) {
+            if self.restricted || self.ephemeral.is_some() || !self.settings.team_mode {
+                bail!("Agent Team tools require a non-ephemeral session with team_mode enabled");
+            }
+            return crate::agent_team::execute_tool(&self.app, &self.s, name, &args);
+        }
+        if name == "run_code" {
+            if self.restricted
+                || self.ephemeral.is_some()
+                || !matches!(self.settings.mode, Mode::Auto | Mode::Goal)
+                || !self.cmd_enabled
+            {
+                bail!("run_code requires a non-ephemeral Auto/Goal turn with command execution enabled");
+            }
+            let base_root = self
+                .project
+                .roots
+                .first()
+                .map(|r| r.path.clone())
+                .context("No project root available")?;
+            let wd = self.s.lock().unwrap().working_dir.clone();
+            let cwd = match wd.as_deref() {
+                Some(w) => crate::ext::resolve_project_root(&self.project, w, false)
+                    .and_then(|(r, rel)| tools::resolve(&r.path, &rel, false))
+                    .unwrap_or(base_root),
+                None => base_root,
+            };
+            return crate::ptc::execute(
+                &self.app,
+                &self.s,
+                &self.project,
+                &self.settings,
+                effective_sandbox,
+                &writable_roots,
+                &cwd,
+                &args,
+            )
+            .await;
+        }
+        if matches!(name, "ralph" | "workflow") {
+            if self.restricted
+                || self.ephemeral.is_some()
+                || !matches!(self.settings.mode, Mode::Auto | Mode::Goal)
+                || !self.cmd_enabled
+            {
+                bail!("{name} requires a non-ephemeral Auto/Goal turn with command execution enabled");
+            }
+            let base_root = self
+                .project
+                .roots
+                .first()
+                .map(|r| r.path.clone())
+                .context("No project root available")?;
+            let wd = self.s.lock().unwrap().working_dir.clone();
+            let cwd = match wd.as_deref() {
+                Some(w) => crate::ext::resolve_project_root(&self.project, w, false)
+                    .and_then(|(r, rel)| tools::resolve(&r.path, &rel, false))
+                    .unwrap_or(base_root),
+                None => base_root,
+            };
+            return if name == "ralph" {
+                crate::workflow::execute_ralph(
+                    &self.app,
+                    &session_id_owned,
+                    &self.settings,
+                    &self.project,
+                    &self.harness_tree,
+                    self.policy,
+                    effective_sandbox,
+                    &writable_roots,
+                    &cwd,
+                    &args,
+                )
+                .await
+            } else {
+                crate::workflow::execute_workflow(
+                    &self.app,
+                    &session_id_owned,
+                    &self.settings,
+                    &self.project,
+                    &self.harness_tree,
+                    self.policy,
+                    effective_sandbox,
+                    &writable_roots,
+                    &cwd,
+                    &args,
+                )
+                .await
+            };
+        }
+        if name == "web_fetch" {
+            if self.restricted
+                || self.ephemeral.is_some()
+                || !matches!(self.settings.mode, Mode::Plan | Mode::Auto | Mode::Goal)
+            {
+                bail!("web_fetch requires a non-ephemeral Plan/Auto/Goal turn");
+            }
+            let sid = self.s.lock().unwrap().id.clone();
+            return crate::web_tools::execute_web_fetch(Some(self.app.data.as_ref()), Some(&sid), &args)
+                .await;
+        }
+        if name == "web_search" {
+            if self.restricted
+                || self.ephemeral.is_some()
+                || !matches!(self.settings.mode, Mode::Plan | Mode::Auto | Mode::Goal)
+            {
+                bail!("web_search requires a non-ephemeral Plan/Auto/Goal turn");
+            }
+            return crate::web_tools::execute_web_search(&args).await;
+        }
+        if name == "extract_document" {
+            if self.restricted
+                || self.ephemeral.is_some()
+                || !matches!(self.settings.mode, Mode::Plan | Mode::Auto | Mode::Goal)
+            {
+                bail!("extract_document requires a non-ephemeral Plan/Auto/Goal turn");
+            }
+            let sid = self.s.lock().unwrap().id.clone();
+            return crate::documents::execute_tool(
+                self.app.data.as_ref(),
+                &sid,
+                &self.project,
+                &args,
+            )
+            .await;
+        }
+        if matches!(name, "browser_use" | "computer_use") {
+            if self.restricted
+                || self.ephemeral.is_some()
+                || !matches!(self.settings.mode, Mode::Auto | Mode::Goal)
+                || !self.cmd_enabled
+            {
+                bail!("{name} requires a non-ephemeral Auto/Goal turn with command execution enabled");
+            }
+            let sid = self.s.lock().unwrap().id.clone();
+            let base_cwd = self.project.roots.first().map(|r| r.path.as_path());
+            return if name == "browser_use" {
+                crate::automation_seams::execute_browser_with_cmd(
+                    Some(self.app.data.as_ref()),
+                    &sid,
+                    base_cwd,
+                    &args,
+                    None,
+                )
+                .await
+            } else {
+                crate::automation_seams::execute_computer_with_cmd(
+                    Some(self.app.data.as_ref()),
+                    &sid,
+                    base_cwd,
+                    &args,
+                    None,
+                )
+                .await
+            };
+        }
         if name == "list_files" && args["path"] == "." {
             return Ok(json!({
                 "contexts": self.project.roots.iter()
@@ -728,21 +1126,62 @@ impl TurnContext {
             return client.call(&tool, &args).await;
         }
         if name == "run_command" && self.cmd_enabled {
+            if let Some(remote_res) = crate::ssh::execute_remote_command(&self.project, &args).await?
+            {
+                return Ok(remote_res);
+            }
             let root = self
                 .project
                 .roots
                 .first()
                 .map(|r| r.path.as_path())
                 .context("No project root available")?;
-            return execute_command(root, &args).await;
+            let wd = self.s.lock().unwrap().working_dir.clone();
+            let cmd_cwd = match wd.as_deref() {
+                Some(w) => crate::ext::resolve_project_root(&self.project, w, false)
+                    .and_then(|(r, rel)| tools::resolve(&r.path, &rel, false))
+                    .unwrap_or_else(|_| root.to_path_buf()),
+                None => root.to_path_buf(),
+            };
+            return execute_command_ctx(&cmd_cwd, &args, &exec_ctx).await;
+        }
+        if !self.restricted {
+            let allow_ssh_write = !self.settings.mode.is_read_only() && self.settings.allow_writes;
+            if let Some(remote_res) =
+                crate::ssh::try_remote_fs(&self.project, name, &args, allow_ssh_write).await?
+            {
+                return Ok(remote_res);
+            }
         }
         let (root, path) = self
             .project
             .root(args["path"].as_str().unwrap_or(""), tools::writes(name))?;
         let candidate = root.join(&path);
-        let canonical = candidate.canonicalize().unwrap_or(candidate);
+        let canonical = candidate.canonicalize().unwrap_or(candidate.clone());
         if canonical.starts_with(self.app.data.as_ref()) {
             bail!("Conversation storage is not available to tools");
+        }
+        if self.ephemeral.is_none()
+            && tools::writes(name)
+            && !self.settings.mode.is_read_only()
+            && self.settings.allow_writes
+        {
+            if let Ok(resolved) = tools::resolve(root, &path, true) {
+                let alias = self
+                    .project
+                    .roots
+                    .iter()
+                    .find(|r| r.path == root)
+                    .map(|r| r.alias.clone())
+                    .unwrap_or_else(|| "workspace".into());
+                let _ = self.app.ext.checkpoints.capture_before_edit(
+                    self.app.data.as_ref(),
+                    &session_id_owned,
+                    name,
+                    &format!("{name} {path}"),
+                    &[(path.clone(), alias, path.clone(), resolved)],
+                );
+            }
         }
         let mut scoped_args = args;
         scoped_args["path"] = json!(path);

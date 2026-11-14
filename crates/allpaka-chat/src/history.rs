@@ -180,11 +180,15 @@ pub async fn import(State(app): State<App>, Json(input): Json<Import>) -> ApiRes
     if settings.model.trim().is_empty() || settings.model.len() > 200 {
         return Err(error(StatusCode::BAD_REQUEST, "Invalid imported model ID"));
     }
-    // Imported settings never enable writes or execute queued actions.
+    // Imported settings never enable writes, unsafe approvals, or execute queued actions.
     settings.allow_writes = false;
     settings.guardrails = None;
     settings.prepared_guardrails = None;
     settings.mode = Mode::Chat;
+    settings.sandbox_mode = crate::sandbox::SandboxMode::Unsandboxed;
+    settings.approval_policy = crate::sandbox::ApprovalPolicy::Never;
+    settings.permission_preset = None;
+    settings.team_mode = false;
     settings.max_steps = settings.max_steps.clamp(1, 50);
     settings.max_output_tokens = settings.max_output_tokens.clamp(
         256,
