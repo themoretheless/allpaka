@@ -357,6 +357,52 @@ extern "C" __global__ void swiglu(
     if (i < n) gate[i] = silu_f(gate[i]) * up[i];
 }
 
+// GeGLU with tanh GELU (Gemma): gate = gelu_tanh(gate) * up, ggml_gelu's formula.
+extern "C" __global__ void geglu_tanh(
+    float* __restrict__ gate,
+    const float* __restrict__ up,
+    unsigned n)
+{
+    unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float x = gate[i];
+        float t = tanhf(0.7978845608f * x * (1.0f + 0.044715f * x * x));
+        gate[i] = 0.5f * x * (1.0f + t) * up[i];
+    }
+}
+
+// Gemma's sandwich norm into the residual: x[row] += rmsnorm(a[row]) * w.
+// One block (256 threads) per row.
+extern "C" __global__ void rmsnorm_add_f32(
+    float* __restrict__ x,
+    const float* __restrict__ a,
+    const float* __restrict__ w,
+    unsigned n,
+    float eps,
+    unsigned rows)
+{
+    unsigned row = blockIdx.x;
+    if (row >= rows) return;
+    float* xr = x + (size_t)row * n;
+    const float* ar = a + (size_t)row * n;
+    __shared__ float buf[256];
+    float local = 0.f;
+    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
+        float v = ar[i];
+        local += v * v;
+    }
+    buf[threadIdx.x] = local;
+    __syncthreads();
+    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) buf[threadIdx.x] += buf[threadIdx.x + s];
+        __syncthreads();
+    }
+    float scale = rsqrtf(buf[0] / (float)n + eps);
+    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
+        xr[i] += ar[i] * scale * w[i];
+    }
+}
+
 // SwiGLU + block_q8_1 pack in one pass (decode down-proj avoids a separate quantize).
 extern "C" __global__ void swiglu_into_q8(
     float* __restrict__ gate,

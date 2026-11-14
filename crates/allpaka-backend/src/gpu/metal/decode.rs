@@ -662,6 +662,12 @@ pub(super) enum FfnRefs {
 
 /// Diagnostic-preserving entry point for production fast paths.
 pub fn decode_token_checked(req: &TokenReq) -> Result<TokenOut, DecodeDecline> {
+    if req.layers.iter().any(|l| l.gemma_extras()) {
+        return Err(DecodeDecline {
+            stage: "backend-decode",
+            reason: "Gemma layers are CUDA-only",
+        });
+    }
     use std::sync::atomic::Ordering::Relaxed;
     DECODE_ATTEMPTS.fetch_add(1, Relaxed);
     match decode_token(req) {

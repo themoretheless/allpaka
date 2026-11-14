@@ -16,6 +16,8 @@ pub(super) const KERNEL_NAMES: &[&str] = &[
     "residual_add",
     "swiglu",
     "swiglu_into_q8",
+    "geglu_tanh",
+    "rmsnorm_add_f32",
     "copy_f32",
     "cast_f32_to_f16",
     "cast_f16_to_f32",
@@ -154,6 +156,8 @@ pub struct CudaGpu {
     /// NeoX RoPE inv_freq[rot_dim/2] on device (set once; kernels use d_pos).
     pub d_rope_freq: Option<CudaSlice<f32>>,
     pub d_rope_freq_n: usize,
+    /// Gemma 3's local-layer RoPE frequencies (`set_rope_inv_freq_swa`).
+    pub d_rope_freq_swa: Option<CudaSlice<f32>>,
     /// Scratch for argmax index (avoids alloc during graph capture).
     pub d_argmax: CudaSlice<u32>,
     /// Captured whole-token dense decode graph (invalidated on shape change).
@@ -495,6 +499,7 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         d_pos,
         d_rope_freq: None,
         d_rope_freq_n: 0,
+        d_rope_freq_swa: None,
         d_argmax,
         decode_graph: None,
         pf_graph: None,

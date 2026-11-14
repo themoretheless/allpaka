@@ -124,6 +124,21 @@ pub struct TokenLayer<'a> {
     pub k_off: usize,
     pub v_off: usize,
     pub ffn: TokenFfn<'a>,
+    /// Gemma 3: sandwich norms on the attention and FFN outputs (applied
+    /// before each residual add), GeGLU instead of SwiGLU, and a local
+    /// layer rotated with the second RoPE table (`set_rope_inv_freq_swa`).
+    /// Only the CUDA fused token path implements these; others decline.
+    pub post_attn_norm: Option<&'a [f32]>,
+    pub post_ffn_norm: Option<&'a [f32]>,
+    pub gelu: bool,
+    pub swa_rope: bool,
+}
+
+impl TokenLayer<'_> {
+    /// Uses any Gemma-only feature.
+    pub fn gemma_extras(&self) -> bool {
+        self.post_attn_norm.is_some() || self.post_ffn_norm.is_some() || self.gelu || self.swa_rope
+    }
 }
 
 pub enum TokenFfn<'a> {

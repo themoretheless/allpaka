@@ -449,6 +449,9 @@ pub(super) fn decode_token_one(
         }
     }
 
+    if req.layers.iter().any(|l| l.gemma_extras()) {
+        return None;
+    }
     let hidden = x_in.len();
     let hd = req.head_dim;
     let q_dim = req.n_heads * hd;

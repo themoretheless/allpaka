@@ -33,6 +33,17 @@ impl<'a> Model<'a> {
             }
             return Ok(None);
         }
+        // The token kernels attend over the whole cache: Gemma's local
+        // layers are exact only while the context fits their window.
+        if c.gemma
+            .as_ref()
+            .is_some_and(|g| pos >= g.swa_window as usize)
+        {
+            if dbg {
+                eprintln!("tokenbuf declined: past the sliding window");
+            }
+            return Ok(None);
+        }
         // Keep host rope table by default; skip only when explicitly opted in.
         // Device freq rope still used inside CUDA when d_rope_freq is set.
         let skip_host_rope =
@@ -77,11 +88,14 @@ impl<'a> Model<'a> {
         };
         let embd = self.embedding()?;
         let (embd_ty, embd_bytes) = embd.raw();
-        let use_gpu_embed = allpaka_backend::gpu::can_embed_on_gpu(embd_ty, embd_bytes, embd.n_in);
+        // A scaled embedding (Gemma) goes up from the host: the GPU gather
+        // has no scale.
+        let use_gpu_embed = self.embed_scale == 1.0
+            && allpaka_backend::gpu::can_embed_on_gpu(embd_ty, embd_bytes, embd.n_in);
         let x_host = if use_gpu_embed {
             None
         } else {
-            Some(embd.row(token as usize)?)
+            Some(self.embed_token(token)?)
         };
         let x: &[f32] = x_host.as_deref().unwrap_or(&[]);
         let (out_ty, out_bytes) = self.output_head()?.raw();
@@ -105,7 +119,7 @@ impl<'a> Model<'a> {
             output_norm: self.output_norm_raw,
             output: (out_ty, out_bytes, self.output_head()?.n_out),
             argmax,
-            embd: Some((embd_ty, embd_bytes, embd.n_in)),
+            embd: use_gpu_embed.then_some((embd_ty, embd_bytes, embd.n_in)),
             token_id: Some(token),
         };
         match allpaka_backend::gpu::decode_token_checked(&request) {
@@ -131,7 +145,7 @@ impl<'a> Model<'a> {
         let dbg = tokenbuf_debug_enabled();
         let c = &self.config;
         let m = tokens.len();
-        if m == 0 || m > 8 || no_tokenbuf_enabled() {
+        if m == 0 || m > 8 || no_tokenbuf_enabled() || c.gemma.is_some() {
             return Ok(None);
         }
         if self.output_norm_raw.is_empty() {
@@ -358,6 +372,10 @@ impl<'a> Model<'a> {
                 v_off,
                 gdn,
                 ffn,
+                post_attn_norm: layer.post_attn_norm.as_deref(),
+                post_ffn_norm: layer.post_ffn_norm.as_deref(),
+                gelu: matches!(layer.ffn, Ffn::Dense { gelu: true, .. }),
+                swa_rope: layer.window.is_some(),
             });
         }
         Ok(Some(layers))
@@ -637,6 +655,7 @@ impl<'a> Model<'a> {
         let c = &self.config;
         let pos = s.pos();
         if token >= c.vocab
+            || c.gemma.is_some()
             || !matches!(c.rope_style, RopeStyle::Neox)
             || pos + n > s.kv.capacity()
             || cpu_attn_enabled()
@@ -757,12 +776,6 @@ fn ffn_residual(
 /// regions) are still checked per call in `token_layers`.
 pub(crate) fn token_path_decline(layers: &[super::Layer<'_>]) -> Option<&'static str> {
     for layer in layers {
-        if layer.post_attn_norm.is_some() || layer.window.is_some() {
-            return Some("Gemma sandwich norms / sliding window are not in the token kernels");
-        }
-        if matches!(layer.ffn, Ffn::Dense { gelu: true, .. }) {
-            return Some("GeGLU FFN is not in the token kernels");
-        }
         if layer.attn_norm_raw.is_empty() || layer.ffn_norm_raw.is_empty() {
             return Some("a layer norm is not raw F32");
         }

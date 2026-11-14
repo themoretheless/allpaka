@@ -37,6 +37,9 @@ struct FusedPlan {
     out_norm_at: usize,
     norms_base: usize,
     per_layer_norms: usize,
+    /// Gemma: two more `hidden` vectors per layer (post-attn, post-FFN norm)
+    /// at the end of each layer's norm block.
+    post_norms: bool,
     x_elems: usize,
     /// Identity of everything a captured graph bakes in; a change re-captures.
     graph_key: u64,
@@ -109,7 +112,12 @@ impl FusedPlan {
         let out_norm_at = rope_k_at + req.n_kv_heads * rope_pairs * 2;
         let norms_base = out_norm_at + hidden;
         let bias_stride = if has_attn_bias { q_dim + 2 * kv } else { 0 };
-        let per_layer_norms = 2 * hidden + 2 * hd + bias_stride;
+        let post_norms = req
+            .layers
+            .iter()
+            .any(|l| l.post_attn_norm.is_some() || l.post_ffn_norm.is_some());
+        let per_layer_norms =
+            2 * hidden + 2 * hd + bias_stride + if post_norms { 2 * hidden } else { 0 };
         let x_elems = norms_base + req.layers.len() * per_layer_norms;
 
         // What the persistent decode inputs (norms, biases, RoPE tables in
@@ -217,6 +225,7 @@ impl FusedPlan {
             out_norm_at,
             norms_base,
             per_layer_norms,
+            post_norms,
             x_elems,
             graph_key,
             norms_key,
@@ -327,6 +336,24 @@ pub(super) fn decode_token_one_fused(
             && rope_freq_ptr.is_some()
             && gpu.fns.contains_key("build_rope_freq_dpos")
             && gpu.fns.contains_key("rmsnorm_rope_qk_store_table_dpos");
+        let rope_freq_swa_ptr = if req.layers.iter().any(|l| l.swa_rope) {
+            // Local layers need both tables, and those exist only on the
+            // table path; otherwise decline before any launch.
+            if !use_qk_rope_table {
+                return None;
+            }
+            let buf = gpu.d_rope_freq_swa.as_ref()?;
+            let (p, g) = DevicePtr::device_ptr(buf, &stream);
+            drop(g);
+            Some(p)
+        } else {
+            None
+        };
+        if req.layers.iter().any(|l| l.gemma_extras())
+            && !(gpu.fns.contains_key("geglu_tanh") && gpu.fns.contains_key("rmsnorm_add_f32"))
+        {
+            return None;
+        }
         let ctx = FusedCtx {
             req,
             plan,
@@ -336,6 +363,7 @@ pub(super) fn decode_token_one_fused(
             ybase,
             xbase,
             rope_freq_ptr,
+            rope_freq_swa_ptr,
             q8_on,
             capturing_whole,
             capturing_hybrid,
@@ -574,6 +602,7 @@ fn refresh_layer_norms(
         out_norm_at,
         norms_base,
         per_layer_norms,
+        post_norms,
         ..
     } = *plan;
     let stream = Arc::clone(&gpu.stream);
@@ -585,6 +614,22 @@ fn refresh_layer_norms(
         .ok()?;
     for (li, layer) in req.layers.iter().enumerate() {
         let base = norms_base + li * per_layer_norms;
+        if post_norms {
+            let post_at = base + per_layer_norms - 2 * hidden;
+            for (i, w) in [layer.post_attn_norm, layer.post_ffn_norm]
+                .into_iter()
+                .enumerate()
+            {
+                let w = w?;
+                if w.len() < hidden {
+                    return None;
+                }
+                let at = post_at + i * hidden;
+                stream
+                    .memcpy_htod(&w[..hidden], &mut gpu.dec_x.slice_mut(at..at + hidden))
+                    .ok()?;
+            }
+        }
         let attn_w = norm_f32_bytes(layer.attn_norm, hidden)?;
         let ffn_w = norm_f32_bytes(layer.ffn_norm, hidden)?;
         stream
@@ -666,6 +711,9 @@ struct FusedCtx<'a> {
     xbase: u64,
     /// Device RoPE frequency table, when the dpos kernels compute sin/cos.
     rope_freq_ptr: Option<u64>,
+    /// Gemma 3's local-layer frequencies; their table is built into
+    /// `rope_k_at`, which the table path leaves unused.
+    rope_freq_swa_ptr: Option<u64>,
     q8_on: bool,
     capturing_whole: bool,
     capturing_hybrid: bool,
@@ -1049,6 +1097,7 @@ impl FusedCtx<'_> {
         qw_off: usize,
         kw_off: usize,
         k_cache_off: usize,
+        rope_at: usize,
     ) -> Option<()> {
         let FusedCtx {
             req,
@@ -1056,13 +1105,7 @@ impl FusedCtx<'_> {
             ybase,
             xbase,
             use_qk_rope_table,
-            plan:
-                FusedPlan {
-                    hd,
-                    rot_dim,
-                    rope_q_at,
-                    ..
-                },
+            plan: FusedPlan { hd, rot_dim, .. },
             ..
         } = *self;
 
@@ -1081,7 +1124,7 @@ impl FusedCtx<'_> {
         let kp = ybase + (k_off * 4) as u64;
         let qwp = xbase + (qw_off * 4) as u64;
         let kwp = xbase + (kw_off * 4) as u64;
-        let ropep = xbase + (rope_q_at * 4) as u64;
+        let ropep = xbase + (rope_at * 4) as u64;
         let cfg = LaunchConfig {
             grid_dim: (q_heads_u + kv_heads_u, 1, 1),
             block_dim: (hd.next_power_of_two().clamp(32, 256) as u32, 1, 1),
@@ -1614,20 +1657,30 @@ impl FusedCtx<'_> {
             ..
         } = *self;
         let f = gpu.func_owned("build_rope_freq_dpos")?;
-        let ropep = xbase + (rope_q_at * 4) as u64;
-        let fp = rope_freq_ptr?;
         let pairs_u = rope_pairs as u32;
         let cfg = CudaGpu::cfg_1d(pairs_u, 64);
-        unsafe {
-            stream
-                .launch_builder_pdl(&f)
-                .arg(&ropep)
-                .arg(&fp)
-                .arg(&gpu.d_pos)
-                .arg(&pairs_u)
-                .launch_pdl(cfg)
+        let tables = [
+            (rope_q_at, rope_freq_ptr),
+            (self.plan.rope_k_at, self.rope_freq_swa_ptr),
+        ];
+        for (i, (at, freq)) in tables.into_iter().enumerate() {
+            let fp = match (i, freq) {
+                (0, f) => f?,
+                (_, Some(f)) => f,
+                (_, None) => break,
+            };
+            let ropep = xbase + (at * 4) as u64;
+            unsafe {
+                stream
+                    .launch_builder_pdl(&f)
+                    .arg(&ropep)
+                    .arg(&fp)
+                    .arg(&gpu.d_pos)
+                    .arg(&pairs_u)
+                    .launch_pdl(cfg)
+            }
+            .ok()?;
         }
-        .ok()?;
         Some(())
     }
 
@@ -1821,11 +1874,24 @@ impl FusedCtx<'_> {
         let can_fuse_qk_post =
             qkv_fused && layer.q_norm.is_some() && layer.k_norm.is_some() && use_qk_rope_table;
         let qk_post_fused = if can_fuse_qk_post {
-            self.launch_rms_rope_qk_store(gpu, q_at, k_at, q_norm_at, k_norm_at, layer.k_off)?;
+            let rope_at = if layer.swa_rope { rope_k_at } else { rope_q_at };
+            self.launch_rms_rope_qk_store(
+                gpu,
+                q_at,
+                k_at,
+                q_norm_at,
+                k_norm_at,
+                layer.k_off,
+                rope_at,
+            )?;
             true
         } else {
             false
         };
+        // Gemma's two RoPE tables live only on the table path.
+        if layer.gemma_extras() && !qk_post_fused {
+            return None;
+        }
         if qk_post_fused {
             *launches += 1;
         } else if layer.q_norm.is_some() && gpu.fns.contains_key("rmsnorm_rope_neox") {
@@ -2040,6 +2106,11 @@ impl FusedCtx<'_> {
         } = *self;
         let layer_base = norms_base + li * per_layer_norms;
         let ffn_norm_at = layer_base + hidden;
+        // Gemma's sandwich norms: the projection lands in `h` (free after the
+        // QKV matvecs), then x += rmsnorm(h) * w.
+        let post_at = layer_base + per_layer_norms - 2 * hidden;
+        let post_attn = layer.post_attn_norm.is_some();
+        let post_ffn = layer.post_ffn_norm.is_some();
         launch_matvec_y_ptr(
             gpu,
             DevWeight {
@@ -2054,12 +2125,17 @@ impl FusedCtx<'_> {
             ArenaMatvec {
                 y_base: ybase,
                 x_off: attn_at,
-                y_off: x_at,
+                y_off: if post_attn { h_at } else { x_at },
                 m: 1,
-                add: true,
+                add: !post_attn,
             },
         )?;
         *launches += 1;
+        if post_attn {
+            self.launch_rmsnorm_add(gpu, x_at, h_at, post_at, hidden)?;
+            gpu.invalidate_q8();
+            *launches += 1;
+        }
 
         self.launch_rms_into(gpu, h_at, x_at, ffn_norm_at, hidden, 1)?;
         *launches += 1;
@@ -2073,6 +2149,7 @@ impl FusedCtx<'_> {
         // Fused gate+up: Q8 dual-mmvq (SwiGLU in epilogue).
         // Skip when measuring llama MMVQ via ALLPAKA_GGML_DECODE.
         let gu_fused = !ggml_decode
+            && !layer.gelu
             && matches!((gate.0, up.0), (GgmlType::Q4K, GgmlType::Q4K))
             && gate.2 == up.2
             && launch_matvec_q4k_2(
@@ -2139,7 +2216,12 @@ impl FusedCtx<'_> {
             if ggml_decode {
                 crate::gpu::cuda::ggml::prepare_for_cudarc();
             }
-            let q8_primed = self.launch_swiglu(gpu, gate_at, up_at, gate.2)?;
+            let q8_primed = if layer.gelu {
+                self.launch_geglu(gpu, gate_at, up_at, gate.2)?;
+                false
+            } else {
+                self.launch_swiglu(gpu, gate_at, up_at, gate.2)?
+            };
             if !q8_primed {
                 gpu.invalidate_q8();
             }
@@ -2180,12 +2262,72 @@ impl FusedCtx<'_> {
             ArenaMatvec {
                 y_base: ybase,
                 x_off: gate_at,
-                y_off: x_at,
+                y_off: if post_ffn { h_at } else { x_at },
                 m: 1,
-                add: true,
+                add: !post_ffn,
             },
         )?;
         *launches += 1;
+        if post_ffn {
+            self.launch_rmsnorm_add(gpu, x_at, h_at, post_at + hidden, hidden)?;
+            gpu.invalidate_q8();
+            *launches += 1;
+        }
+        Some(())
+    }
+
+    /// x += rmsnorm(a) * w (Gemma's sandwich norm into the residual).
+    fn launch_rmsnorm_add(
+        &self,
+        gpu: &mut CudaGpu,
+        x_off: usize,
+        a_off: usize,
+        w_off: usize,
+        n: usize,
+    ) -> Option<()> {
+        let f = gpu.func_owned("rmsnorm_add_f32")?;
+        let xp = self.ybase + (x_off * 4) as u64;
+        let ap = self.ybase + (a_off * 4) as u64;
+        let wp = self.xbase + (w_off * 4) as u64;
+        let n_u = n as u32;
+        let rows = 1u32;
+        let eps = self.req.eps;
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            self.stream
+                .launch_builder_pdl(&f)
+                .arg(&xp)
+                .arg(&ap)
+                .arg(&wp)
+                .arg(&n_u)
+                .arg(&eps)
+                .arg(&rows)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
+        Some(())
+    }
+
+    /// gate = gelu_tanh(gate) * up.
+    fn launch_geglu(&self, gpu: &mut CudaGpu, gate: usize, up: usize, n: usize) -> Option<()> {
+        let f = gpu.func_owned("geglu_tanh")?;
+        let gp = self.ybase + (gate * 4) as u64;
+        let upp = self.ybase + (up * 4) as u64;
+        let n_u = n as u32;
+        let cfg = CudaGpu::cfg_1d(n_u, 256);
+        unsafe {
+            self.stream
+                .launch_builder_pdl(&f)
+                .arg(&gp)
+                .arg(&upp)
+                .arg(&n_u)
+                .launch_pdl(cfg)
+        }
+        .ok()?;
         Some(())
     }
 

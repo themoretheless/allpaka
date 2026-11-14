@@ -1166,3 +1166,8 @@ impl Gpu {
         }
     }
 }
+
+/// Gemma 3 local-layer RoPE frequencies; only the CUDA token path uses them.
+pub fn set_rope_inv_freq_swa(_inv_freq: &[f32]) -> bool {
+    false
+}

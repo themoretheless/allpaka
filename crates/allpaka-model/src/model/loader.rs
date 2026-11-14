@@ -268,6 +268,7 @@ impl<'a> Model<'a> {
         };
         // Device-side RoPE freqs: decode skips per-token sin/cos H2D.
         let _ = allpaka_backend::gpu::set_rope_inv_freq(&model.rope_inv_freq);
+        let _ = allpaka_backend::gpu::set_rope_inv_freq_swa(&model.rope_inv_freq_swa);
         Ok(model)
     }
 }

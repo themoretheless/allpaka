@@ -84,6 +84,21 @@ pub fn set_rope_inv_freq(inv_freq: &[f32]) -> bool {
     .unwrap_or(false)
 }
 
+/// Upload the local layers' RoPE inv_freq (Gemma 3); empty clears it.
+pub fn set_rope_inv_freq_swa(inv_freq: &[f32]) -> bool {
+    with_gpu(|gpu| {
+        gpu.d_rope_freq_swa = if inv_freq.is_empty() {
+            None
+        } else {
+            gpu.stream.clone_htod(inv_freq).ok()
+        };
+        gpu.clear_decode_graphs();
+        gpu.decode_graph_key = 0;
+        Some(true)
+    })
+    .unwrap_or(false)
+}
+
 /// True when decode can build NeoX rope from device inv_freq + d_pos.
 pub fn has_device_rope_freq() -> bool {
     with_gpu(|gpu| Some(gpu.d_rope_freq.is_some() && gpu.d_rope_freq_n > 0)).unwrap_or(false)
