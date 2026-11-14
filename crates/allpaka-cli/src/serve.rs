@@ -13,6 +13,7 @@ mod launch;
 mod memory;
 mod messages;
 mod predict;
+mod preemptible;
 mod rag_tools;
 mod request_control;
 mod resources;
@@ -96,7 +97,14 @@ struct InferenceContext<'a> {
     prefixes: &'a mut PrefixCache<PrefixSnap>,
     prefix_namespace: u32,
     control: &'a RequestControl,
+    /// Called between steps (a prefill chunk, a decode token) of this
+    /// generation; may serve a waiting short request in the meantime.
+    interrupt: Option<Interrupt<'a>>,
 }
+
+/// What a generation hands the step hook: the model it is running on, so a
+/// request served in between uses the same weights.
+type Interrupt<'a> = &'a dyn Fn(&Model<'static>, &Tokenizer, &Template, &memory::Budget, usize);
 
 struct GenerationRequest<'a> {
     messages: &'a [(String, String)],
@@ -213,13 +221,51 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
 
         while runtime.queued() > 0 {
             for scheduled in runtime.next_batch() {
+                // A chat request that arrives while this one generates is
+                // served between its steps instead of after it (roadmap A3).
+                let pending = std::cell::RefCell::new(Vec::new());
+                let serving = scheduled.model.clone();
+                let interrupt = |model: &Model<'static>,
+                                 tok: &Tokenizer,
+                                 template: &Template,
+                                 budget: &memory::Budget,
+                                 running_tokens: usize| {
+                    while let Ok((name, context_tokens, connection)) = incoming.try_recv() {
+                        if preemptible::eligible(
+                            &name,
+                            &serving,
+                            &connection,
+                            context_tokens,
+                            running_tokens,
+                        ) {
+                            preemptible::serve(
+                                &name, connection, model, tok, template, budget, &rag_tools,
+                            );
+                        } else {
+                            pending
+                                .borrow_mut()
+                                .push((name, context_tokens, connection));
+                        }
+                    }
+                };
                 if let Err(error) = dispatch_connection(
                     scheduled.model,
                     scheduled.payload,
                     &mut runtime,
                     &rag_tools,
+                    Some(&interrupt),
                 ) {
                     println!("request failed: {error:#}");
+                }
+                for (name, context_tokens, connection) in pending.into_inner() {
+                    let mut rejection_stream = connection.stream.try_clone()?;
+                    if let Err(error) = runtime.enqueue(name, context_tokens, connection) {
+                        respond(
+                            &mut rejection_stream,
+                            429,
+                            &json!({"error":format!("scheduler: {error:?}")}),
+                        )?;
+                    }
                 }
             }
         }

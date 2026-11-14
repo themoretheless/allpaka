@@ -101,6 +101,16 @@ pub(super) fn prefill_prompt(
                 context.control.check()?;
                 logits = model.forward_batch(chunk, &mut chat.session)?;
                 chat.tokens.extend_from_slice(chunk);
+                if let Some(interrupt) = context.interrupt {
+                    let running = prompt.len() + max_tokens;
+                    interrupt(
+                        model,
+                        context.tok,
+                        context.template,
+                        &chat.memory.budget(),
+                        running,
+                    );
+                }
             }
         }
         Ok(())
@@ -261,9 +271,14 @@ pub(super) fn run_inference(
         .filter(|_| parse_tools && std::env::var("ALLPAKA_TOOL_GRAMMAR").as_deref() != Ok("0"))
         .map(|tools| ToolGrammar::new(tools, tool_choice));
     let mut token_bytes: Vec<u8> = Vec::new();
+    let interrupt = context.interrupt;
     crate::airbug::span("decode", || -> Result<()> {
         while generated.len() < max_tokens {
             context.control.check()?;
+            if let Some(interrupt) = interrupt {
+                let running = prompt.len() + max_tokens;
+                interrupt(model, tok, template, &chat.memory.budget(), running);
+            }
             if grammar.as_ref().is_some_and(ToolGrammar::must_stop) {
                 finish = "stop";
                 break;

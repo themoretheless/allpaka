@@ -105,7 +105,7 @@ pub(super) fn prepare_connection(
 /// the loopback fixture; 0 of 300 with this). So: say we are done writing,
 /// then wait briefly for the client to close its side, discarding anything it
 /// still sends.
-fn close_politely(mut stream: TcpStream) {
+pub(super) fn close_politely(mut stream: TcpStream) {
     use std::io::Read;
     let _ = stream.shutdown(std::net::Shutdown::Write);
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
@@ -136,6 +136,7 @@ pub(super) fn dispatch_connection(
     connection: QueuedConnection,
     runtime: &mut ServerRuntime,
     rag: &RagTools,
+    interrupt: Option<Interrupt<'_>>,
 ) -> Result<()> {
     let route = routes::classify(&connection.request_line).map(|matched| matched.route);
     match route {
@@ -248,6 +249,7 @@ pub(super) fn dispatch_connection(
                 prefixes,
                 prefix_namespace,
                 control: &connection.control,
+                interrupt,
             },
             rag,
         },

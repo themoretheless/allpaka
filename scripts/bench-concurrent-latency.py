@@ -52,17 +52,17 @@ def chat(addr, model, new_tokens, started):
     return sent, arrivals
 
 
-def heavy(addr, model, prompt_tokens, new_tokens, started):
+def heavy(addr, model, prompt_tokens, new_tokens, started, instruction):
     # About one token per word for this filler in the tokenizers serve supports.
     filler = ' '.join(f'item{i}' for i in range(prompt_tokens // 2))
     sent = time.perf_counter()
     started.set()
     reply = post(addr, {'model': model, 'temperature': 0, 'max_tokens': new_tokens,
-                        'messages': [{'role': 'user', 'content': f'Summarise this list: {filler}'}]})
+                        'messages': [{'role': 'user', 'content': instruction + '\n\n' + filler}]})
     return sent, time.perf_counter(), reply.get('usage', {})
 
 
-def scenario(name, addr, model, prompt_tokens, new_tokens):
+def scenario(name, addr, model, prompt_tokens, new_tokens, instruction):
     result = {}
     chat_started, heavy_started = threading.Event(), threading.Event()
 
@@ -70,7 +70,7 @@ def scenario(name, addr, model, prompt_tokens, new_tokens):
         result['chat'] = chat(addr, model, new_tokens, chat_started)
 
     def run_heavy():
-        result['heavy'] = heavy(addr, model, prompt_tokens, new_tokens, heavy_started)
+        result['heavy'] = heavy(addr, model, prompt_tokens, new_tokens, heavy_started, instruction)
 
     first, second, gate = ((run_chat, run_heavy, chat_started) if name == 'chat-first'
                            else (run_heavy, run_chat, heavy_started))
@@ -106,9 +106,11 @@ def main():
     p.add_argument('--model', default='')
     p.add_argument('--prompt-tokens', type=int, default=2000)
     p.add_argument('--new-tokens', type=int, default=64)
+    p.add_argument('--heavy-instruction', default='Summarise this list:',
+                   help='what the heavy request asks; ask for a long answer to keep it decoding')
     p.add_argument('--json')
     a = p.parse_args()
-    rows = [scenario(name, a.addr, a.model, a.prompt_tokens, a.new_tokens)
+    rows = [scenario(name, a.addr, a.model, a.prompt_tokens, a.new_tokens, a.heavy_instruction)
             for name in ('chat-first', 'heavy-first')]
     for row in rows:
         print(f"{row['scenario']:<12} chat: first token {row['chat_first_token_ms']} ms, "
@@ -117,7 +119,7 @@ def main():
               f"for {row['heavy_prompt_tokens']} prompt tokens")
     if a.json:
         with open(a.json, 'w') as out:
-            json.dump({'addr': a.addr, 'prompt_tokens': a.prompt_tokens,
+            json.dump({'addr': a.addr, 'prompt_tokens': a.prompt_tokens, 'heavy_instruction': a.heavy_instruction,
                        'new_tokens': a.new_tokens, 'scenarios': rows}, out, indent=2)
             out.write('\n')
 

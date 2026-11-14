@@ -47,6 +47,14 @@ by model, then executed serially by the inference owner. It is not yet a
 multi-session fused GPU kernel, and `GET /stats` reports
 `"kernel_batching": false` explicitly.
 
+A short chat request does not wait for a long one to finish. Between the
+steps of a running generation (each prefill chunk and each decode token),
+`serve` looks at the queue; a waiting chat completion for the same model,
+without `session_id`, whose prompt plus `max_tokens` is at most a quarter of
+the running request's, is served to completion right there in a temporary
+session (no prefix cache read or written), and the long generation resumes.
+Other requests wait their turn as before.
+
 ## Prefix-cache contract
 
 `--prefix-cache-mib` sets one global byte budget. Cache keys are namespaced by

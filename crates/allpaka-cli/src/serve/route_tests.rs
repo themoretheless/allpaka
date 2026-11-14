@@ -84,7 +84,7 @@ fn dispatched(line: &str, body: &str) -> String {
     };
     let mut runtime = ServerRuntime::new(ServingLimits::default());
     let rag = RagTools::grep_only();
-    dispatch_connection(model, connection, &mut runtime, &rag).unwrap();
+    dispatch_connection(model, connection, &mut runtime, &rag, None).unwrap();
     read_all(client)
 }
 
