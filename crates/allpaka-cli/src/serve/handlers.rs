@@ -184,9 +184,13 @@ pub(super) fn chat_completions(
             .unwrap_or_default()
     };
     let greedy = temperature <= 0.0 && repeat_penalty == 1.0;
+    // Drafting from the prompt pays only when the answer repeats it. On by
+    // default only when the client says it will (`prediction`): for ordinary
+    // greedy answers it cost 8-12% of decode on Qwen2.5-7B. `prompt_lookup`
+    // still turns it on (true or a draft length) or off.
     let prompt_lookup_k = parse_prompt_lookup_k(
         &req["prompt_lookup"],
-        greedy || !prediction_tokens.is_empty(),
+        greedy && !prediction_tokens.is_empty(),
     );
 
     if streaming && (tools.is_none() || !rag.cfg.enabled) {

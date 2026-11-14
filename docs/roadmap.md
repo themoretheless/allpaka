@@ -21,7 +21,7 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 
 | Мешает | Пункты |
 |---|---|
-| Можно делать здесь (Windows + RTX 5090) | P2, A1, A3 → A4, C1\*, C2, C3\*, C5, P8 (dense Qwen) |
+| Можно делать здесь (Windows + RTX 5090) | A1, A3 → A4, C1\*, C2, C3\*, C5, P8 (dense Qwen) |
 | Нужен Mac (Metal) | P4, P5, P6, P7, D3, D4, A7, D2 (Metal-раннер) |
 | Нужна вторая машина | B1 → B3 |
 | Нужен настоящий GGUF Llama/Mistral | P9 |
@@ -60,19 +60,6 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 ---
 
 ## Трек P — производительность движка
-
-### P2. CUDA: decode через `serve` медленнее, чем движок
-
-Сам движок на Qwen2.5-7B быстрее llama.cpp: `allpaka bench` — decode 292 против
-260–268 tok/s, prefill 16 700 против 12 700–13 500 (2 раунда, pp512/tg128).
-Через `serve` тот же 7B — 80–86% llama-server на любой глубине контекста
-(199 против 238 tok/s на 1k, 160 против 198 на 29k;
-`scripts/bench-decode-vs-context.py`), а greedy-путь с argmax на GPU
-(`temperature: 0, repeat_penalty: 1.0`) ещё медленнее — 210 против 270 tok/s
-у пути с полными логитами. Потери, значит, в цикле `serve`, не в ядрах.
-
-**DoD:** decode через `serve` в пределах 5% от `allpaka bench` на 7B и 32B;
-greedy-путь не медленнее пути с логитами; названо, куда уходило время.
 
 ### P4. Metal: GLM-Air decode ≥ llama
 
