@@ -192,6 +192,21 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
     def act(id,kind,text='',**kw):return api(f'sessions/{id}/actions',dict(kind=kind,text=text,**kw))
     process=start()
     try:
+        # C1: server-side @path[:START-END] attachments carry provenance and a budget; bad paths are 400s.
+        (workspace/'cite.rs').write_text('alpha\nbeta\ngamma\n')
+        cite=create();act(cite,'send','explain @cite.rs:2-3')
+        cited=wait(cite,lambda s:s['status']!='running' and len(s['messages'])>=2)
+        first=cited['messages'][0];c=first['citations'][0]
+        assert (c['path'],c['start_line'],c['end_line'],c['truncated'])==('cite.rs',2,3,False),first
+        assert first['context_budget']['used_bytes']==len('beta\ngamma') and first['context_budget']['limit_bytes']>0
+        assert '<attached_file path="cite.rs" lines="2-3">\nbeta\ngamma\n</attached_file>' in first['content']
+        (workspace/'cite.rs').write_text('alpha\nBETA2\ngamma\n')
+        act(cite,'send','again @cite.rs:2-2')
+        fresh=wait(cite,lambda s:s['status']!='running' and len(s['messages'])>=4)
+        assert 'BETA2' in [m for m in fresh['messages'] if m['role']=='user'][-1]['content']
+        for bad in ['@../outside.rs','@.hidden.rs','@missing.rs','@cite.rs:9-10','@cite.rs:3-1']:
+            try:act(cite,'send','see '+bad);raise AssertionError('bad @ accepted: '+bad)
+            except urllib.error.HTTPError as error:assert error.code==400 and (bad in error.read().decode() or bad.endswith('3-1')),bad
         from allpaka_guardrails import policy_manifest, rules_from_manifest, check_guardrails, GuardrailBlocked
         # Conversation totals and budgets: the mock answers every plain message with 3+4 tokens.
         budgeted=create(budget=dict(max_tokens=14))

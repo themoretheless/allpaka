@@ -24,6 +24,7 @@ mod judge_runs;
 mod mcp;
 mod memory;
 mod memory_extract;
+mod mentions;
 mod model_evaluators;
 mod observability;
 mod online_evaluation;
@@ -146,6 +147,11 @@ struct Action {
     #[serde(default)]
     text: String,
     settings: Option<Settings>,
+    /// Filled by the handler from `@` mentions in `text`; never client input.
+    #[serde(skip)]
+    citations: Vec<types::Citation>,
+    #[serde(skip)]
+    context_budget: Option<types::ContextBudget>,
 }
 /// The only kinds `POST /api/sessions/:id/actions` accepts. Serde rejects
 /// anything else, and the actor must name every variant it does not handle,

@@ -354,6 +354,38 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Files attached with `@path[:START-END]`; the cited text is in `content`.
+    /// Local transcript data, never a wire field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citations: Vec<Citation>,
+    /// How much of the `@` attachment budget this message used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_budget: Option<ContextBudget>,
+}
+
+/// Provenance of attached or retrieved project text: `root`/`path` plus the
+/// inclusive 1-based line range actually served.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Citation {
+    pub root: String,
+    pub path: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub bytes: usize,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// Usage of the per-message `@` attachment budget.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ContextBudget {
+    pub used_bytes: usize,
+    pub limit_bytes: usize,
+    pub per_file_bytes: usize,
+    pub per_file_lines: usize,
+    pub files: usize,
+    #[serde(default)]
+    pub truncated: bool,
 }
 impl Message {
     pub fn text(role: &str, content: impl Into<String>) -> Self {
@@ -373,6 +405,10 @@ pub struct Pending {
     pub images: Vec<crate::context::Image>,
     pub text: String,
     pub settings: Settings,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citations: Vec<Citation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_budget: Option<ContextBudget>,
 }
 
 /// Milestone status in a session's durable plan. The wire names match the

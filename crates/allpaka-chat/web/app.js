@@ -588,6 +588,7 @@ function renderSingleMessage(s,m,index,openKey,detailState){
   if(m.truncated)div.append(node('div','Неполный ответ · достигнут лимит токенов','muted'));
   for(const call of m.incomplete_tool_calls||[]){const d=node('details');const dk=openKey();d.dataset.openKey=dk;d.open=detailState.get(dk)??false;d.append(node('summary','Незавершённый вызов · не выполнен'),node('pre',JSON.stringify(call,null,2)));div.append(d);}
   for(const i of m.images||[]){const img=document.createElement('img');img.alt=i.name;img.src=`data:${i.mime};base64,${i.data}`;div.append(img);}
+  if(m.citations?.length){const cites=node('div','','muted citations');cites.append(node('span','Файлы: '+m.citations.map(c=>`${c.path}:${c.start_line}-${c.end_line}${c.truncated?' (обрезано)':''}`).join(', ')));const b=m.context_budget;if(b)cites.append(node('span',` · бюджет вложений ${b.used_bytes} / ${b.limit_bytes} байт`));div.append(cites);}
   // Вызов с полученным результатом не дублируется: его запрос показан в
   // карточке результата. Отдельный блок остаётся только у вызовов без ответа.
   for(const call of m.tool_calls||[]){if(s.messages.some(x=>x.role==='tool'&&x.tool_call_id===call.id))continue;const d=node('details');const ck=openKey();d.dataset.openKey=ck;d.open=detailState.get(ck)??false;d.append(node('summary',toolLabel(call)),node('pre',call.function?.arguments||''));div.append(d);}

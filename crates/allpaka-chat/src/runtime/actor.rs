@@ -84,6 +84,8 @@ pub(crate) async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Act
                     }
                     let mut message = Message::text("user", p.text);
                     message.images = p.images;
+                    message.citations = p.citations;
+                    message.context_budget = p.context_budget;
                     s.messages.push(message);
                     if s.settings.mode == Mode::Goal && !p.continuation {
                         let origin = s.messages.len() - 1;
@@ -128,7 +130,7 @@ pub(crate) async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Act
                     ActionKind::BackgroundDone => {
                         let mut state=s.lock().unwrap();
                         if a.wake_epoch==Some(state.background_continuation_epoch) && !paused && state.folder==HistoryFolder::Active && matches!(state.settings.mode,Mode::Auto|Mode::Goal) && state.queue.len()<32 {
-                            let settings=state.settings.clone();state.queue.push(Pending{continuation:true,images:vec![],text:a.text,settings});
+                            let settings=state.settings.clone();state.queue.push(Pending{citations:vec![],context_budget:None,continuation:true,images:vec![],text:a.text,settings});
                         }
                     },
                     ActionKind::Stop => { cancel(&mut task,&s).await;paused=true; },
@@ -140,7 +142,7 @@ pub(crate) async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Act
                             if truncated || s.queue.is_empty() {
                                 let settings=a.settings.unwrap_or_else(||s.settings.clone());
                                 let text=if truncated {"The previous response reached its output token limit. Continue the unfinished answer without repeating existing text. Any incomplete tool calls were NOT executed: regenerate the necessary calls in full, never continue partial JSON. Do not repeat previously completed side effects."} else {"Continue the task from the current state. Do not repeat completed side effects."};
-                                s.queue.insert(0,Pending{continuation:true,images:vec![],text:text.into(),settings});
+                                s.queue.insert(0,Pending{citations:vec![],context_budget:None,continuation:true,images:vec![],text:text.into(),settings});
                             }
                         }
                     },
@@ -150,7 +152,7 @@ pub(crate) async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Act
                         if a.kind==ActionKind::SendNow {cancel(&mut task,&s).await;}
                         let mut s=s.lock().unwrap();
                         let settings=a.settings.unwrap_or_else(||s.settings.clone());
-                        let p=Pending{continuation:a.kind==ActionKind::Steer,images:a.images,text:a.text,settings};
+                        let p=Pending{citations:a.citations,context_budget:a.context_budget,continuation:a.kind==ActionKind::Steer,images:a.images,text:a.text,settings};
                         if s.queue.len()>=32 && a.kind!=ActionKind::SendNow {rejection=Some("Message queue is full".to_string());s.error=rejection.clone();} else {
                             if a.kind==ActionKind::SendNow {s.queue.insert(0,p);} else {s.queue.push(p);}
                             paused=false;
@@ -175,7 +177,7 @@ pub(crate) async fn actor(app: App, s: SharedSession, mut rx: mpsc::Receiver<Act
                     Ok(Ok(TurnOutcome::GoalIncomplete))=>{s.status=SessionStatus::Paused;paused=true;s.notice=Some("Цель не завершена: в плане остались незакрытые этапы или отсутствуют критерии и заявленные подтверждения. Прогресс сохранён. Уточните задачу или нажмите «Продолжить».".into());},
                     Ok(Ok(TurnOutcome::Complete))=>{
                         s.status=SessionStatus::Idle;
-                        if !s.steering.is_empty(){let settings=s.settings.clone();s.queue.insert(0,Pending{continuation:true,images:vec![],text:"Apply the pending user steering to the current task.".into(),settings});}
+                        if !s.steering.is_empty(){let settings=s.settings.clone();s.queue.insert(0,Pending{citations:vec![],context_budget:None,continuation:true,images:vec![],text:"Apply the pending user steering to the current task.".into(),settings});}
                     },
                     Ok(Err(e))=>{s.notice=None;s.status=SessionStatus::Error;s.error=Some(format!("{e:#}"));s.close_pending_tools();paused=true;},
                     Err(e)=>{s.notice=None;s.status=SessionStatus::Error;s.error=Some(format!("Task failed: {e}"));s.close_pending_tools();paused=true;},
