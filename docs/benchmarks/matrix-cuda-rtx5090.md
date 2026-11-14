@@ -18,3 +18,9 @@ gave 12095 at -1.21 and -1.11. allpaka's CPU reference differs from llama.cpp
 CUDA by 0.24, inside that spread; argmax agrees in every combination. Greedy
 parity for 32B is therefore taken from the token replay, which compares the
 decoded tokens themselves.
+
+With the deeper-model default (0.3, `verify` since this note), Qwen3-32B passes
+the prefill check. Its decode check does not: by the fourth step the largest
+top-10 difference is 1.12 against a 0.48 decode tolerance, with argmax equal at
+every step. llama.cpp's own CPU and CUDA builds differ by 0.78 at that step, on
+a token near log-prob -7. Open as roadmap P8.

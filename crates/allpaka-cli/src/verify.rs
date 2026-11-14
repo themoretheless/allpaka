@@ -185,8 +185,14 @@ pub fn run(
     // A MoE re-routes on numeric near-ties, so two correct implementations
     // legitimately drift further apart than two dense ones. llama.cpp's own
     // Metal and CPU backends disagree by up to ~0.45 on Qwen3-30B-A3B.
+    // Deep dense models drift further too: on Qwen3-32B (64 layers) llama.cpp's
+    // CPU and CUDA builds differ by up to 0.24 on the default prompt, where
+    // Qwen2.5-7B (28 layers) stays within 0.15
+    // (docs/benchmarks/matrix-cuda-rtx5090.md).
     let tolerance = tolerance.unwrap_or(if model.config.moe.is_some() {
         0.5
+    } else if model.config.n_layers > 32 {
+        0.3
     } else {
         0.15
     });

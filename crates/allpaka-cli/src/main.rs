@@ -326,9 +326,10 @@ enum Command {
         #[arg(long, default_value_t = 6)]
         decode: usize,
         /// Maximum acceptable |log-prob| difference. Defaults to 0.15 for a
-        /// dense model and 0.5 for a MoE: measured llama.cpp Metal-vs-CPU
-        /// disagreement on Qwen3-30B-A3B reaches 0.45 by itself, so a MoE
-        /// tolerance below that would fail a correct engine.
+        /// dense model of up to 32 layers, 0.3 for a deeper one and 0.5 for a
+        /// MoE: llama.cpp's own backends disagree by up to 0.24 on Qwen3-32B
+        /// and 0.45 on Qwen3-30B-A3B, so a tighter default would fail a
+        /// correct engine.
         #[arg(long)]
         tol: Option<f64>,
     },
