@@ -21,7 +21,7 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 
 | Мешает | Пункты |
 |---|---|
-| Можно делать здесь (Windows + RTX 5090) | A3 → A4, C1\*, C3\*, C5, P8 (dense Qwen) |
+| Можно делать здесь (Windows + RTX 5090) | A3 → A4, C1\*, C3\*, C5, P8 (Gemma, допуск verify) |
 | Нужен Mac (Metal) | P4, P5, P6, P7, D3, D4, A7, D2 (Metal-раннер) |
 | Нужна вторая машина | B1 → B3 |
 | Нужен настоящий GGUF Llama/Mistral | P9 |
@@ -103,9 +103,14 @@ pp480 — 481 dispatch в одном command buffer, GPU занят 321/322 мс
 
 ### P8. Новые модели в матрице
 
-1. Dense Qwen (`qwen3`/`qwen35` dense) среднего размера.
-2. Gemma — только после attention с head_dim=512.
-3. Опционально MTP-35B для паритета спекуляции.
+Dense Qwen на CUDA — в матрице с паритетом (`docs/benchmarks/matrix-cuda-rtx5090.md`:
+Qwen3-32B, Qwen2.5-7B). Осталось:
+
+1. Gemma — только после attention с head_dim=512.
+2. Опционально MTP-35B для паритета спекуляции.
+3. Допуск `allpaka verify` для 32B: 0.15 строже, чем llama.cpp согласован сам с
+   собой (CPU против CUDA — до 0.24); либо масштабировать допуск по модели,
+   либо сравнивать потоки токенов, как token replay.
 
 **DoD:** модель проходит greedy-паритет и попадает в матрицу с артефактом.
 
