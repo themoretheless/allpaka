@@ -51,6 +51,7 @@ pub(super) fn serve(
     budget: &memory::Budget,
     rag: &RagTools,
     interrupt: Option<Interrupt<'_>>,
+    named: Option<(&NamedSessions, String)>,
 ) {
     let QueuedConnection {
         stream,
@@ -61,10 +62,19 @@ pub(super) fn serve(
     let Ok(mut error_stream) = stream.try_clone() else {
         return;
     };
-    let mut chat = match ChatState::new(model, budget, 1) {
-        Ok(chat) => chat,
-        Err(error) => {
-            let _ = respond(&mut error_stream, 429, &json!({"error": error.to_string()}));
+    // A named session is checked out for the run and put back after, as
+    // `dispatch_connection` does; otherwise a temporary one.
+    let checked_out = match &named {
+        Some((sessions, id)) => check_out_named(sessions, id, model, budget).map(Some),
+        None => ChatState::new(model, budget, 1)
+            .map(|chat| Some((chat, false)))
+            .map_err(|error| (429, error.to_string())),
+    };
+    let (mut chat, existed) = match checked_out {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return,
+        Err((status, message)) => {
+            let _ = respond(&mut error_stream, status, &json!({ "error": message }));
             router::close_politely(error_stream);
             return;
         }
@@ -91,6 +101,13 @@ pub(super) fn serve(
             rag,
         },
     );
+    let succeeded = outcome.is_ok();
+    if !succeeded {
+        let _ = chat.sanitize_after_failure(model);
+    }
+    if let Some((sessions, id)) = named {
+        check_in_named(sessions, id, chat, succeeded || existed);
+    }
     if let Err(error) = outcome {
         let status = if error.downcast_ref::<Interrupted>().is_some() {
             408

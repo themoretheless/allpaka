@@ -45,8 +45,8 @@ model tuned for one workload has no entry for another until it is tuned for it.
 current batching mode is `model-aware-admission`: requests are grouped fairly
 by model and admitted by the inference owner.
 
-Up to four long chat completions for the same model (no `session_id`) run at
-once, each in its own session: the first on the owner thread, the others on
+Up to four long chat completions for the same model run at once, each in its
+own session (a named one, checked out for the run, or a temporary one): the first on the owner thread, the others on
 worker threads. They take turns through a FIFO gate at every prefill chunk,
 and their decode steps are batched: whichever generation holds the turn runs
 one step for every generation then waiting to decode, as one pass over the
@@ -209,7 +209,10 @@ starts, interruption returns HTTP 408; during SSE it emits an error event and
 `[DONE]`. Completion removes the request registration.
 
 A model retains at most four named sessions. Idle sessions expire after ten
-minutes and are collected on the next model request. A request without
+minutes and are collected on the next model request. A session is checked
+out for the whole of a request, so requests for different sessions run side
+by side, and a request for a session another request is using waits for it
+(`scripts/check-named-sessions.py`). A request without
 `session_id` has independent KV state. Named sessions are scoped to the model
 and reuse their own state. The service has no tenant authentication; expose it
 only to trusted clients or place an authenticating proxy in front of it.

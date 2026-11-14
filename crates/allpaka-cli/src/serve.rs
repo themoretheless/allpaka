@@ -39,7 +39,8 @@ pub(crate) use predict::{
 };
 pub(crate) use sampler::Sampler;
 pub(crate) use session::{
-    exact_prefix_snapshot, model_prefix_namespace, prefix_key, ChatState, ModelService, PrefixSnap,
+    check_in_named, check_out_named, exact_prefix_snapshot, model_prefix_namespace, named_in_use,
+    prefix_key, ChatState, ModelService, NamedSessions, PrefixSnap,
 };
 pub(crate) use template::Template;
 
@@ -238,6 +239,7 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
                         tokenizer: Arc::clone(&service.tokenizer),
                         force_think: service.force_think,
                         budget: service.chat.memory.budget(),
+                        sessions: Arc::clone(&service.sessions),
                     }
                 });
                 // A worker generation may already run (started during an
@@ -268,6 +270,7 @@ pub fn run(model_paths: &[std::path::PathBuf], bind: &str, limits: ServingLimits
                         ) {
                             preemptible::serve(
                                 &name, connection, model, tok, template, budget, &rag_tools, None,
+                                None,
                             );
                         } else if let Some(shared) = shared
                             .as_ref()
@@ -353,7 +356,7 @@ fn load_model_service(
             tokenizer: Arc::new(tokenizer),
             force_think,
             chat,
-            sessions: std::collections::HashMap::new(),
+            sessions: Arc::default(),
         },
     ))
 }

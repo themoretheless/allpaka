@@ -172,11 +172,6 @@ pub(super) fn dispatch_connection(
                 .context("session_id must be a non-empty string of at most 128 bytes")
         })
         .transpose()?;
-    let now = std::time::Instant::now();
-    service
-        .sessions
-        .retain(|_, (_, used)| now.duration_since(*used).as_secs() < 600);
-
     let ModelService {
         model,
         tokenizer,
@@ -191,30 +186,23 @@ pub(super) fn dispatch_connection(
     let mut checked_out_session: Option<(String, ChatState, bool)> = None;
     if is_chat {
         if let Some(id) = session_id {
-            if !sessions.contains_key(&id) && sessions.len() >= 4 {
-                let mut stream = connection.stream;
-                return respond(
-                    &mut stream,
-                    429,
-                    &json!({"error":"resident session capacity exhausted"}),
-                );
-            }
-            match sessions.remove(&id) {
-                Some((session_chat, _)) => {
-                    checked_out_session = Some((id, session_chat, true));
+            // A worker generation (`interleave`) may still be running this
+            // session: wait for it, as a request queued behind it would,
+            // passing it the turn this thread holds meanwhile.
+            while named_in_use(&id) && connection.control.check().is_ok() {
+                match super::interleave::current() {
+                    Some(gate) => gate.pass(),
+                    None => std::thread::sleep(std::time::Duration::from_millis(5)),
                 }
-                None => match ChatState::new(model, &default_chat.memory.budget(), 1) {
-                    Ok(session_chat) => {
-                        checked_out_session = Some((id, session_chat, false));
-                    }
-                    Err(error) => {
-                        return respond(
-                            &mut connection.stream.try_clone()?,
-                            429,
-                            &json!({"error":error.to_string()}),
-                        );
-                    }
-                },
+            }
+            match check_out_named(sessions, &id, model, &default_chat.memory.budget()) {
+                Ok((session_chat, existed)) => {
+                    checked_out_session = Some((id, session_chat, existed));
+                }
+                Err((status, message)) => {
+                    let mut stream = connection.stream;
+                    return respond(&mut stream, status, &json!({ "error": message }));
+                }
             }
         }
     }
@@ -277,9 +265,12 @@ pub(super) fn dispatch_connection(
             active_chat.sanitize_after_failure(model)?;
         }
         if let Some((id, session_chat, had_existing_session)) = checked_out_session {
-            if succeeded || had_existing_session {
-                sessions.insert(id, (session_chat, std::time::Instant::now()));
-            }
+            check_in_named(
+                sessions,
+                id,
+                session_chat,
+                succeeded || had_existing_session,
+            );
         }
     }
     Ok(())

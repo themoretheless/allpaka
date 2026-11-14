@@ -255,6 +255,7 @@ pub(super) struct Shared {
     pub(super) tokenizer: Arc<Tokenizer>,
     pub(super) force_think: bool,
     pub(super) budget: memory::Budget,
+    pub(super) sessions: NamedSessions,
 }
 
 /// Whether a waiting request should run alongside the current one: a chat
@@ -266,8 +267,26 @@ pub(super) fn eligible(requested: &str, shared: &Shared, connection: &QueuedConn
         routes::classify(&connection.request_line).map(|m| m.route),
         Some(Route::ChatCompletions)
     ) && requested == shared.name
-        && connection.request.get("session_id").is_none()
+        && named_free(shared, connection)
         && workers() + 1 < MAX_TURNS
+}
+
+/// A request without `session_id`, or one whose named session is parked
+/// (not in the running generation) or new; a malformed id is answered by
+/// the ordinary path.
+fn named_free(shared: &Shared, connection: &QueuedConnection) -> bool {
+    match connection.request.get("session_id") {
+        None => true,
+        Some(id) => id
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 128)
+            .is_some_and(|id| {
+                let parked = shared.sessions.lock().unwrap();
+                parked.contains_key(id)
+                    || (parked.len() < super::session::NAMED_SESSIONS_MAX
+                        && !super::session::named_in_use(id))
+            }),
+    }
 }
 
 /// Start `connection` on a worker that takes turns with the caller, and return
@@ -282,6 +301,7 @@ pub(super) fn spawn(shared: Shared, connection: QueuedConnection) -> Arc<Gate> {
         Arc::clone(gate)
     };
     let worker_gate = Arc::clone(&gate);
+    let named = connection.request["session_id"].as_str().map(str::to_owned);
     std::thread::spawn(move || {
         worker_gate.enter();
         set_turn(Some(Arc::clone(&worker_gate)));
@@ -316,6 +336,7 @@ pub(super) fn spawn(shared: Shared, connection: QueuedConnection) -> Arc<Gate> {
             &shared.budget,
             &rag,
             Some(&pass),
+            named.as_ref().map(|id| (&shared.sessions, id.clone())),
         );
         finish(&worker_gate);
     });
