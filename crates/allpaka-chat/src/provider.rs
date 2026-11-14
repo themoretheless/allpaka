@@ -351,6 +351,8 @@ pub fn body_with_effort(
             item.as_object_mut().unwrap().remove("model");
             // Per-agent swarm reports are local transcript data, never a wire field.
             item.as_object_mut().unwrap().remove("swarm");
+            item.as_object_mut().unwrap().remove("citations");
+            item.as_object_mut().unwrap().remove("context_budget");
             let same_router = p.id == "openrouter"
                 && m.provider.as_deref() == Some(p.id.as_str())
                 && m.model.as_deref() == Some(model)

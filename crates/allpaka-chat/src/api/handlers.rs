@@ -313,6 +313,8 @@ pub(crate) async fn execute_background(
                                         waited["tasks"][0]["status"].as_str().unwrap_or("unknown")
                                     ),
                                     settings: None,
+                                    citations: vec![],
+                                    context_budget: None,
                                 })
                                 .await;
                         }
@@ -498,13 +500,17 @@ pub(crate) async fn action(
     if let Some(settings) = &action.settings {
         validate_settings(settings, &app).map_err(crate::bad_request)?;
     }
-    let (current, folder) = {
+    let (current, folder, ephemeral_project) = {
         let sessions = app.sessions.lock().unwrap();
         let (s, _) = sessions
             .get(&id)
             .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
         let state = s.lock().unwrap();
-        (state.settings.clone(), state.folder)
+        (
+            state.settings.clone(),
+            state.folder,
+            state.ephemeral.as_ref().map(|e| e.project.clone()),
+        )
     };
     if folder != HistoryFolder::Active
         && !matches!(action.kind, ActionKind::Stop | ActionKind::ClearQueue)
@@ -527,6 +533,35 @@ pub(crate) async fn action(
             StatusCode::BAD_REQUEST,
             "Use Send now or Queue for images",
         ));
+    }
+    if matches!(
+        action.kind,
+        ActionKind::Send | ActionKind::SendNow | ActionKind::Steer
+    ) && !mentions::parse(&action.text)
+        .map_err(crate::bad_request)?
+        .is_empty()
+    {
+        let project = match ephemeral_project {
+            Some(project) => project,
+            None => app
+                .projects
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| p.id == chosen.project_id)
+                .cloned()
+                .ok_or_else(|| error(StatusCode::NOT_FOUND, "Unknown project"))?,
+        };
+        let data = app.data.clone();
+        let text = action.text.clone();
+        let attached =
+            tokio::task::spawn_blocking(move || mentions::attach(&project, &data, &text))
+                .await
+                .map_err(crate::internal)?
+                .map_err(|e| crate::bad_request(format!("{e:#}")))?;
+        action.text = attached.text;
+        action.citations = attached.citations;
+        action.context_budget = attached.budget;
     }
     let tx = app
         .sessions

@@ -100,7 +100,12 @@ pub(crate) fn search(root: &Path, args: &Value, excluded: Option<&Path>) -> Resu
             }
             let text = excerpt(line, position, query);
             let text_truncated = text.len() < line.len();
-            matches.push(json!({"path":relative,"line":index+1,"text":text,"preceding_declaration":declaration.as_ref().map(|(line,text)| json!({"line":line,"text":text})),"text_truncated":text_truncated}));
+            let citation = format!(
+                "{}:{}",
+                relative.to_string_lossy().replace('\\', "/"),
+                index + 1
+            );
+            matches.push(json!({"path":relative,"line":index+1,"citation":citation,"text":text,"preceding_declaration":declaration.as_ref().map(|(line,text)| json!({"line":line,"text":text})),"text_truncated":text_truncated}));
         }
         if matches.len() == limit as usize {
             truncated |= !pending.is_empty();
@@ -185,6 +190,7 @@ mod tests {
         assert_eq!(found["matches"].as_array().unwrap().len(), 2);
         assert_eq!(found["matches"][0]["path"], "source.rs");
         assert_eq!(found["matches"][0]["line"], 2);
+        assert_eq!(found["matches"][0]["citation"], "source.rs:2");
         assert_eq!(found["matches"][0]["preceding_declaration"]["line"], 1);
         let found = search(
             &root,
