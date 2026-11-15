@@ -35,6 +35,7 @@ struct Cli {
     command: Command,
 }
 
+#[allow(unknown_lints, clippy::large_unopt_stack_frames)]
 #[derive(Subcommand)]
 enum Command {
     /// Run a contiguous transformer stage on this machine.

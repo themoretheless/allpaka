@@ -1306,7 +1306,7 @@ fn probe_model(request: &Value) -> Value {
             say(&json!({"files":{},"notes":"KEEP_BASE: runs agree"}).to_string())
         }
     } else if results.is_empty() {
-        assert!(system.contains("# Available skills") && tools.contains(&"load_skill".to_string()));
+        assert!(system.contains("# Available skills") && tools.iter().any(|t| t == "load_skill"));
         call("load_skill", json!({"name":"note"}))
     } else if results.len() == 1 {
         assert!(results[0].contains("Write out.txt"));
@@ -1594,7 +1594,7 @@ fn selector_model(request: &Value) -> Value {
     let (system, tools, results) = (system_of(request), tools_of(request), results_of(request));
     assert!(system.contains("CHECK THE CLAIMS AGAINST THE SOURCE"));
     assert!(
-        tools.contains(&"read_file".to_string())
+        tools.iter().any(|t| t == "read_file")
             && !tools
                 .iter()
                 .any(|t| ["write_file", "edit_file", "run_command"].contains(&t.as_str()))
@@ -1812,11 +1812,11 @@ fn delegate_model(request: &Value) -> Value {
     let (system, tools, results) = (system_of(request), tools_of(request), results_of(request));
     if system.contains("You are the `reader` subagent") {
         assert!(
-            !tools.contains(&"delegate".to_string()),
+            !tools.iter().any(|t| t == "delegate"),
             "subagents cannot delegate again"
         );
         assert!(
-            !tools.contains(&"write_file".to_string()),
+            !tools.iter().any(|t| t == "write_file"),
             "reader has writes: false"
         );
         return if results.is_empty() {
@@ -1897,7 +1897,7 @@ fn files_only_model(request: &Value) -> Value {
             say("child could not execute")
         };
     }
-    assert!(tools.contains(&"delegate".to_string()));
+    assert!(tools.iter().any(|t| t == "delegate"));
     assert!(tools
         .iter()
         .all(|name| !["run_command", "run_script", "background"].contains(&name.as_str())));
