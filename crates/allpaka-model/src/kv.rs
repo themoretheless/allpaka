@@ -696,12 +696,6 @@ impl KvCache {
         ops::f16::from_f32(v, &mut store[vr.start + at..vr.start + at + kv_dim]);
     }
 
-    /// Synchronize a range of host-written KV positions to the GPU cache.
-    ///
-    /// * On **UMA** (`SharedRegion::is_unified()`), host and GPU share physical
-    ///   memory in place — this is a zero-copy no-op returning `true`.
-    /// * On **dUMA** (`SharedRegion::is_discrete()`), uploads the K and V byte
-    ///   slices for `positions` to device VRAM (`H2D`).
     /// The reverse of [`sync_gpu_range`]: bring `positions` of `layer` back
     /// from device VRAM into the host store (dUMA only; a no-op on UMA or
     /// without a GPU). GPU paths write K/V on the device alone; a CPU
@@ -734,6 +728,12 @@ impl KvCache {
         )
     }
 
+    /// Synchronize a range of host-written KV positions to the GPU cache.
+    ///
+    /// * On **UMA** (`SharedRegion::is_unified()`), host and GPU share physical
+    ///   memory in place — this is a zero-copy no-op returning `true`.
+    /// * On **dUMA** (`SharedRegion::is_discrete()`), uploads the K and V byte
+    ///   slices for `positions` to device VRAM (`H2D`).
     pub fn sync_gpu_range(&mut self, layer: usize, positions: std::ops::Range<usize>) -> bool {
         if positions.start > positions.end || positions.end > self.capacity {
             return false;
