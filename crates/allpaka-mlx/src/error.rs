@@ -1,68 +1,89 @@
-//! The crate's error type: what failed while reading an MLX checkpoint.
+//! Typed errors for MLX safetensors containers.
 
 use std::fmt;
+use std::path::PathBuf;
 
+/// Errors produced when loading or slicing MLX `.safetensors` checkpoints.
 #[derive(Debug)]
 pub enum MlxError {
-    /// Opening, reading or mapping a file failed.
-    Io(std::io::Error),
-    /// An index or safetensors header is not valid JSON.
+    /// Filesystem or memory-mapping I/O error.
+    Io {
+        path: Option<PathBuf>,
+        source: std::io::Error,
+    },
+    /// Invalid JSON in `model.safetensors.index.json` or a shard header.
     Json(serde_json::Error),
-    /// The checkpoint is malformed or points outside its files.
-    Format(String),
+    /// Non-UTF-8 bytes in a safetensors JSON header.
+    Utf8(std::str::Utf8Error),
+    /// `model.safetensors.index.json` is missing a `"weight_map"` object.
+    MissingWeightMap,
+    /// Shard file is smaller than the 8-byte header-length prefix.
+    EmptySafetensors,
+    /// Malformed or overflowing safetensors header geometry.
+    InvalidHeader(&'static str),
+    /// Container has no mapped shards.
+    EmptyContainer,
+    /// Tensor byte range overflows `usize`/`u64` or exceeds its shard mapping.
+    TensorBounds { name: String, detail: &'static str },
 }
 
-pub type Result<T, E = MlxError> = std::result::Result<T, E>;
+pub type Result<T> = std::result::Result<T, MlxError>;
 
-impl fmt::Display for MlxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MlxError::Io(e) => e.fmt(f),
-            MlxError::Json(e) => e.fmt(f),
-            MlxError::Format(m) => f.write_str(m),
+impl MlxError {
+    pub(crate) fn io_at(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+        Self::Io {
+            path: Some(path.into()),
+            source,
         }
     }
 }
 
+impl fmt::Display for MlxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io {
+                path: Some(p),
+                source,
+            } => write!(f, "{}: {source}", p.display()),
+            Self::Io { path: None, source } => Display::fmt(source, f),
+            Self::Json(err) => Display::fmt(err, f),
+            Self::Utf8(err) => Display::fmt(err, f),
+            Self::MissingWeightMap => f.write_str("no weight_map object in safetensors index"),
+            Self::EmptySafetensors => f.write_str("empty safetensors"),
+            Self::InvalidHeader(msg) => f.write_str(msg),
+            Self::EmptyContainer => f.write_str("no mmaps loaded in container"),
+            Self::TensorBounds { name, detail } => write!(f, "tensor {name} {detail}"),
+        }
+    }
+}
+
+use fmt::Display;
+
 impl std::error::Error for MlxError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        // The wrapped error is already the message; continue past it.
         match self {
-            MlxError::Io(e) => e.source(),
-            MlxError::Json(e) => e.source(),
-            MlxError::Format(_) => None,
+            Self::Io { source, .. } => Some(source),
+            Self::Json(err) => Some(err),
+            Self::Utf8(err) => Some(err),
+            _ => None,
         }
     }
 }
 
 impl From<std::io::Error> for MlxError {
-    fn from(e: std::io::Error) -> Self {
-        MlxError::Io(e)
+    fn from(source: std::io::Error) -> Self {
+        Self::Io { path: None, source }
     }
 }
 
 impl From<serde_json::Error> for MlxError {
-    fn from(e: serde_json::Error) -> Self {
-        MlxError::Json(e)
-    }
-}
-
-impl From<std::array::TryFromSliceError> for MlxError {
-    fn from(e: std::array::TryFromSliceError) -> Self {
-        MlxError::Format(e.to_string())
+    fn from(err: serde_json::Error) -> Self {
+        Self::Json(err)
     }
 }
 
 impl From<std::str::Utf8Error> for MlxError {
-    fn from(e: std::str::Utf8Error) -> Self {
-        MlxError::Format(format!("safetensors header is not UTF-8: {e}"))
+    fn from(err: std::str::Utf8Error) -> Self {
+        Self::Utf8(err)
     }
 }
-
-/// A [`MlxError::Format`] built like `format!`.
-macro_rules! format_err {
-    ($($arg:tt)*) => {
-        $crate::error::MlxError::Format(format!($($arg)*))
-    };
-}
-pub(crate) use format_err;

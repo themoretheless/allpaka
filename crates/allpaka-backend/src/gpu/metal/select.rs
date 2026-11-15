@@ -141,16 +141,39 @@ pub(super) fn attend_mm() -> bool {
     crate::runtime::get().attend_mm
 }
 
+/// FA inner-loop pipelining (`ALLPAKA_FA_DB=1`): swaps `attend_mm`,
+/// `attend_mm_fq`, and `attend_mm256` for the `_db` variants shaped like
+/// llama's `fa_f16` (QK two dim-blocks in flight, PV four V loads in flight).
+/// Bit-identical by accumulate order; default OFF until a quiet-machine A/B
+/// decides.
+pub(super) fn attend_mm_kernel() -> &'static str {
+    if crate::runtime::get().fa_db {
+        "attend_mm_db"
+    } else {
+        "attend_mm"
+    }
+}
+
+pub(super) fn attend_mm_fq_kernel() -> &'static str {
+    if crate::runtime::get().fa_db {
+        "attend_mm_fq_db"
+    } else {
+        "attend_mm_fq"
+    }
+}
+
+pub(super) fn attend_mm256_kernel() -> &'static str {
+    if crate::runtime::get().fa_db {
+        "attend_mm256_db"
+    } else {
+        "attend_mm256"
+    }
+}
+
 /// Prefill attention row tiling: `ALLPAKA_ATTN_T4=0` reverts to the
 /// row-per-threadgroup kernel.
 pub(super) fn attend_rows_kernel() -> &'static str {
-    static T4: OnceLock<usize> = OnceLock::new();
-    match *T4.get_or_init(|| {
-        std::env::var("ALLPAKA_ATTN_T4")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8)
-    }) {
+    match crate::runtime::get().attn_t4 {
         8 => "attend_rows_t8",
         0 => "attend_rows",
         _ => "attend_rows_t4",
@@ -161,17 +184,11 @@ pub(super) fn attend_rows_kernel() -> &'static str {
 /// flash-attn vec path. `ALLPAKA_ATTN_MV=0` reverts to the position-per-step
 /// kernel.
 pub(super) fn attend_kernel() -> &'static str {
-    static MV: OnceLock<bool> = OnceLock::new();
-    if *MV.get_or_init(|| std::env::var("ALLPAKA_ATTN_MV").map_or(true, |v| v != "0")) {
+    let p = crate::runtime::get();
+    if p.attn_mv {
         return "attend_mv";
     }
-    static SG: OnceLock<usize> = OnceLock::new();
-    match *SG.get_or_init(|| {
-        std::env::var("ALLPAKA_ATTN_S8")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(32)
-    }) {
+    match p.attn_s8 {
         32 => "attend_s32",
         16 => "attend_s16",
         4 | 0 => "attend",
@@ -205,8 +222,7 @@ pub(super) fn probe_skip(what: &str) -> bool {
 
 /// The decode q2_k kernel: the interleaved dual-block variant under its env.
 pub(super) fn q2_kernel() -> &'static str {
-    static ILV: OnceLock<bool> = OnceLock::new();
-    if *ILV.get_or_init(|| std::env::var_os("ALLPAKA_Q2_ILV").is_some()) {
+    if crate::runtime::get().q2_ilv {
         "matvec_q2_k_ilv"
     } else if q2_mv() {
         "matvec_q2_k_mv"
@@ -255,8 +271,7 @@ pub(super) fn qkv_mv_fuse() -> bool {
 
 /// ALLPAKA_DEBUG_QKV=1: log pipelined-Q6_K / mixed-QKV kernel selection.
 pub(super) fn debug_qkv() -> bool {
-    static D: OnceLock<bool> = OnceLock::new();
-    *D.get_or_init(|| std::env::var_os("ALLPAKA_DEBUG_QKV").is_some())
+    crate::runtime::get().debug_qkv
 }
 
 /// The fused single-threadgroup router_topk in decode. OFF by default: the
@@ -373,50 +388,111 @@ pub(super) fn serial_dispatch() -> metal::MTLDispatchType {
 /// Use specialized BN=16 grouped MoE tile when average rows per active expert
 /// <= 24 (or forced via `ALLPAKA_MMID_BN16=1`, disabled via `=0`).
 pub(super) fn mmid_use_bn16(avg_rows: usize) -> bool {
-    static FORCE: OnceLock<Option<bool>> = OnceLock::new();
-    match *FORCE.get_or_init(|| std::env::var("ALLPAKA_MMID_BN16").ok().map(|v| v != "0")) {
+    match crate::runtime::get().mmid_bn16 {
         Some(b) => b,
         None => mm_ll() && !(mm_k64() || mmid_k64()) && avg_rows <= 24,
     }
 }
 
 /// Down-projection kernel with swiglu folded into B staging: gate and up
-/// stay raw in y, the mm applies silu(g)*u while loading. q4_k only;
-/// anything else keeps the standalone swiglu pass.
+/// stay raw in y, the mm applies silu(g)*u while loading. Covers Q2_K, Q3_K,
+/// Q4_K, Q5_K, Q6_K, and Q8_0 across BN=32 and BN=16.
 pub(super) fn mmid_swiglu_kernel_for(ty: GgmlType, bn16: bool) -> Option<(&'static str, usize)> {
     if !mm_ll() || mm_k64() {
         return None;
     }
-    match (ty, bn16) {
-        (GgmlType::Q4K, false) => Some((
-            if mm_pipe() {
+    let pipe = mm_pipe();
+    let name = match (ty, bn16) {
+        (GgmlType::Q2K, false) => {
+            if pipe {
+                "mmllps_id_q2_k"
+            } else {
+                "mmlls_id_q2_k"
+            }
+        }
+        (GgmlType::Q3K, false) => {
+            if pipe {
+                "mmllps_id_q3_k"
+            } else {
+                "mmlls_id_q3_k"
+            }
+        }
+        (GgmlType::Q4K, false) => {
+            if pipe {
                 "mmllps_id_q4_k"
             } else {
                 "mmlls_id_q4_k"
-            },
-            64,
-        )),
-        (GgmlType::Q4K, true) => Some((
-            if mm_pipe() {
-                "mmllps_id_q4_k_bn16"
+            }
+        }
+        (GgmlType::Q5K, false) => {
+            if pipe {
+                "mmllps_id_q5_k"
             } else {
-                "mmlls_id_q4_k_bn16"
-            },
-            64,
-        )),
-        // The 8B dense's Q6_K down (18/36 layers): pipelined + swiglu fold.
+                "mmlls_id_q5_k"
+            }
+        }
         (GgmlType::Q6K, false) => {
-            if mm_pipe() {
+            if pipe {
                 if debug_qkv() {
                     eprintln!("debug-qkv: mmllps_id_q6_k selected");
                 }
-                Some(("mmllps_id_q6_k", 64))
+                "mmllps_id_q6_k"
             } else {
-                None
+                "mmlls_id_q6_k"
             }
         }
-        _ => None,
-    }
+        (GgmlType::Q8_0, false) => {
+            if pipe {
+                "mmllps_id_q8_0"
+            } else {
+                "mmlls_id_q8_0"
+            }
+        }
+        (GgmlType::Q2K, true) => {
+            if pipe {
+                "mmllps_id_q2_k_bn16"
+            } else {
+                "mmlls_id_q2_k_bn16"
+            }
+        }
+        (GgmlType::Q3K, true) => {
+            if pipe {
+                "mmllps_id_q3_k_bn16"
+            } else {
+                "mmlls_id_q3_k_bn16"
+            }
+        }
+        (GgmlType::Q4K, true) => {
+            if pipe {
+                "mmllps_id_q4_k_bn16"
+            } else {
+                "mmlls_id_q4_k_bn16"
+            }
+        }
+        (GgmlType::Q5K, true) => {
+            if pipe {
+                "mmllps_id_q5_k_bn16"
+            } else {
+                "mmlls_id_q5_k_bn16"
+            }
+        }
+        (GgmlType::Q6K, true) => {
+            if pipe {
+                "mmllps_id_q6_k_bn16"
+            } else {
+                "mmlls_id_q6_k_bn16"
+            }
+        }
+        (GgmlType::Q8_0, true) => {
+            if pipe {
+                "mmllps_id_q8_0_bn16"
+            } else {
+                "mmlls_id_q8_0_bn16"
+            }
+        }
+        _ => return None,
+    };
+    Some((name, 64))
 }
 
 pub(super) fn mmid_kernel_for(
@@ -426,6 +502,7 @@ pub(super) fn mmid_kernel_for(
 ) -> Option<(&'static str, usize)> {
     if mm_ll() {
         let k64 = mm_k64() || mmid_k64();
+        let pipe = mm_pipe();
         if bn16 && !k64 {
             let name = match (ty, gather) {
                 (GgmlType::Q8_0, false) => "mmll_id_q8_0_bn16",
@@ -435,18 +512,48 @@ pub(super) fn mmid_kernel_for(
                 (GgmlType::Q5K, false) => "mmll_id_q5_k_bn16",
                 (GgmlType::Q6K, false) => "mmll_id_q6_k_bn16",
                 (GgmlType::Q5_0, false) => "mmll_id_q5_0_bn16",
-                (GgmlType::Q8_0, true) => "mmllg_id_q8_0_bn16",
-                (GgmlType::Q2K, true) => "mmllg_id_q2_k_bn16",
-                (GgmlType::Q3K, true) => "mmllg_id_q3_k_bn16",
+                (GgmlType::Q8_0, true) => {
+                    if pipe {
+                        "mmllpg_id_q8_0_bn16"
+                    } else {
+                        "mmllg_id_q8_0_bn16"
+                    }
+                }
+                (GgmlType::Q2K, true) => {
+                    if pipe {
+                        "mmllpg_id_q2_k_bn16"
+                    } else {
+                        "mmllg_id_q2_k_bn16"
+                    }
+                }
+                (GgmlType::Q3K, true) => {
+                    if pipe {
+                        "mmllpg_id_q3_k_bn16"
+                    } else {
+                        "mmllg_id_q3_k_bn16"
+                    }
+                }
                 (GgmlType::Q4K, true) => {
-                    if mm_pipe() {
+                    if pipe {
                         "mmllpg_id_q4_k_bn16"
                     } else {
                         "mmllg_id_q4_k_bn16"
                     }
                 }
-                (GgmlType::Q5K, true) => "mmllg_id_q5_k_bn16",
-                (GgmlType::Q6K, true) => "mmllg_id_q6_k_bn16",
+                (GgmlType::Q5K, true) => {
+                    if pipe {
+                        "mmllpg_id_q5_k_bn16"
+                    } else {
+                        "mmllg_id_q5_k_bn16"
+                    }
+                }
+                (GgmlType::Q6K, true) => {
+                    if pipe {
+                        "mmllpg_id_q6_k_bn16"
+                    } else {
+                        "mmllg_id_q6_k_bn16"
+                    }
+                }
                 (GgmlType::Q5_0, true) => "mmllg_id_q5_0_bn16",
                 _ => return None,
             };
@@ -460,18 +567,48 @@ pub(super) fn mmid_kernel_for(
             (GgmlType::Q5K, false, false) => "mmll_id_q5_k",
             (GgmlType::Q6K, false, false) => "mmll_id_q6_k",
             (GgmlType::Q5_0, false, false) => "mmll_id_q5_0",
-            (GgmlType::Q8_0, true, false) => "mmllg_id_q8_0",
-            (GgmlType::Q2K, true, false) => "mmllg_id_q2_k",
-            (GgmlType::Q3K, true, false) => "mmllg_id_q3_k",
+            (GgmlType::Q8_0, true, false) => {
+                if pipe {
+                    "mmllpg_id_q8_0"
+                } else {
+                    "mmllg_id_q8_0"
+                }
+            }
+            (GgmlType::Q2K, true, false) => {
+                if pipe {
+                    "mmllpg_id_q2_k"
+                } else {
+                    "mmllg_id_q2_k"
+                }
+            }
+            (GgmlType::Q3K, true, false) => {
+                if pipe {
+                    "mmllpg_id_q3_k"
+                } else {
+                    "mmllg_id_q3_k"
+                }
+            }
             (GgmlType::Q4K, true, false) => {
-                if mm_pipe() {
+                if pipe {
                     "mmllpg_id_q4_k"
                 } else {
                     "mmllg_id_q4_k"
                 }
             }
-            (GgmlType::Q5K, true, false) => "mmllg_id_q5_k",
-            (GgmlType::Q6K, true, false) => "mmllg_id_q6_k",
+            (GgmlType::Q5K, true, false) => {
+                if pipe {
+                    "mmllpg_id_q5_k"
+                } else {
+                    "mmllg_id_q5_k"
+                }
+            }
+            (GgmlType::Q6K, true, false) => {
+                if pipe {
+                    "mmllpg_id_q6_k"
+                } else {
+                    "mmllg_id_q6_k"
+                }
+            }
             (GgmlType::Q5_0, true, false) => "mmllg_id_q5_0",
             (GgmlType::Q8_0, false, true) => "mm64ll_id_q8_0",
             (GgmlType::Q2K, false, true) => "mm64ll_id_q2_k",

@@ -30,19 +30,6 @@ pub struct Gpu {
     pub(super) residency: Option<usize>,
     /// Reusable staging for activations in and outputs back: bump-allocated
     /// slices bound by buffer offset, so a dispatch creates no buffer objects.
-    ///
-    /// Arena rule, relied on by the `SAFETY` comments that copy into or out
-    /// of `x_arena` / `y_arena` through `contents()`: both are shared,
-    /// page-aligned allocations of exactly `x_cap` / `y_cap` bytes, grown only
-    /// by `ensure_arenas` (which drains deferred prefill buffers first and
-    /// never shrinks). Every synchronous entry point commits and waits its own
-    /// command buffer before returning, all under the `GPU` mutex, and the only
-    /// buffers left in flight - the fused prefill's deferred or one-buffer
-    /// chain - exist only between `prefill_begin` and `prefill_end*` /
-    /// `prefill_abort`, which drain them; the model calls the plain
-    /// attention/matvec entry points outside that window. So outside the
-    /// fused prefill, a CPU copy after `ensure_arenas` and before `commit`, or
-    /// after `wait_until_completed`, never overlaps GPU access.
     pub(super) x_arena: Buffer,
     pub(super) x_cap: usize,
     pub(super) y_arena: Buffer,
@@ -169,13 +156,6 @@ pub(super) fn route_layout(
 
 // Metal objects are reference-counted ObjC objects; the global below is
 // guarded by a Mutex, so cross-thread use is serialised.
-// SAFETY: the only instance lives in `GPU` behind a `Mutex`, so the
-// device, queue, buffers, pipelines and pending command buffers it holds are
-// touched by one thread at a time; Apple documents MTLDevice, MTLCommandQueue,
-// MTLBuffer and pipeline states as usable from any thread, and command
-// buffers only need non-concurrent use, not a fixed thread. The `Cell` and
-// `RefCell` fields stay `!Sync` (no `Sync` impl), and `residency` is a raw
-// ObjC pointer stored as `usize` that is likewise only messaged under the lock.
 unsafe impl Send for Gpu {}
 
 pub(super) static GPU: OnceLock<Option<Mutex<Gpu>>> = OnceLock::new();
@@ -202,11 +182,6 @@ pub fn attach(mapping: &[u8]) -> bool {
     }
     gpu.add_mapping(mapping)
 }
-
-/// Release a mapping handed to [`attach`]. Metal windows are no-copy views of
-/// host memory, so a later mapping at the same address is read live and
-/// nothing can go stale; the windows stay until the process exits.
-pub fn detach(_mapping: &[u8]) {}
 
 pub fn is_attached() -> bool {
     GPU.get().is_some_and(Option::is_some)
@@ -285,7 +260,7 @@ pub fn has_device_rope_freq() -> bool {
 }
 
 pub fn prefer_gpu_embed() -> bool {
-    is_attached() && !crate::runtime::get().metal_gpu_embed_off
+    is_attached() && crate::runtime::get().gpu_embed
 }
 
 pub fn can_embed_on_gpu(ty: GgmlType, bytes: &[u8], n_in: usize) -> bool {
@@ -308,13 +283,6 @@ pub fn can_embed_on_gpu(ty: GgmlType, bytes: &[u8], n_in: usize) -> bool {
 }
 
 pub fn prefill_replay(_xs: &[f32]) -> Option<Vec<f32>> {
-    None
-}
-
-pub fn prefill_graph_key(_key: u64) {}
-
-/// Batched decode staging; CUDA only (`MultiRow` declines elsewhere).
-pub fn multi_stage(_key: u64, _positions: &[u32], _ropes: &[f32]) -> Option<()> {
     None
 }
 
@@ -349,7 +317,9 @@ pub(super) fn init_device() -> Option<Gpu> {
         "attend_rows_t4",
         "attend_rows_t8",
         "attend_mm",
+        "attend_mm_db",
         "attend_mm_fq",
+        "attend_mm_fq_db",
         "residual_norm",
         "residual_norm_sig",
         "norm_rows",
@@ -364,18 +334,45 @@ pub(super) fn init_device() -> Option<Gpu> {
         "resnorm_router",
         "resnorm_router_rows",
         "mmllr64_q4_k",
+        "mmllp_q2_k",
+        "mmllp_q3_k",
         "mmllp_q4_k",
-        "mmllp_q8_0",
+        "mmllp_q5_k",
         "mmllp_q6_k",
+        "mmllp_q8_0",
+        "mmllp_qkv_q2_k",
+        "mmllp_qkv_q3_k",
         "mmllp_qkv_q4_k",
+        "mmllp_qkv_q5_k",
+        "mmllp_qkv_q6_k",
         "mmllp_qkv_q8_0",
         "mmllp_qkv_q4k_q6k",
+        "mmllp_qkv_mixed",
         "matvec_qkv_q4k_q6k",
+        "mmllpg_id_q2_k",
+        "mmllpg_id_q3_k",
         "mmllpg_id_q4_k",
+        "mmllpg_id_q5_k",
+        "mmllpg_id_q6_k",
+        "mmllpg_id_q8_0",
+        "mmllps_id_q2_k",
+        "mmllps_id_q3_k",
         "mmllps_id_q4_k",
+        "mmllps_id_q5_k",
         "mmllps_id_q6_k",
+        "mmllps_id_q8_0",
+        "mmllpg_id_q2_k_bn16",
+        "mmllpg_id_q3_k_bn16",
         "mmllpg_id_q4_k_bn16",
+        "mmllpg_id_q5_k_bn16",
+        "mmllpg_id_q6_k_bn16",
+        "mmllpg_id_q8_0_bn16",
+        "mmllps_id_q2_k_bn16",
+        "mmllps_id_q3_k_bn16",
         "mmllps_id_q4_k_bn16",
+        "mmllps_id_q5_k_bn16",
+        "mmllps_id_q6_k_bn16",
+        "mmllps_id_q8_0_bn16",
         "route_pick",
         "route_scan",
         "route_scatter",
@@ -399,6 +396,7 @@ pub(super) fn init_device() -> Option<Gpu> {
         "qk_prep_batch256",
         "attend_rows256",
         "attend_mm256",
+        "attend_mm256_db",
         "route_patch_shared_w",
     ] {
         let f = library
@@ -419,9 +417,6 @@ pub(super) fn init_device() -> Option<Gpu> {
     let pf_hs = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
     let route_buf = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
     let pf_attn_sync = device.new_buffer(256, MTLResourceOptions::StorageModeShared);
-    // SAFETY: `pf_attn_sync` was just allocated with 256 bytes of shared
-    // storage and no command buffer has referenced it yet, so the CPU is the
-    // only writer of those 256 bytes.
     unsafe { std::ptr::write_bytes(pf_attn_sync.contents() as *mut u8, 0, 256) };
     let pf_ev = device.new_shared_event();
 
@@ -1132,10 +1127,6 @@ impl Gpu {
         be.end_encoding();
         cmd.commit();
         cmd.wait_until_completed();
-        // SAFETY: `dst` is the shared buffer of `CSTAMP_CAP * 8` bytes made with
-        // `cstamps`, and `n <= CSTAMP_CAP`, so `n` u64s fit; buffer contents are
-        // page-aligned. The resolve blit wrote them and `wait_until_completed`
-        // returned, so the GPU no longer writes while the slice is copied out.
         let ts = unsafe { std::slice::from_raw_parts(dst.contents() as *const u64, n).to_vec() };
         let labels = self.cstamp_labels.borrow();
         let scale = match cal {

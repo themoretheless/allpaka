@@ -259,7 +259,9 @@ impl Drop for JobGuard {
         if let Err(error) = self.manager.save(&self.job) {
             eprintln!("Matrix job persistence failed: {error}");
         }
-        self.manager.active.lock().unwrap().remove(&self.job.id);
+        if let Some(token) = self.manager.active.lock().unwrap().remove(&self.job.id) {
+            token.close();
+        }
     }
 }
 fn prepare(
@@ -390,6 +392,9 @@ async fn execute_job(
             }
             tokio::select! {
                 _ = notified => {}
+                _ = stop.cancelled(), if !stop.is_cancelled() => {
+                    app.experiments.cancel(&id)?;
+                }
                 _ = tokio::time::sleep(Duration::from_millis(25)) => {}
             }
         }
@@ -512,10 +517,7 @@ pub(crate) async fn cancel(
         let result = (|| -> Result<Value> {
             app.matrix_jobs.load(&id)?;
             let active = app.matrix_jobs.active.lock().unwrap();
-            let requested = active.get(&id).is_some_and(|flag| {
-                flag.cancel();
-                true
-            });
+            let requested = active.get(&id).is_some_and(CancelToken::cancel_active);
             Ok(json!({"cancel_requested":requested}))
         })();
         result.map(Json).map_err(crate::bad_request)

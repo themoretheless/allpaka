@@ -282,7 +282,9 @@ pub(crate) async fn start(
                 },
                 &Value::Null,
             );
-            app.judge_runs.active.lock().unwrap().remove(&prepared.0);
+            if let Some(token) = app.judge_runs.active.lock().unwrap().remove(&prepared.0) {
+                token.close();
+            }
         });
         Ok(Json(response))
     })

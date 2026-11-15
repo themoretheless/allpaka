@@ -1044,6 +1044,9 @@ pub(crate) async fn save_provider(
             "This provider ID is reserved",
         ));
     }
+    let mut providers = app.providers.lock().unwrap();
+    // Hold the provider lock across the file update so concurrent edits
+    // serialize in the same order on disk and in memory.
     update_custom_providers(app.data.as_path(), |list| {
         match list.iter().position(|p| p.id == candidate.id) {
             Some(i) => list[i] = candidate.clone(),
@@ -1052,7 +1055,6 @@ pub(crate) async fn save_provider(
         Ok(())
     })
     .map_err(crate::internal)?;
-    let mut providers = app.providers.lock().unwrap();
     let old = providers
         .iter()
         .find(|p| p.id == candidate.id)
@@ -1078,6 +1080,7 @@ pub(crate) async fn delete_provider(
             "Built-in providers cannot be removed",
         ));
     }
+    let mut providers = app.providers.lock().unwrap();
     let found = update_custom_providers(app.data.as_path(), |list| {
         let before = list.len();
         list.retain(|p| p.id != id);
@@ -1096,10 +1099,7 @@ pub(crate) async fn delete_provider(
             false,
         );
     }
-    app.providers
-        .lock()
-        .unwrap()
-        .retain(|p| p.id != id || !p.custom);
+    providers.retain(|p| p.id != id || !p.custom);
     Ok(Json(json!({"deleted": id})))
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

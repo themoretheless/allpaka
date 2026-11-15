@@ -17,7 +17,7 @@ pub mod metadata;
 pub mod tensors;
 pub mod vision;
 
-pub use error::GgufError;
+pub use error::{GgufError, Result};
 pub use metadata::{read, GgufInfo};
 pub use tensors::{fingerprint, GgmlType, GgufFile, TensorInfo};
 pub use vision::VisionCensus;

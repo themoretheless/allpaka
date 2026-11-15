@@ -1,7 +1,7 @@
 //! Bounded, cancellable dataset runs using the native provider implementation.
 pub(crate) mod matrix_jobs;
-use crate::cancel::CancelToken;
 use crate::{
+    cancel::CancelToken,
     evaluation::{Sample, Snapshot},
     provider,
     types::{Message, Mode, Settings},
@@ -1082,7 +1082,9 @@ impl Drop for RunGuard {
         if let Err(e) = self.manager.save(&self.run) {
             eprintln!("Experiment persistence failed: {e}");
         }
-        self.manager.active.lock().unwrap().remove(&self.run.id);
+        if let Some(token) = self.manager.active.lock().unwrap().remove(&self.run.id) {
+            token.close();
+        }
         self.manager.notify.notify_waiters();
     }
 }

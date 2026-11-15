@@ -65,7 +65,6 @@ pub(super) fn resolve_decode_layers(
     allow_normflag: bool,
     dbg: bool,
 ) -> Option<CachedDecodeLayers> {
-    use std::hash::{Hash, Hasher};
     macro_rules! why {
         ($cond:expr, $msg:expr) => {
             if $cond {
@@ -86,74 +85,82 @@ pub(super) fn resolve_decode_layers(
 
     let sw_fuse_env = std::env::var("ALLPAKA_SWFUSE").is_ok_and(|v| v == "1");
     let runtime_normflag = crate::runtime::get().normflag;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    hidden.hash(&mut hasher);
-    q_dim.hash(&mut hasher);
-    kv.hash(&mut hasher);
-    allow_normflag.hash(&mut hasher);
-    runtime_normflag.hash(&mut hasher);
-    sw_fuse_env.hash(&mut hasher);
-    mega_enabled().hash(&mut hasher);
-    gufuse().hash(&mut hasher);
-    shared_tail().hash(&mut hasher);
-    gpu.chunks.len().hash(&mut hasher);
-    req.layers.len().hash(&mut hasher);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    #[inline(always)]
+    fn mix(h: &mut u64, v: u64) {
+        *h ^= v;
+        *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    #[inline(always)]
+    fn ty_code(ty: GgmlType) -> u64 {
+        match ty {
+            GgmlType::F32 => 1,
+            GgmlType::F16 => 2,
+            GgmlType::BF16 => 3,
+            GgmlType::Q5_0 => 4,
+            GgmlType::Q8_0 => 5,
+            GgmlType::Q2K => 6,
+            GgmlType::Q3K => 7,
+            GgmlType::Q4K => 8,
+            GgmlType::Q5K => 9,
+            GgmlType::Q6K => 10,
+            GgmlType::MlxQ4 => 11,
+            GgmlType::MlxQ8 => 12,
+            GgmlType::Other(v) => 100 + v as u64,
+        }
+    }
+    mix(&mut h, hidden as u64);
+    mix(&mut h, q_dim as u64);
+    mix(&mut h, kv as u64);
+    let flags = (allow_normflag as u64)
+        | ((runtime_normflag as u64) << 1)
+        | ((sw_fuse_env as u64) << 2)
+        | ((mega_enabled() as u64) << 3)
+        | ((gufuse() as u64) << 4)
+        | ((shared_tail() as u64) << 5);
+    mix(&mut h, flags);
+    mix(&mut h, gpu.chunks.len() as u64);
+    mix(&mut h, req.layers.len() as u64);
     for l in req.layers {
-        (l.attn_norm.as_ptr() as usize, l.attn_norm.len()).hash(&mut hasher);
-        (l.ffn_norm.as_ptr() as usize, l.ffn_norm.len()).hash(&mut hasher);
-        (
-            std::mem::discriminant(&l.wq.0),
-            l.wq.1.as_ptr() as usize,
-            l.wq.2,
-        )
-            .hash(&mut hasher);
-        (
-            std::mem::discriminant(&l.wk.0),
-            l.wk.1.as_ptr() as usize,
-            l.wk.2,
-        )
-            .hash(&mut hasher);
-        (
-            std::mem::discriminant(&l.wv.0),
-            l.wv.1.as_ptr() as usize,
-            l.wv.2,
-        )
-            .hash(&mut hasher);
-        (
-            std::mem::discriminant(&l.wo.0),
-            l.wo.1.as_ptr() as usize,
-            l.wo.2,
-        )
-            .hash(&mut hasher);
-        l.gate_in_q.hash(&mut hasher);
-        l.q_bias.map(|b| b.as_ptr() as usize).hash(&mut hasher);
-        l.k_bias.map(|b| b.as_ptr() as usize).hash(&mut hasher);
-        l.v_bias.map(|b| b.as_ptr() as usize).hash(&mut hasher);
+        mix(&mut h, l.attn_norm.as_ptr() as u64);
+        mix(&mut h, l.attn_norm.len() as u64);
+        mix(&mut h, l.ffn_norm.as_ptr() as u64);
+        mix(&mut h, l.ffn_norm.len() as u64);
+        mix(&mut h, ty_code(l.wq.0));
+        mix(&mut h, l.wq.1.as_ptr() as u64);
+        mix(&mut h, l.wq.2 as u64);
+        mix(&mut h, ty_code(l.wk.0));
+        mix(&mut h, l.wk.1.as_ptr() as u64);
+        mix(&mut h, l.wk.2 as u64);
+        mix(&mut h, ty_code(l.wv.0));
+        mix(&mut h, l.wv.1.as_ptr() as u64);
+        mix(&mut h, l.wv.2 as u64);
+        mix(&mut h, ty_code(l.wo.0));
+        mix(&mut h, l.wo.1.as_ptr() as u64);
+        mix(&mut h, l.wo.2 as u64);
+        mix(&mut h, l.gate_in_q as u64);
+        mix(&mut h, l.q_bias.map_or(0, |b| b.as_ptr() as u64));
+        mix(&mut h, l.k_bias.map_or(0, |b| b.as_ptr() as u64));
+        mix(&mut h, l.v_bias.map_or(0, |b| b.as_ptr() as u64));
         if let Some(g) = &l.gdn {
-            (
-                std::mem::discriminant(&g.wqkv.0),
-                g.wqkv.1.as_ptr() as usize,
-                g.wqkv.2,
-            )
-                .hash(&mut hasher);
-            (g.conv_off, g.state_off).hash(&mut hasher);
+            mix(&mut h, ty_code(g.wqkv.0));
+            mix(&mut h, g.wqkv.1.as_ptr() as u64);
+            mix(&mut h, g.wqkv.2 as u64);
+            mix(&mut h, g.conv_off as u64);
+            mix(&mut h, g.state_off as u64);
         }
         match &l.ffn {
             TokenFfn::Dense { gate, up, down } => {
-                0u8.hash(&mut hasher);
-                (
-                    std::mem::discriminant(&gate.0),
-                    gate.1.as_ptr() as usize,
-                    gate.2,
-                )
-                    .hash(&mut hasher);
-                (std::mem::discriminant(&up.0), up.1.as_ptr() as usize, up.2).hash(&mut hasher);
-                (
-                    std::mem::discriminant(&down.0),
-                    down.1.as_ptr() as usize,
-                    down.2,
-                )
-                    .hash(&mut hasher);
+                mix(&mut h, 0);
+                mix(&mut h, ty_code(gate.0));
+                mix(&mut h, gate.1.as_ptr() as u64);
+                mix(&mut h, gate.2 as u64);
+                mix(&mut h, ty_code(up.0));
+                mix(&mut h, up.1.as_ptr() as u64);
+                mix(&mut h, up.2 as u64);
+                mix(&mut h, ty_code(down.0));
+                mix(&mut h, down.1.as_ptr() as u64);
+                mix(&mut h, down.2 as u64);
             }
             TokenFfn::Moe {
                 router,
@@ -165,31 +172,25 @@ pub(super) fn resolve_decode_layers(
                 sigmoid,
                 ..
             } => {
-                1u8.hash(&mut hasher);
-                (router.1.as_ptr() as usize, router.2).hash(&mut hasher);
-                (
-                    std::mem::discriminant(&gate.0),
-                    gate.1.as_ptr() as usize,
-                    gate.1.len(),
-                )
-                    .hash(&mut hasher);
-                (
-                    std::mem::discriminant(&up.0),
-                    up.1.as_ptr() as usize,
-                    up.1.len(),
-                )
-                    .hash(&mut hasher);
-                (
-                    std::mem::discriminant(&down.0),
-                    down.1.as_ptr() as usize,
-                    down.1.len(),
-                )
-                    .hash(&mut hasher);
-                (*expert_ffn, *n_used, *sigmoid).hash(&mut hasher);
+                mix(&mut h, 1);
+                mix(&mut h, router.1.as_ptr() as u64);
+                mix(&mut h, router.2 as u64);
+                mix(&mut h, ty_code(gate.0));
+                mix(&mut h, gate.1.as_ptr() as u64);
+                mix(&mut h, gate.1.len() as u64);
+                mix(&mut h, ty_code(up.0));
+                mix(&mut h, up.1.as_ptr() as u64);
+                mix(&mut h, up.1.len() as u64);
+                mix(&mut h, ty_code(down.0));
+                mix(&mut h, down.1.as_ptr() as u64);
+                mix(&mut h, down.1.len() as u64);
+                mix(&mut h, *expert_ffn as u64);
+                mix(&mut h, *n_used as u64);
+                mix(&mut h, *sigmoid as u64);
             }
         }
     }
-    let key = hasher.finish();
+    let key = h;
     if let Some(cached) = &gpu.decode_cache {
         if cached.key == key && cached.layers.len() == req.layers.len() {
             return Some(cached.clone());
@@ -304,9 +305,11 @@ pub(super) fn resolve_decode_layers(
         };
         let normflag = allow_normflag
             && runtime_normflag
-            && mats_pre
-                .as_ref()
-                .is_some_and(|(m, _)| m.iter().take(3).all(|m| m.kernel == "matvec_q4_k_mv"))
+            && mats_pre.as_ref().is_some_and(|(m, _)| {
+                m.iter()
+                    .take(3)
+                    .all(|m| matches!(m.kernel, "matvec_q2_k_mv" | "matvec_q4_k_mv"))
+            })
             && matches!(l.ffn, TokenFfn::Moe { .. });
         let (mats, mat_states) = match mats_pre {
             Some((mats, dims)) => {
@@ -337,6 +340,7 @@ pub(super) fn resolve_decode_layers(
                     matches!(
                         k,
                         "matvec_q2_k"
+                            | "matvec_q2_k_mv"
                             | "matvec_q3_k_mv"
                             | "matvec_q4_k_mv"
                             | "matvec_q5_k_mv"
@@ -417,6 +421,7 @@ pub(super) fn resolve_decode_layers(
                     matches!(
                         k,
                         "matvec_q2_k"
+                            | "matvec_q2_k_mv"
                             | "matvec_q3_k_mv"
                             | "matvec_q4_k_mv"
                             | "matvec_q5_k_mv"
@@ -438,11 +443,12 @@ pub(super) fn resolve_decode_layers(
                     .enumerate()
                 {
                     let lpr = lanes_per_row(mat.ty, n_in);
+                    let nr0 = (32 / lpr).max(1);
                     let kernel = match mat.kernel {
-                        "matvec_q2_k_mv" if n_out % 4 != 0 => "matvec_q2_k",
+                        "matvec_q2_k_mv" if n_out % nr0 != 0 => "matvec_q2_k",
                         "matvec_q3_k_mv" if n_out % 2 != 0 => "matvec_q3_k",
-                        "matvec_q4_k_mv" if n_out % 2 != 0 => "matvec_q4_k",
-                        "matvec_q5_k_mv" if n_out % 2 != 0 => "matvec_q5_k",
+                        "matvec_q4_k_mv" if n_out % nr0 != 0 => "matvec_q4_k",
+                        "matvec_q5_k_mv" if n_out % nr0 != 0 => "matvec_q5_k",
                         "matvec_q6_k_mv" if n_out % 2 != 0 => "matvec_q6_k",
                         "matvec_q8_0_mv" if n_out % q8_nr0() != 0 => "matvec_q8_0",
                         k => k,
@@ -884,13 +890,6 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     gpu.ensure_arenas(4096, total * 4);
 
     // Stage x (or token_id for GPU embedding lookup) and zero the first delta.
-    // SAFETY: `ensure_arenas(4096, total * 4)` reserved every offset used here
-    // (`tok_at`, `x_at + hidden`, `delta_at + hidden`, `flag_at`, `ctr_at` all lie
-    // before `total`); offsets are in f32 units, so the u32 store at `tok_at` is
-    // 4-byte aligned. `req.x` has at least `hidden` floats (`hidden` is
-    // `req.x.len() / m`). The shared-expert slot `wts_at + n_used` is inside the
-    // `max_slots >= n_used + 1` weights region. The arena is idle (arena rule,
-    // `Gpu::x_arena`).
     unsafe {
         let yp = gpu.y_arena.contents() as *mut f32;
         if let Some((_, _, _, _, tok_id)) = gpu_embed {
@@ -1162,11 +1161,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             enc.set_buffer(6, Some(y), e(tok_at));
             let tok_idx = 0u32;
             enc.set_bytes(7, 4, &tok_idx as *const u32 as *const _);
-            let n_tg = if fmt <= 5 {
-                (hidden as u64).div_ceil(256)
-            } else {
-                (hidden as u64).div_ceil(32)
-            };
+            let n_tg = crate::gpu::common::embed_row_groups(fmt, hidden) as u64;
             enc.dispatch_thread_groups(MTLSize::new(n_tg, 1, 1), MTLSize::new(32, 1, 1));
             bar(&enc);
             dispatched += 1;
@@ -1419,6 +1414,8 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                             gate_in_q: l.gate_in_q as u32,
                             k_base: l.k_off as u64,
                             v_base: l.v_off as u64,
+                            rope_norm: req.rope_norm as u32,
+                            pad0: 0,
                         };
                         enc.set_bytes(
                             4,
@@ -1516,7 +1513,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
                             k_base: l.k_off as u64,
                             v_base: l.v_off as u64,
                             has_bias: refs.q_bias.is_some() as u32,
-                            pad2: 0,
+                            rope_norm: req.rope_norm as u32,
                         };
                         enc.set_bytes(
                             4,
@@ -2285,10 +2282,6 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
             let mut cpu_end = 0u64;
             let mut gpu_end = 0u64;
             gpu.device.sample_timestamps(&mut cpu_end, &mut gpu_end);
-            // SAFETY: `resolved` is a shared buffer of `MAX_SPLIT_SAMPLES` u64s and
-            // `split_index` never exceeds that (`split_here!` checks before advancing);
-            // the resolve blit that filled it ran in `cmd`, which `commit_and_wait`
-            // completed, so the GPU no longer writes it while the slice lives.
             let samples = unsafe {
                 std::slice::from_raw_parts(resolved.contents() as *const u64, split_index as usize)
             };
@@ -2336,17 +2329,12 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
         DISPATCHES.fetch_add(dispatched + 2, Ordering::Relaxed);
 
         if req.argmax {
-            // SAFETY: `cmd` was committed and waited; `amax_at + 64 * 2` is the argmax
-            // winner slot inside the `align(64 * 2 + 1)` region before `total`, and the
-            // f32-unit offset keeps the u32 read aligned.
             let next = unsafe {
                 ((gpu.y_arena.contents() as *const f32).add(amax_at + 64 * 2) as *const u32).read()
             };
             TokenOut::Argmax(next)
         } else {
             let mut out = vec![0f32; vocab];
-            // SAFETY: waited above; `out_logits_at + vocab` lies inside the
-            // `align(vocab)` region reserved below `total`, and `out` holds `vocab` f32s.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     (gpu.y_arena.contents() as *const f32).add(out_logits_at),
@@ -2360,36 +2348,7 @@ pub fn decode_token(req: &TokenReq) -> Option<TokenOut> {
     Some(out)
 }
 
-/// `fmt` codes `embed_row_f32_dtoken` and the other Metal dequant kernels
-/// switch on. CUDA numbers its formats differently (BF16 is 6 here, 9 there).
-pub(super) mod fmt {
-    pub const Q4K: u32 = 0;
-    pub const Q5K: u32 = 1;
-    pub const Q6K: u32 = 2;
-    pub const Q8_0: u32 = 3;
-    pub const Q2K: u32 = 4;
-    pub const Q3K: u32 = 5;
-    pub const BF16: u32 = 6;
-    pub const F16: u32 = 7;
-    pub const F32: u32 = 8;
-}
-
-pub(super) fn dq_fmt(ty: GgmlType) -> Option<u32> {
-    Some(match ty {
-        GgmlType::Q4K => fmt::Q4K,
-        GgmlType::Q5K => fmt::Q5K,
-        GgmlType::Q6K => fmt::Q6K,
-        GgmlType::Q8_0 => fmt::Q8_0,
-        GgmlType::Q2K => fmt::Q2K,
-        GgmlType::Q3K => fmt::Q3K,
-        GgmlType::BF16 => fmt::BF16,
-        GgmlType::F16 => fmt::F16,
-        GgmlType::F32 => fmt::F32,
-        _ => return None,
-    })
-}
-
-pub(super) use crate::gpu::common::row_bytes;
+pub(super) use crate::gpu::common::{dq_fmt, row_bytes};
 
 /// After a successful greedy decode, run `n_more` further tokens on-device:
 /// embed(hist[step]) -> layers 0..N -> output_head -> argmax -> hist[step+1],
@@ -2546,10 +2505,6 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
         ((n_more + 1) * 4) as u64,
         metal::MTLResourceOptions::StorageModeShared,
     );
-    // SAFETY: `hist_buf` was just created with `(n_more + 1) * 4` bytes and is
-    // not yet referenced by any command buffer; `wts_at + n_used` is inside the
-    // `max_slots >= n_used + 1` weights region of the `total` floats reserved by
-    // `ensure_arenas`, and the y arena is idle (arena rule, `Gpu::x_arena`).
     unsafe {
         *(hist_buf.contents() as *mut u32) = seed_token;
         let yp = gpu.y_arena.contents() as *mut f32;
@@ -2697,11 +2652,7 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
             enc.set_buffer(6, Some(&hist_buf), 0);
             let tok_idx = step as u32;
             enc.set_bytes(7, 4, &tok_idx as *const u32 as *const _);
-            let n_tg = if fmt <= 5 {
-                (hidden as u64).div_ceil(256)
-            } else {
-                (hidden as u64).div_ceil(32)
-            };
+            let n_tg = crate::gpu::common::embed_row_groups(fmt, hidden) as u64;
             enc.dispatch_thread_groups(MTLSize::new(n_tg, 1, 1), MTLSize::new(32, 1, 1));
 
             enc.set_compute_pipeline_state(&zero_state);
@@ -2762,6 +2713,8 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
                         gate_in_q: l.gate_in_q as u32,
                         k_base: l.k_off as u64,
                         v_base: l.v_off as u64,
+                        rope_norm: req.rope_norm as u32,
+                        pad0: 0,
                     };
                     enc.set_bytes(
                         4,
@@ -2860,7 +2813,7 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
                         k_base: l.k_off as u64,
                         v_base: l.v_off as u64,
                         has_bias: refs.q_bias.is_some() as u32,
-                        pad2: 0,
+                        rope_norm: req.rope_norm as u32,
                     };
                     enc.set_bytes(
                         4,
@@ -3323,9 +3276,6 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
         DECODE_SUCCESSES.fetch_add(n_more as u64, Ordering::Relaxed);
 
         let mut results = vec![0u32; n_more];
-        // SAFETY: `cmd` was committed and waited, so the store kernels are done
-        // with `hist_buf`; elements `1..=n_more` are inside its `n_more + 1` u32s and
-        // `results` has `n_more` slots.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 (hist_buf.contents() as *const u32).add(1),
@@ -3335,50 +3285,4 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
         }
         Some(results)
     })
-}
-
-#[cfg(test)]
-mod dq_fmt_tests {
-    use super::fmt;
-
-    /// The embed kernel's per-format branches read blocks of the size (or
-    /// element type) the host code means by each `fmt` number.
-    #[test]
-    fn embed_kernel_branches_match_the_host_codes() {
-        let src = crate::gpu::metal_kernels::KERNELS;
-        let start = src
-            .find("kernel void embed_row_f32_dtoken(")
-            .expect("embed_row_f32_dtoken exists");
-        let body = &src[start..];
-        let body = &body[..body[1..]
-            .find(
-                "
-kernel void",
-            )
-            .map_or(body.len(), |i| i + 1)];
-        let branch = |code: u32| {
-            let at = body
-                .find(&format!("fmt == {code}u"))
-                .unwrap_or_else(|| panic!("no branch for fmt {code}"));
-            &body[at..(at + 200).min(body.len())]
-        };
-        assert!(
-            body.contains("fmt <= 2u"),
-            "K formats 0..=2 share one block"
-        );
-        assert!(
-            branch(fmt::Q4K).contains("b * 144u"),
-            "Q4_K blocks are 144 bytes"
-        );
-        assert!(
-            branch(fmt::Q5K).contains("b * 176u"),
-            "Q5_K blocks are 176 bytes"
-        );
-        for code in [fmt::Q8_0, fmt::Q2K, fmt::Q3K] {
-            branch(code);
-        }
-        assert!(branch(fmt::BF16).contains("device const ushort*"));
-        assert!(branch(fmt::F16).contains("device const half*"));
-        assert!(branch(fmt::F32).contains("device const float*"));
-    }
 }

@@ -14,10 +14,6 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
     gpu.pf_obuf_cmd = None;
     gpu.pf_hs_normed.set(false);
     gpu.ensure_prefill(xs.len() * 4);
-    // SAFETY: `ensure_prefill(xs.len() * 4)` left `pf_x` at least that many bytes of
-    // shared storage (page-aligned, so f32-aligned). `prefill_drain` above waited
-    // every deferred buffer and the open one-buffer segment was dropped, so no
-    // command buffer can be reading `pf_x` while the CPU writes it.
     unsafe {
         std::ptr::copy_nonoverlapping(xs.as_ptr(), gpu.pf_x.contents() as *mut f32, xs.len());
     }
@@ -43,13 +39,7 @@ pub(super) fn prefill_complete(gpu: &mut Gpu) {
         CALLS.fetch_add(1, Ordering::Relaxed);
     }
     gpu.prefill_drain();
-    if let (Some((tab, n_ex)), true) = (gpu.dbg_route.get(), crate::runtime::get().metal_rows_debug)
-    {
-        // SAFETY: (for the deref below) `prefill_drain` and the one-buffer wait above
-        // mean no GPU work is writing `route_buf`. `dbg_route` holds the word offset
-        // of a route table of `n_ex * 3` words laid out by `route_layout` inside a
-        // buffer sized by `ensure_route`, which only ever grows, so every
-        // `tab + i * 3 + 2` read stays in bounds and u32-aligned.
+    if let (Some((tab, n_ex)), true) = (gpu.dbg_route.get(), crate::runtime::get().rows_debug) {
         let rb = gpu.route_buf.contents() as *const u32;
         let mut rows: Vec<u32> = (0..n_ex)
             .map(|i| unsafe { *rb.add(tab + i * 3 + 2) })
@@ -78,9 +68,6 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
     if gpu.pf_active_len != Some(xs.len()) || xs.len().checked_mul(4)? > gpu.pf_x_cap {
         return None;
     }
-    // SAFETY: `prefill_complete` committed and waited the one-buffer chunk and
-    // drained every deferred buffer, so the GPU is done writing `pf_x`; the check
-    // above bounds `xs.len() * 4` by `pf_x_cap`, the buffer's length.
     unsafe {
         std::ptr::copy_nonoverlapping(gpu.pf_x.contents() as *const f32, xs.as_mut_ptr(), xs.len());
     }
@@ -113,10 +100,6 @@ impl std::ops::Deref for SharedVector {
     type Target = [f32];
     fn deref(&self) -> &[f32] {
         // Only constructed after prefill_complete; storage outlives the slice.
-        // SAFETY: the buffer is the former `pf_x` (or a spare of the same length),
-        // taken out of the GPU state by `prefill_end_output` after `prefill_complete`
-        // drained all writers, with `len * 4 <= pf_x_cap == length`. Nothing else
-        // holds it, contents are page-aligned, and it lives as long as `self`.
         unsafe {
             std::slice::from_raw_parts(self.buf.as_ref().unwrap().contents().cast(), self.len)
         }
@@ -124,8 +107,6 @@ impl std::ops::Deref for SharedVector {
 }
 impl std::ops::DerefMut for SharedVector {
     fn deref_mut(&mut self) -> &mut [f32] {
-        // SAFETY: as for `deref`; `&mut self` makes this the only live view, and no
-        // command buffer references the allocation once it has been handed out.
         unsafe {
             std::slice::from_raw_parts_mut(self.buf.as_ref().unwrap().contents().cast(), self.len)
         }
@@ -248,26 +229,47 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 .to_owned(),
         );
     }
-    let qkv_state = if wq_out % 64 == 0 && kv % 64 == 0 {
-        if mats[0].ty == mats[1].ty && mats[1].ty == mats[2].ty {
-            mm_qkv_kernel_for(mats[0].ty)
-                .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned()))
-        } else if mm_pipe()
-            && mats[0].ty == GgmlType::Q4K
-            && mats[1].ty == GgmlType::Q4K
-            && mats[2].ty == GgmlType::Q6K
+    let (qkv_state, qkv_pad) = if wq_out % 64 == 0 && kv % 64 == 0 {
+        if mats[0].ty == mats[1].ty
+            && mats[1].ty == mats[2].ty
+            && (mats[0].ty == GgmlType::Q8_0 || hidden % 256 == 0)
         {
-            // Qwen3-8B's odd layers: v stays Q6_K where q/k are Q4_K.
-            if debug_qkv() {
-                eprintln!("debug-qkv: mixed q4k/q6k fused selected");
+            (
+                mm_qkv_kernel_for(mats[0].ty)
+                    .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned())),
+                0u32,
+            )
+        } else if mm_ll() && !mm_k64() && mm_pipe() && !crate::runtime::get().no_fused_qkv {
+            match (
+                super::decode::dq_fmt(mats[0].ty),
+                super::decode::dq_fmt(mats[1].ty),
+                super::decode::dq_fmt(mats[2].ty),
+            ) {
+                (Some(fq), Some(fk), Some(fv))
+                    if fq <= 5
+                        && fk <= 5
+                        && fv <= 5
+                        && ((fq == 3 && fk == 3 && fv == 3) || hidden % 256 == 0) =>
+                {
+                    if debug_qkv() {
+                        eprintln!(
+                            "debug-qkv: mmllp_qkv_mixed selected ({:?}/{:?}/{:?})",
+                            mats[0].ty, mats[1].ty, mats[2].ty
+                        );
+                    }
+                    let pad = fq | (fk << 8) | (fv << 16);
+                    (
+                        gpu.pipeline("mmllp_qkv_mixed", 1, 1).map(|p| p.to_owned()),
+                        pad,
+                    )
+                }
+                _ => (None, 0),
             }
-            gpu.pipeline("mmllp_qkv_q4k_q6k", 1, 1)
-                .map(|p| p.to_owned())
         } else {
-            None
+            (None, 0)
         }
     } else {
-        None
+        (None, 0)
     };
     let prep_state = gpu.pipelines[&("qk_prep_batch", 1, 1)].to_owned();
     let attend_state = gpu.pipelines[&(attend_rows_kernel(), 1, 1)].to_owned();
@@ -314,7 +316,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
     let norm_state = gpu.pipelines[&("norm_rows", 1, 1)].to_owned();
     let prep256_state = gpu.pipelines[&("qk_prep_batch256", 1, 1)].to_owned();
     let attend256_state = gpu.pipelines[&("attend_rows256", 1, 1)].to_owned();
-    let attend_mm256_state = gpu.pipelines[&("attend_mm256", 1, 1)].to_owned();
+    let attend_mm256_state = gpu.pipelines[&(attend_mm256_kernel(), 1, 1)].to_owned();
     let gate_mul_state = gpu.pipelines[&("attn_gate_mul", 1, 1)].to_owned();
     // GLM's q/k/v biases resolved outside the encoder closure (`?` needs
     // the function's Option, not the closure's Vec).
@@ -345,13 +347,6 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
     let n_expert = fusion.as_ref().map_or(0, |f| f.n_expert);
     let y_total = router_at + align(req.m * n_expert);
     gpu.ensure_arenas(x_total * 4, y_total * 4);
-    // SAFETY: `ensure_arenas(x_total * 4, ..)` sized `x_arena` for both copies
-    // (`hs_at + hs.len() <= ropes_at`, `ropes_at + ropes.len() * 2 <= x_total`).
-    // Synchronous layers find the GPU idle on this arena. Deferred and one-buffer
-    // layers (fusion only, so `hs` is not uploaded) may still have an earlier
-    // layer's buffer in flight that reads the rope tables here; every attention
-    // layer of a chunk writes byte-identical tables at the same `ropes_at`, so the
-    // overlap rewrites equal values and no Rust reference to the arena exists.
     unsafe {
         let xp = gpu.x_arena.contents() as *mut f32;
         if fusion.is_none() {
@@ -370,15 +365,16 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
         // free for the deferred commit bookkeeping.
         let queue = gpu.queue.clone();
         let mut cmd = queue.new_command_buffer();
+        let policy = crate::runtime::get();
         // ALLPAKA_PF_SPLIT=1: commit after every stage and print its GPU
         // time. Debug-only; serialises the stages, so wall time degrades.
-        let split = crate::runtime::get().metal_pf_split;
+        let split = policy.pf_split;
         // ALLPAKA_PF_CHAIN=1: a commit per stage like PF_SPLIT, but the
         // stage buffers are only queued, never waited - the in-order queue
         // runs them back-to-back at full clock, so the per-stage
         // GPUStart/EndTime deltas (printed at the end of the layer) are
         // free of the DVFS sag that makes PF_SPLIT numbers unusable.
-        let chain = !split && crate::runtime::get().metal_pf_chain;
+        let chain = !split && policy.pf_chain;
         // One-buffer chunk (ALLPAKA_PF_ONEBUF=1, default): encode into the
         // chunk's shared command buffer - a sequential encoder per stage,
         // the commit happens once in prefill_end. The segment arms lazily
@@ -520,7 +516,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 k_off: e(k_at),
                 v_off: e(v_at),
                 m: req.m as u32,
-                pad: 0,
+                pad: qkv_pad,
             };
             enc.set_bytes(
                 5,
@@ -571,6 +567,8 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 gate_in_q: req.gate_in_q as u32,
                 k_base: req.k_off as u64,
                 v_base: req.v_off as u64,
+                rope_norm: req.rope_norm as u32,
+                pad0: 0,
             };
             enc.set_bytes(
                 4,
@@ -655,8 +653,11 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             // barrier. gate_in_q (GLM) keeps the two-dispatch path: its q
             // rows are double-wide, which this kernel does not handle.
             let tiles = (req.m as u32).div_ceil(8);
-            let fused_qk =
-                attend_mm() && crate::runtime::get().pf_fused_qk && !req.gate_in_q && tiles <= 64;
+            let fused_qk = attend_mm()
+                && crate::runtime::get().pf_fused_qk
+                && !req.gate_in_q
+                && req.n_heads >= 2 * req.n_kv_heads
+                && tiles <= 64;
             if fused_qk && !pf_skip("attend") {
                 // The producer/consumer sync counters are per row-block and
                 // must start at zero: consumers wait for this dispatch's
@@ -668,7 +669,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 enc.set_bytes(1, 4, &zw as *const u32 as *const _);
                 enc.dispatch_thread_groups(MTLSize::new(1, 1, 1), MTLSize::new(64, 1, 1));
                 enc.memory_barrier_with_resources(&[&gpu.pf_attn_sync]);
-                enc.set_compute_pipeline_state(&gpu.pipelines[&("attend_mm_fq", 1, 1)]);
+                enc.set_compute_pipeline_state(&gpu.pipelines[&(attend_mm_fq_kernel(), 1, 1)]);
                 enc.set_buffer(0, Some(&req.cache.buf), 0);
                 enc.set_buffer(1, Some(&req.cache.buf), 0);
                 enc.set_buffer(2, Some(y), e(q_at));
@@ -698,6 +699,8 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                     has_bias: req.attn_bias.is_some() as u32,
                     n_kv_heads: req.n_kv_heads as u32,
                     wait_base: 0,
+                    rope_norm: req.rope_norm as u32,
+                    pad0: 0,
                 };
                 enc.set_bytes(
                     15,
@@ -751,7 +754,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                     k_base: req.k_off as u64,
                     v_base: req.v_off as u64,
                     has_bias: req.attn_bias.is_some() as u32,
-                    pad2: 0,
+                    rope_norm: req.rope_norm as u32,
                 };
                 enc.set_bytes(
                     4,
@@ -812,7 +815,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 if attend_mm() {
                     // MMA tiles: same bindings as attend_rows, 8 rows per
                     // threadgroup.
-                    enc.set_compute_pipeline_state(&gpu.pipelines[&("attend_mm", 1, 1)]);
+                    enc.set_compute_pipeline_state(&gpu.pipelines[&(attend_mm_kernel(), 1, 1)]);
                     let rows32 = req.m as u32;
                     enc.set_bytes(12, 4, &rows32 as *const u32 as *const _);
                     enc.dispatch_thread_groups(
@@ -921,7 +924,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             note_gpu_times(cmd);
         }
         WAIT_NS.fetch_add(t_wait.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        if !defer && !onebuf && crate::runtime::get().metal_ffn_time {
+        if !defer && !onebuf && policy.ffn_time {
             use objc::{msg_send, sel, sel_impl};
             let gs: f64 = unsafe { msg_send![cmd, GPUStartTime] };
             let ge: f64 = unsafe { msg_send![cmd, GPUEndTime] };
@@ -945,10 +948,6 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             (out_at, req.m * hidden)
         };
         let mut out = vec![0f32; out_len];
-        // SAFETY: reached only on the paths that committed and waited this buffer
-        // (onebuf and defer return earlier, as they need GPU routing), so the GPU is
-        // done with `y_arena`; `src_at + out.len()` is within `y_total`, which
-        // `ensure_arenas` reserved.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 (gpu.y_arena.contents() as *const f32).add(src_at),
@@ -1003,11 +1002,33 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 .to_owned(),
         );
     }
-    let qkvz_state = if channels % 64 == 0 && value_dim % 64 == 0 && mats[0].ty == mats[1].ty {
-        mm_qkv_kernel_for(mats[0].ty)
-            .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned()))
+    let (qkvz_state, qkvz_pad) = if channels % 64 == 0 && value_dim % 64 == 0 {
+        if mats[0].ty == mats[1].ty && (mats[0].ty == GgmlType::Q8_0 || hidden % 256 == 0) {
+            (
+                mm_qkv_kernel_for(mats[0].ty)
+                    .and_then(|name| gpu.pipeline(name, 1, 1).map(|p| p.to_owned())),
+                0u32,
+            )
+        } else if mm_ll() && !mm_k64() && mm_pipe() && !crate::runtime::get().no_fused_qkv {
+            match (
+                super::decode::dq_fmt(mats[0].ty),
+                super::decode::dq_fmt(mats[1].ty),
+            ) {
+                (Some(fq), Some(fk))
+                    if fq <= 5 && fk <= 5 && ((fq == 3 && fk == 3) || hidden % 256 == 0) =>
+                {
+                    (
+                        gpu.pipeline("mmllp_qkv_mixed", 1, 1).map(|p| p.to_owned()),
+                        fq | (fk << 8),
+                    )
+                }
+                _ => (None, 0),
+            }
+        } else {
+            (None, 0)
+        }
     } else {
-        None
+        (None, 0)
     };
     let conv1d = {
         let addr = req.conv1d.as_ptr() as usize;
@@ -1077,7 +1098,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
         let t_encode = std::time::Instant::now();
         let queue = gpu.queue.clone();
         let mut cmd = queue.new_command_buffer();
-        let split = crate::runtime::get().metal_pf_split;
+        let split = crate::runtime::get().pf_split;
         // One-buffer segment: lazily armed on the first eligible layer,
         // sealed by a layer that stays off it (see prefill_attn_block).
         let onebuf = fusion.is_some() && gpu_route() && pf_onebuf() && !split;
@@ -1205,7 +1226,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 k_off: e(z_at),
                 v_off: 0,
                 m: req.m as u32,
-                pad: 0,
+                pad: qkvz_pad,
             };
             enc.set_bytes(
                 5,
@@ -1446,9 +1467,6 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             return Vec::new();
         }
         let mut out = vec![0f32; req.m * n_expert];
-        // SAFETY: as in `prefill_attn_block`: only the waited, non-GPU-routing
-        // path gets here, and `router_at + m * n_expert` is inside the y arena
-        // reserved by `ensure_arenas` above.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 (gpu.y_arena.contents() as *const f32).add(router_at),

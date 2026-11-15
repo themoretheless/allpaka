@@ -1,9 +1,37 @@
 //! Core tensor data types, quantization block geometry, and SIMD float conversions.
 //!
 //! Centralizes primitive format conversions (`f16`, `bf16`, `f32`), `GgmlType`
-//! geometry, K-quant scale unpacking, and MLX affine block dequantization so
-//! `allpaka-gguf`, `allpaka-mlx`, and `allpaka-backend` share a single
-//! zero-duplication foundation.
+//! geometry, and K-quant scale unpacking so `allpaka-gguf`, `allpaka-mlx`, and
+//! `allpaka-backend` share a single zero-duplication foundation.
+
+use std::fmt;
+
+/// Error returned when computing expected byte size for a tensor of [`GgmlType`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DtypeError {
+    UnsupportedType(GgmlType),
+    UnalignedElementCount {
+        elements: usize,
+        block_elements: usize,
+    },
+}
+
+impl fmt::Display for DtypeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            DtypeError::UnsupportedType(ty) => write!(f, "ggml type {ty:?} is not supported"),
+            DtypeError::UnalignedElementCount {
+                elements,
+                block_elements,
+            } => write!(
+                f,
+                "{elements} elements is not a whole number of {block_elements}-element blocks"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DtypeError {}
 
 /// A tensor quantization or floating-point dtype, with block geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,40 +112,17 @@ impl GgmlType {
     pub fn expected_bytes(self, elements: usize) -> Result<usize, DtypeError> {
         let (be, bb) = match (self.block_elements(), self.block_bytes()) {
             (Some(be), Some(bb)) => (be as usize, bb as usize),
-            _ => return Err(DtypeError::Unsupported(self)),
+            _ => return Err(DtypeError::UnsupportedType(self)),
         };
         if elements % be != 0 {
-            return Err(DtypeError::PartialBlock {
+            return Err(DtypeError::UnalignedElementCount {
                 elements,
-                block: be,
+                block_elements: be,
             });
         }
         Ok(elements / be * bb)
     }
 }
-
-/// Why a tensor's element count has no byte length in its dtype.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DtypeError {
-    /// The type has no fixed block layout this crate knows.
-    Unsupported(GgmlType),
-    /// The element count does not fill whole blocks.
-    PartialBlock { elements: usize, block: usize },
-}
-
-impl std::fmt::Display for DtypeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DtypeError::Unsupported(ty) => write!(f, "ggml type {ty:?} is not supported"),
-            DtypeError::PartialBlock { elements, block } => write!(
-                f,
-                "{elements} elements is not a whole number of {block}-element blocks"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for DtypeError {}
 
 /// IEEE 754 half (`f16`) to single (`f32`). Handles subnormals, infinities and NaN.
 #[inline]
@@ -200,6 +205,7 @@ pub const fn f32_to_bf16(x: f32) -> u16 {
 pub fn f32_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
     assert_eq!(bytes.len(), dst.len() * 4);
     #[cfg(target_endian = "little")]
+    // SAFETY: `dst` has `dst.len() * 4 == bytes.len()` valid writable bytes and does not alias `bytes` (`&mut [f32]` vs `&[u8]`), and little-endian `f32` matches IEEE-754 byte order.
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_mut_ptr() as *mut u8, bytes.len());
     }
@@ -217,13 +223,7 @@ pub fn f16_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
     let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
-    // SAFETY: `bytes.len() == 2 * n` (asserted above); every load reads 8 or 4 u16 at
-    // element `i` only while `i + 8 <= n` / `i + 4 <= n`, and every store writes the
-    // same number of f32 to `dst[i..]`, so all accesses stay in bounds. The
-    // byte buffer may not be 2-aligned; that is fine because stdarch's aarch64
-    // `vld1`/`vst1` are unaligned reads/writes. The transmutes reinterpret
-    // 64-bit vectors of the same size (uint16x4_t -> float16x4_t), where every
-    // bit pattern is valid.
+    // SAFETY: `aarch64` guarantees NEON (`fp16` vector conversions via `vcvt_f32_f16`); `bytes` has `2 * n` bytes (`vld1q_u16`/`vld1_u16` are unaligned-safe), and `dst` has `n` writable `f32` elements.
     unsafe {
         use std::arch::aarch64::*;
         let ptr = bytes.as_ptr() as *const u16;
@@ -251,16 +251,16 @@ pub fn f16_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
                 let n = dst.len();
                 let ptr = bytes.as_ptr();
                 while *i + 8 <= n {
-                    let h = _mm_loadu_si128(ptr.add(*i * 2) as *const __m128i);
-                    let f = _mm256_cvtph_ps(h);
-                    _mm256_storeu_ps(dst.as_mut_ptr().add(*i), f);
+                    // SAFETY: `*i + 8 <= n` ensures 16 readable bytes in `bytes` and 8 writable `f32`s in `dst`.
+                    unsafe {
+                        let h = _mm_loadu_si128(ptr.add(*i * 2) as *const __m128i);
+                        let f = _mm256_cvtph_ps(h);
+                        _mm256_storeu_ps(dst.as_mut_ptr().add(*i), f);
+                    }
                     *i += 8;
                 }
             }
-            // SAFETY: the `f16c` target feature was detected at runtime just above. Inside,
-            // the loop reads 16 bytes at `*i * 2` and writes 8 f32 at `*i` only while
-            // `*i + 8 <= dst.len()`, and `bytes.len() == 2 * dst.len()` was asserted, so
-            // both stay in bounds; `loadu`/`storeu` take unaligned pointers.
+            // SAFETY: `is_x86_feature_detected!("f16c")` verified `f16c` support, and `bytes.len() == dst.len() * 2`.
             unsafe { convert_f16c(bytes, dst, &mut i) };
         }
     }
@@ -277,10 +277,7 @@ pub fn bf16_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
     let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
-    // SAFETY: `bytes.len() == 2 * n` (asserted above); each iteration reads 8 u16 at
-    // element `i` and writes 8 f32 to `dst[i..]` only while `i + 8 <= n`. The
-    // byte buffer may not be 2-aligned, which stdarch's unaligned aarch64
-    // `vld1`/`vst1` reads/writes allow.
+    // SAFETY: `aarch64` guarantees NEON (`vld1q_u16`, `vshll_n_u16`, `vst1q_f32`); `bytes` has `2 * n` bytes (unaligned loads allowed) and `dst` has `n` writable `f32` elements.
     unsafe {
         use std::arch::aarch64::*;
         let ptr = bytes.as_ptr() as *const u16;
@@ -303,16 +300,17 @@ pub fn bf16_bytes_to_f32(bytes: &[u8], dst: &mut [f32]) {
                 let n = dst.len();
                 let ptr = bytes.as_ptr();
                 while *i + 8 <= n {
-                    let h = _mm_loadu_si128(ptr.add(*i * 2) as *const __m128i);
-                    let wide = _mm256_cvtepu16_epi32(h);
-                    let shifted = _mm256_slli_epi32(wide, 16);
-                    _mm256_storeu_ps(dst.as_mut_ptr().add(*i), _mm256_castsi256_ps(shifted));
+                    // SAFETY: `*i + 8 <= n` ensures 16 readable bytes in `bytes` and 8 writable `f32`s in `dst`.
+                    unsafe {
+                        let h = _mm_loadu_si128(ptr.add(*i * 2) as *const __m128i);
+                        let wide = _mm256_cvtepu16_epi32(h);
+                        let shifted = _mm256_slli_epi32(wide, 16);
+                        _mm256_storeu_ps(dst.as_mut_ptr().add(*i), _mm256_castsi256_ps(shifted));
+                    }
                     *i += 8;
                 }
             }
-            // SAFETY: `avx2` was detected at runtime just above. The loop reads 16 bytes at
-            // `*i * 2` and writes 8 f32 at `*i` only while `*i + 8 <= dst.len()`, with
-            // `bytes.len() == 2 * dst.len()` asserted, using unaligned `loadu`/`storeu`.
+            // SAFETY: `is_x86_feature_detected!("avx2")` verified `avx2` support, and `bytes.len() == dst.len() * 2`.
             unsafe { convert_avx2(bytes, dst, &mut i) };
         }
     }
@@ -329,11 +327,7 @@ pub fn f32_to_f16_slice(src: &[f32], dst: &mut [u16]) {
     let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
-    // SAFETY: `src.len() == dst.len()` (asserted above); each load reads 8 or 4 f32 at
-    // `i` and each store writes the same count of u16 at `i`, guarded by
-    // `i + 8 <= len` / `i + 4 <= len`; both pointers come from typed slices, so
-    // they are element-aligned. The transmutes reinterpret
-    // float16x4_t as uint16x4_t: same size, every bit pattern valid.
+    // SAFETY: `aarch64` guarantees NEON (`vcvt_f16_f32`, `vld1q_f32`, `vst1q_u16`); `src` and `dst` both have `src.len()` elements and loop bounds check `i + 8 <= src.len()` and `i + 4 <= src.len()`.
     unsafe {
         use std::arch::aarch64::*;
         while i + 8 <= src.len() {
@@ -360,19 +354,19 @@ pub fn f32_to_f16_slice(src: &[f32], dst: &mut [u16]) {
                 use std::arch::x86_64::*;
                 let n = src.len();
                 while *i + 8 <= n {
-                    let v = _mm256_loadu_ps(src.as_ptr().add(*i));
-                    // VCVTPS2PH reads only imm8[2:0]; recent stdarch rejects the
-                    // _MM_FROUND_NO_EXC bit at compile time, and dropping it does
-                    // not change the instruction's behaviour.
-                    let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(v);
-                    _mm_storeu_si128(dst.as_mut_ptr().add(*i) as *mut __m128i, h);
+                    // SAFETY: `*i + 8 <= n` ensures 8 readable `f32`s in `src` and 8 writable `u16`s in `dst`.
+                    unsafe {
+                        let v = _mm256_loadu_ps(src.as_ptr().add(*i));
+                        // VCVTPS2PH reads only imm8[2:0]; recent stdarch rejects the
+                        // _MM_FROUND_NO_EXC bit at compile time, and dropping it does
+                        // not change the instruction's behaviour.
+                        let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(v);
+                        _mm_storeu_si128(dst.as_mut_ptr().add(*i) as *mut __m128i, h);
+                    }
                     *i += 8;
                 }
             }
-            // SAFETY: `f16c` was detected at runtime just above. The loop reads 8 f32 and
-            // writes 8 u16 at `*i` only while `*i + 8 <= src.len()`, and the caller asserted
-            // `src.len() == dst.len()`, so both accesses are in bounds (unaligned
-            // `loadu`/`storeu`).
+            // SAFETY: `is_x86_feature_detected!("f16c")` verified `f16c` support, and `src.len() == dst.len()`.
             unsafe { convert_f16c(src, dst, &mut i) };
         }
     }
@@ -408,77 +402,28 @@ pub fn unpack_q3_k_scales_raw(packed: &[u8]) -> [i8; 16] {
     let u1 = (a1 & KMASK2) | (((tmp >> 2) & KMASK1) << 4);
     let u2 = ((a0 >> 4) & KMASK2) | (((tmp >> 4) & KMASK1) << 4);
     let u3 = ((a1 >> 4) & KMASK2) | (((tmp >> 6) & KMASK1) << 4);
-    // SAFETY: `[u32; 4]` and `[i8; 16]` have the same size, `i8` has alignment 1
-    // and every bit pattern is a valid `i8`. The byte order is the target's native
-    // one, which matches the little-endian SWAR packing on every supported target.
-    unsafe { std::mem::transmute::<[u32; 4], [i8; 16]>([u0, u1, u2, u3]) }
-}
-
-/// Dequantise one MLX affine 4-bit block (36 bytes: eight little-endian `u32` nibble words + bf16 scale + bf16 bias).
-#[inline]
-pub fn dequant_mlx_q4_block_slice(block: &[u8], out: &mut [f32]) {
-    assert!(
-        block.len() >= 36 && out.len() >= 64,
-        "Q4Affine block requires 36 input bytes and 64 output elements"
-    );
-    let scale = bf16_to_f32(u16::from_le_bytes([block[32], block[33]]));
-    let bias = bf16_to_f32(u16::from_le_bytes([block[34], block[35]]));
-    let mut table = [0.0f32; 16];
-    for (q, slot) in table.iter_mut().enumerate() {
-        *slot = (q as f32).mul_add(scale, bias);
+    // SAFETY: `[u32; 4]` and `[i8; 16]` both occupy 16 initialized bytes with no padding, and on little-endian targets (or byte-packed SWAR words) lane ordering matches `[0..16]`.
+    #[cfg(target_endian = "little")]
+    unsafe {
+        std::mem::transmute::<[u32; 4], [i8; 16]>([u0, u1, u2, u3])
     }
-    for w in 0..8 {
-        let word = u32::from_le_bytes(block[w * 4..w * 4 + 4].try_into().unwrap());
-        let dst = &mut out[w * 8..w * 8 + 8];
-        dst[0] = table[(word & 0xf) as usize];
-        dst[1] = table[((word >> 4) & 0xf) as usize];
-        dst[2] = table[((word >> 8) & 0xf) as usize];
-        dst[3] = table[((word >> 12) & 0xf) as usize];
-        dst[4] = table[((word >> 16) & 0xf) as usize];
-        dst[5] = table[((word >> 20) & 0xf) as usize];
-        dst[6] = table[((word >> 24) & 0xf) as usize];
-        dst[7] = table[((word >> 28) & 0xf) as usize];
-    }
-}
-
-/// Dequantise one MLX affine 8-bit block (68 bytes: 64 unsigned payload bytes + bf16 scale + bf16 bias).
-#[inline]
-pub fn dequant_mlx_q8_block_slice(block: &[u8], out: &mut [f32]) {
-    assert!(
-        block.len() >= 68 && out.len() >= 64,
-        "Q8Affine block requires 68 input bytes and 64 output elements"
-    );
-    let scale = bf16_to_f32(u16::from_le_bytes([block[64], block[65]]));
-    let bias = bf16_to_f32(u16::from_le_bytes([block[66], block[67]]));
-    for (&q, slot) in block[..64].iter().zip(out[..64].iter_mut()) {
-        *slot = (q as f32).mul_add(scale, bias);
+    #[cfg(not(target_endian = "little"))]
+    {
+        let mut out = [0i8; 16];
+        for (w_idx, w) in [u0, u1, u2, u3].into_iter().enumerate() {
+            let b = w.to_le_bytes();
+            out[w_idx * 4] = b[0] as i8;
+            out[w_idx * 4 + 1] = b[1] as i8;
+            out[w_idx * 4 + 2] = b[2] as i8;
+            out[w_idx * 4 + 3] = b[3] as i8;
+        }
+        out
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn expected_bytes_reports_typed_errors() {
-        assert_eq!(GgmlType::Q4K.expected_bytes(512), Ok(288));
-        assert_eq!(
-            GgmlType::Other(77).expected_bytes(256),
-            Err(DtypeError::Unsupported(GgmlType::Other(77)))
-        );
-        let partial = GgmlType::Q8_0.expected_bytes(40).unwrap_err();
-        assert_eq!(
-            partial,
-            DtypeError::PartialBlock {
-                elements: 40,
-                block: 32
-            }
-        );
-        assert_eq!(
-            partial.to_string(),
-            "40 elements is not a whole number of 32-element blocks"
-        );
-    }
 
     #[test]
     fn f16_and_bf16_simd_slices_match_scalar() {
@@ -528,5 +473,21 @@ mod tests {
             let expected = (lo | (hi << 4)) as i8;
             assert_eq!(got, expected, "scale {i}");
         }
+    }
+
+    #[test]
+    fn expected_bytes_reports_typed_errors() {
+        assert_eq!(GgmlType::Q4K.expected_bytes(512), Ok(288));
+        assert_eq!(
+            GgmlType::Other(99).expected_bytes(64),
+            Err(DtypeError::UnsupportedType(GgmlType::Other(99)))
+        );
+        assert_eq!(
+            GgmlType::Q4K.expected_bytes(300),
+            Err(DtypeError::UnalignedElementCount {
+                elements: 300,
+                block_elements: 256,
+            })
+        );
     }
 }

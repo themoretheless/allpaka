@@ -219,6 +219,14 @@ CI-проверка на скачиваемом эталонном чекпои�
 
 ## Трек D — гигиена и корректность
 
+Слито с `origin/main` (волна `refactor/architecture-wave`, 28 коммитов с другой
+машины): в CI добавлены `scripts/check-backends.sh`, CUDA-кросс-clippy
+(`x86_64-pc-windows-msvc`) и `scripts/studio-ui-tests/run.sh`; `gpu/` разложен на
+`metal/*`, `cuda/*`, `common.rs`, шейдеры Metal — из `shaders/kernels.metal`;
+clippy-долг backend/model закрыт на той стороне. CUDA-бэкенд и модель взяты с
+локальной стороны (Gemma 3, окно SWA, исправления арены и RoPE): `rope_norm` из
+CUDA-ядер той стороны не нужен — загрузчик переводит Llama/Mistral в NEOX.
+
 ### D1. CI: первый зелёный прогон расширенного набора
 
 `.github/workflows/ci.yml` теперь гоняет `fmt --check`, `clippy -D warnings`,

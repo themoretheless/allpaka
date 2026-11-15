@@ -641,7 +641,11 @@ pub fn similarity(trees: &[&Tree]) -> Option<f64> {
             pairs += 1;
         }
     }
-    (pairs > 0).then(|| total / pairs as f64)
+    if pairs > 0 {
+        Some(total / pairs as f64)
+    } else {
+        None
+    }
 }
 
 /// The body of one skill and the scripts it ships, for the load_skill tool.

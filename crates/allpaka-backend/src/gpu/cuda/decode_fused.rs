@@ -1089,6 +1089,7 @@ impl FusedCtx<'_> {
         Some(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch_rms_rope_qk_store(
         &self,
         gpu: &mut CudaGpu,

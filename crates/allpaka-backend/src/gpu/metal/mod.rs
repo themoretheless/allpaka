@@ -103,8 +103,11 @@ pub fn indexed_matvec_bandwidth(
         .pipeline_full(mat.kernel, 1, lpr, true, false)?
         .to_owned();
     let expert_bytes = match ty {
+        GgmlType::Q2K => n_out * (n_in / 256) * 84,
+        GgmlType::Q3K => n_out * (n_in / 256) * 110,
         GgmlType::Q4K => n_out * (n_in / 256) * 144,
         GgmlType::Q5K => n_out * (n_in / 256) * 176,
+        GgmlType::Q6K => n_out * (n_in / 256) * 210,
         GgmlType::Q8_0 => n_out * (n_in / 32) * 34,
         _ => return None,
     };

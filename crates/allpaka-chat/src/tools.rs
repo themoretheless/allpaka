@@ -456,6 +456,7 @@ fn git_diff(call: &ToolCall<'_>) -> Result<Value> {
 fn agentgrep(call: &ToolCall<'_>) -> Result<Value> {
     crate::code_search::search(call.root, call.args, call.excluded)
 }
+
 pub fn writes(name: &str) -> bool {
     tool(name).is_some_and(|tool| matches!(tool.kind, Kind::Write(_)))
 }

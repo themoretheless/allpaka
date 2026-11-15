@@ -43,7 +43,7 @@ pub(super) struct QkPrepArgs {
     pub(super) k_base: u64,
     pub(super) v_base: u64,
     pub(super) has_bias: u32,
-    pub(super) pad2: u32,
+    pub(super) rope_norm: u32,
 }
 
 #[repr(C)]
@@ -54,6 +54,8 @@ pub(super) struct FqPrepArgs {
     pub(super) has_bias: u32,
     pub(super) n_kv_heads: u32,
     pub(super) wait_base: u32,
+    pub(super) rope_norm: u32,
+    pub(super) pad0: u32,
 }
 
 #[repr(C)]
@@ -68,6 +70,8 @@ pub(super) struct QkPrep256Args {
     pub(super) gate_in_q: u32,
     pub(super) k_base: u64,
     pub(super) v_base: u64,
+    pub(super) rope_norm: u32,
+    pub(super) pad0: u32,
 }
 
 #[repr(C)]
@@ -102,6 +106,8 @@ pub(super) struct QkPrepBatch256Args {
     pub(super) gate_in_q: u32,
     pub(super) k_base: u64,
     pub(super) v_base: u64,
+    pub(super) rope_norm: u32,
+    pub(super) pad0: u32,
 }
 
 #[repr(C)]

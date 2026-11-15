@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::error::{MlxError, Result};
 use memmap2::Mmap;
 
 #[derive(Debug, Clone)]
@@ -33,14 +34,12 @@ struct ShardedIndex {
 }
 
 impl ShardedIndex {
-    fn parse(json_str: &str) -> crate::error::Result<Self> {
+    fn parse(json_str: &str) -> Result<Self> {
         let obj: serde_json::Value = serde_json::from_str(json_str)?;
         let weight_map = obj
             .get("weight_map")
             .and_then(|v| v.as_object())
-            .ok_or_else(|| {
-                crate::error::format_err!("no weight_map object in safetensors index")
-            })?;
+            .ok_or(MlxError::MissingWeightMap)?;
         let mut files: Vec<String> = weight_map
             .values()
             .filter_map(|v| v.as_str().map(str::to_owned))
@@ -51,14 +50,15 @@ impl ShardedIndex {
     }
 }
 
-pub fn load<P>(root: P) -> crate::error::Result<MlxSafetensors>
+pub fn load<P>(root: P) -> Result<MlxSafetensors>
 where
     P: AsRef<Path>,
 {
     let root = root.as_ref();
     let index_path = root.join("model.safetensors.index.json");
     let shard_files: Vec<String> = if index_path.is_file() {
-        let idx_txt = std::fs::read_to_string(&index_path)?;
+        let idx_txt =
+            std::fs::read_to_string(&index_path).map_err(|e| MlxError::io_at(&index_path, e))?;
         let index = ShardedIndex::parse(&idx_txt)?;
         if index.files.is_empty() {
             let pattern = root
@@ -82,13 +82,13 @@ where
                 let info = parse_safetensors_header(&mm)?;
                 Ok((mm, info))
             })
-            .collect::<crate::error::Result<Vec<_>>>()?
+            .collect::<Result<Vec<_>>>()?
     } else {
         std::thread::scope(|s| {
             let handles: Vec<_> = shard_files
                 .iter()
                 .map(|fname| {
-                    s.spawn(move || -> crate::error::Result<(Mmap, FileInfo)> {
+                    s.spawn(move || -> Result<(Mmap, FileInfo)> {
                         let mm = mmap_shard(root.join(fname))?;
                         let info = parse_safetensors_header(&mm)?;
                         Ok((mm, info))
@@ -98,7 +98,7 @@ where
             handles
                 .into_iter()
                 .map(|h| h.join().expect("shard parse thread panicked"))
-                .collect::<crate::error::Result<Vec<_>>>()
+                .collect::<Result<Vec<_>>>()
         })?
     };
 
@@ -115,9 +115,13 @@ where
         let start = info.data_start as u64;
         mmaps.push(mm);
         for mut t in info.tensors {
-            t.offset = t.offset.checked_add(start).ok_or_else(|| {
-                crate::error::format_err!("tensor offset overflow for {}", t.name)
-            })?;
+            t.offset = t
+                .offset
+                .checked_add(start)
+                .ok_or_else(|| MlxError::TensorBounds {
+                    name: t.name.clone(),
+                    detail: "offset overflow",
+                })?;
             let raw_name = t.name;
             let prefixed_name = format!("{i}/{fname}/{raw_name}");
             t.name = prefixed_name.clone();
@@ -137,24 +141,24 @@ where
     })
 }
 
-fn parse_safetensors_header(mm: &Mmap) -> crate::error::Result<FileInfo> {
+fn parse_safetensors_header(mm: &Mmap) -> Result<FileInfo> {
     let len = mm.len() as u64;
     if len < 8 {
-        return Err(crate::error::format_err!("empty safetensors"));
+        return Err(MlxError::EmptySafetensors);
     }
-    let n_bytes = u64::from_le_bytes(mm[0..8].try_into()?);
+    let n_bytes = u64::from_le_bytes([mm[0], mm[1], mm[2], mm[3], mm[4], mm[5], mm[6], mm[7]]);
     let h_start = 8u64;
     let h_end = h_start
         .checked_add(n_bytes)
-        .ok_or_else(|| crate::error::format_err!("header size overflow"))?;
+        .ok_or(MlxError::InvalidHeader("header size overflow"))?;
     if h_end > len {
-        return Err(crate::error::format_err!("header exceeds mmap"));
+        return Err(MlxError::InvalidHeader("header exceeds mmap"));
     }
     let hdr_txt = std::str::from_utf8(&mm[h_start as usize..h_end as usize])?;
     let hdr: serde_json::Value = serde_json::from_str(hdr_txt)?;
-    let hdr_obj = hdr
-        .as_object()
-        .ok_or_else(|| crate::error::format_err!("safetensors header must be a JSON object"))?;
+    let hdr_obj = hdr.as_object().ok_or(MlxError::InvalidHeader(
+        "safetensors header must be a JSON object",
+    ))?;
     let empty_map = serde_json::Map::new();
     let meta = hdr_obj
         .get("__metadata__")
@@ -194,7 +198,7 @@ fn parse_safetensors_header(mm: &Mmap) -> crate::error::Result<FileInfo> {
         }
     }
     let mut hdr_sz =
-        usize::try_from(h_end).map_err(|_| crate::error::format_err!("header too large"))?;
+        usize::try_from(h_end).map_err(|_| MlxError::InvalidHeader("header too large"))?;
     let align: usize = meta
         .get("alignment")
         .and_then(|v| v.as_u64())
@@ -203,24 +207,24 @@ fn parse_safetensors_header(mm: &Mmap) -> crate::error::Result<FileInfo> {
     hdr_sz = hdr_sz
         .div_ceil(align)
         .checked_mul(align)
-        .ok_or_else(|| crate::error::format_err!("header alignment overflow"))?;
+        .ok_or(MlxError::InvalidHeader("header alignment overflow"))?;
     Ok(FileInfo {
         tensors,
         data_start: hdr_sz,
     })
 }
 
-fn mmap_shard<P>(path: P) -> crate::error::Result<Mmap>
+fn mmap_shard<P>(path: P) -> Result<Mmap>
 where
     P: AsRef<Path>,
 {
-    let f = std::fs::File::open(path.as_ref())?;
+    let path = path.as_ref();
+    let f = std::fs::File::open(path).map_err(|e| MlxError::io_at(path, e))?;
     // SAFETY: the map is read-only and owned by the returned `Mmap`, so slices of it
     // cannot outlive the mapping. A process that truncates or rewrites the shard while
     // it is mapped would be undefined behaviour; like every mmap-based loader we
     // accept that model files are not modified while being served.
-    unsafe { memmap2::Mmap::map(&f) }
-        .map_err(|e| crate::error::format_err!("mmap fail {}: {}", path.as_ref().display(), e))
+    unsafe { memmap2::Mmap::map(&f) }.map_err(|e| MlxError::io_at(path, e))
 }
 
 fn glob_pattern_to_filenames(pattern: &str) -> Vec<String> {
@@ -237,9 +241,9 @@ struct FileInfo {
     data_start: usize,
 }
 
-pub fn tensor_data<'a>(f: &'a MlxSafetensors, t: &TensorInfo) -> crate::error::Result<&'a [u8]> {
+pub fn tensor_data<'a>(f: &'a MlxSafetensors, t: &TensorInfo) -> Result<&'a [u8]> {
     if f.mmaps.is_empty() {
-        return Err(crate::error::format_err!("no mmaps loaded in container"));
+        return Err(MlxError::EmptyContainer);
     }
     let shard_idx = f
         .by_name
@@ -248,13 +252,21 @@ pub fn tensor_data<'a>(f: &'a MlxSafetensors, t: &TensorInfo) -> crate::error::R
         .unwrap_or_else(|| t.name.split('/').next().unwrap_or("0").parse().unwrap_or(0))
         .min(f.mmaps.len() - 1);
     let mm = &f.mmaps[shard_idx];
-    let off = usize::try_from(t.offset)
-        .map_err(|_| crate::error::format_err!("tensor {} offset overflow", t.name))?;
+    let off = usize::try_from(t.offset).map_err(|_| MlxError::TensorBounds {
+        name: t.name.clone(),
+        detail: "offset overflow",
+    })?;
     let end = off
         .checked_add(t.bytes)
-        .ok_or_else(|| crate::error::format_err!("tensor {} size overflow", t.name))?;
+        .ok_or_else(|| MlxError::TensorBounds {
+            name: t.name.clone(),
+            detail: "size overflow",
+        })?;
     if end > mm.len() {
-        return Err(crate::error::format_err!("tensor {} out of bounds", t.name));
+        return Err(MlxError::TensorBounds {
+            name: t.name.clone(),
+            detail: "out of bounds",
+        });
     }
     Ok(&mm[off..end])
 }

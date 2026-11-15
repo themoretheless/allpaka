@@ -448,36 +448,39 @@ pub(crate) async fn action(
         })));
     }
     if matches!(action.kind, ActionKind::Rename | ActionKind::Move) {
-        let sessions = app.sessions.lock().unwrap();
-        let (shared, _) = sessions
-            .get(&id)
-            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
-        let mut state = shared.lock().unwrap();
-        if action.kind == ActionKind::Move && state.status == SessionStatus::Running {
-            return Err(error(
-                StatusCode::CONFLICT,
-                "Stop generation before moving the conversation",
-            ));
-        }
-        if action.kind == ActionKind::Rename {
-            let title = action.text.trim();
-            if title.is_empty() || title.chars().count() > 100 {
+        return crate::blocking(move || {
+            let sessions = app.sessions.lock().unwrap();
+            let (shared, _) = sessions
+                .get(&id)
+                .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
+            let mut state = shared.lock().unwrap();
+            if action.kind == ActionKind::Move && state.status == SessionStatus::Running {
                 return Err(error(
-                    StatusCode::BAD_REQUEST,
-                    "Title must be 1–100 characters",
+                    StatusCode::CONFLICT,
+                    "Stop generation before moving the conversation",
                 ));
             }
-            state.title = title.to_string();
-        } else {
-            state.folder = match action.text.as_str() {
-                "active" => HistoryFolder::Active,
-                "archived" => HistoryFolder::Archived,
-                "trash" => HistoryFolder::Trash,
-                _ => return Err(error(StatusCode::BAD_REQUEST, "Unknown history folder")),
-            };
-        }
-        save(&app, &state).map_err(crate::internal)?;
-        return Ok(Json(json!({"accepted":true})));
+            if action.kind == ActionKind::Rename {
+                let title = action.text.trim();
+                if title.is_empty() || title.chars().count() > 100 {
+                    return Err(error(
+                        StatusCode::BAD_REQUEST,
+                        "Title must be 1–100 characters",
+                    ));
+                }
+                state.title = title.to_string();
+            } else {
+                state.folder = match action.text.as_str() {
+                    "active" => HistoryFolder::Active,
+                    "archived" => HistoryFolder::Archived,
+                    "trash" => HistoryFolder::Trash,
+                    _ => return Err(error(StatusCode::BAD_REQUEST, "Unknown history folder")),
+                };
+            }
+            save(&app, &state).map_err(crate::internal)?;
+            Ok(Json(json!({"accepted":true})))
+        })
+        .await;
     }
     if matches!(
         action.kind,

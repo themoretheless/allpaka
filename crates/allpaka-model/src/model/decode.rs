@@ -100,6 +100,7 @@ impl<'a> Model<'a> {
         let x: &[f32] = x_host.as_deref().unwrap_or(&[]);
         let (out_ty, out_bytes) = self.output_head()?.raw();
         let request = TokenReq {
+            rope_norm: false,
             x,
             m: 1,
             layers: &layers,
@@ -185,6 +186,7 @@ impl<'a> Model<'a> {
         }
         let (out_ty, out_bytes) = self.output_head()?.raw();
         let request = TokenReq {
+            rope_norm: false,
             x: &x,
             m,
             layers: &layers,
@@ -694,6 +696,7 @@ impl<'a> Model<'a> {
         let (out_ty, out_bytes) = self.output_head()?.raw();
         let empty_x: &[f32] = &[];
         let request = allpaka_backend::gpu::TokenReq {
+            rope_norm: false,
             x: empty_x,
             m: 1,
             layers: &layers,

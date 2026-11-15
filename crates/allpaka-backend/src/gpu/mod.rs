@@ -4,10 +4,8 @@
 //! Linux/Windows with the `cuda` feature, or `stub` as the CPU-only fallback)
 //! behind a unified module API (`allpaka_backend::gpu::*`).
 
+pub mod common;
 pub mod types;
-
-#[cfg_attr(not(any(target_os = "macos", feature = "cuda")), allow(dead_code))]
-mod common;
 
 #[cfg(target_os = "macos")]
 mod metal_kernels;

@@ -8,14 +8,12 @@
 //! acceptance test. The unit tests here pin the bit layout so a refactor
 //! cannot silently move a shift.
 
-use crate::error::{bail, Result};
+use crate::error::{GgufError, Result};
 use crate::tensors::GgmlType;
 use allpaka_dtype::{
     bf16_bytes_to_f32, f16_bytes_to_f32, f32_bytes_to_f32, unpack_q3_k_scales_raw,
 };
-pub use allpaka_dtype::{
-    bf16_to_f32, dequant_mlx_q4_block_slice, dequant_mlx_q8_block_slice, f16_to_f32, scale_min_k4,
-};
+pub use allpaka_dtype::{bf16_to_f32, f16_to_f32, scale_min_k4};
 
 /// Dequantise `data` holding `elements` values of type `ty`.
 pub fn dequant(ty: GgmlType, data: &[u8], elements: usize) -> Result<Vec<f32>> {
@@ -29,10 +27,13 @@ pub fn dequant_into(ty: GgmlType, data: &[u8], dst: &mut [f32]) -> Result<()> {
     let elements = dst.len();
     let expected = ty.expected_bytes(elements)?;
     if data.len() != expected {
-        bail!(
-            "expected {expected} bytes for {elements} elements of {ty:?}, got {}",
-            data.len()
-        );
+        return Err(GgufError::Dequant {
+            tensor: None,
+            detail: format!(
+                "expected {expected} bytes for {elements} elements of {ty:?}, got {}",
+                data.len()
+            ),
+        });
     }
     match ty {
         GgmlType::F32 => f32_bytes_to_f32(data, dst),
@@ -73,17 +74,18 @@ pub fn dequant_into(ty: GgmlType, data: &[u8], dst: &mut [f32]) -> Result<()> {
                 dequant_q6_k_block_slice(block, out);
             }
         }
-        GgmlType::MlxQ4 => {
-            for (block, out) in data.chunks_exact(36).zip(dst.chunks_exact_mut(64)) {
-                dequant_mlx_q4_block_slice(block, out);
-            }
+        GgmlType::MlxQ4 | GgmlType::MlxQ8 => {
+            return Err(GgufError::Dequant {
+                tensor: None,
+                detail: format!("mlx affine type {ty:?} is dequantised by allpaka-mlx"),
+            })
         }
-        GgmlType::MlxQ8 => {
-            for (block, out) in data.chunks_exact(68).zip(dst.chunks_exact_mut(64)) {
-                dequant_mlx_q8_block_slice(block, out);
-            }
+        GgmlType::Other(id) => {
+            return Err(GgufError::Dequant {
+                tensor: None,
+                detail: format!("ggml type id {id} is not supported"),
+            })
         }
-        GgmlType::Other(id) => bail!("ggml type id {id} is not supported"),
     }
     Ok(())
 }

@@ -612,15 +612,18 @@ pub(crate) async fn save_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     body: axum::body::Bytes,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
+    let data = app.data.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
         if body.len() > 128 * 1024 {
             bail!("Policy file exceeds 128 KiB");
         }
         let value = crate::strict_json::parse(std::str::from_utf8(&body)?)?;
         let manifest: Manifest = serde_json::from_value(value)?;
-        let saved = Store::open(&app.data)?.put(&manifest)?;
+        let saved = Store::open(&data)?.put(&manifest)?;
         Ok(json!({"policy":saved,"provider_calls":0}))
-    })();
+    })
+    .await
+    .map_err(|error| crate::error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
     result
         .map(axum::Json)
         .map_err(|error| crate::error(axum::http::StatusCode::BAD_REQUEST, error))
@@ -629,9 +632,12 @@ pub(crate) async fn get_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Path(hash): axum::extract::Path<String>,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
-        Ok(json!({"policy":Store::open(&app.data)?.get(&hash)?,"provider_calls":0}))
-    })();
+    let data = app.data.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+        Ok(json!({"policy":Store::open(&data)?.get(&hash)?,"provider_calls":0}))
+    })
+    .await
+    .map_err(|error| crate::error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
     result
         .map(axum::Json)
         .map_err(|error| crate::error(axum::http::StatusCode::BAD_REQUEST, error))
@@ -652,8 +658,13 @@ pub(crate) async fn list_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     axum::extract::Query(page): axum::extract::Query<Page>,
 ) -> crate::ApiResult<Value> {
-    Store::open(&app.data)
-        .and_then(|store| store.list(page.offset, page.limit))
+    let data = app.data.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        Store::open(&data).and_then(|store| store.list(page.offset, page.limit))
+    })
+    .await
+    .map_err(|error| crate::error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    result
         .map(axum::Json)
         .map_err(|error| crate::error(axum::http::StatusCode::BAD_REQUEST, error))
 }
@@ -667,15 +678,18 @@ pub(crate) async fn create_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
     body: axum::body::Bytes,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
+    let data = app.data.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
         if body.len() > 128 * 1024 {
             bail!("Policy request exceeds 128 KiB");
         }
         let value = crate::strict_json::parse(std::str::from_utf8(&body)?)?;
         let request: Create = serde_json::from_value(value)?;
         let manifest = Manifest::create(request.rules)?;
-        Ok(json!({"policy":Store::open(&app.data)?.put(&manifest)?,"provider_calls":0}))
-    })();
+        Ok(json!({"policy":Store::open(&data)?.put(&manifest)?,"provider_calls":0}))
+    })
+    .await
+    .map_err(|error| crate::error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
     result
         .map(axum::Json)
         .map_err(|error| crate::error(axum::http::StatusCode::BAD_REQUEST, error))
@@ -693,16 +707,19 @@ pub(crate) async fn check_api(
     axum::extract::Path(hash): axum::extract::Path<String>,
     body: axum::body::Bytes,
 ) -> crate::ApiResult<Value> {
-    let result = (|| -> Result<Value> {
+    let data = app.data.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value> {
         if body.len() > 512 * 1024 {
             bail!("Guardrail request exceeds 512 KiB");
         }
         let value = crate::strict_json::parse(std::str::from_utf8(&body)?)?;
         let request: Check = serde_json::from_value(value)?;
-        Store::open(&app.data)?
+        Store::open(&data)?
             .get(&hash)?
             .check(&request.text, request.stage, request.action)
-    })();
+    })
+    .await
+    .map_err(|error| crate::error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
     result
         .map(axum::Json)
         .map_err(|error| crate::error(axum::http::StatusCode::BAD_REQUEST, error))

@@ -59,28 +59,18 @@ fn grouped_tail_stores_match_conservative_barriers() {
             }
         }
         let wb = buffer(weights.as_ptr().cast(), weights.len() as u64);
-        let mut kernels = vec![
+        let kernels = vec![
             format!("mmll_id_{suffix}"),
             format!("mmllg_id_{suffix}"),
+            format!("mmlls_id_{suffix}"),
+            format!("mmllpg_id_{suffix}"),
+            format!("mmllps_id_{suffix}"),
             format!("mmll_id_{suffix}_bn16"),
             format!("mmllg_id_{suffix}_bn16"),
+            format!("mmlls_id_{suffix}_bn16"),
+            format!("mmllpg_id_{suffix}_bn16"),
+            format!("mmllps_id_{suffix}_bn16"),
         ];
-        if suffix == "q4_k" {
-            kernels.extend(
-                [
-                    "mmlls_id_q4_k",
-                    "mmllpg_id_q4_k",
-                    "mmllps_id_q4_k",
-                    "mmlls_id_q4_k_bn16",
-                    "mmllpg_id_q4_k_bn16",
-                    "mmllps_id_q4_k_bn16",
-                ]
-                .map(str::to_owned),
-            );
-        }
-        if suffix == "q6_k" {
-            kernels.push("mmllps_id_q6_k".to_owned());
-        }
         for name in kernels {
             let outputs = libs.each_ref().map(|_| {
                 device.new_buffer(
@@ -159,7 +149,7 @@ fn grouped_tail_stores_match_conservative_barriers() {
 
         // Verify BN=16 kernels match BN=32 kernels bit-for-bit across all
         // full-tile (m=16, m=32) and tail-tile (m=1, m=31, m=33, m=65) groups.
-        let mut bn16_pairs = vec![
+        let bn16_pairs = vec![
             (
                 format!("mmll_id_{suffix}"),
                 format!("mmll_id_{suffix}_bn16"),
@@ -168,20 +158,19 @@ fn grouped_tail_stores_match_conservative_barriers() {
                 format!("mmllg_id_{suffix}"),
                 format!("mmllg_id_{suffix}_bn16"),
             ),
+            (
+                format!("mmlls_id_{suffix}"),
+                format!("mmlls_id_{suffix}_bn16"),
+            ),
+            (
+                format!("mmllpg_id_{suffix}"),
+                format!("mmllpg_id_{suffix}_bn16"),
+            ),
+            (
+                format!("mmllps_id_{suffix}"),
+                format!("mmllps_id_{suffix}_bn16"),
+            ),
         ];
-        if suffix == "q4_k" {
-            bn16_pairs.extend([
-                ("mmlls_id_q4_k".to_owned(), "mmlls_id_q4_k_bn16".to_owned()),
-                (
-                    "mmllpg_id_q4_k".to_owned(),
-                    "mmllpg_id_q4_k_bn16".to_owned(),
-                ),
-                (
-                    "mmllps_id_q4_k".to_owned(),
-                    "mmllps_id_q4_k_bn16".to_owned(),
-                ),
-            ]);
-        }
         for (k32, k16) in bn16_pairs {
             let outputs = [&k32, &k16].map(|kname| {
                 let out = device.new_buffer(
@@ -298,10 +287,20 @@ fn fused_qkv_kernels_match_separate_dispatches() {
     for (single_name, qkv_name, block_bytes, blocks, scales) in [
         ("mmll_q8_0", "mmll_qkv_q8_0", 34usize, 8usize, vec![0usize]),
         ("mmllp_q8_0", "mmllp_qkv_q8_0", 34, 8, vec![0]),
+        ("mmll_q2_k", "mmll_qkv_q2_k", 84, 1, vec![80, 82]),
+        ("mmll_q2_k", "mmllp_qkv_q2_k", 84, 1, vec![80, 82]),
+        ("mmllp_q2_k", "mmllp_qkv_q2_k", 84, 1, vec![80, 82]),
+        ("mmll_q3_k", "mmll_qkv_q3_k", 110, 1, vec![108]),
+        ("mmll_q3_k", "mmllp_qkv_q3_k", 110, 1, vec![108]),
+        ("mmllp_q3_k", "mmllp_qkv_q3_k", 110, 1, vec![108]),
         ("mmll_q4_k", "mmll_qkv_q4_k", 144, 1, vec![0, 2]),
         ("mmllp_q4_k", "mmllp_qkv_q4_k", 144, 1, vec![0, 2]),
         ("mmll_q5_k", "mmll_qkv_q5_k", 176, 1, vec![0, 2]),
+        ("mmll_q5_k", "mmllp_qkv_q5_k", 176, 1, vec![0, 2]),
+        ("mmllp_q5_k", "mmllp_qkv_q5_k", 176, 1, vec![0, 2]),
         ("mmll_q6_k", "mmll_qkv_q6_k", 210, 1, vec![208]),
+        ("mmll_q6_k", "mmllp_qkv_q6_k", 210, 1, vec![208]),
+        ("mmllp_q6_k", "mmllp_qkv_q6_k", 210, 1, vec![208]),
     ] {
         let total_cols = (n_q + n_k + n_v) as usize;
         let row_bytes = blocks * block_bytes;
@@ -1146,5 +1145,1410 @@ fn matvec_qkv_q4k_q6k_matches_separate() {
             a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
             "matvec_qkv_q4k_q6k[{i}]: fused {b} != separate {a}"
         );
+    }
+}
+
+/// Inner-loop pipelined FlashAttention (`attend_mm_db`, `attend_mm_fq_db`,
+/// `attend_mm256_db`) preserves per-accumulator reduction order, so outputs
+/// must be bit-identical to the single-chain kernels.
+#[test]
+fn attend_mm_db_variants_are_bit_identical() {
+    #[repr(C)]
+    struct FqPrepArgs {
+        eps: f32,
+        has_qk_norm: u32,
+        rot_dim: u32,
+        has_bias: u32,
+        n_kv_heads: u32,
+        wait_base: u32,
+        rope_norm: u32,
+        pad0: u32,
+    }
+
+    let Some(device) = Device::system_default() else {
+        return;
+    };
+    let queue = device.new_command_queue();
+    let lib = device
+        .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
+        .unwrap();
+    let pipe = |name: &str| {
+        let f = lib.get_function(name, None).unwrap();
+        device.new_compute_pipeline_state_with_function(&f).unwrap()
+    };
+    let buffer = |p, n| device.new_buffer_with_data(p, n, MTLResourceOptions::StorageModeShared);
+
+    // 1. attend_mm vs attend_mm_db (hd=128) and attend_mm256 vs attend_mm256_db (hd=256)
+    for (hd, k0, k1) in [
+        (128usize, "attend_mm", "attend_mm_db"),
+        (256usize, "attend_mm256", "attend_mm256_db"),
+    ] {
+        let n_q_heads = 8usize;
+        let n_kv_heads = 2usize;
+        let group = (n_q_heads / n_kv_heads) as u32;
+        let base = 19usize;
+        let n_rows = 77usize; // spans >1 64-position tile + partial tail row
+        let total_pos = base + n_rows;
+        let kv_dim = n_kv_heads * hd;
+        let q_dim = n_q_heads * hd;
+        let scale = 1.0f32 / (hd as f32).sqrt();
+
+        let kv_f32: Vec<f32> = (0..total_pos * kv_dim * 2)
+            .map(|i| ((i * 31 + 7) % 113) as f32 * 0.015 - 0.8)
+            .collect();
+        let mut kv_f16 = vec![0u16; kv_f32.len()];
+        allpaka_dtype::f32_to_f16_slice(&kv_f32, &mut kv_f16);
+        let q_f32: Vec<f32> = (0..n_rows * q_dim)
+            .map(|i| ((i * 19 + 11) % 101) as f32 * 0.018 - 0.9)
+            .collect();
+
+        let kv_buf = buffer(kv_f16.as_ptr().cast(), (kv_f16.len() * 2) as u64);
+        let q_buf = buffer(q_f32.as_ptr().cast(), (q_f32.len() * 4) as u64);
+        let k_base = 0u64;
+        let v_base = (total_pos * kv_dim) as u64;
+        let kv_dim32 = kv_dim as u32;
+        let hd32 = hd as u32;
+        let base32 = base as u32;
+        let heads32 = n_q_heads as u32;
+        let rows32 = n_rows as u32;
+
+        let outputs = [k0, k1].map(|kname| {
+            let out = device.new_buffer(
+                (n_rows * q_dim * 4) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let p = pipe(kname);
+            let cmd = queue.new_command_buffer();
+            let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+            enc.set_compute_pipeline_state(&p);
+            enc.set_buffer(0, Some(&kv_buf), 0);
+            enc.set_buffer(1, Some(&kv_buf), 0);
+            enc.set_buffer(2, Some(&q_buf), 0);
+            enc.set_buffer(3, Some(&out), 0);
+            enc.set_bytes(4, 4, (&kv_dim32 as *const u32).cast());
+            enc.set_bytes(5, 4, (&hd32 as *const u32).cast());
+            enc.set_bytes(6, 4, (&base32 as *const u32).cast());
+            enc.set_bytes(7, 4, (&group as *const u32).cast());
+            enc.set_bytes(8, 4, (&scale as *const f32).cast());
+            enc.set_bytes(9, 8, (&k_base as *const u64).cast());
+            enc.set_bytes(10, 8, (&v_base as *const u64).cast());
+            enc.set_bytes(11, 4, (&heads32 as *const u32).cast());
+            enc.set_bytes(12, 4, (&rows32 as *const u32).cast());
+            enc.dispatch_thread_groups(
+                MTLSize::new(n_q_heads as u64, (n_rows as u64).div_ceil(8), 1),
+                MTLSize::new(128, 1, 1),
+            );
+            enc.end_encoding();
+            cmd.commit();
+            cmd.wait_until_completed();
+            assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{kname}");
+            out
+        });
+
+        let a_slice = unsafe {
+            std::slice::from_raw_parts(outputs[0].contents().cast::<f32>(), n_rows * q_dim)
+        };
+        let b_slice = unsafe {
+            std::slice::from_raw_parts(outputs[1].contents().cast::<f32>(), n_rows * q_dim)
+        };
+        for (i, (&a, &b)) in a_slice.iter().zip(b_slice).enumerate() {
+            assert!(
+                a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
+                "{k1} vs {k0} [{i}]: {b} != {a}"
+            );
+        }
+    }
+
+    // 2. attend_mm_fq vs attend_mm_fq_db (hd=128 with qk-norm + rope + producer/consumer sync)
+    let hd = 128usize;
+    let n_q_heads = 8usize;
+    let n_kv_heads = 2usize;
+    let group = (n_q_heads / n_kv_heads) as u32;
+    let base = 16usize;
+    let n_rows = 75usize;
+    let total_pos = base + n_rows;
+    let kv_dim = n_kv_heads * hd;
+    let q_dim = n_q_heads * hd;
+    let scale = 1.0f32 / (hd as f32).sqrt();
+
+    let kv_init_f32: Vec<f32> = (0..total_pos * kv_dim * 2)
+        .map(|i| ((i * 29 + 5) % 109) as f32 * 0.014 - 0.7)
+        .collect();
+    let mut kv_init_f16 = vec![0u16; kv_init_f32.len()];
+    allpaka_dtype::f32_to_f16_slice(&kv_init_f32, &mut kv_init_f16);
+    let q_in: Vec<f32> = (0..n_rows * q_dim)
+        .map(|i| ((i * 23 + 3) % 97) as f32 * 0.02 - 0.9)
+        .collect();
+    let k_in: Vec<f32> = (0..n_rows * kv_dim)
+        .map(|i| ((i * 41 + 9) % 89) as f32 * 0.019 - 0.8)
+        .collect();
+    let v_in: Vec<f32> = (0..n_rows * kv_dim)
+        .map(|i| ((i * 37 + 13) % 83) as f32 * 0.017 - 0.7)
+        .collect();
+    let qw: Vec<f32> = (0..hd).map(|i| 0.85 + (i as f32) * 0.002).collect();
+    let kw: Vec<f32> = (0..hd).map(|i| 0.9 + (i as f32) * 0.0015).collect();
+    let ropes: Vec<[f32; 2]> = (0..n_rows * (hd / 2))
+        .map(|i| {
+            let ang = (i as f32) * 0.013;
+            [ang.sin(), ang.cos()]
+        })
+        .collect();
+
+    let q_buf = buffer(q_in.as_ptr().cast(), (q_in.len() * 4) as u64);
+    let k_in_buf = buffer(k_in.as_ptr().cast(), (k_in.len() * 4) as u64);
+    let v_in_buf = buffer(v_in.as_ptr().cast(), (v_in.len() * 4) as u64);
+    let ropes_buf = buffer(ropes.as_ptr().cast(), (ropes.len() * 8) as u64);
+    let pa = FqPrepArgs {
+        eps: 1e-6,
+        has_qk_norm: 1,
+        rot_dim: hd as u32,
+        has_bias: 0,
+        n_kv_heads: n_kv_heads as u32,
+        wait_base: 0,
+        rope_norm: 0,
+        pad0: 0,
+    };
+    let k_base = 0u64;
+    let v_base = (total_pos * kv_dim) as u64;
+    let kv_dim32 = kv_dim as u32;
+    let hd32 = hd as u32;
+    let base32 = base as u32;
+    let heads32 = n_q_heads as u32;
+    let rows32 = n_rows as u32;
+
+    let fq_outputs = ["attend_mm_fq", "attend_mm_fq_db"].map(|kname| {
+        let kv_buf = buffer(kv_init_f16.as_ptr().cast(), (kv_init_f16.len() * 2) as u64);
+        let sync = device.new_buffer(256, MTLResourceOptions::StorageModeShared);
+        unsafe { std::ptr::write_bytes(sync.contents().cast::<u8>(), 0, 256) };
+        let out = device.new_buffer(
+            (n_rows * q_dim * 4) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let p = pipe(kname);
+        let cmd = queue.new_command_buffer();
+        let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+        enc.set_compute_pipeline_state(&p);
+        enc.set_buffer(0, Some(&kv_buf), 0);
+        enc.set_buffer(1, Some(&kv_buf), 0);
+        enc.set_buffer(2, Some(&q_buf), 0);
+        enc.set_buffer(3, Some(&out), 0);
+        enc.set_bytes(4, 4, (&kv_dim32 as *const u32).cast());
+        enc.set_bytes(5, 4, (&hd32 as *const u32).cast());
+        enc.set_bytes(6, 4, (&base32 as *const u32).cast());
+        enc.set_bytes(7, 4, (&group as *const u32).cast());
+        enc.set_bytes(8, 4, (&scale as *const f32).cast());
+        enc.set_bytes(9, 8, (&k_base as *const u64).cast());
+        enc.set_bytes(10, 8, (&v_base as *const u64).cast());
+        enc.set_bytes(11, 4, (&heads32 as *const u32).cast());
+        enc.set_bytes(12, 4, (&rows32 as *const u32).cast());
+        enc.set_buffer(13, Some(&k_in_buf), 0);
+        enc.set_buffer(14, Some(&v_in_buf), 0);
+        enc.set_bytes(
+            15,
+            std::mem::size_of::<FqPrepArgs>() as u64,
+            (&pa as *const FqPrepArgs).cast(),
+        );
+        enc.set_bytes(16, (hd * 4) as u64, qw.as_ptr().cast());
+        enc.set_bytes(17, (hd * 4) as u64, kw.as_ptr().cast());
+        enc.set_buffer(18, Some(&ropes_buf), 0);
+        enc.set_buffer(19, Some(&kv_buf), 0);
+        enc.set_buffer(20, Some(&kv_buf), 0);
+        enc.set_buffer(21, Some(&kv_buf), 0);
+        enc.set_buffer(22, Some(&sync), 0);
+        enc.dispatch_thread_groups(
+            MTLSize::new(n_q_heads as u64, (n_rows as u64).div_ceil(8), 1),
+            MTLSize::new(128, 1, 1),
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{kname}");
+        out
+    });
+
+    let fq_a = unsafe {
+        std::slice::from_raw_parts(fq_outputs[0].contents().cast::<f32>(), n_rows * q_dim)
+    };
+    let fq_b = unsafe {
+        std::slice::from_raw_parts(fq_outputs[1].contents().cast::<f32>(), n_rows * q_dim)
+    };
+    for (i, (&a, &b)) in fq_a.iter().zip(fq_b).enumerate() {
+        assert!(
+            a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
+            "attend_mm_fq_db vs attend_mm_fq [{i}]: {b} != {a}"
+        );
+    }
+}
+
+/// Generalized `mmllp_qkv_mixed` bit-exactness across arbitrary combinations
+/// of `{Q4_K=0, Q5_K=1, Q6_K=2, Q8_0=3, Q2_K=4, Q3_K=5}`, plus GDN 2-way
+/// (`n_v == 0`).
+#[test]
+fn fused_qkv_mixed_any_formats_match_separate() {
+    #[repr(C)]
+    struct MmQkvArgs {
+        n_in: u32,
+        n_q: u32,
+        n_k: u32,
+        n_v: u32,
+        wq_off: u64,
+        wk_off: u64,
+        wv_off: u64,
+        q_off: u64,
+        k_off: u64,
+        v_off: u64,
+        m: u32,
+        pad: u32,
+    }
+
+    let Some(device) = Device::system_default() else {
+        return;
+    };
+    let queue = device.new_command_queue();
+    let lib = device
+        .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
+        .unwrap();
+    let f_mixed = lib.get_function("mmllp_qkv_mixed", None).unwrap();
+    let p_mixed = device
+        .new_compute_pipeline_state_with_function(&f_mixed)
+        .unwrap();
+
+    let ni = 512u32; // multiple of 256 so multi-block pipe runs (nblk = 16)
+    let m = 45u32;
+    let x: Vec<f32> = (0..(m * ni) as usize)
+        .map(|i| (i % 89) as f32 * 0.004 - 0.15)
+        .collect();
+    let buffer = |p, n| device.new_buffer_with_data(p, n, MTLResourceOptions::StorageModeShared);
+    let xb = buffer(x.as_ptr().cast(), (x.len() * 4) as u64);
+
+    // (fmt_id, single_kernel, block_bytes, blocks_per_256, scale_offsets)
+    let fmt_meta = |fmt: u32| -> (&'static str, usize, usize, Vec<usize>) {
+        match fmt {
+            0 => ("mmllp_q4_k", 144, 2, vec![0, 2]),
+            1 => ("mmllp_q5_k", 176, 2, vec![0, 2]),
+            2 => ("mmllp_q6_k", 210, 2, vec![208]),
+            3 => ("mmllp_q8_0", 34, 16, vec![0]),
+            4 => ("mmllp_q2_k", 84, 2, vec![80, 82]),
+            5 => ("mmllp_q3_k", 110, 2, vec![108]),
+            _ => unreachable!(),
+        }
+    };
+
+    for (fq, fk, fv, n_q, n_k, n_v) in [
+        (4u32, 5u32, 2u32, 128u32, 64u32, 64u32), // Q2_K + Q3_K + Q6_K (235B-style mixed)
+        (0u32, 1u32, 3u32, 128u32, 64u32, 64u32), // Q4_K + Q5_K + Q8_0 (35B-style mixed)
+        (3u32, 4u32, 0u32, 192u32, 128u32, 0u32), // GDN 2-way (n_v == 0): Q8_0 + Q2_K
+    ] {
+        let make_weights = |fmt: u32, rows: u32, seed: usize| -> Buffer {
+            let (_, bb, blks, scales) = fmt_meta(fmt);
+            let len = (rows as usize * blks * bb).max(256);
+            let mut w = vec![0u8; len];
+            for (i, v) in w.iter_mut().enumerate() {
+                *v = ((i + seed).wrapping_mul(67) + i / 83) as u8;
+            }
+            for b in w.chunks_exact_mut(bb) {
+                for &off in &scales {
+                    b[off..off + 2].copy_from_slice(&0x211fu16.to_le_bytes());
+                }
+            }
+            buffer(w.as_ptr().cast(), w.len() as u64)
+        };
+        let wq_b = make_weights(fq, n_q, 11);
+        let wk_b = make_weights(fk, n_k, 37);
+        let wv_b = make_weights(fv, n_v, 71);
+
+        let q_elems = (m * n_q) as usize;
+        let k_elems = (m * n_k) as usize;
+        let v_elems = (m * n_v) as usize;
+        let total_out = q_elems + k_elems + v_elems;
+        let ref_out = device.new_buffer(
+            (total_out * 4) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let fused_out = device.new_buffer(
+            (total_out * 4) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let cmd = queue.new_command_buffer();
+        let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+        let zero64 = 0u64;
+        for (fmt, wb, n_out, y_off) in [
+            (fq, &wq_b, n_q, 0u64),
+            (fk, &wk_b, n_k, (q_elems * 4) as u64),
+            (fv, &wv_b, n_v, ((q_elems + k_elems) * 4) as u64),
+        ] {
+            if n_out == 0 {
+                continue;
+            }
+            let (sname, _, _, _) = fmt_meta(fmt);
+            let f = lib.get_function(sname, None).unwrap();
+            let p = device.new_compute_pipeline_state_with_function(&f).unwrap();
+            enc.set_compute_pipeline_state(&p);
+            enc.set_buffer(0, Some(wb), 0);
+            enc.set_buffer(1, Some(&xb), 0);
+            enc.set_buffer(2, Some(&ref_out), y_off);
+            enc.set_bytes(3, 4, (&ni as *const u32).cast());
+            enc.set_bytes(4, 4, (&n_out as *const u32).cast());
+            enc.set_bytes(5, 8, (&zero64 as *const u64).cast());
+            enc.set_bytes(6, 4, (&m as *const u32).cast());
+            enc.dispatch_thread_groups(
+                MTLSize::new((n_out as u64).div_ceil(64), (m as u64).div_ceil(32), 1),
+                MTLSize::new(128, 1, 1),
+            );
+        }
+
+        let args = MmQkvArgs {
+            n_in: ni,
+            n_q,
+            n_k,
+            n_v,
+            wq_off: 0,
+            wk_off: 0,
+            wv_off: 0,
+            q_off: 0,
+            k_off: (q_elems * 4) as u64,
+            v_off: ((q_elems + k_elems) * 4) as u64,
+            m,
+            pad: fq | (fk << 8) | (fv << 16),
+        };
+        enc.set_compute_pipeline_state(&p_mixed);
+        enc.set_buffer(0, Some(&wq_b), 0);
+        enc.set_buffer(1, Some(&wk_b), 0);
+        enc.set_buffer(2, Some(&wv_b), 0);
+        enc.set_buffer(3, Some(&xb), 0);
+        enc.set_buffer(4, Some(&fused_out), 0);
+        enc.set_bytes(
+            5,
+            std::mem::size_of::<MmQkvArgs>() as u64,
+            (&args as *const MmQkvArgs).cast(),
+        );
+        enc.dispatch_thread_groups(
+            MTLSize::new(
+                ((n_q + n_k + n_v) as u64).div_ceil(64),
+                (m as u64).div_ceil(32),
+                1,
+            ),
+            MTLSize::new(128, 1, 1),
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+        let s_ref =
+            unsafe { std::slice::from_raw_parts(ref_out.contents().cast::<f32>(), total_out) };
+        let s_fused =
+            unsafe { std::slice::from_raw_parts(fused_out.contents().cast::<f32>(), total_out) };
+        for (i, (&a, &b)) in s_ref.iter().zip(s_fused).enumerate() {
+            assert!(
+                a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
+                "mmllp_qkv_mixed({fq},{fk},{fv})[{i}]: {b} != {a}"
+            );
+        }
+    }
+}
+
+/// Verify vectorized `matvec_q2_k_mv` (indexed + `SWIGLU_X` + `MV_ID_GRID`)
+/// matches `matvec_q2_k` within float reassociation tolerance and benchmark
+/// both on 235B MoE shapes (`[1536, 4096]` and `[4096, 1536] × 8` slots).
+#[test]
+fn matvec_q2_k_mv_matches_reference_and_swiglu_fold() {
+    #[repr(C)]
+    struct IdxArgs {
+        stride: u64,
+        slots: u32,
+        x_stride: u32,
+        n_rows: u32,
+        x_row_stride: u32,
+        y_row_stride: u32,
+        ids_stride: u32,
+    }
+
+    let Some(device) = Device::system_default() else {
+        return;
+    };
+    let queue = device.new_command_queue();
+    let lib = device
+        .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
+        .unwrap();
+
+    let make_pipe = |name: &str, lpr: u32, indexed: bool, swiglu: bool, id_grid: bool| {
+        let consts = FunctionConstantValues::new();
+        let tile = 1u32;
+        consts.set_constant_value_at_index((&tile as *const u32).cast(), MTLDataType::UInt, 0);
+        consts.set_constant_value_at_index((&lpr as *const u32).cast(), MTLDataType::UInt, 1);
+        consts.set_constant_value_at_index((&indexed as *const bool).cast(), MTLDataType::Bool, 2);
+        consts.set_constant_value_at_index((&swiglu as *const bool).cast(), MTLDataType::Bool, 3);
+        let f_false = false;
+        for idx in [4u64, 5, 6, 7] {
+            consts.set_constant_value_at_index(
+                (&f_false as *const bool).cast(),
+                MTLDataType::Bool,
+                idx,
+            );
+        }
+        consts.set_constant_value_at_index((&id_grid as *const bool).cast(), MTLDataType::Bool, 8);
+        let fun = lib.get_function(name, Some(consts)).unwrap();
+        device
+            .new_compute_pipeline_state_with_function(&fun)
+            .unwrap()
+    };
+
+    let n_in = 1536usize;
+    let n_out = 514usize; // non-multiple of 4 exercises NR0=4 tail handling
+    let slots = 8usize;
+    let n_experts = 12usize;
+    let row_bytes = (n_in / 256) * 84;
+    let estride = n_out * row_bytes;
+    let mut weights = vec![0u8; n_experts * estride];
+    for (i, v) in weights.iter_mut().enumerate() {
+        *v = (i.wrapping_mul(43) + i / 113) as u8;
+    }
+    for b in weights.chunks_exact_mut(84) {
+        b[80..82].copy_from_slice(&0x211fu16.to_le_bytes());
+        b[82..84].copy_from_slice(&0x2010u16.to_le_bytes());
+    }
+    let xg: Vec<f32> = (0..slots * n_in)
+        .map(|i| ((i * 31 + 7) % 101) as f32 * 0.02 - 1.0)
+        .collect();
+    let xu: Vec<f32> = (0..slots * n_in)
+        .map(|i| ((i * 53 + 11) % 97) as f32 * 0.02 - 0.95)
+        .collect();
+    let ids: Vec<u32> = [2, 0, 11, 5, 7, 3, 9, 1].to_vec();
+
+    let buffer = |p, n| device.new_buffer_with_data(p, n, MTLResourceOptions::StorageModeShared);
+    let wb = buffer(weights.as_ptr().cast(), weights.len() as u64);
+    let xgb = buffer(xg.as_ptr().cast(), (xg.len() * 4) as u64);
+    let xub = buffer(xu.as_ptr().cast(), (xu.len() * 4) as u64);
+    let idsb = buffer(ids.as_ptr().cast(), (ids.len() * 4) as u64);
+
+    for swiglu in [false, true] {
+        let p_ref = make_pipe("matvec_q2_k", 8, true, swiglu, false);
+        let y_ref = device.new_buffer(
+            (slots * n_out * 4) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let idx = IdxArgs {
+            slots: slots as u32,
+            stride: estride as u64,
+            x_stride: n_in as u32,
+            n_rows: 1,
+            x_row_stride: 0,
+            y_row_stride: 0,
+            ids_stride: 0,
+        };
+        let ni32 = n_in as u32;
+        let no32 = n_out as u32;
+        let zero64 = 0u64;
+
+        let cmd = queue.new_command_buffer();
+        let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+        enc.set_compute_pipeline_state(&p_ref);
+        enc.set_buffer(0, Some(&wb), 0);
+        enc.set_buffer(1, Some(&xgb), 0);
+        enc.set_buffer(2, Some(&y_ref), 0);
+        enc.set_bytes(3, 4, (&ni32 as *const u32).cast());
+        enc.set_bytes(4, 4, (&no32 as *const u32).cast());
+        enc.set_bytes(5, 8, (&zero64 as *const u64).cast());
+        enc.set_buffer(6, Some(&idsb), 0);
+        enc.set_bytes(
+            7,
+            std::mem::size_of::<IdxArgs>() as u64,
+            (&idx as *const IdxArgs).cast(),
+        );
+        enc.set_buffer(8, Some(&xub), 0);
+        enc.dispatch_thread_groups(
+            MTLSize::new(((n_out * slots * 8) as u64).div_ceil(128), 1, 1),
+            MTLSize::new(128, 1, 1),
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+        let ref_s =
+            unsafe { std::slice::from_raw_parts(y_ref.contents().cast::<f32>(), slots * n_out) };
+
+        for (lpr, id_grid) in [(16u32, true), (8u32, true)] {
+            let p_mv = make_pipe("matvec_q2_k_mv", lpr, true, swiglu, id_grid);
+            let y_mv = device.new_buffer(
+                (slots * n_out * 4) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let cmd = queue.new_command_buffer();
+            let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+            enc.set_compute_pipeline_state(&p_mv);
+            enc.set_buffer(0, Some(&wb), 0);
+            enc.set_buffer(1, Some(&xgb), 0);
+            enc.set_buffer(2, Some(&y_mv), 0);
+            enc.set_bytes(3, 4, (&ni32 as *const u32).cast());
+            enc.set_bytes(4, 4, (&no32 as *const u32).cast());
+            enc.set_bytes(5, 8, (&zero64 as *const u64).cast());
+            enc.set_buffer(6, Some(&idsb), 0);
+            enc.set_bytes(
+                7,
+                std::mem::size_of::<IdxArgs>() as u64,
+                (&idx as *const IdxArgs).cast(),
+            );
+            enc.set_buffer(8, Some(&xub), 0);
+            if id_grid {
+                enc.dispatch_thread_groups(
+                    MTLSize::new((n_out as u64 * lpr as u64).div_ceil(128), 1, slots as u64),
+                    MTLSize::new(128, 1, 1),
+                );
+            } else {
+                enc.dispatch_thread_groups(
+                    MTLSize::new(((n_out * slots) as u64 * lpr as u64).div_ceil(128), 1, 1),
+                    MTLSize::new(128, 1, 1),
+                );
+            }
+            enc.end_encoding();
+            cmd.commit();
+            cmd.wait_until_completed();
+            assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+            let mv_s =
+                unsafe { std::slice::from_raw_parts(y_mv.contents().cast::<f32>(), slots * n_out) };
+            let mut max_rel = 0.0f32;
+            for (i, (&a, &b)) in ref_s.iter().zip(mv_s).enumerate() {
+                let err = (a - b).abs();
+                let rel = err / a.abs().max(1.0);
+                max_rel = max_rel.max(rel);
+                assert!(
+                    a.is_finite() && b.is_finite() && rel < 1e-5,
+                    "q2_k_mv(lpr={lpr},swiglu={swiglu},idg={id_grid})[{i}]: {b} vs {a} (err {err}, rel {rel})"
+                );
+            }
+            assert!(max_rel < 1e-5);
+        }
+    }
+}
+
+/// Verify `RopeStyle::Norm` (`rope_norm == 1`) across all Metal RoPE-bearing
+/// kernels:
+/// - `qk_prep` (`hd = 128`, full `rot_dim = 128` and partial `rot_dim = 64`,
+///   with `has_qk_norm = 1` and `has_bias = 1`),
+/// - `qk_prep_batch` (`m = 17`, `hd = 128`, full & partial rotary),
+/// - `attend_mm_fq` and `attend_mm_fq_db` (`m = 29`, `hd = 128`, full & partial
+///   rotary, `has_qk_norm = 1`, `has_bias = 1`) vs `qk_prep_batch` + `attend_mm`
+///   and CPU reference,
+/// - `qk_prep256` and `qk_prep_batch256` (`hd = 256`, `rot_dim = 64`,
+///   `gate_in_q = 1`, `has_qk_norm = 1`).
+#[test]
+fn rope_norm_metal_kernels_match_cpu_reference() {
+    #[repr(C)]
+    struct QkPrepArgs {
+        n_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        kv_dim: u32,
+        eps: f32,
+        pos: u32,
+        has_qk_norm: u32,
+        rot_dim: u32,
+        k_base: u64,
+        v_base: u64,
+        has_bias: u32,
+        rope_norm: u32,
+    }
+    #[repr(C)]
+    struct FqPrepArgs {
+        eps: f32,
+        has_qk_norm: u32,
+        rot_dim: u32,
+        has_bias: u32,
+        n_kv_heads: u32,
+        wait_base: u32,
+        rope_norm: u32,
+        pad0: u32,
+    }
+    #[repr(C)]
+    struct QkPrep256Args {
+        n_heads: u32,
+        n_kv_heads: u32,
+        kv_dim: u32,
+        eps: f32,
+        pos: u32,
+        has_qk_norm: u32,
+        rot_dim: u32,
+        gate_in_q: u32,
+        k_base: u64,
+        v_base: u64,
+        rope_norm: u32,
+        pad0: u32,
+    }
+    #[repr(C)]
+    struct QkPrepBatch256Args {
+        n_heads: u32,
+        n_kv_heads: u32,
+        kv_dim: u32,
+        eps: f32,
+        base: u32,
+        has_qk_norm: u32,
+        rot_dim: u32,
+        gate_in_q: u32,
+        k_base: u64,
+        v_base: u64,
+        rope_norm: u32,
+        pad0: u32,
+    }
+
+    let Some(device) = Device::system_default() else {
+        return;
+    };
+    let queue = device.new_command_queue();
+    let lib = device
+        .new_library_with_source(allpaka_backend::gpu::KERNELS, &CompileOptions::new())
+        .unwrap();
+    let pipe = |name: &str| {
+        let f = lib.get_function(name, None).unwrap();
+        device.new_compute_pipeline_state_with_function(&f).unwrap()
+    };
+    let buffer = |p, n| device.new_buffer_with_data(p, n, MTLResourceOptions::StorageModeShared);
+
+    use allpaka_backend::ops::{self, f16};
+
+    // 1. hd=128: qk_prep, qk_prep_batch, attend_mm_fq, attend_mm_fq_db.
+    let n_heads = 8usize;
+    let n_kv_heads = 2usize;
+    let hd = 128usize;
+    let q_dim = n_heads * hd;
+    let kv_dim = n_kv_heads * hd;
+    let eps = 1e-6f32;
+
+    for rot_dim in [128usize, 64usize] {
+        let rot_h = rot_dim / 2;
+        let qw: Vec<f32> = (0..hd).map(|i| 0.8 + (i as f32) * 0.003).collect();
+        let kw: Vec<f32> = (0..hd).map(|i| 0.9 + (i as f32) * 0.002).collect();
+        let qb: Vec<f32> = (0..q_dim)
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.01)
+            .collect();
+        let kb: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i % 31) as f32 - 15.0) * 0.01)
+            .collect();
+        let vb: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.01)
+            .collect();
+
+        let cpu_prep_row = |q_src: &[f32], k_src: &[f32], v_src: &[f32], rope: &[[f32; 2]]| {
+            let mut q_ref = q_src.to_vec();
+            let mut k_ref = k_src.to_vec();
+            let mut v_ref = v_src.to_vec();
+            for (dst, b) in q_ref.iter_mut().zip(&qb) {
+                *dst += b;
+            }
+            for (dst, b) in k_ref.iter_mut().zip(&kb) {
+                *dst += b;
+            }
+            for (dst, b) in v_ref.iter_mut().zip(&vb) {
+                *dst += b;
+            }
+            for h in 0..n_heads {
+                let sl = &mut q_ref[h * hd..(h + 1) * hd];
+                ops::rmsnorm(sl, &qw, eps);
+                ops::rope_norm_cached_from_array(sl, rope);
+            }
+            for h in 0..n_kv_heads {
+                let sl = &mut k_ref[h * hd..(h + 1) * hd];
+                ops::rmsnorm(sl, &kw, eps);
+                ops::rope_norm_cached_from_array(sl, rope);
+            }
+            let k_f16: Vec<u16> = k_ref.iter().map(|&x| f16::scalar_from_f32(x)).collect();
+            let v_f16: Vec<u16> = v_ref.iter().map(|&x| f16::scalar_from_f32(x)).collect();
+            (q_ref, k_f16, v_f16)
+        };
+
+        // 1a. Single-row `qk_prep`.
+        let q0: Vec<f32> = (0..q_dim)
+            .map(|i| ((i * 53 + 7) % 101) as f32 * 0.02 - 1.0)
+            .collect();
+        let k0: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i * 41 + 9) % 89) as f32 * 0.02 - 0.9)
+            .collect();
+        let v0: Vec<f32> = (0..kv_dim)
+            .map(|i| ((i * 37 + 13) % 83) as f32 * 0.02 - 0.8)
+            .collect();
+        let rope0: Vec<[f32; 2]> = (0..rot_h)
+            .map(|i| {
+                let ang = 0.031 * (i as f32 + 1.0);
+                [ang.sin(), ang.cos()]
+            })
+            .collect();
+        let (q_want, k_want, v_want) = cpu_prep_row(&q0, &k0, &v0, &rope0);
+
+        let pos = 5u32;
+        let cap = 16usize;
+        let q_buf = buffer(q0.as_ptr().cast(), (q0.len() * 4) as u64);
+        let k_buf = buffer(k0.as_ptr().cast(), (k0.len() * 4) as u64);
+        let v_buf = buffer(v0.as_ptr().cast(), (v0.len() * 4) as u64);
+        let cache = device.new_buffer(
+            (2 * cap * kv_dim * 2) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let qb_buf = buffer(qb.as_ptr().cast(), (qb.len() * 4) as u64);
+        let kb_buf = buffer(kb.as_ptr().cast(), (kb.len() * 4) as u64);
+        let vb_buf = buffer(vb.as_ptr().cast(), (vb.len() * 4) as u64);
+        let qa = QkPrepArgs {
+            n_heads: n_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            head_dim: hd as u32,
+            kv_dim: kv_dim as u32,
+            eps,
+            pos,
+            has_qk_norm: 1,
+            rot_dim: rot_dim as u32,
+            k_base: 0,
+            v_base: (cap * kv_dim) as u64,
+            has_bias: 1,
+            rope_norm: 1,
+        };
+        let p_qk = pipe("qk_prep");
+        let cmd = queue.new_command_buffer();
+        let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+        enc.set_compute_pipeline_state(&p_qk);
+        enc.set_buffer(0, Some(&q_buf), 0);
+        enc.set_buffer(1, Some(&k_buf), 0);
+        enc.set_buffer(2, Some(&v_buf), 0);
+        enc.set_buffer(3, Some(&cache), 0);
+        enc.set_bytes(
+            4,
+            std::mem::size_of::<QkPrepArgs>() as u64,
+            (&qa as *const QkPrepArgs).cast(),
+        );
+        enc.set_bytes(5, (hd * 4) as u64, qw.as_ptr().cast());
+        enc.set_bytes(6, (hd * 4) as u64, kw.as_ptr().cast());
+        enc.set_bytes(7, (rot_h * 8) as u64, rope0.as_ptr().cast());
+        enc.set_buffer(8, Some(&qb_buf), 0);
+        enc.set_buffer(9, Some(&kb_buf), 0);
+        enc.set_buffer(10, Some(&vb_buf), 0);
+        enc.dispatch_thread_groups(
+            MTLSize::new((n_heads + 2 * n_kv_heads) as u64, 1, 1),
+            MTLSize::new(32, 1, 1),
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+        let q_got = unsafe { std::slice::from_raw_parts(q_buf.contents().cast::<f32>(), q_dim) };
+        let cache_u16 =
+            unsafe { std::slice::from_raw_parts(cache.contents().cast::<u16>(), 2 * cap * kv_dim) };
+        for (i, (&g, &w)) in q_got.iter().zip(&q_want).enumerate() {
+            assert!(
+                (g - w).abs() < 2e-5,
+                "qk_prep(rot_dim={rot_dim}) q[{i}]: {g} vs {w}"
+            );
+        }
+        let k_off = pos as usize * kv_dim;
+        let v_off = (cap + pos as usize) * kv_dim;
+        for i in 0..kv_dim {
+            let gk = f16::to_f32(cache_u16[k_off + i]);
+            let wk = f16::to_f32(k_want[i]);
+            assert!(
+                (gk - wk).abs() < 2e-3,
+                "qk_prep(rot_dim={rot_dim}) k[{i}]: {gk} vs {wk}"
+            );
+            let gv = f16::to_f32(cache_u16[v_off + i]);
+            let wv = f16::to_f32(v_want[i]);
+            assert_eq!(gv.to_bits(), wv.to_bits());
+        }
+
+        // 1b. Batched `qk_prep_batch` + `attend_mm` vs `attend_mm_fq` + `attend_mm_fq_db`
+        //     and CPU causal attention reference.
+        let base = 19usize;
+        let m = 29usize;
+        let total_pos = base + m;
+        let kv_cap = 64usize;
+        let mut kv_prefix = vec![0u16; 2 * kv_cap * kv_dim];
+        for r in 0..base {
+            for d in 0..kv_dim {
+                let kv = (((r * 61 + d * 17) % 103) as f32 - 51.0) * 0.015;
+                let vv = (((r * 47 + d * 29) % 97) as f32 - 48.0) * 0.017;
+                kv_prefix[r * kv_dim + d] = f16::scalar_from_f32(kv);
+                kv_prefix[(kv_cap + r) * kv_dim + d] = f16::scalar_from_f32(vv);
+            }
+        }
+        let qm: Vec<f32> = (0..m * q_dim)
+            .map(|i| ((i * 53 + 7) % 101) as f32 * 0.019 - 0.95)
+            .collect();
+        let km: Vec<f32> = (0..m * kv_dim)
+            .map(|i| ((i * 41 + 9) % 89) as f32 * 0.018 - 0.8)
+            .collect();
+        let vm: Vec<f32> = (0..m * kv_dim)
+            .map(|i| ((i * 37 + 13) % 83) as f32 * 0.017 - 0.7)
+            .collect();
+        let ropes_m: Vec<[f32; 2]> = (0..m * rot_h)
+            .map(|i| {
+                let ang = 0.017 * (i as f32 + 1.0);
+                [ang.sin(), ang.cos()]
+            })
+            .collect();
+
+        // CPU reference: prep each row into kv_cpu, then run causal GQA attention.
+        let mut kv_cpu = kv_prefix.clone();
+        let mut q_cpu = vec![0.0f32; m * q_dim];
+        for r in 0..m {
+            let (qr, kr, vr) = cpu_prep_row(
+                &qm[r * q_dim..(r + 1) * q_dim],
+                &km[r * kv_dim..(r + 1) * kv_dim],
+                &vm[r * kv_dim..(r + 1) * kv_dim],
+                &ropes_m[r * rot_h..(r + 1) * rot_h],
+            );
+            q_cpu[r * q_dim..(r + 1) * q_dim].copy_from_slice(&qr);
+            kv_cpu[(base + r) * kv_dim..(base + r + 1) * kv_dim].copy_from_slice(&kr);
+            kv_cpu[(kv_cap + base + r) * kv_dim..(kv_cap + base + r + 1) * kv_dim]
+                .copy_from_slice(&vr);
+        }
+        let scale = (hd as f32).sqrt().recip();
+        let group = n_heads / n_kv_heads;
+        let mut attn_cpu = vec![0.0f32; m * q_dim];
+        for r in 0..m {
+            let n_pos = base + r + 1;
+            for qh in 0..n_heads {
+                let kvh = qh / group;
+                let qv: Vec<f32> = q_cpu[r * q_dim + qh * hd..r * q_dim + (qh + 1) * hd]
+                    .iter()
+                    .map(|&x| f16::to_f32(f16::scalar_from_f32(x)))
+                    .collect();
+                let mut scores = vec![0.0f32; n_pos];
+                let mut mx = f32::NEG_INFINITY;
+                for (t, sc_out) in scores.iter_mut().enumerate() {
+                    let ks = &kv_cpu[t * kv_dim + kvh * hd..t * kv_dim + (kvh + 1) * hd];
+                    let dot: f32 = qv
+                        .iter()
+                        .zip(ks)
+                        .map(|(&q_e, &k_e)| q_e * f16::to_f32(k_e))
+                        .sum();
+                    let s = dot * scale;
+                    *sc_out = s;
+                    mx = mx.max(s);
+                }
+                let mut den = 0.0f32;
+                for s in &mut scores {
+                    *s = (*s - mx).exp();
+                    den += *s;
+                }
+                let out_sl = &mut attn_cpu[r * q_dim + qh * hd..r * q_dim + (qh + 1) * hd];
+                for (t, &wgt) in scores.iter().enumerate() {
+                    let p = wgt / den;
+                    let vs = &kv_cpu
+                        [(kv_cap + t) * kv_dim + kvh * hd..(kv_cap + t) * kv_dim + (kvh + 1) * hd];
+                    for d in 0..hd {
+                        out_sl[d] += p * f16::to_f32(vs[d]);
+                    }
+                }
+            }
+        }
+
+        // Two-dispatch GPU path (`qk_prep_batch` + `attend_mm_db`).
+        let qm_b = buffer(qm.as_ptr().cast(), (qm.len() * 4) as u64);
+        let km_b = buffer(km.as_ptr().cast(), (km.len() * 4) as u64);
+        let vm_b = buffer(vm.as_ptr().cast(), (vm.len() * 4) as u64);
+        let ropes_b = buffer(ropes_m.as_ptr().cast(), (ropes_m.len() * 8) as u64);
+        let kv_sep = buffer(kv_prefix.as_ptr().cast(), (kv_prefix.len() * 2) as u64);
+        let out_sep = device.new_buffer(
+            (m * q_dim * 4) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let qba = QkPrepArgs {
+            n_heads: n_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            head_dim: hd as u32,
+            kv_dim: kv_dim as u32,
+            eps,
+            pos: base as u32,
+            has_qk_norm: 1,
+            rot_dim: rot_dim as u32,
+            k_base: 0,
+            v_base: (kv_cap * kv_dim) as u64,
+            has_bias: 1,
+            rope_norm: 1,
+        };
+        let p_qkb = pipe("qk_prep_batch");
+        let p_amm = pipe("attend_mm_db");
+        let k_base = 0u64;
+        let v_base = (kv_cap * kv_dim) as u64;
+        let kv_dim32 = kv_dim as u32;
+        let hd32 = hd as u32;
+        let base32 = base as u32;
+        let group32 = group as u32;
+        let heads32 = n_heads as u32;
+        let rows32 = m as u32;
+
+        let cmd = queue.new_command_buffer();
+        let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+        enc.set_compute_pipeline_state(&p_qkb);
+        enc.set_buffer(0, Some(&qm_b), 0);
+        enc.set_buffer(1, Some(&km_b), 0);
+        enc.set_buffer(2, Some(&vm_b), 0);
+        enc.set_buffer(3, Some(&kv_sep), 0);
+        enc.set_bytes(
+            4,
+            std::mem::size_of::<QkPrepArgs>() as u64,
+            (&qba as *const QkPrepArgs).cast(),
+        );
+        enc.set_bytes(5, (hd * 4) as u64, qw.as_ptr().cast());
+        enc.set_bytes(6, (hd * 4) as u64, kw.as_ptr().cast());
+        enc.set_buffer(7, Some(&ropes_b), 0);
+        enc.set_buffer(8, Some(&qb_buf), 0);
+        enc.set_buffer(9, Some(&kb_buf), 0);
+        enc.set_buffer(10, Some(&vb_buf), 0);
+        enc.dispatch_thread_groups(
+            MTLSize::new((n_heads + 2 * n_kv_heads) as u64, m as u64, 1),
+            MTLSize::new(32, 1, 1),
+        );
+        enc.set_compute_pipeline_state(&p_amm);
+        enc.set_buffer(0, Some(&kv_sep), 0);
+        enc.set_buffer(1, Some(&kv_sep), 0);
+        enc.set_buffer(2, Some(&qm_b), 0);
+        enc.set_buffer(3, Some(&out_sep), 0);
+        enc.set_bytes(4, 4, (&kv_dim32 as *const u32).cast());
+        enc.set_bytes(5, 4, (&hd32 as *const u32).cast());
+        enc.set_bytes(6, 4, (&base32 as *const u32).cast());
+        enc.set_bytes(7, 4, (&group32 as *const u32).cast());
+        enc.set_bytes(8, 4, (&scale as *const f32).cast());
+        enc.set_bytes(9, 8, (&k_base as *const u64).cast());
+        enc.set_bytes(10, 8, (&v_base as *const u64).cast());
+        enc.set_bytes(11, 4, (&heads32 as *const u32).cast());
+        enc.set_bytes(12, 4, (&rows32 as *const u32).cast());
+        enc.dispatch_thread_groups(
+            MTLSize::new(n_heads as u64, (m as u64).div_ceil(8), 1),
+            MTLSize::new(128, 1, 1),
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+        let sep_s =
+            unsafe { std::slice::from_raw_parts(out_sep.contents().cast::<f32>(), m * q_dim) };
+        for (i, (&g, &w)) in sep_s.iter().zip(&attn_cpu).enumerate() {
+            assert!(
+                (g - w).abs() < 2e-3,
+                "qk_prep_batch+attend_mm(rot_dim={rot_dim})[{i}]: {g} vs cpu {w}"
+            );
+        }
+
+        // Fused `attend_mm_fq` and `attend_mm_fq_db` must match `sep_s` and CPU!
+        let qm_raw_b = buffer(qm.as_ptr().cast(), (qm.len() * 4) as u64);
+        let km_raw_b = buffer(km.as_ptr().cast(), (km.len() * 4) as u64);
+        let vm_raw_b = buffer(vm.as_ptr().cast(), (vm.len() * 4) as u64);
+        let pa = FqPrepArgs {
+            eps,
+            has_qk_norm: 1,
+            rot_dim: rot_dim as u32,
+            has_bias: 1,
+            n_kv_heads: n_kv_heads as u32,
+            wait_base: 0,
+            rope_norm: 1,
+            pad0: 0,
+        };
+        for kname in ["attend_mm_fq", "attend_mm_fq_db"] {
+            let kv_fq = buffer(kv_prefix.as_ptr().cast(), (kv_prefix.len() * 2) as u64);
+            let sync = device.new_buffer(256, MTLResourceOptions::StorageModeShared);
+            unsafe { std::ptr::write_bytes(sync.contents().cast::<u8>(), 0, 256) };
+            let out_fq = device.new_buffer(
+                (m * q_dim * 4) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let p_fq = pipe(kname);
+            let cmd = queue.new_command_buffer();
+            let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+            enc.set_compute_pipeline_state(&p_fq);
+            enc.set_buffer(0, Some(&kv_fq), 0);
+            enc.set_buffer(1, Some(&kv_fq), 0);
+            enc.set_buffer(2, Some(&qm_raw_b), 0);
+            enc.set_buffer(3, Some(&out_fq), 0);
+            enc.set_bytes(4, 4, (&kv_dim32 as *const u32).cast());
+            enc.set_bytes(5, 4, (&hd32 as *const u32).cast());
+            enc.set_bytes(6, 4, (&base32 as *const u32).cast());
+            enc.set_bytes(7, 4, (&group32 as *const u32).cast());
+            enc.set_bytes(8, 4, (&scale as *const f32).cast());
+            enc.set_bytes(9, 8, (&k_base as *const u64).cast());
+            enc.set_bytes(10, 8, (&v_base as *const u64).cast());
+            enc.set_bytes(11, 4, (&heads32 as *const u32).cast());
+            enc.set_bytes(12, 4, (&rows32 as *const u32).cast());
+            enc.set_buffer(13, Some(&km_raw_b), 0);
+            enc.set_buffer(14, Some(&vm_raw_b), 0);
+            enc.set_bytes(
+                15,
+                std::mem::size_of::<FqPrepArgs>() as u64,
+                (&pa as *const FqPrepArgs).cast(),
+            );
+            enc.set_bytes(16, (hd * 4) as u64, qw.as_ptr().cast());
+            enc.set_bytes(17, (hd * 4) as u64, kw.as_ptr().cast());
+            enc.set_buffer(18, Some(&ropes_b), 0);
+            enc.set_buffer(19, Some(&qb_buf), 0);
+            enc.set_buffer(20, Some(&kb_buf), 0);
+            enc.set_buffer(21, Some(&vb_buf), 0);
+            enc.set_buffer(22, Some(&sync), 0);
+            enc.dispatch_thread_groups(
+                MTLSize::new(n_heads as u64, (m as u64).div_ceil(8), 1),
+                MTLSize::new(128, 1, 1),
+            );
+            enc.end_encoding();
+            cmd.commit();
+            cmd.wait_until_completed();
+            assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{kname}");
+
+            let fq_s =
+                unsafe { std::slice::from_raw_parts(out_fq.contents().cast::<f32>(), m * q_dim) };
+            for (i, (&a, &b)) in sep_s.iter().zip(fq_s).enumerate() {
+                assert!(
+                    a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
+                    "{kname}(rot_dim={rot_dim})[{i}]: {b} != {a}"
+                );
+            }
+            let kv_sep_s = unsafe {
+                std::slice::from_raw_parts(kv_sep.contents().cast::<u16>(), total_pos * kv_dim)
+            };
+            let kv_fq_s = unsafe {
+                std::slice::from_raw_parts(kv_fq.contents().cast::<u16>(), total_pos * kv_dim)
+            };
+            assert_eq!(kv_sep_s, kv_fq_s, "{kname} K cache mismatch");
+        }
+    }
+
+    // 2. hd=256 (`qk_prep256` & `qk_prep_batch256`, rot_dim=64, gate_in_q=1, rope_norm=1).
+    let hd256 = 256usize;
+    let rot256 = 64usize;
+    let rot_h256 = rot256 / 2;
+    let n_h256 = 4usize;
+    let n_kv256 = 2usize;
+    let q_dim256 = n_h256 * hd256;
+    let kv_dim256 = n_kv256 * hd256;
+    let m256 = 5usize;
+    let cap256 = 16usize;
+    let qw256: Vec<f32> = (0..hd256).map(|i| 0.85 + (i as f32) * 0.001).collect();
+    let kw256: Vec<f32> = (0..hd256).map(|i| 0.92 + (i as f32) * 0.001).collect();
+    let qg_in: Vec<f32> = (0..m256 * n_h256 * 2 * hd256)
+        .map(|i| ((i * 43 + 5) % 97) as f32 * 0.02 - 0.95)
+        .collect();
+    let k256_in: Vec<f32> = (0..m256 * kv_dim256)
+        .map(|i| ((i * 31 + 11) % 89) as f32 * 0.02 - 0.88)
+        .collect();
+    let v256_in: Vec<f32> = (0..m256 * kv_dim256)
+        .map(|i| ((i * 29 + 3) % 83) as f32 * 0.02 - 0.82)
+        .collect();
+    let ropes256: Vec<[f32; 2]> = (0..m256 * rot_h256)
+        .map(|i| {
+            let ang = 0.023 * (i as f32 + 1.0);
+            [ang.sin(), ang.cos()]
+        })
+        .collect();
+
+    // Compare single-token `qk_prep256` on row 0 and batched `qk_prep_batch256` on all m256 rows.
+    let qg_b0 = buffer(qg_in.as_ptr().cast(), (n_h256 * 2 * hd256 * 4) as u64);
+    let k_b0 = buffer(k256_in.as_ptr().cast(), (kv_dim256 * 4) as u64);
+    let v_b0 = buffer(v256_in.as_ptr().cast(), (kv_dim256 * 4) as u64);
+    let cache256_0 = device.new_buffer(
+        (2 * cap256 * kv_dim256 * 2) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let q_out0 = device.new_buffer((q_dim256 * 4) as u64, MTLResourceOptions::StorageModeShared);
+    let g_out0 = device.new_buffer((q_dim256 * 4) as u64, MTLResourceOptions::StorageModeShared);
+    let a256_0 = QkPrep256Args {
+        n_heads: n_h256 as u32,
+        n_kv_heads: n_kv256 as u32,
+        kv_dim: kv_dim256 as u32,
+        eps,
+        pos: 3,
+        has_qk_norm: 1,
+        rot_dim: rot256 as u32,
+        gate_in_q: 1,
+        k_base: 0,
+        v_base: (cap256 * kv_dim256) as u64,
+        rope_norm: 1,
+        pad0: 0,
+    };
+
+    let qg_bm = buffer(qg_in.as_ptr().cast(), (qg_in.len() * 4) as u64);
+    let k_bm = buffer(k256_in.as_ptr().cast(), (k256_in.len() * 4) as u64);
+    let v_bm = buffer(v256_in.as_ptr().cast(), (v256_in.len() * 4) as u64);
+    let ropes256_b = buffer(ropes256.as_ptr().cast(), (ropes256.len() * 8) as u64);
+    let cache256_m = device.new_buffer(
+        (2 * cap256 * kv_dim256 * 2) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let q_outm = device.new_buffer(
+        (m256 * q_dim256 * 4) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let g_outm = device.new_buffer(
+        (m256 * q_dim256 * 4) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+    let a256_m = QkPrepBatch256Args {
+        n_heads: n_h256 as u32,
+        n_kv_heads: n_kv256 as u32,
+        kv_dim: kv_dim256 as u32,
+        eps,
+        base: 3,
+        has_qk_norm: 1,
+        rot_dim: rot256 as u32,
+        gate_in_q: 1,
+        k_base: 0,
+        v_base: (cap256 * kv_dim256) as u64,
+        rope_norm: 1,
+        pad0: 0,
+    };
+
+    let p256 = pipe("qk_prep256");
+    let pb256 = pipe("qk_prep_batch256");
+    let cmd = queue.new_command_buffer();
+    let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+    enc.set_compute_pipeline_state(&p256);
+    enc.set_buffer(0, Some(&qg_b0), 0);
+    enc.set_buffer(1, Some(&k_b0), 0);
+    enc.set_buffer(2, Some(&v_b0), 0);
+    enc.set_buffer(3, Some(&cache256_0), 0);
+    enc.set_bytes(
+        4,
+        std::mem::size_of::<QkPrep256Args>() as u64,
+        (&a256_0 as *const QkPrep256Args).cast(),
+    );
+    enc.set_bytes(5, (hd256 * 4) as u64, qw256.as_ptr().cast());
+    enc.set_bytes(6, (hd256 * 4) as u64, kw256.as_ptr().cast());
+    enc.set_bytes(7, (rot_h256 * 8) as u64, ropes256.as_ptr().cast());
+    enc.set_buffer(8, Some(&q_out0), 0);
+    enc.set_buffer(9, Some(&g_out0), 0);
+    enc.dispatch_thread_groups(
+        MTLSize::new((n_h256 + 2 * n_kv256) as u64, 1, 1),
+        MTLSize::new(32, 1, 1),
+    );
+
+    enc.set_compute_pipeline_state(&pb256);
+    enc.set_buffer(0, Some(&qg_bm), 0);
+    enc.set_buffer(1, Some(&k_bm), 0);
+    enc.set_buffer(2, Some(&v_bm), 0);
+    enc.set_buffer(3, Some(&cache256_m), 0);
+    enc.set_bytes(
+        4,
+        std::mem::size_of::<QkPrepBatch256Args>() as u64,
+        (&a256_m as *const QkPrepBatch256Args).cast(),
+    );
+    enc.set_bytes(5, (hd256 * 4) as u64, qw256.as_ptr().cast());
+    enc.set_bytes(6, (hd256 * 4) as u64, kw256.as_ptr().cast());
+    enc.set_buffer(7, Some(&ropes256_b), 0);
+    enc.set_buffer(8, Some(&q_outm), 0);
+    enc.set_buffer(9, Some(&g_outm), 0);
+    enc.dispatch_thread_groups(
+        MTLSize::new((n_h256 + 2 * n_kv256) as u64, m256 as u64, 1),
+        MTLSize::new(32, 1, 1),
+    );
+    enc.end_encoding();
+    cmd.commit();
+    cmd.wait_until_completed();
+    assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+    let q0_s = unsafe { std::slice::from_raw_parts(q_out0.contents().cast::<f32>(), q_dim256) };
+    let g0_s = unsafe { std::slice::from_raw_parts(g_out0.contents().cast::<f32>(), q_dim256) };
+    let qm_s =
+        unsafe { std::slice::from_raw_parts(q_outm.contents().cast::<f32>(), m256 * q_dim256) };
+    let gm_s =
+        unsafe { std::slice::from_raw_parts(g_outm.contents().cast::<f32>(), m256 * q_dim256) };
+    let c0_s = unsafe {
+        std::slice::from_raw_parts(cache256_0.contents().cast::<u16>(), 2 * cap256 * kv_dim256)
+    };
+    let cm_s = unsafe {
+        std::slice::from_raw_parts(cache256_m.contents().cast::<u16>(), 2 * cap256 * kv_dim256)
+    };
+
+    for r in 0..m256 {
+        let rope_r = &ropes256[r * rot_h256..(r + 1) * rot_h256];
+        for h in 0..n_h256 {
+            let src = &qg_in[(r * n_h256 + h) * 2 * hd256..];
+            let mut q_ref = src[..hd256].to_vec();
+            ops::rmsnorm(&mut q_ref, &qw256, eps);
+            ops::rope_norm_cached_from_array(&mut q_ref, rope_r);
+            let g_ref = &src[hd256..2 * hd256];
+            let q_got = &qm_s[r * q_dim256 + h * hd256..r * q_dim256 + (h + 1) * hd256];
+            let g_got = &gm_s[r * q_dim256 + h * hd256..r * q_dim256 + (h + 1) * hd256];
+            for d in 0..hd256 {
+                assert!(
+                    (q_got[d] - q_ref[d]).abs() < 2e-5,
+                    "qk_prep_batch256 r={r} h={h} d={d}: {} vs {}",
+                    q_got[d],
+                    q_ref[d]
+                );
+                assert_eq!(g_got[d].to_bits(), g_ref[d].to_bits());
+            }
+            if r == 0 {
+                for d in 0..hd256 {
+                    assert_eq!(q0_s[h * hd256 + d].to_bits(), q_got[d].to_bits());
+                    assert_eq!(g0_s[h * hd256 + d].to_bits(), g_got[d].to_bits());
+                }
+            }
+        }
+        let pos = 3 + r;
+        for kh in 0..n_kv256 {
+            let src = &k256_in[r * kv_dim256 + kh * hd256..r * kv_dim256 + (kh + 1) * hd256];
+            let mut k_ref = src.to_vec();
+            ops::rmsnorm(&mut k_ref, &kw256, eps);
+            ops::rope_norm_cached_from_array(&mut k_ref, rope_r);
+            for d in 0..hd256 {
+                let got_u16 = cm_s[pos * kv_dim256 + kh * hd256 + d];
+                let got = f16::to_f32(got_u16);
+                let want = f16::to_f32(f16::scalar_from_f32(k_ref[d]));
+                assert!(
+                    (got - want).abs() < 2e-3,
+                    "qk_prep_batch256 K r={r} kh={kh} d={d}: {got} vs {want}"
+                );
+                if r == 0 {
+                    assert_eq!(c0_s[pos * kv_dim256 + kh * hd256 + d], got_u16);
+                }
+            }
+        }
+    }
+}
+
+/// Characterization test for the unified `dq_fmt` ABI codes (`0..=9`) shared
+/// between Rust (`gpu/common.rs::dq_fmt`) and Metal (`embed_row_f32_dtoken` /
+/// `mmllp_qkv_mixed`) against CPU `QuantMat::row`.
+#[test]
+fn embed_row_f32_dtoken_all_formats_match_cpu_dequant() {
+    use allpaka_backend::{gpu, QuantMat};
+    use allpaka_dtype::GgmlType;
+
+    let Some(device) = Device::system_default() else {
+        return;
+    };
+    let queue = device.new_command_queue();
+    let lib = device
+        .new_library_with_source(gpu::KERNELS, &CompileOptions::new())
+        .unwrap();
+    let fun = lib.get_function("embed_row_f32_dtoken", None).unwrap();
+    let pipe = device
+        .new_compute_pipeline_state_with_function(&fun)
+        .unwrap();
+
+    let n_in = 512usize;
+    let vocab = 5usize;
+    let tok_hist: [u32; 4] = [0, 3, 1, 4];
+    let tok_idx: u32 = 1; // picks row 3
+    let picked_row = tok_hist[tok_idx as usize] as usize;
+    let w_base: u64 = 64; // non-zero offset to verify w_base pointer math
+
+    let formats: [(u32, GgmlType, &[usize]); 10] = [
+        (0, GgmlType::Q4K, &[0, 2]),
+        (1, GgmlType::Q5K, &[0, 2]),
+        (2, GgmlType::Q6K, &[208]),
+        (3, GgmlType::Q8_0, &[0]),
+        (4, GgmlType::Q2K, &[80, 82]),
+        (5, GgmlType::Q3K, &[108]),
+        (6, GgmlType::Q5_0, &[0]),
+        (7, GgmlType::F16, &[]),
+        (8, GgmlType::F32, &[]),
+        (9, GgmlType::BF16, &[]),
+    ];
+
+    let tok_buf = device.new_buffer_with_data(
+        tok_hist.as_ptr().cast(),
+        (tok_hist.len() * 4) as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+
+    for (fmt, ty, scale_offs) in formats {
+        let be = ty.block_elements().unwrap() as usize;
+        let bb = ty.block_bytes().unwrap() as usize;
+        let row_bytes = (n_in / be) * bb;
+        let mut raw = vec![0u8; w_base as usize + vocab * row_bytes];
+        let payload = &mut raw[w_base as usize..];
+        match ty {
+            GgmlType::F32 => {
+                for (i, chunk) in payload.chunks_exact_mut(4).enumerate() {
+                    let v = ((i * 37 + 11) % 101) as f32 * 0.03125 - 1.5;
+                    chunk.copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            GgmlType::F16 => {
+                for (i, chunk) in payload.chunks_exact_mut(2).enumerate() {
+                    let v = ((i * 41 + 7) % 97) as f32 * 0.03125 - 1.5;
+                    let bits = allpaka_backend::ops::f16::scalar_from_f32(v);
+                    chunk.copy_from_slice(&bits.to_le_bytes());
+                }
+            }
+            GgmlType::BF16 => {
+                for (i, chunk) in payload.chunks_exact_mut(2).enumerate() {
+                    let v = ((i * 43 + 5) % 89) as f32 * 0.0625 - 2.5;
+                    let bits = (v.to_bits() >> 16) as u16;
+                    chunk.copy_from_slice(&bits.to_le_bytes());
+                }
+            }
+            _ => {
+                for (i, b) in payload.iter_mut().enumerate() {
+                    *b = (i.wrapping_mul(73).wrapping_add(19 + fmt as usize * 13)) as u8;
+                }
+                for blk in payload.chunks_exact_mut(bb) {
+                    for (si, &off) in scale_offs.iter().enumerate() {
+                        let code: u16 = if si == 0 { 0x211f } else { 0x191f };
+                        blk[off..off + 2].copy_from_slice(&code.to_le_bytes());
+                    }
+                }
+            }
+        }
+
+        let qm = QuantMat::new(&raw[w_base as usize..], ty, vocab, n_in).unwrap();
+        let want = qm.row(picked_row).unwrap();
+
+        let wb = device.new_buffer_with_data(
+            raw.as_ptr().cast(),
+            raw.len() as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        let out_buf = device.new_buffer(
+            ((n_in + 32) * 4) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+        unsafe {
+            std::slice::from_raw_parts_mut(out_buf.contents().cast::<f32>(), n_in + 32)
+                .fill(-9999.0);
+        }
+
+        let n_in_u32 = n_in as u32;
+        let rb_u32 = row_bytes as u32;
+        let n_tg = if fmt <= 5 {
+            n_in.div_ceil(256) as u64
+        } else {
+            n_in.div_ceil(32) as u64
+        };
+
+        let cmd = queue.new_command_buffer();
+        let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+        enc.set_compute_pipeline_state(&pipe);
+        enc.set_buffer(0, Some(&wb), 0);
+        enc.set_buffer(1, Some(&out_buf), 0);
+        enc.set_bytes(2, 4, (&n_in_u32 as *const u32).cast());
+        enc.set_bytes(3, 8, (&w_base as *const u64).cast());
+        enc.set_bytes(4, 4, (&rb_u32 as *const u32).cast());
+        enc.set_bytes(5, 4, (&fmt as *const u32).cast());
+        enc.set_buffer(6, Some(&tok_buf), 0);
+        enc.set_bytes(7, 4, (&tok_idx as *const u32).cast());
+        enc.dispatch_thread_groups(MTLSize::new(n_tg, 1, 1), MTLSize::new(32, 1, 1));
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed);
+
+        let got =
+            unsafe { std::slice::from_raw_parts(out_buf.contents().cast::<f32>(), n_in + 32) };
+        for i in 0..n_in {
+            let diff = (got[i] - want[i]).abs();
+            assert!(
+                diff <= 1e-6,
+                "dq_fmt={fmt} ({ty:?}) col {i}: gpu {} vs cpu {} (diff {diff})",
+                got[i],
+                want[i]
+            );
+        }
+        for (i, &val) in got[n_in..n_in + 32].iter().enumerate() {
+            assert_eq!(
+                val,
+                -9999.0,
+                "dq_fmt={fmt} ({ty:?}) wrote past n_in at {}",
+                n_in + i
+            );
+        }
     }
 }

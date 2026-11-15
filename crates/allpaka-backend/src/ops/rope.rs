@@ -46,11 +46,15 @@ pub fn rope_neox_cached(x: &mut [f32], table: &[(f32, f32)]) {
 }
 
 /// [`rope_norm`] over a precomputed per-position table stored as arrays.
+///
+/// The table may cover only a leading slice of the head (partial rotary):
+/// those adjacent channel pairs rotate and the tail passes through unchanged.
 pub fn rope_norm_cached_from_array(x: &mut [f32], table: &[[f32; 2]]) {
-    assert_eq!(x.len(), table.len() * 2);
+    assert!(x.len() >= table.len() * 2);
     // Same arithmetic as `rope_norm_cached`, read straight from the arrays:
     // reinterpreting `[f32; 2]` as `(f32, f32)` would rely on tuple layout,
-    // which Rust leaves unspecified.
+    // which Rust leaves unspecified. Channels past `2 * table.len()` (partial
+    // rotary) pass through unchanged.
     for (i, &[sin, cos]) in table.iter().enumerate() {
         let a = x[2 * i];
         let b = x[2 * i + 1];

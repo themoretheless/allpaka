@@ -31,6 +31,9 @@ jobs:
       - name: Lint components for the pinned toolchain
         run: rustup component add rustfmt clippy
 
+      - name: Install Windows cross-check target
+        run: rustup target add x86_64-pc-windows-msvc
+
       - name: Cargo cache
         uses: actions/cache@v4
         with:
@@ -44,8 +47,13 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      - name: cargo clippy -D warnings
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Cross-backend check (Metal, stub, CUDA)
+        run: bash scripts/check-backends.sh
+
+      - name: cargo clippy -D warnings (workspace + CUDA cross-target)
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy -p allpaka-backend --target x86_64-pc-windows-msvc --features allpaka-backend/cuda -- -D warnings
 
       - name: cargo test --workspace
         run: cargo test --workspace
@@ -58,14 +66,14 @@ jobs:
       - name: CLI without default features
         run: cargo build -p allpaka-cli --no-default-features
 
-      - name: Studio web sources parse
-        run: node --check crates/allpaka-chat/web/app.js
-
-      - name: Studio content rendering
-        run: node scripts/test-studio-content.cjs
+      - name: Studio frontend & UI checks
+        run: |
+          node --check crates/allpaka-chat/web/app.js
+          node scripts/test-studio-content.cjs
+          bash scripts/studio-ui-tests/run.sh
 
       - name: Studio HTTP contracts (mock provider)
-        # The step above left a reduced binary at target/debug/allpaka; the
+        # The CLI step above left a reduced binary at target/debug/allpaka; the
         # contracts drive the default one.
         run: |
           cargo build -p allpaka-cli
