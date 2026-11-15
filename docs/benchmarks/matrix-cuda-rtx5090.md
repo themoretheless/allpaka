@@ -26,3 +26,12 @@ the prefill check. Its decode check does not: by the fourth step the largest
 top-10 difference is 1.12 against a 0.48 decode tolerance, with argmax equal at
 every step. llama.cpp's own CPU and CUDA builds differ by 0.78 at that step, on
 a token near log-prob -7. Open as roadmap P8.
+
+## Qwen2.5-7B, `The capital of France is Paris. The capital of Japan is`
+
+`verify --decode 32 --tol 0.3` stops at decode step 23 (0.7077 against 0.48,
+argmax equal), on this commit and on the one before Gemma support alike.
+Along the same greedy path llama.cpp disagrees with itself by up to 0.8577
+(CUDA vs CPU build) and 0.3872 (cached decode vs batch scoring) over the 32
+steps (2026-11-15, same session), so the step-23 gap is inside llama.cpp's own
+spread: tail noise, not a defect.
