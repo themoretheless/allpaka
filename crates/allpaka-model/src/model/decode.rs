@@ -516,6 +516,8 @@ impl<'a> Model<'a> {
                             layer.q_norm.as_deref(),
                             layer.k_norm.as_deref(),
                             rope_pairs,
+                            // Llama/Mistral are permuted to NEOX order at load.
+                            false,
                             c.rms_eps,
                             cache,
                             (k_off, v_off),

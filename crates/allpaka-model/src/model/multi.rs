@@ -226,6 +226,7 @@ impl Model<'_> {
                     &ropes,
                     c.rope_dim as usize,
                     false,
+                    false,
                     layer.bias.as_ref().map(|b| (b.q.1, b.k.1, b.v.1)),
                     c.rms_eps,
                     rows[0].cache,

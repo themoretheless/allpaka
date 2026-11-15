@@ -612,6 +612,7 @@ fn rope_norm_end_to_end_gpu_paths_match_cpu() {
         0,
         scale,
         None,
+        None,
     )
     .expect("GPU must accept prefill_attn_block with rope_norm=true");
 
@@ -673,6 +674,7 @@ fn rope_norm_end_to_end_gpu_paths_match_cpu() {
         (kv_dim, hd, n_heads, n_kv),
         m_pf,
         scale,
+        None,
     )
     .expect("GPU must accept attn_block with rope_norm=true");
     let want_ab = cpu_attn_step(&h_dec, m_pf, &rope_dec, &mut cpu_kv, false);
@@ -705,6 +707,10 @@ fn rope_norm_end_to_end_gpu_paths_match_cpu() {
             up: (GgmlType::Q4K, &region[wu_off..wu_off + wu_len], ffn),
             down: (GgmlType::Q6K, &region[wd_off..wd_off + wd_len], hidden),
         },
+        post_attn_norm: None,
+        post_ffn_norm: None,
+        gelu: false,
+        swa_rope: false,
     };
 
     let cpu_full_step = |x_in: &[f32], pos: usize, rope: &[[f32; 2]], kv: &mut [u16]| {
