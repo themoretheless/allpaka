@@ -351,6 +351,8 @@ pub fn body_with_effort(
             item.as_object_mut().unwrap().remove("model");
             // Per-agent swarm reports are local transcript data, never a wire field.
             item.as_object_mut().unwrap().remove("swarm");
+            item.as_object_mut().unwrap().remove("citations");
+            item.as_object_mut().unwrap().remove("context_budget");
             let same_router = p.id == "openrouter"
                 && m.provider.as_deref() == Some(p.id.as_str())
                 && m.model.as_deref() == Some(model)
@@ -1043,19 +1045,15 @@ pub(crate) async fn save_provider(
         ));
     }
     let mut providers = app.providers.lock().unwrap();
-    state_file::update_list(
-        app.data.as_path(),
-        "custom-providers",
-        "custom provider",
-        validate_custom_provider,
-        |list| {
-            match list.iter().position(|p| p.id == candidate.id) {
-                Some(i) => list[i] = candidate.clone(),
-                None => list.push(candidate.clone()),
-            }
-            Ok(())
-        },
-    )
+    // Hold the provider lock across the file update so concurrent edits
+    // serialize in the same order on disk and in memory.
+    update_custom_providers(app.data.as_path(), |list| {
+        match list.iter().position(|p| p.id == candidate.id) {
+            Some(i) => list[i] = candidate.clone(),
+            None => list.push(candidate.clone()),
+        }
+        Ok(())
+    })
     .map_err(crate::internal)?;
     let old = providers
         .iter()
@@ -1083,17 +1081,11 @@ pub(crate) async fn delete_provider(
         ));
     }
     let mut providers = app.providers.lock().unwrap();
-    let found = state_file::update_list(
-        app.data.as_path(),
-        "custom-providers",
-        "custom provider",
-        validate_custom_provider,
-        |list| {
-            let before = list.len();
-            list.retain(|p| p.id != id);
-            Ok(list.len() != before)
-        },
-    )
+    let found = update_custom_providers(app.data.as_path(), |list| {
+        let before = list.len();
+        list.retain(|p| p.id != id);
+        Ok(list.len() != before)
+    })
     .map_err(crate::internal)?;
     if !found {
         return Err(error(StatusCode::NOT_FOUND, "Custom provider not found"));
@@ -1162,6 +1154,18 @@ pub(crate) fn load_custom_providers(data: &std::path::Path) -> Result<Vec<Custom
     state_file::load_list(data, "custom-providers", "custom provider", |p| {
         validate_custom_provider(p)
     })
+}
+fn update_custom_providers<R>(
+    data: &std::path::Path,
+    change: impl FnOnce(&mut Vec<CustomProvider>) -> Result<R>,
+) -> Result<R> {
+    state_file::update_list(
+        data,
+        "custom-providers",
+        "custom provider",
+        validate_custom_provider,
+        change,
+    )
 }
 pub(crate) fn custom_to_provider(p: &CustomProvider) -> Provider {
     Provider {

@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 const start=source.indexOf('async function loadConversationTraces('),end=source.indexOf('async function loadTraceSummary(',start);
 const node=(tag,text)=>({tag,text,children:[],replaceChildren(...children){this.children=children;}});
 const requests=[],pending=[];let active=true;

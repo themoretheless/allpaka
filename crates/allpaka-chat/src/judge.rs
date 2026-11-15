@@ -115,38 +115,49 @@ fn hash(bytes: &[u8]) -> String {
 }
 pub(crate) async fn judge_inner(
     app: &App,
-    mut request: Request,
+    request: Request,
 ) -> std::result::Result<Value, crate::ApiError> {
     let _permit = app
         .judges
         .clone()
         .try_acquire_owned()
         .map_err(|_| crate::error(StatusCode::TOO_MANY_REQUESTS, "Judge capacity reached"))?;
-    let prepared=(||->Result<_>{
-        crate::validate_settings(&request.settings,app)?;
-        request.verify_quality_source(&app.data)?;
-        if request.settings.mode!=Mode::Chat || request.settings.allow_writes { bail!("Judges require Chat without writes"); }
-        if request.rubric.trim().is_empty() || request.rubric.len()>16000 || request.input.len()>16000 || request.output.len()>64000 || request.reference.as_ref().is_some_and(|s|s.len()>64000) { bail!("Judge text exceeds bounds"); }
-        if let Some(source)=&request.trace_ref{source.validate(&app.observability,&request.settings.project_id)?;}
-        let (source,contexts)=if let Some(source)=&request.dataset_ref {
-            if source.dataset_version==0 {bail!("Pin a dataset version");}
-            let dataset=app.evaluation.load(&source.dataset_id,Some(source.dataset_version))?;
-            let sample=dataset.samples.iter().find(|sample|sample.id==source.sample_id).context("Dataset sample not found")?;
-            if dataset.project_id!=request.settings.project_id || sample.input!=request.input || sample.expected_output!=request.reference {bail!("Judge source differs from pinned dataset sample");}
-            if sample.contexts.iter().map(String::len).sum::<usize>()>16000 {bail!("Judge contexts exceed 16000 bytes");}
-            (json!({"dataset_id":dataset.id,"dataset_version":dataset.version,"dataset_sha256":dataset.sha256,"sample_id":sample.id}),sample.contexts.clone())
-        }else{(Value::Null,Vec::new())};
-        let provider=app.providers.lock().unwrap().iter().find(|p|p.id==request.settings.provider).cloned().context("Provider not found")?;
-        let data=json!({"rubric":request.rubric,"input":request.input,"answer":request.output,"reference":request.reference,"contexts":contexts});
-        Ok((provider,serde_json::to_string(&data)?,source))
-    })().map_err(|e|crate::error(StatusCode::BAD_REQUEST,e))?;
-    let guards = request
-        .settings
-        .guardrails
-        .as_ref()
-        .map(|selection| selection.prepare(&crate::guardrail_policies::Store::open(&app.data)?))
-        .transpose()
-        .map_err(crate::bad_request)?;
+    // Preparation loads datasets, trace receipts and guardrail policies from
+    // disk: keep it off the async worker threads.
+    let task_app = app.clone();
+    let (mut request, prepared, guards) = crate::blocking(move || {
+        let app = &task_app;
+        let prepared=(||->Result<_>{
+            crate::validate_settings(&request.settings,app)?;
+            request.verify_quality_source(&app.data)?;
+            if request.settings.mode!=Mode::Chat || request.settings.allow_writes { bail!("Judges require Chat without writes"); }
+            if request.rubric.trim().is_empty() || request.rubric.len()>16000 || request.input.len()>16000 || request.output.len()>64000 || request.reference.as_ref().is_some_and(|s|s.len()>64000) { bail!("Judge text exceeds bounds"); }
+            if let Some(source)=&request.trace_ref{source.validate(&app.observability,&request.settings.project_id)?;}
+            let (source,contexts)=if let Some(source)=&request.dataset_ref {
+                if source.dataset_version==0 {bail!("Pin a dataset version");}
+                let dataset=app.evaluation.load(&source.dataset_id,Some(source.dataset_version))?;
+                let sample=dataset.samples.iter().find(|sample|sample.id==source.sample_id).context("Dataset sample not found")?;
+                if dataset.project_id!=request.settings.project_id || sample.input!=request.input || sample.expected_output!=request.reference {bail!("Judge source differs from pinned dataset sample");}
+                if sample.contexts.iter().map(String::len).sum::<usize>()>16000 {bail!("Judge contexts exceed 16000 bytes");}
+                (json!({"dataset_id":dataset.id,"dataset_version":dataset.version,"dataset_sha256":dataset.sha256,"sample_id":sample.id}),sample.contexts.clone())
+            }else{(Value::Null,Vec::new())};
+            let provider=app.providers.lock().unwrap().iter().find(|p|p.id==request.settings.provider).cloned().context("Provider not found")?;
+            let data=json!({"rubric":request.rubric,"input":request.input,"answer":request.output,"reference":request.reference,"contexts":contexts});
+            Ok((provider,serde_json::to_string(&data)?,source))
+        })();
+        let guards = prepared.as_ref().map_or(Ok(None), |_| {
+            request
+                .settings
+                .guardrails
+                .as_ref()
+                .map(|selection| selection.prepare(&crate::guardrail_policies::Store::open(&app.data)?))
+                .transpose()
+        });
+        (request, prepared, guards)
+    })
+    .await;
+    let prepared = prepared.map_err(|e| crate::error(StatusCode::BAD_REQUEST, e))?;
+    let guards = guards.map_err(crate::bad_request)?;
     request.settings.max_output_tokens = request.settings.max_output_tokens.min(4096);
     // reasoning_effort is honoured as requested: it is part of the receipt's pinned settings.
     let id = crate::evaluation::new_id();
@@ -288,12 +299,15 @@ pub(crate) async fn read(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    read_inner(&app, &id).map(Json).map_err(|_| {
-        crate::error(
-            StatusCode::BAD_REQUEST,
-            "Judge receipt unavailable or invalid",
-        )
+    crate::blocking(move || {
+        read_inner(&app, &id).map(Json).map_err(|_| {
+            crate::error(
+                StatusCode::BAD_REQUEST,
+                "Judge receipt unavailable or invalid",
+            )
+        })
     })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -323,183 +337,186 @@ pub(crate) async fn plan(
     State(app): State<App>,
     Json(mut input): Json<PlanRequest>,
 ) -> crate::ApiResult<Value> {
-    if input.experiment_id.is_some() && input.offline_score_id.is_some() {
-        return Err(crate::error(
-            StatusCode::BAD_REQUEST,
-            "Choose one saved answer source",
-        ));
-    }
-    let offline = match &input.offline_score_id {
-        Some(id) => Some(
-            crate::experiments::read_offline_score_inner(&app, id).map_err(|_| {
-                crate::error(
-                    StatusCode::BAD_REQUEST,
-                    "Offline scoring receipt unavailable or invalid",
-                )
-            })?,
-        ),
-        None => None,
-    };
-    let experiment = match &input.experiment_id {
-        Some(id) => Some(crate::experiments::detail_inner(&app, id).map_err(crate::bad_request)?),
-        None => None,
-    };
-    let result = (|| -> Result<Value> {
-        crate::validate_settings(&input.settings, &app)?;
-        let preset = if let Some(reference) = &input.judge_preset {
-            if !input.rubric.is_empty() || input.rubric_ref.is_some() {
-                bail!("Choose one judge criterion source");
-            }
-            let preset = crate::judge_presets::resolve(&reference.id, reference.version)?;
-            input.rubric = preset["rubric"].as_str().unwrap().into();
-            Some(preset)
-        } else {
-            None
+    crate::blocking(move || {
+        if input.experiment_id.is_some() && input.offline_score_id.is_some() {
+            return Err(crate::error(
+                StatusCode::BAD_REQUEST,
+                "Choose one saved answer source",
+            ));
+        }
+        let offline = match &input.offline_score_id {
+            Some(id) => Some(
+                crate::experiments::read_offline_score_inner(&app, id).map_err(|_| {
+                    crate::error(
+                        StatusCode::BAD_REQUEST,
+                        "Offline scoring receipt unavailable or invalid",
+                    )
+                })?,
+            ),
+            None => None,
         };
-        let rubric_snapshot = if let Some(reference) = &input.rubric_ref {
-            if !input.rubric.is_empty() || reference.version == 0 {
-                bail!("Pin a positive rubric version and omit inline rubric");
-            }
-            let snapshot = app.prompts.load(&reference.id, Some(reference.version))?;
-            if snapshot.project_id != input.settings.project_id {
-                bail!("Rubric belongs to another project");
-            }
-            input.rubric = snapshot.system.clone();
-            Some(snapshot)
-        } else {
-            None
+        let experiment = match &input.experiment_id {
+            Some(id) => Some(crate::experiments::detail_inner(&app, id).map_err(crate::bad_request)?),
+            None => None,
         };
-        if input.settings.mode != Mode::Chat
-            || input.settings.allow_writes
-            || input.dataset_version == 0
-        {
-            bail!("Judge plans require Chat without writes and a pinned dataset version");
-        }
-        if input.rubric.trim().is_empty() || input.rubric.len() > 16000 {
-            bail!("Invalid judge rubric");
-        }
-        if !app
-            .providers
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|p| p.id == input.settings.provider)
-        {
-            bail!("Provider not found");
-        }
-        let dataset = app
-            .evaluation
-            .load(&input.dataset_id, Some(input.dataset_version))?;
-        if let Some(score) = &offline {
-            if score["project_id"] != dataset.project_id
-                || score["dataset_id"] != dataset.id
-                || score["dataset_version"] != dataset.version
-                || score["dataset_sha256"] != dataset.sha256
-            {
-                bail!("Saved scores must match the pinned dataset");
-            }
-            let items = score["items"].as_array().context("Missing saved outputs")?;
-            if items.len() != input.outputs.len() {
-                bail!("Saved score output coverage mismatch");
-            }
-            for item in items {
-                let id = item["sample_id"]
-                    .as_str()
-                    .context("Missing saved sample ID")?;
-                if input.outputs.get(id).map(String::as_str) != item["output"].as_str() {
-                    bail!("Saved score output mismatch");
+        let result = (|| -> Result<Value> {
+            crate::validate_settings(&input.settings, &app)?;
+            let preset = if let Some(reference) = &input.judge_preset {
+                if !input.rubric.is_empty() || input.rubric_ref.is_some() {
+                    bail!("Choose one judge criterion source");
                 }
-            }
-        }
-        if let Some(run) = &experiment {
-            if run["status"] != "completed"
-                || run["project_id"] != dataset.project_id
-                || run["dataset_id"] != dataset.id
-                || run["dataset_version"] != dataset.version
-                || run["dataset_sha256"] != dataset.sha256
+                let preset = crate::judge_presets::resolve(&reference.id, reference.version)?;
+                input.rubric = preset["rubric"].as_str().unwrap().into();
+                Some(preset)
+            } else {
+                None
+            };
+            let rubric_snapshot = if let Some(reference) = &input.rubric_ref {
+                if !input.rubric.is_empty() || reference.version == 0 {
+                    bail!("Pin a positive rubric version and omit inline rubric");
+                }
+                let snapshot = app.prompts.load(&reference.id, Some(reference.version))?;
+                if snapshot.project_id != input.settings.project_id {
+                    bail!("Rubric belongs to another project");
+                }
+                input.rubric = snapshot.system.clone();
+                Some(snapshot)
+            } else {
+                None
+            };
+            if input.settings.mode != Mode::Chat
+                || input.settings.allow_writes
+                || input.dataset_version == 0
             {
-                bail!("Judge experiment must be completed and match the pinned dataset");
+                bail!("Judge plans require Chat without writes and a pinned dataset version");
             }
-            let items = run["items"]
-                .as_array()
-                .context("Missing experiment outputs")?;
-            if items.len() != input.outputs.len() {
-                bail!("Experiment output coverage mismatch");
+            if input.rubric.trim().is_empty() || input.rubric.len() > 16000 {
+                bail!("Invalid judge rubric");
             }
-            let mut seen = std::collections::HashSet::new();
-            for item in items {
-                let id = item["sample_id"]
-                    .as_str()
-                    .context("Missing experiment sample ID")?;
-                if !seen.insert(id)
-                    || item["status"] != "completed"
-                    || item["output_truncated"] == true
-                    || input.outputs.get(id).map(String::as_str) != item["output"].as_str()
+            if !app
+                .providers
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.id == input.settings.provider)
+            {
+                bail!("Provider not found");
+            }
+            let dataset = app
+                .evaluation
+                .load(&input.dataset_id, Some(input.dataset_version))?;
+            if let Some(score) = &offline {
+                if score["project_id"] != dataset.project_id
+                    || score["dataset_id"] != dataset.id
+                    || score["dataset_version"] != dataset.version
+                    || score["dataset_sha256"] != dataset.sha256
                 {
-                    bail!("Judge experiment output mismatch or incomplete output");
+                    bail!("Saved scores must match the pinned dataset");
+                }
+                let items = score["items"].as_array().context("Missing saved outputs")?;
+                if items.len() != input.outputs.len() {
+                    bail!("Saved score output coverage mismatch");
+                }
+                for item in items {
+                    let id = item["sample_id"]
+                        .as_str()
+                        .context("Missing saved sample ID")?;
+                    if input.outputs.get(id).map(String::as_str) != item["output"].as_str() {
+                        bail!("Saved score output mismatch");
+                    }
                 }
             }
-        }
-        if dataset.project_id != input.settings.project_id
-            || dataset.samples.is_empty()
-            || dataset.samples.len() > 200
-            || input.outputs.len() != dataset.samples.len()
-        {
-            bail!("Judge plan project or sample coverage mismatch");
-        }
-        let mut samples = Vec::new();
-        for sample in &dataset.samples {
-            if let Some(preset) = &preset {
-                crate::judge_presets::validate_source(preset, sample)?;
+            if let Some(run) = &experiment {
+                if run["status"] != "completed"
+                    || run["project_id"] != dataset.project_id
+                    || run["dataset_id"] != dataset.id
+                    || run["dataset_version"] != dataset.version
+                    || run["dataset_sha256"] != dataset.sha256
+                {
+                    bail!("Judge experiment must be completed and match the pinned dataset");
+                }
+                let items = run["items"]
+                    .as_array()
+                    .context("Missing experiment outputs")?;
+                if items.len() != input.outputs.len() {
+                    bail!("Experiment output coverage mismatch");
+                }
+                let mut seen = std::collections::HashSet::new();
+                for item in items {
+                    let id = item["sample_id"]
+                        .as_str()
+                        .context("Missing experiment sample ID")?;
+                    if !seen.insert(id)
+                        || item["status"] != "completed"
+                        || item["output_truncated"] == true
+                        || input.outputs.get(id).map(String::as_str) != item["output"].as_str()
+                    {
+                        bail!("Judge experiment output mismatch or incomplete output");
+                    }
+                }
             }
-            let output = input
-                .outputs
-                .get(&sample.id)
-                .context("Missing judge output")?;
-            if sample.input.len() > 16000
-                || output.len() > 64000
-                || sample
-                    .expected_output
-                    .as_ref()
-                    .is_some_and(|s| s.len() > 64000)
-                || sample.contexts.iter().map(String::len).sum::<usize>() > 16000
+            if dataset.project_id != input.settings.project_id
+                || dataset.samples.is_empty()
+                || dataset.samples.len() > 200
+                || input.outputs.len() != dataset.samples.len()
             {
-                bail!("Judge plan source exceeds text bounds");
+                bail!("Judge plan project or sample coverage mismatch");
             }
-            samples.push(json!({"sample_id":sample.id,"input":sample.input,"output":output,"reference":sample.expected_output,"contexts":sample.contexts}));
-        }
-        input.settings.max_output_tokens = input.settings.max_output_tokens.min(4096);
-        let id = crate::evaluation::new_id();
-        let mut receipt = json!({"id":id,"kind":"judge_plan","project_id":dataset.project_id,"dataset_id":dataset.id,"dataset_version":dataset.version,"dataset_sha256":dataset.sha256,"settings":input.settings,"rubric":input.rubric,"samples":samples,"provider_calls":0});
-        if let Some(snapshot) = rubric_snapshot {
-            receipt["rubric_snapshot"] = serde_json::to_value(snapshot)?;
-        }
-        if let Some(preset) = preset {
-            receipt["judge_preset"] = preset;
-        }
-        if let Some(run) = &experiment {
-            receipt["experiment_source"] =
-                json!({"id":run["id"],"snapshot_sha256":hash(&serde_json::to_vec(run)?)});
-        }
-        if let Some(score) = &offline {
-            receipt["offline_score_source"] =
-                json!({"id":score["id"],"snapshot_sha256":hash(&serde_json::to_vec(score)?)});
-        }
-        let bytes = serde_json::to_vec(&receipt)?;
-        if bytes.len() > 16 * 1024 * 1024 {
-            bail!("Judge plan exceeds 16 MiB");
-        }
-        receipt["plan_sha256"] = json!(hash(&bytes));
-        let directory = app.data.join("evaluation/judge_plans");
-        std::fs::create_dir_all(&directory)?;
-        let directory = directory.canonicalize()?;
-        if !directory.starts_with(app.data.as_ref()) {
-            bail!("Judge plan storage escapes Studio data");
-        }
-        crate::evaluation::commit_new(&directory.join(format!("{id}.json")), &receipt)?;
-        Ok(receipt)
-    })();
-    result.map(Json).map_err(crate::bad_request)
+            let mut samples = Vec::new();
+            for sample in &dataset.samples {
+                if let Some(preset) = &preset {
+                    crate::judge_presets::validate_source(preset, sample)?;
+                }
+                let output = input
+                    .outputs
+                    .get(&sample.id)
+                    .context("Missing judge output")?;
+                if sample.input.len() > 16000
+                    || output.len() > 64000
+                    || sample
+                        .expected_output
+                        .as_ref()
+                        .is_some_and(|s| s.len() > 64000)
+                    || sample.contexts.iter().map(String::len).sum::<usize>() > 16000
+                {
+                    bail!("Judge plan source exceeds text bounds");
+                }
+                samples.push(json!({"sample_id":sample.id,"input":sample.input,"output":output,"reference":sample.expected_output,"contexts":sample.contexts}));
+            }
+            input.settings.max_output_tokens = input.settings.max_output_tokens.min(4096);
+            let id = crate::evaluation::new_id();
+            let mut receipt = json!({"id":id,"kind":"judge_plan","project_id":dataset.project_id,"dataset_id":dataset.id,"dataset_version":dataset.version,"dataset_sha256":dataset.sha256,"settings":input.settings,"rubric":input.rubric,"samples":samples,"provider_calls":0});
+            if let Some(snapshot) = rubric_snapshot {
+                receipt["rubric_snapshot"] = serde_json::to_value(snapshot)?;
+            }
+            if let Some(preset) = preset {
+                receipt["judge_preset"] = preset;
+            }
+            if let Some(run) = &experiment {
+                receipt["experiment_source"] =
+                    json!({"id":run["id"],"snapshot_sha256":hash(&serde_json::to_vec(run)?)});
+            }
+            if let Some(score) = &offline {
+                receipt["offline_score_source"] =
+                    json!({"id":score["id"],"snapshot_sha256":hash(&serde_json::to_vec(score)?)});
+            }
+            let bytes = serde_json::to_vec(&receipt)?;
+            if bytes.len() > 16 * 1024 * 1024 {
+                bail!("Judge plan exceeds 16 MiB");
+            }
+            receipt["plan_sha256"] = json!(hash(&bytes));
+            let directory = app.data.join("evaluation/judge_plans");
+            std::fs::create_dir_all(&directory)?;
+            let directory = directory.canonicalize()?;
+            if !directory.starts_with(app.data.as_ref()) {
+                bail!("Judge plan storage escapes Studio data");
+            }
+            crate::evaluation::commit_new(&directory.join(format!("{id}.json")), &receipt)?;
+            Ok(receipt)
+        })();
+        result.map(Json).map_err(crate::bad_request)
+    })
+    .await
 }
 pub(crate) fn read_plan_inner(app: &App, id: &str) -> Result<Value> {
     if id.is_empty() || id.len() > 80 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -585,9 +602,12 @@ pub(crate) async fn read_plan(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> crate::ApiResult<Value> {
-    read_plan_inner(&app, &id)
-        .map(Json)
-        .map_err(|_| crate::error(StatusCode::BAD_REQUEST, "Judge plan unavailable or invalid"))
+    crate::blocking(move || {
+        read_plan_inner(&app, &id)
+            .map(Json)
+            .map_err(|_| crate::error(StatusCode::BAD_REQUEST, "Judge plan unavailable or invalid"))
+    })
+    .await
 }
 #[cfg(test)]
 mod tests {

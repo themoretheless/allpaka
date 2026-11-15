@@ -32,6 +32,7 @@ impl Q8Acts {
         for b in 0..blocks {
             let xs = &x[b * 32..b * 32 + 32];
             #[cfg(target_arch = "aarch64")]
+            // SAFETY: `xs` is exactly 32 floats, which is all the kernel reads.
             let (amax, block_sum) = unsafe { super::dot_neon::q8_block_amax_sum(xs) };
             #[cfg(not(target_arch = "aarch64"))]
             let (amax, block_sum) = (
@@ -45,6 +46,9 @@ impl Q8Acts {
                 0.0
             };
             #[cfg(target_arch = "aarch64")]
+            // SAFETY: `q` has `x.len() >= blocks * 32` elements, so `b * 32 + 32 <= q.len()`
+            // and the kernel's 32 i8 stores at `q[b * 32..]` are in bounds; `xs` is 32
+            // floats.
             unsafe {
                 super::dot_neon::quantize_q8_block(xs, id, q.as_mut_ptr().add(b * 32));
             }
@@ -101,6 +105,8 @@ pub(super) fn dot_q5_0_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
         let qs = &block[6..22];
         let mut qw = [0i8; 32];
         #[cfg(target_arch = "aarch64")]
+        // SAFETY: `qs` is 16 bytes (`block[6..22]` of a 22-byte chunk), the 16-byte
+        // load the kernel does; `qw` is a 32-element array.
         unsafe {
             super::dot_neon::unpack_q5_0_i8(qs, qh, &mut qw);
         }
@@ -130,6 +136,8 @@ pub(super) fn dot_q2_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
         for half in 0..2 {
             let q = &qs[half * 32..half * 32 + 32];
             #[cfg(target_arch = "aarch64")]
+            // SAFETY: `q` is 32 bytes (the kernel's two 16-byte loads). The kernel indexes
+            // `scales` and `acts` with bounds checks, so their lengths need no unsafe proof.
             unsafe {
                 total +=
                     super::dot_neon::dot_q2_k_half_i8(q, scales, d, dmin, bi, half, &mut is, acts);
@@ -188,6 +196,8 @@ pub(super) fn dot_q3_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
                 let dx = acts.d[blk];
                 let mut qw = [0i8; 32];
                 #[cfg(target_arch = "aarch64")]
+                // SAFETY: `q` and `hmask` are 32 bytes each (two 16-byte loads apiece) and
+                // `qw` is a 32-element array.
                 unsafe {
                     super::dot_neon::unpack_q3_k_i8(q, hmask, shift, m, &mut qw);
                 }
@@ -228,6 +238,8 @@ pub(super) fn dot_q5_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
             let mut lo = [0i8; 32];
             let mut hi = [0i8; 32];
             #[cfg(target_arch = "aarch64")]
+            // SAFETY: `q` and `qh` are 32 bytes each (two 16-byte loads apiece); `lo` and
+            // `hi` are 32-element arrays.
             unsafe {
                 super::dot_neon::unpack_q5_k_i8(q, qh, bit_shift1, bit_shift2, &mut lo, &mut hi);
             }
@@ -268,6 +280,7 @@ pub(super) fn dot_q4_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
             let mut lo = [0i8; 32];
             let mut hi = [0i8; 32];
             #[cfg(target_arch = "aarch64")]
+            // SAFETY: `q` is 32 bytes (two 16-byte loads); `lo`/`hi` are 32-element arrays.
             unsafe {
                 super::dot_neon::unpack_q4_k_i8(q, &mut lo, &mut hi);
             }
@@ -306,6 +319,8 @@ pub(super) fn dot_q6_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
 
             let mut quarters = [[0i8; 32]; 4];
             #[cfg(target_arch = "aarch64")]
+            // SAFETY: `ql` is 64 bytes (loads at 0, 16, 32, 48) and `qh` 32 bytes
+            // (loads at 0 and 16); the four outputs are 32-element arrays.
             unsafe {
                 super::dot_neon::unpack_q6_k_i8(ql, qh, &mut quarters);
             }
@@ -338,6 +353,10 @@ pub(super) fn dot_q6_k_i8(row: &[u8], acts: &Q8ActsSlice<'_>) -> f32 {
 pub(super) fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: the kernel reads `a.len()` elements from both slices, so `b` must
+    // be at least as long. This is a module-internal fn: every caller in this file
+    // passes two 16- or 32-element slices of equal length (the debug assert checks it).
+    // On macOS the `dotprod` path is unconditional, which every Apple Silicon has.
     unsafe {
         super::dot_neon::dot_i8_neon(a, b)
     }

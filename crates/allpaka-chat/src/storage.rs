@@ -39,15 +39,19 @@ pub fn now_ms() -> u64 {
 }
 
 #[inline]
+/// The one rule for named identifiers (B9, PLAN 3.4): `[A-Za-z0-9_-]`, 1 to
+/// 100 bytes. It accepts every id any store accepted before. Generated ids
+/// use the stricter [`valid_hex_id`].
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
-        && id.len() <= 80
+        && id.len() <= 100
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 #[inline]
+/// Generated identifiers (sessions, projects, jobs): hex and `-`, 1 to 80 bytes.
 pub fn valid_hex_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 80 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
 }
@@ -87,6 +91,30 @@ pub fn read_bounded_bytes(path: &Path, limit: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Rename `temp` over `path`. On Windows the rename is refused while another
+/// process holds `path` open without delete sharing (a reader, an indexer, an
+/// antivirus scan); such holds are brief, so retry for up to half a second
+/// instead of losing the write.
+fn rename_over(temp: &Path, path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut attempt = 0;
+        loop {
+            match std::fs::rename(temp, path) {
+                Err(error)
+                    if attempt < 50 && matches!(error.raw_os_error(), Some(5) | Some(32)) =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                other => return other,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    std::fs::rename(temp, path)
+}
+
 pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     atomic_write_bytes_with_sync(path, bytes, false)
 }
@@ -104,7 +132,9 @@ pub fn atomic_write_bytes_with_sync(path: &Path, bytes: &[u8], sync_parent: bool
         let mut file = options.open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        std::fs::rename(&temp, path)?;
+        // Windows refuses to rename a file that still has an open handle.
+        drop(file);
+        rename_over(&temp, path)?;
         if sync_parent {
             #[cfg(unix)]
             if let Some(parent) = path.parent() {
@@ -130,6 +160,8 @@ pub fn atomic_create_new_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         let mut file = options.open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        // Close before linking so the temp name can be removed on Windows.
+        drop(file);
         std::fs::hard_link(&temp, path)?;
         Ok(())
     })();
@@ -216,6 +248,52 @@ pub fn base64_decode(input: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reader that briefly holds the destination open must not lose the write.
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_survives_a_brief_reader_without_delete_sharing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("allpaka-rename-{}", crate::evaluation::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("job.json");
+        atomic_write_bytes(&path, b"old").unwrap();
+        // FILE_SHARE_READ only: what Python's open() and most tools request.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(held);
+        });
+        atomic_write_bytes(&path, b"new").unwrap();
+        release.join().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// PLAN 3.4 / B9: two identifier rules. Named ids (plugins, feedback,
+    /// review queues, storage) share valid_id; generated ids (sessions,
+    /// projects, matrix jobs) share valid_hex_id. Each accepts every id the
+    /// per-store rules it replaced accepted.
+    #[test]
+    fn identifier_rules() {
+        let long80 = "a".repeat(80);
+        let long81 = "a".repeat(81);
+        assert!(valid_id("Ab_9-z") && valid_id(&"a".repeat(100)));
+        assert!(!valid_id("") && !valid_id(&"a".repeat(101)));
+        assert!(!valid_id("a.b") && !valid_id("a/b"));
+        assert!(valid_hex_id("0a-F9") && valid_hex_id(&long80));
+        assert!(!valid_hex_id("g") && !valid_hex_id("a_b") && !valid_hex_id(&long81));
+        let named = crate::plugins::valid_id;
+        assert!(named("Ab_9-z") && named(&"a".repeat(100)) && !named("a.b"));
+        let generated = crate::api::valid_id;
+        assert!(generated("0a-f") && generated(&long80));
+        assert!(!generated("a_b") && !generated(&long81) && !generated(""));
+    }
 
     #[test]
     fn hex_and_validation_primitives_match_spec() {

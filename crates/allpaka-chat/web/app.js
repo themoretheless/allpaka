@@ -279,7 +279,7 @@ function swarmState(report){
   if(status==='running')return {label:report.step>1?`работает · шаг ${report.step}`:'работает',className:'swarm-run'};
   return {label:'в очереди',className:'muted'};
 }
-function settings() {return {guardrails:$('chat-guardrails-enabled').checked?{input_policy_sha256:$('chat-guardrails-input').value.trim(),output_policy_sha256:$('chat-guardrails-output').value.trim(),action:$('chat-guardrails-action').value}:null,verbosity:$('verbosity').value,project_id:$('project').value,provider:$('provider').value,model:$('model').value.trim(),mode:$('mode').value,max_steps:Number($('steps').value),max_output_tokens:Number($('output-tokens').value),auto_compact:$('auto-compact').checked,compact_threshold:$('compact-threshold').value?Number($('compact-threshold').value):24000,allow_writes:$('writes').checked,json_mode:$('json-mode').checked,reasoning_effort:$('effort').value||null,sandbox_mode:$('sandbox-mode')?.value||'unsandboxed',approval_policy:$('approval-policy')?.value||'never',permission_preset:$('permission-preset')?.value||null,team_mode:!!$('team-mode')?.checked,swarm:collectSwarm()};}
+function settings() {return {guardrails:$('chat-guardrails-enabled').checked?{input_policy_sha256:$('chat-guardrails-input').value.trim(),output_policy_sha256:$('chat-guardrails-output').value.trim(),action:$('chat-guardrails-action').value}:null,verbosity:$('verbosity').value,project_id:$('project').value,provider:$('provider').value,model:$('model').value.trim(),mode:$('mode').value,max_steps:Number($('steps').value),max_output_tokens:Number($('output-tokens').value),auto_compact:$('auto-compact').checked,compact_threshold:$('compact-threshold').value?Number($('compact-threshold').value):24000,allow_writes:$('writes').checked,json_mode:$('json-mode').checked,reasoning_effort:$('effort').value||null,sandbox_mode:$('sandbox-mode')?.value||'unsandboxed',approval_policy:$('approval-policy')?.value||'never',permission_preset:$('permission-preset')?.value||null,team_mode:!!$('team-mode')?.checked,swarm:collectSwarm(),budget:Object.fromEntries([['max_tokens','budget-tokens'],['max_cost','budget-cost']].map(([key,id])=>[key,$(id)?.value.trim()||'']).filter(([,value])=>value).map(([key,value])=>[key,Number(value)]))};}
 async function loadConfig() {
   config=await api('config');
   $('project').replaceChildren(...config.projects.map(p=>{const o=node('option',p.name);o.value=p.id;return o;}));
@@ -406,7 +406,7 @@ function renderStatus(status) {
 }
 async function openChat(id) {
   active=id;lastMessages='';messageCache=[];pendingSend=null;pendingRev++;const s=await api('sessions/'+id);if(active!==id)return;
-  $('verbosity').value=s.settings.verbosity||'normal';$('auto-compact').checked=s.settings.auto_compact??true;$('compact-threshold').value=s.settings.compact_threshold??24000;current=s;$('history-folder').value=s.folder||'active';$('project').value=s.settings.project_id;$('provider').value=s.settings.provider;$('model').value=s.settings.model;$('mode').value=s.settings.mode;$('steps').value=s.settings.max_steps;$('output-tokens').value=s.settings.max_output_tokens??8192;$('writes').checked=s.settings.allow_writes;$('json-mode').checked=!!s.settings.json_mode;$('effort').value=s.settings.reasoning_effort||'';if($('sandbox-mode'))$('sandbox-mode').value=s.settings.sandbox_mode||'unsandboxed';if($('approval-policy'))$('approval-policy').value=s.settings.approval_policy||'never';if($('permission-preset'))$('permission-preset').value=s.settings.permission_preset||'';if($('team-mode'))$('team-mode').checked=!!s.settings.team_mode;$('chat-guardrails-enabled').checked=!!s.settings.guardrails;$('chat-guardrails-input').value=s.settings.guardrails?.input_policy_sha256||'';$('chat-guardrails-output').value=s.settings.guardrails?.output_policy_sha256||'';$('chat-guardrails-action').value=s.settings.guardrails?.action||'block';applySwarm(s.settings.swarm);
+  $('verbosity').value=s.settings.verbosity||'normal';$('auto-compact').checked=s.settings.auto_compact??true;$('compact-threshold').value=s.settings.compact_threshold??24000;$('budget-tokens').value=s.settings.budget?.max_tokens??'';$('budget-cost').value=s.settings.budget?.max_cost??'';current=s;$('history-folder').value=s.folder||'active';$('project').value=s.settings.project_id;$('provider').value=s.settings.provider;$('model').value=s.settings.model;$('mode').value=s.settings.mode;$('steps').value=s.settings.max_steps;$('output-tokens').value=s.settings.max_output_tokens??8192;$('writes').checked=s.settings.allow_writes;$('json-mode').checked=!!s.settings.json_mode;$('effort').value=s.settings.reasoning_effort||'';if($('sandbox-mode'))$('sandbox-mode').value=s.settings.sandbox_mode||'unsandboxed';if($('approval-policy'))$('approval-policy').value=s.settings.approval_policy||'never';if($('permission-preset'))$('permission-preset').value=s.settings.permission_preset||'';if($('team-mode'))$('team-mode').checked=!!s.settings.team_mode;$('chat-guardrails-enabled').checked=!!s.settings.guardrails;$('chat-guardrails-input').value=s.settings.guardrails?.input_policy_sha256||'';$('chat-guardrails-output').value=s.settings.guardrails?.output_policy_sha256||'';$('chat-guardrails-action').value=s.settings.guardrails?.action||'block';applySwarm(s.settings.swarm);
   savePrefs();
   renderModelInfo();renderContext();modeHelp();render(s);await listChats();
 }
@@ -446,7 +446,16 @@ function renderContextStatistics(s){
 function renderUsage(s){
   const u=s.usage||{},input=u.prompt_tokens??u.input_tokens,output=u.completion_tokens??u.output_tokens;
   const last=lastAssistantModel(s);
-  $('usage').textContent=`Модель: ${selectedModelLabel()}`+(last?` · Последний ответ: ${modelLabel(last.provider,last.model)}`:'')+` · Шаг ${s.step} / ${s.settings.max_steps}`+(input!==undefined?` · Последний запрос: ${input} вход / ${output??'?'} выход`:'')+(typeof u.cost==='number'?` · $${u.cost.toFixed(6)}`:'');
+  $('usage').textContent=`Модель: ${selectedModelLabel()}`+(last?` · Последний ответ: ${modelLabel(last.provider,last.model)}`:'')+` · Шаг ${s.step} / ${s.settings.max_steps}`+(input!==undefined?` · Последний запрос: ${input} вход / ${output??'?'} выход`:'')+(typeof u.cost==='number'?` · $${u.cost.toFixed(6)}`:'')+usageTotalLabel(s);
+}
+function usageTotalLabel(s){
+  const t=s.usage_total;
+  if(!t||!Number.isSafeInteger(t.requests)||t.requests<1)return '';
+  const fmt=n=>Number(n).toLocaleString('ru-RU'),b=s.settings.budget||{};
+  let text=` · Всего за беседу: ${fmt(t.input_tokens)} вход / ${fmt(t.output_tokens)} выход за ${fmt(t.requests)} запр.`;
+  if(typeof b.max_tokens==='number')text+=` из ${fmt(b.max_tokens)} токенов`;
+  if(t.cost>0||t.requests_without_cost<t.requests)text+=` · стоимость ${t.cost.toFixed(6)}`+(typeof b.max_cost==='number'?` из ${b.max_cost.toFixed(6)}`:'')+(t.requests_without_cost>0?` (без данных о стоимости: ${fmt(t.requests_without_cost)})`:'');
+  return text;
 }
 function refreshContextModel(){
   if(!current){$('context-statistics-title').textContent=contextHeadline(null);return;}
@@ -579,6 +588,7 @@ function renderSingleMessage(s,m,index,openKey,detailState){
   if(m.truncated)div.append(node('div','Неполный ответ · достигнут лимит токенов','muted'));
   for(const call of m.incomplete_tool_calls||[]){const d=node('details');const dk=openKey();d.dataset.openKey=dk;d.open=detailState.get(dk)??false;d.append(node('summary','Незавершённый вызов · не выполнен'),node('pre',JSON.stringify(call,null,2)));div.append(d);}
   for(const i of m.images||[]){const img=document.createElement('img');img.alt=i.name;img.src=`data:${i.mime};base64,${i.data}`;div.append(img);}
+  if(m.citations?.length){const cites=node('div','','muted citations');cites.append(node('span','Файлы: '+m.citations.map(c=>`${c.path}:${c.start_line}-${c.end_line}${c.truncated?' (обрезано)':''}`).join(', ')));const b=m.context_budget;if(b)cites.append(node('span',` · бюджет вложений ${b.used_bytes} / ${b.limit_bytes} байт`));div.append(cites);}
   // Вызов с полученным результатом не дублируется: его запрос показан в
   // карточке результата. Отдельный блок остаётся только у вызовов без ответа.
   for(const call of m.tool_calls||[]){if(s.messages.some(x=>x.role==='tool'&&x.tool_call_id===call.id))continue;const d=node('details');const ck=openKey();d.dataset.openKey=ck;d.open=detailState.get(ck)??false;d.append(node('summary',toolLabel(call)),node('pre',call.function?.arguments||''));div.append(d);}
@@ -2623,7 +2633,7 @@ function render(s) {
   renderBackgroundLauncher(s);renderBackground(s);
   if(traceSession!==s.id){traceSession=s.id;$('trace-results').replaceChildren();}
 
-  $('compact').disabled=s.status==='running'||s.folder&&s.folder!=='active';$('compact-summary').textContent=s.compaction?.summary||'Контекст ещё не сжат.';
+  $('compact').disabled=s.status==='running'||s.folder&&s.folder!=='active';{const last=(s.file_checkpoints||[]).at(-1);$('undo-file').disabled=!last||s.status==='running';$('undo-file').title=last?`Вернуть ${last.path} к состоянию до правки (${last.tool}); откажет, если файл меняли после`:'Правок агента для отмены нет';}$('compact-summary').textContent=s.compaction?.summary||'Контекст ещё не сжат.';
   current=s;$('title').textContent=s.title;renderStatus(s.status);
   $('branch-origin').hidden=!s.parent;
   if(s.parent){const origin=node('button','← Исходный разговор');origin.onclick=()=>openChat(s.parent.session_id).catch(fail);$('branch-origin').replaceChildren(origin,node('span','Независимая ветка · файлы проекта общие'));}
@@ -3096,6 +3106,7 @@ $('swarm-synth-provider').onchange=savePrefs;
 $('swarm-synth-model').oninput=savePrefs;
 $('new-chat').onclick=resetChat;$('search').oninput=()=>listChats().catch(fail);$('history-folder').onchange=()=>listChats().catch(fail);$('history-sort').onchange=()=>listChats().catch(fail);$('history-bookmarked').onchange=()=>listChats().catch(fail);
 $('compact').onclick=()=>control('compact').catch(fail);
+$('undo-file').onclick=async()=>{try{const r=await api(`sessions/${active}/actions`,{kind:'undo',text:''});notify(`${r.path}: ${r.restored==='removed'?'файл удалён':'восстановлено прежнее содержимое'}`);await poll();}catch(e){fail(e);}};
 $('send').onclick=()=>control('send').catch(fail);$('send-now').onclick=()=>control('send_now').catch(fail);$('steer').onclick=()=>control('steer').catch(fail);$('stop').onclick=()=>control('stop').catch(fail);$('resume').onclick=()=>control('resume').catch(fail);
 $('prompt').onkeydown=e=>{
   if(!$('command-menu').hidden){

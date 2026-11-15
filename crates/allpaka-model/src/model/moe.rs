@@ -68,6 +68,9 @@ pub(crate) enum Ffn<'a> {
         w_gate: QuantMat<'a>,
         w_up: QuantMat<'a>,
         w_down: QuantMat<'a>,
+        /// GeGLU with tanh GELU (Gemma) instead of SwiGLU. The fused GPU FFN
+        /// kernels implement SwiGLU only, so this path stays on matmuls.
+        gelu: bool,
     },
     /// The stacked-expert tensors of a MoE layer. Expert `e` is a
     /// `slice_rows` band of each stack; nothing is copied per token.
@@ -80,13 +83,21 @@ pub(crate) enum Ffn<'a> {
         up_exps: QuantMat<'a>,
         down_exps: QuantMat<'a>,
         shared: Option<SharedFfn<'a>>,
-        gating: Gating,
-        weights_norm: bool,
-        weights_scale: f32,
+        routing: RoutingPolicy,
         expert_ffn: usize,
         hidden: usize,
-        n_used: usize,
     },
+}
+
+/// How a MoE router turns logits into the experts a token uses: the gating
+/// function, how many experts win, and how their weights are normalised and
+/// scaled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RoutingPolicy {
+    pub(crate) gating: Gating,
+    pub(crate) weights_norm: bool,
+    pub(crate) weights_scale: f32,
+    pub(crate) n_used: usize,
 }
 
 impl Ffn<'_> {
@@ -98,14 +109,22 @@ impl Ffn<'_> {
                 w_gate,
                 w_up,
                 w_down,
+                gelu,
             } => {
                 // One command buffer for the whole FFN when the GPU takes it.
-                if let Some(mut outs) = QuantMat::ffn_many(&[(w_gate, w_up, w_down, hs)]) {
-                    return Ok(outs.pop().expect("one fused item"));
+                if !*gelu {
+                    if let Some(mut outs) = QuantMat::ffn_many(&[(w_gate, w_up, w_down, hs)]) {
+                        return Ok(outs.pop().expect("one fused item"));
+                    }
                 }
-                let mut gate = w_gate.matmul(hs, m)?;
-                let up = w_up.matmul(hs, m)?;
-                ops::swiglu(&mut gate, &up);
+                let mut gu = QuantMat::matmul_many(&[(w_gate, hs), (w_up, hs)])?;
+                let up = gu.pop().expect("up");
+                let mut gate = gu.pop().expect("gate");
+                if *gelu {
+                    ops::geglu_tanh(&mut gate, &up);
+                } else {
+                    ops::swiglu(&mut gate, &up);
+                }
                 w_down.matmul(&gate, m)
             }
             Ffn::Moe { .. } => {
@@ -135,11 +154,14 @@ impl Ffn<'_> {
             up_exps,
             down_exps,
             shared,
-            gating,
-            weights_norm,
-            weights_scale,
+            routing:
+                RoutingPolicy {
+                    gating,
+                    weights_norm,
+                    weights_scale,
+                    n_used,
+                },
             expert_ffn,
-            n_used,
             ..
         } = self
         else {
@@ -187,6 +209,10 @@ impl Ffn<'_> {
             let norm_val = *weights_norm;
             let scale_val = *weights_scale;
             allpaka_backend::thread_pool::par_for_chunks(m, threads, |_worker, start_t, end_t| {
+                // SAFETY: `routed_flat` has `m * k` entries and outlives the dispatch;
+                // par_for_chunks hands each worker a disjoint token range `[start_t, end_t)`
+                // with `end_t <= m`, so `[start_t * k, end_t * k)` is a unique, in-bounds
+                // sub-slice.
                 let dst = unsafe {
                     std::slice::from_raw_parts_mut(
                         (routed_addr as *mut (usize, f32)).add(start_t * k),
@@ -287,6 +313,9 @@ impl Ffn<'_> {
             let hits_ref = &hits_flat;
             let counts_ref = &hits_counts;
             allpaka_backend::thread_pool::par_for_chunks(m, threads, |_worker, start_t, end_t| {
+                // SAFETY: `out` has `m * hidden` floats (the only caller allocates exactly
+                // that) and outlives the dispatch; disjoint token ranges with `end_t <= m` give
+                // each worker a unique, in-bounds sub-slice.
                 let out_chunk = unsafe {
                     std::slice::from_raw_parts_mut(
                         (out_addr as *mut f32).add(start_t * hidden),
@@ -387,19 +416,7 @@ impl Ffn<'_> {
     /// stream out.
     pub(crate) fn forward(&self, h: &[f32]) -> Result<Vec<f32>> {
         match self {
-            Ffn::Dense {
-                w_gate,
-                w_up,
-                w_down,
-            } => {
-                if let Some(mut outs) = QuantMat::ffn_many(&[(w_gate, w_up, w_down, h)]) {
-                    return Ok(outs.pop().expect("one fused item"));
-                }
-                let mut gate = w_gate.matmul(h, 1)?;
-                let up = w_up.matmul(h, 1)?;
-                ops::swiglu(&mut gate, &up);
-                w_down.matmul(&gate, 1)
-            }
+            Ffn::Dense { .. } => self.forward_batch(h, 1, h.len()),
             Ffn::Moe {
                 router,
                 router_bias,
@@ -407,12 +424,15 @@ impl Ffn<'_> {
                 up_exps,
                 down_exps,
                 shared,
-                gating,
-                weights_norm,
-                weights_scale,
+                routing:
+                    RoutingPolicy {
+                        gating,
+                        weights_norm,
+                        weights_scale,
+                        n_used,
+                    },
                 expert_ffn,
                 hidden,
-                n_used,
             } => {
                 let router_span = profile::span(profile::Phase::Router);
                 let logits = router.matmul(h, 1)?;
@@ -493,8 +513,13 @@ impl Ffn<'_> {
     }
 }
 
+/// Expert count the routers keep on the stack; wider routers use the heap.
+/// The output buffer is sized by `k` (top-k), not by this count.
+const STACK_EXPERTS: usize = 256;
+
 /// Zero-heap-allocation top-k router writing directly into `dst` (length `k`).
-/// Uses stack buffers for `n_expert <= 256` (all Qwen3-MoE, GLM, DeepSeek models).
+/// Uses stack buffers for `n_expert <= STACK_EXPERTS` (all Qwen3-MoE, GLM,
+/// DeepSeek models) and the heap above that.
 #[inline]
 pub(crate) fn route_gated_into_slice(
     logits: &[f32],
@@ -511,7 +536,7 @@ pub(crate) fn route_gated_into_slice(
         return;
     }
 
-    let mut scores_stack = [0.0f32; 256];
+    let mut scores_stack = [0.0f32; STACK_EXPERTS];
     let mut scores_vec;
     let scores: &mut [f32] = if n <= scores_stack.len() {
         scores_stack[..n].copy_from_slice(logits);
@@ -526,7 +551,7 @@ pub(crate) fn route_gated_into_slice(
         Gating::Sigmoid => ops::sigmoid(scores),
     }
 
-    let mut sel_stack = [0.0f32; 256];
+    let mut sel_stack = [0.0f32; STACK_EXPERTS];
     let selection: Cow<'_, [f32]> = match bias {
         Some(b) if n <= sel_stack.len() => {
             for i in 0..n {
@@ -538,7 +563,7 @@ pub(crate) fn route_gated_into_slice(
         None => Cow::Borrowed(scores),
     };
 
-    let mut order_buf = [0usize; 256];
+    let mut order_buf = [0usize; STACK_EXPERTS];
     let mut order_vec;
     let order: &mut [usize] = if n <= order_buf.len() {
         for (i, slot) in order_buf[..n].iter_mut().enumerate() {
@@ -600,7 +625,7 @@ pub fn route(probs: &[f32], k: usize) -> Vec<(usize, f32)> {
     if k == 0 {
         return Vec::new();
     }
-    let mut order_buf = [0usize; 256];
+    let mut order_buf = [0usize; STACK_EXPERTS];
     let mut order_vec;
     let order: &mut [usize] = if probs.len() <= order_buf.len() {
         for (i, slot) in order_buf[..probs.len()].iter_mut().enumerate() {
@@ -630,4 +655,73 @@ pub fn route(probs: &[f32], k: usize) -> Vec<(usize, f32)> {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod stack_boundary_tests {
+    use super::*;
+
+    fn logits(n: usize) -> Vec<f32> {
+        // 331 is prime and above every n used here, so no two logits tie.
+        (0..n)
+            .map(|i| ((i * 37 % 331) as f32 - 165.0) * 0.03)
+            .collect()
+    }
+
+    fn close(a: &[(usize, f32)], b: &[(usize, f32)]) {
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b) {
+            assert_eq!(x.0, y.0, "{a:?} vs {b:?}");
+            assert!((x.1 - y.1).abs() < 1e-6, "{a:?} vs {b:?}");
+        }
+    }
+
+    /// Crossing from the stack path (256 experts) to the heap path (257)
+    /// must not change routing: an extra expert that can never win leaves
+    /// the picks and their weights as they were.
+    #[test]
+    fn routing_is_the_same_on_both_sides_of_the_stack_limit() {
+        let base = logits(STACK_EXPERTS);
+        let mut wide = base.clone();
+        wide.push(f32::NEG_INFINITY);
+        for (gating, norm) in [
+            (Gating::Softmax, true),
+            (Gating::Softmax, false),
+            (Gating::Sigmoid, true),
+        ] {
+            for k in [1, 8] {
+                close(
+                    &route_gated(&base, k, gating, norm, 1.5, None),
+                    &route_gated(&wide, k, gating, norm, 1.5, None),
+                );
+            }
+        }
+        let bias: Vec<f32> = (0..STACK_EXPERTS)
+            .map(|i| 0.5 + (i % 7) as f32 * 0.01)
+            .collect();
+        let mut wide_bias = bias.clone();
+        wide_bias.push(0.0);
+        close(
+            &route_gated(&base, 8, Gating::Sigmoid, true, 2.5, Some(&bias)),
+            &route_gated(&wide, 8, Gating::Sigmoid, true, 2.5, Some(&wide_bias)),
+        );
+        let probs: Vec<f32> = route_gated(&base, STACK_EXPERTS, Gating::Softmax, false, 1.0, None)
+            .into_iter()
+            .map(|p| p.1)
+            .collect();
+        let mut wide_probs = probs.clone();
+        wide_probs.push(0.0);
+        assert_eq!(route(&probs, 8), route(&wide_probs, 8));
+    }
+
+    /// More than 256 experts route on the heap and still pick the true
+    /// top-k, best first.
+    #[test]
+    fn wide_routers_pick_the_true_top_k() {
+        let wide = logits(STACK_EXPERTS + 64);
+        let picks = route_gated(&wide, 4, Gating::Softmax, false, 1.0, None);
+        let mut order: Vec<usize> = (0..wide.len()).collect();
+        order.sort_by(|&a, &b| wide[b].total_cmp(&wide[a]));
+        assert_eq!(picks.iter().map(|p| p.0).collect::<Vec<_>>(), order[..4]);
+    }
 }

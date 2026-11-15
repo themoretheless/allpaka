@@ -3,38 +3,65 @@
 
 use super::*;
 
+/// Announce the identity of the next prefill chunk for graph replay: a hash
+/// of everything a captured prefill bakes in besides the residual input
+/// (chunk length, KV base and cache, RoPE table, model). 0 disables replay
+/// for that chunk. Consumed by the next [`prefill_replay`] / [`prefill_begin`].
+pub fn prefill_graph_key(key: u64) {
+    let _ = with_gpu(|gpu| {
+        gpu.pf_graph_want = key;
+        Some(())
+    });
+}
+
 pub fn prefill_begin(xs: &[f32]) -> Option<()> {
     with_gpu(|gpu| {
         gpu.ensure_prefill(xs.len())?;
-        // Dual-queue: ggml MMQ/FA on private stream, cudarc on peer.
-        // Opt out with ALLPAKA_PREFILL_DUAL=0 (shared stream, no overlap).
-        let dual = std::env::var("ALLPAKA_PREFILL_DUAL")
-            .map_or(true, |v| !(v == "0" || v.eq_ignore_ascii_case("false")));
+        // Default: ggml shares the cudarc stream (no cross-stream waits).
+        // ALLPAKA_PREFILL_DUAL=1 puts ggml on a private stream (slower).
+        let dual = crate::runtime::get().cuda_prefill_dual;
         if dual {
             crate::gpu::cuda::ggml::clear_shared_for_prefill();
         }
-        if pf_graph_on() && gpu.pf_graph_len != xs.len() {
-            gpu.pf_graph = None;
-            gpu.pf_graph_seen = 0;
+        let want = std::mem::take(&mut gpu.pf_graph_want);
+        // want == 0 (tiny chunks, unsupported models) leaves the graph state
+        // alone, so a one-token step between two equal chunks keeps it.
+        if pf_graph_on() && want != 0 && (gpu.pf_graph_key != want || gpu.pf_graph_len != xs.len())
+        {
+            // A different chunk: the old graph's baked state is stale. Capture
+            // only after one uncaptured run of the new key, which settles the
+            // arenas and weight caches (no allocation inside a capture).
+            gpu.drop_pf_graph();
+            gpu.pf_graph_key = want;
             gpu.pf_graph_len = xs.len();
+            gpu.pf_graph_seen = 0;
+            gpu.pf_graph_failed = false;
         }
         gpu.stream
             .memcpy_htod(xs, &mut gpu.pf_x.slice_mut(0..xs.len()))
             .ok()?;
         gpu.pf_active = true;
+        gpu.pf_pending_add = None;
         gpu.pf_len = xs.len();
         gpu.pf_ffn_done = false;
         gpu.pf_rope_n = 0;
+        gpu.pf_rope_src = 0;
+        // Prefill kernels overwrite arena addresses a decode matvec may have
+        // quantised; the Q8 cache is keyed by pointer, so drop it.
+        gpu.invalidate_q8();
         if pf_graph_on()
             && !dual
+            && want != 0
             && gpu.pf_graph.is_none()
-            && gpu.pf_graph_seen == 1
+            && gpu.pf_graph_seen >= 1
+            && !gpu.pf_graph_failed
             && gpu
                 .stream
                 .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
                 .is_ok()
         {
             gpu.pf_capturing = true;
+            gpu.pf_capture_bad = false;
         }
         Some(())
     })
@@ -46,16 +73,20 @@ pub fn prefill_replay(xs: &[f32]) -> Option<Vec<f32>> {
         return None;
     }
     with_gpu(|gpu| {
-        if gpu.pf_graph_len != xs.len() {
+        let want = gpu.pf_graph_want;
+        if want == 0
+            || gpu.pf_graph_key != want
+            || gpu.pf_graph_len != xs.len()
+            || gpu.pf_graph.is_none()
+        {
             return Some(None);
         }
-        if gpu.pf_graph.is_none() {
-            return Some(None);
-        }
+        gpu.pf_graph_want = 0;
         gpu.ensure_prefill(xs.len())?;
         gpu.stream
             .memcpy_htod(xs, &mut gpu.pf_x.slice_mut(0..xs.len()))
             .ok()?;
+        gpu.invalidate_q8();
         gpu.pf_graph.as_ref()?.launch().ok()?;
         crate::gpu::cuda::ggml::sync();
         gpu.sync()?;
@@ -63,14 +94,17 @@ pub fn prefill_replay(xs: &[f32]) -> Option<Vec<f32>> {
         gpu.stream
             .memcpy_dtoh(&gpu.pf_x.slice(0..xs.len()), &mut out)
             .ok()?;
+        gpu.pf_rope_n = 0;
+        gpu.pf_rope_src = 0;
+        gpu.invalidate_q8();
+        crate::gpu::cuda::ggml::bind_peer_stream(&gpu.stream);
         Some(Some(out))
     })
     .flatten()
 }
 
 pub(super) fn pf_graph_on() -> bool {
-    std::env::var("ALLPAKA_PF_GRAPH")
-        .map_or(true, |v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+    crate::runtime::get().cuda_pf_graph
 }
 
 pub fn prefill_end_output(len: usize) -> Option<crate::activation::Activation> {
@@ -84,20 +118,51 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
         if !gpu.pf_active || xs.len() != gpu.pf_len {
             return None;
         }
+        gpu.pf_flush_add()?;
         if gpu.pf_capturing {
-            let graph_flags = unsafe { std::mem::transmute::<u32, CUgraphInstantiate_flags>(0) };
-            match gpu.stream.end_capture(graph_flags) {
+            gpu.pf_capturing = false;
+            // See decode_fused.rs: no zero variant; AUTO_FREE_ON_LAUNCH is a no-op here.
+            let graph_flags =
+                CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH;
+            let captured = match gpu.stream.end_capture(graph_flags) {
                 Ok(Some(g)) => {
-                    eprintln!("cuda: prefill graph captured ({} floats)", gpu.pf_len);
+                    crate::gpu::cuda::pdl::debug_report_graph("prefill graph", &g);
+                    Some(g)
+                }
+                Ok(None) => {
+                    eprintln!("cuda: prefill graph empty");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("cuda: prefill end_capture failed: {e}");
+                    None
+                }
+            };
+            // Capture only recorded the chunk; run it once for real. On any
+            // failure the caller falls back and recomputes the chunk.
+            match captured {
+                Some(g) if !gpu.pf_capture_bad && g.launch().is_ok() => {
+                    static LOGGED: std::sync::atomic::AtomicU32 =
+                        std::sync::atomic::AtomicU32::new(0);
+                    if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+                        eprintln!("cuda: prefill graph captured ({} floats)", gpu.pf_len);
+                    }
                     gpu.pf_graph = Some(g);
                     gpu.pf_graph_len = gpu.pf_len;
                 }
-                Ok(None) => eprintln!("cuda: prefill graph empty"),
-                Err(e) => eprintln!("cuda: prefill end_capture failed: {e}"),
+                _ => {
+                    eprintln!("cuda: prefill graph capture discarded; chunk reruns");
+                    gpu.drop_pf_graph();
+                    gpu.pf_graph_failed = true;
+                    gpu.pf_active = false;
+                    return None;
+                }
             }
-            gpu.pf_capturing = false;
         }
-        gpu.pf_graph_seen = gpu.pf_graph_seen.saturating_add(1);
+        if gpu.pf_len == gpu.pf_graph_len {
+            // Only runs of the keyed chunk shape count toward capture.
+            gpu.pf_graph_seen = gpu.pf_graph_seen.saturating_add(1);
+        }
         // Drain ggml private queue before sharing cudarc again (graph capture).
         crate::gpu::cuda::ggml::sync();
         gpu.sync()?;
@@ -105,6 +170,7 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
             .memcpy_dtoh(&gpu.pf_x.slice(0..xs.len()), xs)
             .ok()?;
         gpu.pf_active = false;
+        gpu.invalidate_q8();
         // Re-install shared stream for decode CUDA graphs + FA-inline.
         crate::gpu::cuda::ggml::bind_peer_stream(&gpu.stream);
         Some(())
@@ -113,10 +179,124 @@ pub fn prefill_end(xs: &mut [f32]) -> Option<()> {
 
 pub fn prefill_abort() {
     let _ = with_gpu(|gpu| {
+        if gpu.pf_capturing {
+            // Discard a partial capture; the caller reruns the chunk.
+            eprintln!("cuda: prefill graph capture aborted; chunk reruns uncaptured");
+            gpu.pf_capturing = false;
+            gpu.pf_graph_failed = true;
+            let flags = CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH;
+            let _ = gpu.stream.end_capture(flags);
+            gpu.drop_pf_graph();
+        }
         gpu.pf_active = false;
         gpu.pf_ffn_done = false;
+        gpu.pf_pending_add = None;
         Some(())
     });
+}
+
+/// Copy the RoPE table into `x_arena[at..]` through page-locked staging, so
+/// the copy is legal (and replayable) inside a prefill graph capture.
+///
+/// A captured graph re-reads its staging on every replay, so only a capture
+/// writes `pf_rope_pinned`. Uncaptured chunks stage through `pf_rope_scratch`:
+/// sharing one buffer let a 32..63-token chunk (no graph key, so the graph of
+/// the larger chunk survives it) leave its own positions there, and the next
+/// replay rotated its first rows by them.
+/// Most sessions one batched decode step takes (llama's MMVQ batches up to 8).
+pub const MULTI_MAX: usize = 8;
+
+/// Stage a batched decode step before [`prefill_replay`] or [`prefill_begin`]:
+/// each row's position into the page-locked buffer the step copies to the
+/// device, and, when the captured graph for `key` is the live one, the RoPE
+/// rows into the staging its captured copy re-reads.
+pub fn multi_stage(key: u64, positions: &[u32], ropes: &[f32]) -> Option<()> {
+    if positions.is_empty() || positions.len() > MULTI_MAX {
+        return None;
+    }
+    with_gpu(|gpu| {
+        if gpu.multi_dpos_pinned == 0 {
+            // SAFETY: plain page-locked allocation of MULTI_MAX u32, written
+            // below before any copy reads it; kept for the process.
+            gpu.multi_dpos_pinned =
+                unsafe { cudarc::driver::result::malloc_host(MULTI_MAX * 4, 0) }.ok()? as usize;
+        }
+        if gpu.multi_dpos_dev.is_none() {
+            gpu.multi_dpos_dev = Some(gpu.stream.alloc_zeros::<u32>(MULTI_MAX).ok()?);
+        }
+        // A replay launched earlier may still be copying from the staging.
+        gpu.stream.synchronize().ok()?;
+        // SAFETY: the allocation above holds MULTI_MAX u32 and no copy reads
+        // it now (synchronized).
+        unsafe {
+            std::slice::from_raw_parts_mut(gpu.multi_dpos_pinned as *mut u32, positions.len())
+                .copy_from_slice(positions);
+        }
+        let (ptr, cap) = gpu.pf_rope_pinned;
+        if key != 0
+            && gpu.pf_graph_key == key
+            && gpu.pf_graph.is_some()
+            && ptr != 0
+            && cap >= ropes.len()
+        {
+            // SAFETY: live page-locked staging of `cap` f32, idle (synchronized).
+            unsafe {
+                std::slice::from_raw_parts_mut(ptr as *mut f32, ropes.len()).copy_from_slice(ropes);
+            }
+        }
+        Some(())
+    })
+}
+
+fn upload_rope_pinned(gpu: &mut CudaGpu, rope: &[f32], at: usize) -> Option<()> {
+    let for_graph = gpu.pf_capturing;
+    let (mut ptr, cap) = if for_graph {
+        gpu.pf_rope_pinned
+    } else {
+        gpu.pf_rope_scratch
+    };
+    if cap < rope.len() {
+        if ptr != 0 {
+            // A capture only starts with no graph alive and the stream
+            // drained by the previous chunk, so nothing reads the old graph
+            // staging any more (and a capturing stream must not be
+            // synchronized). The scratch is read by this chunk's own copies.
+            if !for_graph {
+                let _ = gpu.stream.synchronize();
+            }
+            // SAFETY: `ptr` came from `malloc_host` below and, per the
+            // above, no pending copy still reads it.
+            unsafe {
+                let _ = cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void);
+            }
+        }
+        let n = rope.len().next_power_of_two();
+        // SAFETY: plain page-locked allocation of `n` f32, written below
+        // before any read.
+        ptr = unsafe { cudarc::driver::result::malloc_host(n * 4, 0) }.ok()? as usize;
+        if for_graph {
+            gpu.pf_rope_pinned = (ptr, n);
+        } else {
+            gpu.pf_rope_scratch = (ptr, n);
+        }
+    }
+    // SAFETY: `ptr` is a live page-locked allocation of at least `rope.len()`
+    // f32 (checked above) that no Rust reference aliases; the destination is
+    // a sub-range of `x_arena` the caller sized with `ensure_arenas`.
+    unsafe {
+        let staging = std::slice::from_raw_parts_mut(ptr as *mut f32, rope.len());
+        staging.copy_from_slice(rope);
+        let stream = Arc::clone(&gpu.stream);
+        let (base, g) = DevicePtr::device_ptr(&gpu.x_arena, &stream);
+        drop(g);
+        cudarc::driver::result::memcpy_htod_async(
+            base + (at * 4) as u64,
+            staging,
+            stream.cu_stream(),
+        )
+        .ok()?;
+    }
+    Some(())
 }
 
 /// Dense fused prefill attention: keep activations on device (Metal-style).
@@ -141,6 +321,10 @@ pub(super) fn try_prefill_attn_fused_dev(
         return None;
     }
     // Flatten [[sin,cos]; ...] without copy when layout matches.
+    // SAFETY: `[f32; 2]` has the size and alignment of two consecutive `f32`s with no
+    // padding, so `req.ropes` is a valid `[f32]` of twice its length. We read
+    // `m * pairs * 2` floats, and `req.ropes.len() >= m * pairs` was checked just above.
+    // The slice borrows from `req`, which outlives this function, and is read-only.
     let rope_host: &[f32] =
         unsafe { std::slice::from_raw_parts(req.ropes.as_ptr() as *const f32, m * pairs * 2) };
 
@@ -157,29 +341,30 @@ pub(super) fn try_prefill_attn_fused_dev(
         let rope_at = m * hidden;
         let qn_at = rope_at + m * pairs * 2;
         let kn_at = qn_at + hd;
-        let qb_at = kn_at + hd;
-        let kb_at = qb_at + q_dim;
-        let vb_at = kb_at + kv;
-        let x_need = if req.attn_bias.is_some() {
-            (vb_at + kv) * 4
-        } else {
-            (kn_at + hd) * 4
-        };
+        let x_need = (kn_at + hd) * 4;
         gpu.ensure_arenas(x_need, y_need)?;
 
         // attn RMSNorm: pf_x -> pf_hs
         {
-            let w = norm_f32_bytes(fusion.attn_norm, hidden)?;
-            rmsnorm_pf_x_into_hs(gpu, &w, hidden, m, req.eps)?;
+            rmsnorm_pf_x_into_hs(gpu, fusion.attn_norm, hidden, m, req.eps)?;
         }
-        if gpu.pf_rope_n != rope_host.len() {
-            gpu.stream
-                .memcpy_htod(
-                    rope_host,
-                    &mut gpu.x_arena.slice_mut(rope_at..rope_at + rope_host.len()),
-                )
-                .ok()?;
+        let rope_src = rope_host.as_ptr() as usize;
+        if gpu.pf_rope_n != rope_host.len() || gpu.pf_rope_src != rope_src {
+            if gpu.pf_rope_src == 0 {
+                upload_rope_pinned(gpu, rope_host, rope_at)?;
+            } else {
+                // A second table mid-chunk (Gemma 3's local layers): a plain
+                // copy, so the pinned staging of a copy still in flight is
+                // not overwritten.
+                gpu.stream
+                    .memcpy_htod(
+                        rope_host,
+                        &mut gpu.x_arena.slice_mut(rope_at..rope_at + rope_host.len()),
+                    )
+                    .ok()?;
+            }
             gpu.pf_rope_n = rope_host.len();
+            gpu.pf_rope_src = rope_src;
         }
 
         let (wq_c, wq_o) = resolve_w(gpu, req.wq.1)?;
@@ -188,87 +373,99 @@ pub(super) fn try_prefill_attn_fused_dev(
         let (wo_c, wo_o) = resolve_w(gpu, req.wo.1)?;
         launch_gemm_dequant(
             gpu,
-            req.wq.0,
-            wq_c,
-            wq_o,
-            hidden,
-            q_dim,
-            m,
-            true,
-            &[],
-            q_at,
-            false,
-            true,
-            None,
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.wq.0,
+                    loc: WeightLoc {
+                        chunk: wq_c,
+                        off: wq_o,
+                    },
+                    n_in: hidden,
+                    n_out: q_dim,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: q_at,
+                reuse_x_f16: false,
+                x_from_pf_hs: true,
+                x_dev_override: None,
+            },
         )?;
         launch_gemm_dequant(
             gpu,
-            req.wk.0,
-            wk_c,
-            wk_o,
-            hidden,
-            kv,
-            m,
-            true,
-            &[],
-            k_at,
-            true,
-            true,
-            None,
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.wk.0,
+                    loc: WeightLoc {
+                        chunk: wk_c,
+                        off: wk_o,
+                    },
+                    n_in: hidden,
+                    n_out: kv,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: k_at,
+                reuse_x_f16: true,
+                x_from_pf_hs: true,
+                x_dev_override: None,
+            },
         )?;
         launch_gemm_dequant(
             gpu,
-            req.wv.0,
-            wv_c,
-            wv_o,
-            hidden,
-            kv,
-            m,
-            true,
-            &[],
-            v_at,
-            true,
-            true,
-            None,
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.wv.0,
+                    loc: WeightLoc {
+                        chunk: wv_c,
+                        off: wv_o,
+                    },
+                    n_in: hidden,
+                    n_out: kv,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: v_at,
+                reuse_x_f16: true,
+                x_from_pf_hs: true,
+                x_dev_override: None,
+            },
         )?;
 
         crate::gpu::cuda::ggml::prepare_for_cudarc();
         let stream = Arc::clone(&gpu.stream);
-        // Stage head-norm weights before taking device ptrs (borrowck).
-        if let Some(wn) = req.q_norm {
-            if wn.len() < hd {
-                return None;
-            }
-            stream
-                .memcpy_htod(&wn[..hd], &mut gpu.x_arena.slice_mut(qn_at..qn_at + hd))
-                .ok()?;
-        }
-        if let Some(wn) = req.k_norm {
-            if wn.len() < hd {
-                return None;
-            }
-            stream
-                .memcpy_htod(&wn[..hd], &mut gpu.x_arena.slice_mut(kn_at..kn_at + hd))
-                .ok()?;
-        }
+        // Head-norm weights: persistent device copies (no per-layer H2D).
+        let qn_dev = match req.q_norm {
+            Some(wn) if wn.len() >= hd => Some(dev_f32(gpu, wn.as_ptr() as usize, &wn[..hd])?),
+            Some(_) => return None,
+            None => None,
+        };
+        let kn_dev = match req.k_norm {
+            Some(wn) if wn.len() >= hd => Some(dev_f32(gpu, wn.as_ptr() as usize, &wn[..hd])?),
+            Some(_) => return None,
+            None => None,
+        };
         if let Some((qb, kb, vb)) = req.attn_bias {
-            let qb = norm_f32_bytes(qb, q_dim)?;
-            let kb = norm_f32_bytes(kb, kv)?;
-            let vb = norm_f32_bytes(vb, kv)?;
-            stream
-                .memcpy_htod(&qb, &mut gpu.x_arena.slice_mut(qb_at..qb_at + q_dim))
-                .ok()?;
-            stream
-                .memcpy_htod(&kb, &mut gpu.x_arena.slice_mut(kb_at..kb_at + kv))
-                .ok()?;
-            stream
-                .memcpy_htod(&vb, &mut gpu.x_arena.slice_mut(vb_at..vb_at + kv))
-                .ok()?;
+            // Persistent device copies, like the head norms. The per-layer
+            // pageable H2D into `x_arena` this replaces was not replayable:
+            // every layer shared one destination and the source was a host
+            // temporary, so a replayed prefill graph did not add the bias the
+            // uncaptured run added (qwen2 prefill logits changed from run to
+            // run; ALLPAKA_PF_GRAPH=0 was stable).
+            let qb_dev = dev_norm_bytes(gpu, qb, q_dim)?;
+            let kb_dev = dev_norm_bytes(gpu, kb, kv)?;
+            let vb_dev = dev_norm_bytes(gpu, vb, kv)?;
             let f = gpu.func_owned("add_bias_rows_f32")?;
             let (ybase, _yg) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
-            let (xbase, _xg) = DevicePtr::device_ptr(&gpu.x_arena, &stream);
             let m_u = m as u32;
-            for (off, bias_off, n) in [(q_at, qb_at, q_dim), (k_at, kb_at, kv), (v_at, vb_at, kv)] {
+            for (off, bp, n) in [
+                (q_at, qb_dev, q_dim),
+                (k_at, kb_dev, kv),
+                (v_at, vb_dev, kv),
+            ] {
                 let n_u = n as u32;
                 let cfg = LaunchConfig {
                     grid_dim: (n_u.div_ceil(256), m_u, 1),
@@ -276,7 +473,6 @@ pub(super) fn try_prefill_attn_fused_dev(
                     shared_mem_bytes: 0,
                 };
                 let xp = ybase + (off * 4) as u64;
-                let bp = xbase + (bias_off * 4) as u64;
                 unsafe {
                     stream
                         .launch_builder_pdl(&f)
@@ -294,7 +490,84 @@ pub(super) fn try_prefill_attn_fused_dev(
             let (ybase, _yg) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
             let (xbase, _xg) = DevicePtr::device_ptr(&gpu.x_arena, &stream);
 
-            if req.q_norm.is_some() {
+            // Batched decode rows store K per session below, after RoPE.
+            let fused_nr = req.multi.is_none()
+                && crate::runtime::get().cuda_pf_norm_rope
+                && matches!(
+                    (hd, rot),
+                    (128, 128) | (128, 64) | (64, 64) | (256, 256) | (256, 128)
+                );
+            if fused_nr {
+                // Q in place; K straight into the f16 cache (replaces the
+                // separate norm, rope and K store_kv launches).
+                let f = gpu.func_owned("prefill_norm_rope")?;
+                let rp = xbase + (rope_at * 4) as u64;
+                let (cache_p, cg) = DevicePtr::device_ptr(&req.cache.buf, &stream);
+                drop(cg);
+                let m_u = m as u32;
+                let hd_u = hd as u32;
+                let rot_u = rot as u32;
+                let eps = req.eps;
+                let kv_u = kv as u32;
+                let pos_u = req.base as u32;
+                for (at, heads, wn, store, coff) in [
+                    (q_at, req.n_heads, qn_dev, 0u32, 0u64),
+                    (k_at, req.n_kv_heads, kn_dev, 1u32, req.k_off as u64),
+                ] {
+                    let xp = ybase + (at * 4) as u64;
+                    let wp = wn.unwrap_or(0);
+                    let has = wn.is_some() as u32;
+                    let heads_u = heads as u32;
+                    let threads = (m * heads * 32) as u32;
+                    let cfg = LaunchConfig {
+                        grid_dim: (threads.div_ceil(128), 1, 1),
+                        block_dim: (128, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    unsafe {
+                        stream
+                            .launch_builder_pdl(&f)
+                            .arg(&xp)
+                            .arg(&wp)
+                            .arg(&rp)
+                            .arg(&cache_p)
+                            .arg(&coff)
+                            .arg(&m_u)
+                            .arg(&heads_u)
+                            .arg(&hd_u)
+                            .arg(&rot_u)
+                            .arg(&eps)
+                            .arg(&has)
+                            .arg(&kv_u)
+                            .arg(&pos_u)
+                            .arg(&store)
+                            .launch_pdl(cfg)
+                    }
+                    .ok()?;
+                }
+                let f = gpu.func_owned("store_kv_batch_f16")?;
+                let cfg = LaunchConfig {
+                    grid_dim: (kv_u.div_ceil(256), m_u, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let v_off = req.v_off as u64;
+                let vp = ybase + (v_at * 4) as u64;
+                unsafe {
+                    stream
+                        .launch_builder_pdl(&f)
+                        .arg(&req.cache.buf)
+                        .arg(&vp)
+                        .arg(&v_off)
+                        .arg(&kv_u)
+                        .arg(&m_u)
+                        .arg(&pos_u)
+                        .launch_pdl(cfg)
+                }
+                .ok()?;
+            }
+
+            if !fused_nr && req.q_norm.is_some() {
                 let f = gpu.func_owned("rmsnorm_f32")?;
                 let n_u = hd as u32;
                 let rows_u = (m * req.n_heads) as u32;
@@ -305,7 +578,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                     shared_mem_bytes: 0,
                 };
                 let xp = ybase + (q_at * 4) as u64;
-                let wp = xbase + (qn_at * 4) as u64;
+                let wp = qn_dev?;
                 unsafe {
                     stream
                         .launch_builder_pdl(&f)
@@ -318,13 +591,12 @@ pub(super) fn try_prefill_attn_fused_dev(
                 }
                 .ok()?;
             }
-            {
+            if !fused_nr {
                 let f = gpu.func_owned("rope_neox_batch")?;
                 let m_u = m as u32;
                 let heads_u = req.n_heads as u32;
                 let hd_u = hd as u32;
                 let rot_u = rot as u32;
-                let rope_norm_u = req.rope_norm as u32;
                 let cfg = LaunchConfig {
                     grid_dim: (heads_u, m_u, 1),
                     block_dim: (256, 1, 1),
@@ -341,12 +613,11 @@ pub(super) fn try_prefill_attn_fused_dev(
                         .arg(&heads_u)
                         .arg(&hd_u)
                         .arg(&rot_u)
-                        .arg(&rope_norm_u)
                         .launch_pdl(cfg)
                 }
                 .ok()?;
             }
-            if req.k_norm.is_some() {
+            if !fused_nr && req.k_norm.is_some() {
                 let f = gpu.func_owned("rmsnorm_f32")?;
                 let n_u = hd as u32;
                 let rows_u = (m * req.n_kv_heads) as u32;
@@ -357,7 +628,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                     shared_mem_bytes: 0,
                 };
                 let xp = ybase + (k_at * 4) as u64;
-                let wp = xbase + (kn_at * 4) as u64;
+                let wp = kn_dev?;
                 unsafe {
                     stream
                         .launch_builder_pdl(&f)
@@ -370,13 +641,12 @@ pub(super) fn try_prefill_attn_fused_dev(
                 }
                 .ok()?;
             }
-            {
+            if !fused_nr {
                 let f = gpu.func_owned("rope_neox_batch")?;
                 let m_u = m as u32;
                 let heads_u = req.n_kv_heads as u32;
                 let hd_u = hd as u32;
                 let rot_u = rot as u32;
-                let rope_norm_u = req.rope_norm as u32;
                 let cfg = LaunchConfig {
                     grid_dim: (heads_u, m_u, 1),
                     block_dim: (256, 1, 1),
@@ -393,12 +663,141 @@ pub(super) fn try_prefill_attn_fused_dev(
                         .arg(&heads_u)
                         .arg(&hd_u)
                         .arg(&rot_u)
-                        .arg(&rope_norm_u)
                         .launch_pdl(cfg)
                 }
                 .ok()?;
             }
-            {
+            if let Some(rows) = req.multi {
+                // One decode token per session: store its K/V in that
+                // session's cache and attend over that cache alone.
+                if rows.len() != m {
+                    return None;
+                }
+                let f_store = gpu.func_owned("store_kv_pair_f16_dpos")?;
+                let f_attn = gpu.func_owned("attend_gqa_batch")?;
+                let kv_u = kv as u32;
+                let one = 1u32;
+                let kv_dim = req.kv_dim as u32;
+                let head_dim = hd as u32;
+                let n_q = req.n_heads as u32;
+                let group = (req.n_heads / req.n_kv_heads.max(1)) as u32;
+                let scale = req.scale;
+                // Each row's position on the device, from the staging
+                // `multi_stage` filled: the K/V stores and the FA mask read it
+                // there, so a captured step replays at new positions (and the
+                // bridge's host-written mask cannot race queued rows).
+                if gpu.multi_dpos_pinned == 0 || rows.len() > MULTI_MAX {
+                    return None;
+                }
+                let d_pos_base = {
+                    let dev = gpu.multi_dpos_dev.as_ref()?;
+                    let (p, dg) = DevicePtr::device_ptr(dev, &stream);
+                    drop(dg);
+                    p
+                };
+                // SAFETY: page-locked staging of MULTI_MAX u32 (rows.len() checked).
+                unsafe {
+                    let staging =
+                        std::slice::from_raw_parts(gpu.multi_dpos_pinned as *const u32, rows.len());
+                    cudarc::driver::result::memcpy_htod_async(
+                        d_pos_base,
+                        staging,
+                        stream.cu_stream(),
+                    )
+                }
+                .ok()?;
+                // Every row in one FA slot (the longest row's bucket): rows in
+                // different slots corrupted one another's first step.
+                let longest = rows.iter().map(|r| r.pos + 1).max().unwrap_or(1);
+                let fa_one_slot = crate::gpu::cuda::ggml::enabled()
+                    && crate::gpu::cuda::ggml::fa_set_min_kv(longest.next_power_of_two());
+                let store_cfg = LaunchConfig {
+                    grid_dim: (kv_u.div_ceil(256), 1, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                if !fa_one_slot && gpu.pf_capturing {
+                    // The fallback attention below takes positions from the host.
+                    gpu.pf_capture_bad = true;
+                }
+                for (i, row) in rows.iter().enumerate() {
+                    let pos_u = row.pos as u32;
+                    let k_off = row.k_off as u64;
+                    let v_off = row.v_off as u64;
+                    let kp = ybase + ((k_at + i * kv) * 4) as u64;
+                    let vp = ybase + ((v_at + i * kv) * 4) as u64;
+                    let dp = d_pos_base + (i * 4) as u64;
+                    unsafe {
+                        stream
+                            .launch_builder_pdl(&f_store)
+                            .arg(&row.cache.buf)
+                            .arg(&kp)
+                            .arg(&vp)
+                            .arg(&k_off)
+                            .arg(&v_off)
+                            .arg(&dp)
+                            .arg(&kv_u)
+                            .arg(&kv_u)
+                            .launch_pdl(store_cfg)
+                    }
+                    .ok()?;
+                    let qp = ybase + ((q_at + i * q_dim) * 4) as u64;
+                    let op = ybase + ((attn_at + i * q_dim) * 4) as u64;
+                    // llama.cpp's split-KV flash attention, as the
+                    // single-session decode uses; the prefill kernel below
+                    // parallelises a single row poorly (387 us a call).
+                    if fa_one_slot {
+                        // Each row's mask from its own device position: the
+                        // bridge skips the rebuild when the host base repeats.
+                        crate::gpu::cuda::ggml::reset_mask_lim();
+                        crate::gpu::cuda::ggml::prepare_from_cudarc(&stream);
+                        let (cache_p, cg) = DevicePtr::device_ptr(&row.cache.buf, &stream);
+                        drop(cg);
+                        if crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
+                            q: qp,
+                            k: cache_p + k_off * 2,
+                            v: cache_p + v_off * 2,
+                            out: op,
+                            m: 1,
+                            shape: FaShape {
+                                head_dim: hd,
+                                n_q_heads: req.n_heads,
+                                n_kv_heads: req.n_kv_heads.max(1),
+                                base: row.pos,
+                                kv_dim: req.kv_dim,
+                                scale,
+                            },
+                            d_pos: Some(d_pos_base + (i * 4) as u64),
+                        }) {
+                            crate::gpu::cuda::ggml::mark_cudarc_dirty();
+                            continue;
+                        }
+                    }
+                    unsafe {
+                        stream
+                            .launch_builder_pdl(&f_attn)
+                            .arg(&qp)
+                            .arg(&row.cache.buf)
+                            .arg(&op)
+                            .arg(&k_off)
+                            .arg(&v_off)
+                            .arg(&kv_dim)
+                            .arg(&head_dim)
+                            .arg(&n_q)
+                            .arg(&group)
+                            .arg(&one)
+                            .arg(&pos_u)
+                            .arg(&scale)
+                            .launch_pdl(attend_gqa_launch_cfg(n_q, 1))
+                    }
+                    .ok()?;
+                }
+                if fa_one_slot {
+                    crate::gpu::cuda::ggml::fa_set_min_kv(0);
+                }
+                crate::gpu::cuda::ggml::mark_cudarc_dirty();
+            }
+            if !fused_nr && req.multi.is_none() {
                 let f = gpu.func_owned("store_kv_batch_f16")?;
                 let kv_u = kv as u32;
                 let m_u = m as u32;
@@ -437,7 +836,7 @@ pub(super) fn try_prefill_attn_fused_dev(
                 }
                 .ok()?;
             }
-            {
+            if req.multi.is_none() {
                 let group_usz = req.n_heads / req.n_kv_heads.max(1);
                 let k_off = req.k_off as u64;
                 let v_off = req.v_off as u64;
@@ -458,23 +857,29 @@ pub(super) fn try_prefill_attn_fused_dev(
                     drop(cg);
                     let k_dev = cache_p + k_off * 2;
                     let v_dev = cache_p + v_off * 2;
-                    used_fa = crate::gpu::cuda::ggml::flash_attn(
-                        qp,
-                        k_dev,
-                        v_dev,
-                        op,
-                        hd,
-                        req.n_heads,
-                        req.n_kv_heads.max(1),
+                    used_fa = crate::gpu::cuda::ggml::flash_attn(&FlashAttnReq {
+                        q: qp,
+                        k: k_dev,
+                        v: v_dev,
+                        out: op,
                         m,
-                        req.base,
-                        req.kv_dim,
-                        scale,
-                        None,
-                    );
+                        shape: FaShape {
+                            head_dim: hd,
+                            n_q_heads: req.n_heads,
+                            n_kv_heads: req.n_kv_heads.max(1),
+                            base: req.base,
+                            kv_dim: req.kv_dim,
+                            scale,
+                        },
+                        d_pos: None,
+                    });
                     if used_fa {
                         crate::gpu::cuda::ggml::mark_cudarc_dirty();
                     }
+                }
+                if !used_fa && ATTN_WINDOW.load(Ordering::Relaxed) != 0 {
+                    // Only the flash-attention mask carries the window.
+                    return None;
                 }
                 if !used_fa {
                     let use_kv = false && attend_use_kv_fused(hd, group_usz);
@@ -523,41 +928,44 @@ pub(super) fn try_prefill_attn_fused_dev(
         };
         launch_gemm_dequant(
             gpu,
-            req.wo.0,
-            wo_c,
-            wo_o,
-            q_dim,
-            hidden,
-            m,
-            true,
-            &[],
-            proj_at,
-            false,
-            false,
-            Some(attn_dev),
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.wo.0,
+                    loc: WeightLoc {
+                        chunk: wo_c,
+                        off: wo_o,
+                    },
+                    n_in: q_dim,
+                    n_out: hidden,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: proj_at,
+                reuse_x_f16: false,
+                x_from_pf_hs: false,
+                x_dev_override: Some(attn_dev),
+            },
         )?;
         crate::gpu::cuda::ggml::prepare_for_cudarc();
-        // residual into pf_x
+        // residual into pf_x + FFN RMSNorm into pf_hs, one launch
         {
-            let f_add = gpu.func_owned("residual_add")?;
-            let n = (m * hidden) as u32;
-            let cfg = CudaGpu::cfg_1d(n, 256);
-            let mut a = gpu.pf_x.slice_mut(0..m * hidden);
-            let b = gpu.y_arena.slice(proj_at..proj_at + m * hidden);
-            unsafe {
-                stream
-                    .launch_builder_pdl(&f_add)
-                    .arg(&mut a)
-                    .arg(&b)
-                    .arg(&n)
-                    .launch_pdl(cfg)
+            let proj_dev = {
+                let (p, g) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
+                drop(g);
+                p + (proj_at * 4) as u64
+            };
+            if !fusion.post_attn_norm.is_empty() {
+                rmsnorm_rows_dev(gpu, proj_dev, fusion.post_attn_norm, hidden, m, req.eps)?;
             }
-            .ok()?;
-        }
-        // FFN RMSNorm into pf_hs
-        {
-            let w = norm_f32_bytes(fusion.ffn_norm, hidden)?;
-            rmsnorm_pf_x_into_hs(gpu, &w, hidden, m, req.eps)?;
+            if crate::runtime::get().cuda_pf_defer_add {
+                add_rmsnorm_pf(gpu, proj_dev, fusion.ffn_norm, hidden, m, req.eps)?;
+            } else {
+                gpu.pf_flush_add()?;
+                gpu.pf_pending_add = Some((proj_dev, m * hidden));
+                gpu.pf_flush_add()?;
+                rmsnorm_pf_x_into_hs(gpu, fusion.ffn_norm, hidden, m, req.eps)?;
+            }
         }
         if fusion.n_expert == 0 {
             // No sync: dense FFN continues from pf_hs on-device.
@@ -614,40 +1022,52 @@ pub(super) fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         let (d_c, d_o) = resolve_w(gpu, req.down.1)?;
         launch_gemm_dequant(
             gpu,
-            req.gate.0,
-            g_c,
-            g_o,
-            hidden,
-            ffn,
-            m,
-            true,
-            &[],
-            gate_at,
-            false,
-            true,
-            None,
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.gate.0,
+                    loc: WeightLoc {
+                        chunk: g_c,
+                        off: g_o,
+                    },
+                    n_in: hidden,
+                    n_out: ffn,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: gate_at,
+                reuse_x_f16: false,
+                x_from_pf_hs: true,
+                x_dev_override: None,
+            },
         )?;
         launch_gemm_dequant(
             gpu,
-            req.up.0,
-            u_c,
-            u_o,
-            hidden,
-            ffn,
-            m,
-            true,
-            &[],
-            up_at,
-            true,
-            true,
-            None,
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.up.0,
+                    loc: WeightLoc {
+                        chunk: u_c,
+                        off: u_o,
+                    },
+                    n_in: hidden,
+                    n_out: ffn,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: up_at,
+                reuse_x_f16: true,
+                x_from_pf_hs: true,
+                x_dev_override: None,
+            },
         )?;
         crate::gpu::cuda::ggml::prepare_for_cudarc();
         let stream = Arc::clone(&gpu.stream);
         {
             let (ybase, _yg) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
             {
-                let f = gpu.func_owned("swiglu")?;
+                let f = gpu.func_owned(if comb.gelu { "geglu_tanh" } else { "swiglu" })?;
                 let n = (m * ffn) as u32;
                 let cfg = CudaGpu::cfg_1d(n, 256);
                 let gp = ybase + (gate_at * 4) as u64;
@@ -671,21 +1091,41 @@ pub(super) fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         };
         launch_gemm_dequant(
             gpu,
-            req.down.0,
-            d_c,
-            d_o,
-            ffn,
-            hidden,
-            m,
-            true,
-            &[],
-            down_at,
-            false,
-            false,
-            Some(gate_dev),
+            &GemmReq {
+                w: DevWeight {
+                    ty: req.down.0,
+                    loc: WeightLoc {
+                        chunk: d_c,
+                        off: d_o,
+                    },
+                    n_in: ffn,
+                    n_out: hidden,
+                },
+                m,
+                x_already_in_arena: true,
+                x_elems: &[],
+                y_off: down_at,
+                reuse_x_f16: false,
+                x_from_pf_hs: false,
+                x_dev_override: Some(gate_dev),
+            },
         )?;
         crate::gpu::cuda::ggml::prepare_for_cudarc();
-        {
+        if let Some((w, eps)) = comb.post_norm {
+            let p = {
+                let (p, g) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
+                drop(g);
+                p + (down_at * 4) as u64
+            };
+            rmsnorm_rows_dev(gpu, p, w, hidden, m, eps)?;
+        }
+        if crate::runtime::get().cuda_pf_defer_add {
+            // Fold the residual into the next layer's attention RMSNorm.
+            let (p, g) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
+            drop(g);
+            gpu.pf_flush_add()?;
+            gpu.pf_pending_add = Some((p + (down_at * 4) as u64, m * hidden));
+        } else {
             let f_add = gpu.func_owned("residual_add")?;
             let n = (m * hidden) as u32;
             let cfg = CudaGpu::cfg_1d(n, 256);
@@ -709,7 +1149,9 @@ pub(super) fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
 pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
     let hidden = req.hs.len() / req.m.max(1);
     let hd = req.head_dim;
-    if !matches!(hd, 64 | 128 | 256) || req.m < MM_MIN_M {
+    // A batched decode step (`multi`) is small by nature; the per-row
+    // attention it needs exists only on the fused path below.
+    if !matches!(hd, 64 | 128 | 256) || (req.m < MM_MIN_M && req.multi.is_none()) {
         return None;
     }
     let q_dim = req.n_heads * hd;
@@ -726,7 +1168,17 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             if let Some(out) = try_prefill_attn_fused_dev(req, f) {
                 return Some(out);
             }
+            if req.multi.is_some() {
+                return None;
+            }
         }
+        if !f.post_attn_norm.is_empty() {
+            return None;
+        }
+    }
+    // The paths below have no sliding window.
+    if ATTN_WINDOW.load(Ordering::Relaxed) != 0 {
+        return None;
     }
 
     let hs_owned = if let Some(f) = &req.fusion {
@@ -734,8 +1186,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             if !gpu.pf_active || gpu.pf_len < req.m * hidden {
                 return None;
             }
-            let w = norm_f32_bytes(f.attn_norm, hidden)?;
-            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
+            rmsnorm_pf_x_into_hs(gpu, f.attn_norm, hidden, req.m, req.eps)?;
             gpu.sync()?;
             gpu.stream
                 .clone_dtoh(&gpu.pf_hs.slice(0..req.m * hidden))
@@ -812,22 +1263,14 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             if let Some(wn) = req.q_norm {
                 crate::ops::rmsnorm(qh, wn, req.eps);
             }
-            if req.rope_norm {
-                crate::ops::rope_norm_cached_from_array(&mut qh[..req.rot_dim.min(hd)], rope);
-            } else {
-                crate::ops::rope_neox_cached_from_array(&mut qh[..req.rot_dim.min(hd)], rope);
-            }
+            crate::ops::rope_neox_cached_from_array(&mut qh[..req.rot_dim.min(hd)], rope);
         }
         for h in 0..req.n_kv_heads {
             let kh = &mut k[row * kv + h * hd..row * kv + (h + 1) * hd];
             if let Some(wn) = req.k_norm {
                 crate::ops::rmsnorm(kh, wn, req.eps);
             }
-            if req.rope_norm {
-                crate::ops::rope_norm_cached_from_array(&mut kh[..req.rot_dim.min(hd)], rope);
-            } else {
-                crate::ops::rope_neox_cached_from_array(&mut kh[..req.rot_dim.min(hd)], rope);
-            }
+            crate::ops::rope_neox_cached_from_array(&mut kh[..req.rot_dim.min(hd)], rope);
         }
     }
     store_kv_batch(req.cache, &k, req.k_off, req.base, req.kv_dim, req.m)?;
@@ -905,6 +1348,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 return None;
             }
             gpu.ensure_arenas(proj.len() * 4, 4)?;
+            gpu.pf_flush_add()?;
             gpu.stream
                 .memcpy_htod(&proj, &mut gpu.y_arena.slice_mut(0..proj.len()))
                 .ok()?;
@@ -924,8 +1368,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
                 }
                 .ok()?;
             }
-            let w = norm_f32_bytes(f.ffn_norm, hidden)?;
-            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
+            rmsnorm_pf_x_into_hs(gpu, f.ffn_norm, hidden, req.m, req.eps)?;
             gpu.sync()?;
             if f.n_expert == 0 {
                 return Some(Vec::new());
@@ -944,15 +1387,14 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
     if !is_attached() {
         return None;
     }
-    if std::env::var_os("ALLPAKA_GDN_ZERO").is_some() {
+    if crate::runtime::get().gdn_zero {
         // Mirror CPU/Metal kill switch: zero branch, still honor fusion residual path.
         if let Some(f) = &req.fusion {
             return with_gpu(|gpu| {
                 if !gpu.pf_active || gpu.pf_len < req.m * req.hidden {
                     return None;
                 }
-                let w = norm_f32_bytes(f.ffn_norm, req.hidden)?;
-                rmsnorm_pf_x_into_hs(gpu, &w, req.hidden, req.m, req.eps)?;
+                rmsnorm_pf_x_into_hs(gpu, f.ffn_norm, req.hidden, req.m, req.eps)?;
                 gpu.sync()?;
                 if f.n_expert == 0 {
                     return Some(Vec::new());
@@ -1006,8 +1448,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
             if !gpu.pf_active || gpu.pf_len < req.m * hidden {
                 return None;
             }
-            let w = norm_f32_bytes(f.attn_norm, hidden)?;
-            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
+            rmsnorm_pf_x_into_hs(gpu, f.attn_norm, hidden, req.m, req.eps)?;
             gpu.sync()?;
             gpu.stream
                 .clone_dtoh(&gpu.pf_hs.slice(0..req.m * hidden))
@@ -1322,6 +1763,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 return None;
             }
             gpu.ensure_arenas(proj.len() * 4, req.m * f.n_expert.max(1) * 4)?;
+            gpu.pf_flush_add()?;
             gpu.stream
                 .memcpy_htod(&proj, &mut gpu.y_arena.slice_mut(0..proj.len()))
                 .ok()?;
@@ -1341,8 +1783,7 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
                 }
                 .ok()?;
             }
-            let w = norm_f32_bytes(f.ffn_norm, hidden)?;
-            rmsnorm_pf_x_into_hs(gpu, &w, hidden, req.m, req.eps)?;
+            rmsnorm_pf_x_into_hs(gpu, f.ffn_norm, hidden, req.m, req.eps)?;
             gpu.sync()?;
             if f.n_expert == 0 {
                 return Some(Vec::new());

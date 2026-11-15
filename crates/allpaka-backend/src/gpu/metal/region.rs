@@ -16,6 +16,12 @@ pub struct SharedRegion {
 }
 
 impl SharedRegion {
+    /// No prefill graphs on this backend.
+    #[inline]
+    pub fn graph_id(&self) -> u64 {
+        0
+    }
+
     /// Memory architecture backing this region (`UMA` zero-copy shared memory).
     #[inline]
     pub const fn architecture(&self) -> crate::memory::MemoryArchitecture {
@@ -39,7 +45,14 @@ impl SharedRegion {
 // The buffer is an ObjC refcounted handle; the region it wraps is owned by
 // the caller, who is responsible for not writing it while a kernel reads it
 // (the forward pass stores the step, then attends, in that order).
+// SAFETY: `MTLBuffer` objects are documented thread-safe to retain, release
+// and read `contents()` from any thread; the struct holds no thread-affine
+// state. Moving it to another thread only moves the retained handle.
 unsafe impl Send for SharedRegion {}
+// SAFETY: every `&self` method only reads the handle or `len`; the bytes
+// behind it are written only through `upload_region_range`, which takes
+// `&mut SharedRegion`, or by kernels the caller orders against its own
+// CPU accesses (see above), so shared references never race on the memory.
 unsafe impl Sync for SharedRegion {}
 
 /// Wrap a page-aligned allocation for the GPU. `region` must start on a page
@@ -73,6 +86,13 @@ pub fn upload_region_range(region: &mut SharedRegion, offset: usize, data: &[u8]
     if data.is_empty() {
         return true;
     }
+    // SAFETY: `contents()` is the base of the caller's allocation wrapped
+    // no-copy in `wrap_region`, `len` bytes long and alive while the region is
+    // (the caller owns it and must outlive the wrapper). The check above keeps
+    // `offset + data.len() <= len`, so both `add` and the copy stay in bounds;
+    // u8 needs no alignment. `data` is either a different allocation or, as
+    // every caller in kv.rs does on UMA, this exact range of the region itself,
+    // which the `ptr::eq` test skips, so the copy never sees partial overlap.
     unsafe {
         let dst = (region.buf.contents() as *mut u8).add(offset);
         if !std::ptr::eq(dst, data.as_ptr()) {
@@ -89,6 +109,9 @@ pub fn download_region_range(region: &SharedRegion, offset: usize, dst: &mut [u8
     if dst.is_empty() {
         return true;
     }
+    // SAFETY: as in `upload_region_range`: `offset + dst.len() <= len` keeps
+    // the read inside the wrapped allocation, and `dst` is either disjoint
+    // from it or exactly the same range (UMA callers), which is skipped.
     unsafe {
         let src = (region.buf.contents() as *const u8).add(offset);
         if !std::ptr::eq(src, dst.as_ptr()) {

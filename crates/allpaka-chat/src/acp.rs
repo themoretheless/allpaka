@@ -124,6 +124,8 @@ pub(crate) async fn dispatch_rpc(app: &App, req: &Value) -> Option<Value> {
                     kind: ActionKind::Stop,
                     text: String::new(),
                     settings: None,
+                    citations: Vec::new(),
+                    context_budget: None,
                 });
             }
             if let Ok(shared) = get_session(app, sid) {

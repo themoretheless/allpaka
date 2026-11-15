@@ -43,8 +43,8 @@ macro_rules! cstamp {
 
 mod telemetry;
 
+pub use super::common::{gpu_time_stats, stats};
 use telemetry::*;
-pub use telemetry::{gpu_time_stats, stats};
 
 mod select;
 use select::*;
@@ -119,6 +119,10 @@ pub fn indexed_matvec_bandwidth(
     let x_elems = n_in.max(slots);
     let y_elems = n_out * slots + slots;
     gpu.ensure_arenas(x_elems * 4, y_elems * 4);
+    // SAFETY: `ensure_arenas(x_elems * 4, y_elems * 4)` with
+    // `x_elems >= n_in` and `y_elems >= slots` covers both loops; contents are
+    // page-aligned for f32/u32, and the arenas are idle (arena rule,
+    // `Gpu::x_arena`).
     unsafe {
         let xp = gpu.x_arena.contents() as *mut f32;
         for i in 0..n_in {
@@ -390,6 +394,10 @@ pub fn ffn_batch(reqs: &[FfnReq]) -> Option<Vec<Vec<f32>>> {
         states.push(per_mat);
     }
 
+    // SAFETY: `r.x.len() == m * hidden` was checked per request, and each
+    // `x_off` was planned with `align(m * hidden * 4)` bytes inside `x_need`, the
+    // size given to `ensure_arenas`; the arena is idle (arena rule,
+    // `Gpu::x_arena`).
     unsafe {
         let xp = gpu.x_arena.contents() as *mut u8;
         for (r, p) in reqs.iter().zip(&plans) {
@@ -486,6 +494,9 @@ pub fn ffn_batch(reqs: &[FfnReq]) -> Option<Vec<Vec<f32>>> {
             .zip(&plans)
             .map(|(r, p)| {
                 let mut v = vec![0f32; r.m * r.hidden];
+                // SAFETY: the buffer was waited above; `out_off + m * hidden * 4` is the
+                // last region of this request's plan, inside `y_need`, and `v` holds
+                // `m * hidden` floats.
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         yp.add(p.out_off),

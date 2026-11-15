@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 const start=source.indexOf('let offlineScoresEpoch=0,'),end=source.indexOf('function verifyStudioMatrixJob(',start);
 assert(start>=0&&end>start);
 class Element {constructor(text=''){this.text=text;this.children=[];this.open=false;}append(...items){this.children.push(...items);}replaceChildren(...items){this.children=items;}}

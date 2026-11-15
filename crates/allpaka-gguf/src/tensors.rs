@@ -96,7 +96,7 @@ impl GgufFile {
                 .map_err(|e| GgufError::io_ctx(format!("opening {}", p.display()), e))?;
             let mut h = parse(&mut BufReader::new(&file))
                 .map_err(|e| e.with_context(format!("parsing {}", p.display())))?;
-            // Safety: the map is read-only; a concurrent writer to the file would
+            // SAFETY: the map is read-only; a concurrent writer to the file would
             // be undefined behaviour, which is the standard mmap trade every
             // GGUF-serving runtime makes.
             let mmap = unsafe { Mmap::map(&file) }

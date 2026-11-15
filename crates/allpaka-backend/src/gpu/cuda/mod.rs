@@ -3,8 +3,6 @@
 //! Public surface matches `stub.rs` / Metal exactly. Weights are copied into
 //! VRAM at attach time; KV and other shared regions are H2D-wrapped buffers.
 
-#![allow(clippy::too_many_arguments)]
-
 mod attn;
 mod decode;
 mod decode_fused;
@@ -18,12 +16,14 @@ mod runtime;
 
 use allpaka_dtype::GgmlType;
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
-use cudarc::driver::{CudaSlice, DevicePtr, LaunchConfig, PushKernelArg};
-use pdl::{LaunchArgsPdl, StreamPdlExt};
+use cudarc::driver::{CudaSlice, DevicePtr, LaunchConfig};
+use ggml::{FaShape, FlashAttnReq, HybridReplay};
+use pdl::StreamPdlExt;
 use runtime::{
     dq_fmt, launch_embed_row, launch_gemm_dequant, launch_matvec_q4k_2, launch_matvec_q4k_qkv,
     launch_matvec_y_ptr, note_call, q8_decode_enabled, resolve_w, row_bytes, run_matvec, try_init,
-    with_gpu, CudaGpu, CALLS, DISPATCHES, ENCODE_NS, GPU, GPU_BUSY_NS, MM_MIN_M, SCHED_NS, WAIT_NS,
+    with_gpu, ArenaMatvec, CudaGpu, DevWeight, GateUpReq, GemmReq, QkvReq, VCacheDst, WeightLoc,
+    GPU, MM_MIN_M,
 };
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -45,13 +45,21 @@ pub fn attach(mapping: &[u8]) -> bool {
     if try_init().is_none() {
         return false;
     }
-    with_gpu(|gpu| {
-        if gpu.covers(mapping.as_ptr() as usize, mapping.len()) {
-            return Some(true);
-        }
-        Some(gpu.add_mapping(mapping))
-    })
-    .unwrap_or(false)
+    with_gpu(|gpu| Some(gpu.attach_mapping(mapping))).unwrap_or(false)
+}
+
+/// Release one [`attach`] of `mapping`. CUDA copies weights into VRAM keyed
+/// by host address, so once the last owner lets go the copy must be dropped:
+/// a later model whose mmap or heap buffer lands at the same address would
+/// otherwise run on the old weights.
+pub fn detach(mapping: &[u8]) {
+    if GPU.get().is_none_or(Option::is_none) {
+        return;
+    }
+    let _ = with_gpu(|gpu| {
+        gpu.detach_mapping(mapping);
+        Some(())
+    });
 }
 
 /// Upload NeoX RoPE inv_freq once so decode can skip per-token rope H2D.
@@ -69,11 +77,41 @@ pub fn set_rope_inv_freq(inv_freq: &[f32]) -> bool {
             gpu.stream.memcpy_htod(inv_freq, buf).ok()?;
         }
         // Rope inputs changed — drop graphs.
-        gpu.decode_graph = None;
-        gpu.decode_fa_graphs = None;
-        gpu.decode_fa_attn = None;
-        gpu.decode_fa_kv_offs = None;
-        gpu.decode_fa_execs = None;
+        gpu.clear_decode_graphs();
+        gpu.decode_graph_key = 0;
+        Some(true)
+    })
+    .unwrap_or(false)
+}
+
+/// Sliding window for the prefill attention blocks that follow (Gemma 3's
+/// local layers); None = full causal. False when the attention cannot apply
+/// one, and the caller must not rely on it.
+pub fn set_attn_window(window: Option<usize>) -> bool {
+    let ok = ggml::enabled() && ggml::fa_set_window(window.unwrap_or(0));
+    ATTN_WINDOW.store(if ok { window.unwrap_or(0) } else { 0 }, Ordering::Relaxed);
+    ok
+}
+
+/// The window `set_attn_window` installed; kernels without one must decline
+/// while it is non-zero.
+pub(super) static ATTN_WINDOW: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Prefill GEMMs on quantized weights (see `ggml::set_quant_gemm`).
+pub fn set_quant_gemm(on: bool) -> bool {
+    ggml::set_quant_gemm(on)
+}
+
+/// Upload the local layers' RoPE inv_freq (Gemma 3); empty clears it.
+pub fn set_rope_inv_freq_swa(inv_freq: &[f32]) -> bool {
+    with_gpu(|gpu| {
+        gpu.d_rope_freq_swa = if inv_freq.is_empty() {
+            None
+        } else {
+            gpu.stream.clone_htod(inv_freq).ok()
+        };
+        gpu.clear_decode_graphs();
         gpu.decode_graph_key = 0;
         Some(true)
     })
@@ -87,13 +125,7 @@ pub fn has_device_rope_freq() -> bool {
 
 /// Prefer on-GPU token_embd dequant (skip host embd.row + x H2D). Opt-in: ALLPAKA_GPU_EMBED=1.
 pub fn prefer_gpu_embed() -> bool {
-    static PREFER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    is_attached()
-        && *PREFER.get_or_init(|| {
-            std::env::var("ALLPAKA_GPU_EMBED")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-        })
+    is_attached() && crate::runtime::get().cuda_gpu_embed
 }
 
 pub fn can_embed_on_gpu(ty: GgmlType, bytes: &[u8], n_in: usize) -> bool {
@@ -134,25 +166,18 @@ pub fn residency_status() -> (usize, bool) {
         .unwrap_or((0, false))
 }
 
+/// Bytes of VRAM in this backend's scratch arenas: activations, prefill and
+/// decode buffers, quantised-activation staging, attention partials. Weights
+/// are not included, and neither is what `allpaka_ggml.dll` allocates for
+/// itself (its f16 weight cache and ggml's pools).
 pub fn arena_bytes() -> usize {
-    0
+    let Some(Some(cell)) = GPU.get() else {
+        return 0;
+    };
+    cell.lock().map(|gpu| gpu.arena_bytes()).unwrap_or(0)
 }
 
-pub fn stats() -> (u64, u64, u64, u64) {
-    (
-        CALLS.load(Ordering::Relaxed),
-        DISPATCHES.load(Ordering::Relaxed),
-        ENCODE_NS.load(Ordering::Relaxed),
-        WAIT_NS.load(Ordering::Relaxed),
-    )
-}
-
-pub fn gpu_time_stats() -> (u64, u64) {
-    (
-        GPU_BUSY_NS.load(Ordering::Relaxed),
-        SCHED_NS.load(Ordering::Relaxed),
-    )
-}
+pub use super::common::{gpu_time_stats, stats};
 
 pub fn matvec(ty: GgmlType, w: &[u8], n_in: usize, n_out: usize, x: &[f32]) -> Option<Vec<f32>> {
     matvec_batch(&[MatvecReq {
@@ -183,6 +208,12 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
     if same_x && all_gemm && reqs.len() > 1 {
         return with_gpu(|gpu| {
             let x = reqs[0].x;
+            // Size both arenas for the whole batch first: growing one inside
+            // the loop reallocates it (zeroed), losing the outputs of the
+            // items already launched (Gemma's 15360-wide gate/up was the
+            // first shape to hit this).
+            let y_total: usize = reqs.iter().map(|r| r.m * r.n_out).sum();
+            gpu.ensure_arenas(x.len() * 4, y_total * 4)?;
             let mut y_off = 0usize;
             let mut offs = Vec::with_capacity(reqs.len());
             let t0 = Instant::now();
@@ -190,18 +221,21 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
                 let (chunk, w_off) = resolve_w(gpu, r.w)?;
                 launch_gemm_dequant(
                     gpu,
-                    r.ty,
-                    chunk,
-                    w_off,
-                    r.n_in,
-                    r.n_out,
-                    r.m,
-                    i > 0,
-                    x,
-                    y_off,
-                    i > 0,
-                    false,
-                    None,
+                    &GemmReq {
+                        w: DevWeight {
+                            ty: r.ty,
+                            loc: WeightLoc { chunk, off: w_off },
+                            n_in: r.n_in,
+                            n_out: r.n_out,
+                        },
+                        m: r.m,
+                        x_already_in_arena: i > 0,
+                        x_elems: x,
+                        y_off,
+                        reuse_x_f16: i > 0,
+                        x_from_pf_hs: false,
+                        x_dev_override: None,
+                    },
                 )?;
                 offs.push((y_off, r.m * r.n_out));
                 y_off += r.m * r.n_out;

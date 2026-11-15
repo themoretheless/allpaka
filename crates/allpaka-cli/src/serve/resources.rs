@@ -492,7 +492,7 @@ fn windows_memory_mib() -> (u64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{gpu_query, memory_mib};
+    use super::memory_mib;
 
     #[test]
     fn host_memory_and_gpu_queries_report_positive_capacity() {
@@ -502,7 +502,7 @@ mod tests {
         let _ = rss_mib;
         #[cfg(target_os = "macos")]
         {
-            let gpu = gpu_query(rss_mib, total_mib).expect("macos gpu query");
+            let gpu = super::gpu_query(rss_mib, total_mib).expect("macos gpu query");
             assert!(!gpu.0.is_empty());
             assert_eq!(gpu.2, total_mib);
         }

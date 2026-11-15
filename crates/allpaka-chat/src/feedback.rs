@@ -70,7 +70,7 @@ impl std::fmt::Display for Conflict {
 }
 impl std::error::Error for Conflict {}
 fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 100 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    crate::storage::valid_id(id)
 }
 fn validate(a: &Annotation) -> Result<()> {
     if a.id.as_ref().is_some_and(|id| !valid_id(id))
@@ -381,6 +381,12 @@ pub(crate) async fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// PLAN 3.4: feedback ids follow storage::valid_id.
+    #[test]
+    fn feedback_identifier_rule() {
+        assert!(valid_id("Ab-9") && valid_id("a_b") && valid_id(&"a".repeat(100)));
+        assert!(!valid_id("") && !valid_id(&"a".repeat(101)) && !valid_id("a.b"));
+    }
     fn annotation(author: &str, value: f64) -> Annotation {
         Annotation {
             id: None,

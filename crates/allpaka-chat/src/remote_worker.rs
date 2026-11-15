@@ -311,6 +311,7 @@ mod tests {
             judge_runs: crate::judge_runs::Manager::new(&data).unwrap(),
             judges: Arc::new(tokio::sync::Semaphore::new(2)),
             memory_extractions: Arc::new(tokio::sync::Semaphore::new(2)),
+            memory_extraction_cancels: Default::default(),
             prompts: crate::prompts::Store::new(&data).unwrap(),
             experiments: crate::experiments::Manager::new(&data).unwrap(),
             matrix_jobs: crate::experiments::matrix_jobs::Manager::new(&data).unwrap(),

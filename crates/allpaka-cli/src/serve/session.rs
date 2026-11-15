@@ -77,11 +77,15 @@ pub(crate) struct PrefixSnap {
 }
 
 pub(crate) struct ModelService {
-    pub(crate) model: Model<'static>,
-    pub(crate) tokenizer: Tokenizer,
+    /// Shared so a worker generation (see `interleave`) can run on it while
+    /// the service is locked by another request.
+    pub(crate) model: Arc<Model<'static>>,
+    pub(crate) tokenizer: Arc<Tokenizer>,
     pub(crate) force_think: bool,
     pub(crate) chat: ChatState,
-    pub(crate) sessions: std::collections::HashMap<String, (ChatState, std::time::Instant)>,
+    /// Named sessions not in use, outside the service lock so a generation
+    /// running beside the current request (`interleave`) can check one out.
+    pub(crate) sessions: NamedSessions,
 }
 
 pub(crate) fn model_prefix_namespace(model: &str) -> u32 {
@@ -105,6 +109,71 @@ pub(crate) fn exact_prefix_snapshot(
     let key = prefix_key(namespace, tokens);
     let hit = cache.longest_prefix(&key)?;
     (hit.matched_tokens == key.len() && hit.value.tokens == tokens.len()).then_some(hit.value)
+}
+
+/// Parked named sessions (`session_id`) and when each was last used. A
+/// request checks its session out (removes it) for its whole run and puts it
+/// back after, so a session is never in two generations at once.
+pub(crate) type NamedSessions =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, (ChatState, std::time::Instant)>>>;
+
+/// Most named sessions parked at once.
+pub(crate) const NAMED_SESSIONS_MAX: usize = 4;
+
+/// Parked sessions unused this long are dropped.
+pub(crate) const NAMED_SESSION_IDLE_SECS: u64 = 600;
+
+/// Take `id` out of the parked sessions, or a fresh session for a new id;
+/// `Err` with the status and message to answer when neither is possible. The
+/// flag says the session existed.
+pub(crate) fn check_out_named(
+    sessions: &NamedSessions,
+    id: &str,
+    model: &Model<'static>,
+    budget: &memory::Budget,
+) -> std::result::Result<(ChatState, bool), (u16, String)> {
+    let mut parked = sessions.lock().unwrap();
+    if named_in_use(id) {
+        return Err((409, format!("session {id} is in use by another request")));
+    }
+    let now = std::time::Instant::now();
+    parked.retain(|_, (_, used)| now.duration_since(*used).as_secs() < NAMED_SESSION_IDLE_SECS);
+    let existing = parked.remove(id);
+    if existing.is_none() && parked.len() >= NAMED_SESSIONS_MAX {
+        return Err((429, "resident session capacity exhausted".into()));
+    }
+    IN_USE.lock().unwrap().push(id.to_owned());
+    drop(parked);
+    if let Some((chat, _)) = existing {
+        return Ok((chat, true));
+    }
+    ChatState::new(model, budget, 1)
+        .map(|chat| (chat, false))
+        .map_err(|error| {
+            release_named(id);
+            (429, error.to_string())
+        })
+}
+
+/// Named sessions checked out right now: a session runs in one generation at
+/// a time; a second request for it is refused while it runs.
+static IN_USE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn named_in_use(id: &str) -> bool {
+    IN_USE.lock().unwrap().iter().any(|used| used == id)
+}
+
+fn release_named(id: &str) {
+    IN_USE.lock().unwrap().retain(|used| used != id);
+}
+
+/// Put a checked-out session back (`succeeded` or it existed before).
+pub(crate) fn check_in_named(sessions: &NamedSessions, id: String, chat: ChatState, keep: bool) {
+    let mut parked = sessions.lock().unwrap();
+    release_named(&id);
+    if keep {
+        parked.insert(id, (chat, std::time::Instant::now()));
+    }
 }
 
 #[cfg(test)]

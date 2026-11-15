@@ -1,6 +1,5 @@
 //! Declarative model requirements, separate from backend capabilities.
 
-use crate::config::Architecture;
 use allpaka_backend::capability::Feature;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,6 +9,7 @@ pub enum ModelFamily {
     Qwen35Moe,
     Llama3,
     Mistral,
+    Gemma3,
     Glm4Moe,
     DeepSeekMla,
 }
@@ -17,19 +17,16 @@ pub enum ModelFamily {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRequirements {
     pub family: ModelFamily,
-    pub architecture: Architecture,
+    pub architecture: String,
     pub required: Vec<Feature>,
     pub optional: Vec<Feature>,
 }
 
 impl ModelRequirements {
     pub fn for_architecture(architecture: &str) -> Option<Self> {
-        Self::from_architecture(Architecture::parse(architecture))
-    }
-
-    pub fn from_architecture(architecture: Architecture) -> Option<Self> {
-        let (family, required, optional) = match &architecture {
-            Architecture::Qwen2 => (
+        use crate::arch::Architecture as A;
+        let (family, required, optional) = match A::parse(architecture) {
+            A::Qwen2 => (
                 ModelFamily::Qwen3,
                 vec![
                     Feature::DenseFfn,
@@ -38,7 +35,7 @@ impl ModelRequirements {
                 ],
                 vec![Feature::PagedKv, Feature::QkNorm],
             ),
-            Architecture::Qwen3 => (
+            A::Qwen3 => (
                 ModelFamily::Qwen3,
                 vec![
                     Feature::DenseFfn,
@@ -48,7 +45,7 @@ impl ModelRequirements {
                 ],
                 vec![Feature::PagedKv],
             ),
-            Architecture::Qwen3Moe => (
+            A::Qwen3Moe => (
                 ModelFamily::Qwen3Moe,
                 vec![
                     Feature::SparseMoe,
@@ -58,7 +55,7 @@ impl ModelRequirements {
                 ],
                 vec![Feature::PagedKv],
             ),
-            Architecture::Qwen35Moe => (
+            A::Qwen35Moe => (
                 ModelFamily::Qwen35Moe,
                 vec![
                     Feature::SparseMoe,
@@ -69,7 +66,7 @@ impl ModelRequirements {
                 ],
                 vec![Feature::PagedKv],
             ),
-            Architecture::Llama => (
+            A::Llama => (
                 ModelFamily::Llama3,
                 vec![
                     Feature::DenseFfn,
@@ -78,7 +75,17 @@ impl ModelRequirements {
                 ],
                 vec![Feature::PagedKv],
             ),
-            Architecture::Mistral => (
+            A::Gemma3 => (
+                ModelFamily::Gemma3,
+                vec![
+                    Feature::DenseFfn,
+                    Feature::GqaAttention,
+                    Feature::QkNorm,
+                    Feature::StandardKv,
+                ],
+                vec![Feature::PagedKv],
+            ),
+            A::Mistral => (
                 ModelFamily::Mistral,
                 vec![
                     Feature::DenseFfn,
@@ -87,7 +94,7 @@ impl ModelRequirements {
                 ],
                 vec![Feature::PagedKv],
             ),
-            Architecture::Glm4Moe => (
+            A::Glm4Moe => (
                 ModelFamily::Glm4Moe,
                 vec![
                     Feature::SparseMoe,
@@ -96,16 +103,16 @@ impl ModelRequirements {
                 ],
                 vec![Feature::PagedKv],
             ),
-            Architecture::DeepSeek2 | Architecture::DeepSeek3 => (
+            A::DeepSeek2 | A::DeepSeek3 => (
                 ModelFamily::DeepSeekMla,
                 vec![Feature::SparseMoe, Feature::MlaAttention, Feature::F16Kv],
                 vec![Feature::PagedKv],
             ),
-            Architecture::Gemma4 | Architecture::Other(_) => return None,
+            A::Gemma4 | A::Other(_) => return None,
         };
         Some(Self {
             family,
-            architecture,
+            architecture: architecture.to_string(),
             required,
             optional,
         })
@@ -115,15 +122,12 @@ impl ModelRequirements {
 #[cfg(test)]
 mod tests {
     use super::ModelRequirements;
-    use crate::config::Architecture;
     use allpaka_backend::capability::{BackendCapabilities, Feature};
 
     #[test]
     fn qwen_moe_and_deepseek_have_distinct_attention_requirements() {
         let qwen = ModelRequirements::for_architecture("qwen3moe").unwrap();
         let deepseek = ModelRequirements::for_architecture("deepseek_mla").unwrap();
-        assert_eq!(qwen.architecture, Architecture::Qwen3Moe);
-        assert_eq!(deepseek.architecture, Architecture::DeepSeek2);
         assert!(qwen.required.contains(&Feature::GqaAttention));
         assert!(deepseek.required.contains(&Feature::MlaAttention));
         assert!(BackendCapabilities::current_metal()
@@ -138,7 +142,6 @@ mod tests {
     fn glm4moe_is_registered_as_sparse_moe_with_gqa() {
         let glm = ModelRequirements::for_architecture("glm4moe").unwrap();
         assert_eq!(glm.family, super::ModelFamily::Glm4Moe);
-        assert_eq!(glm.architecture, Architecture::Glm4Moe);
         assert!(glm.required.contains(&Feature::SparseMoe));
         assert!(glm.required.contains(&Feature::GqaAttention));
         assert!(BackendCapabilities::current_metal()

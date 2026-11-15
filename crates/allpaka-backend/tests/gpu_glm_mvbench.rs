@@ -89,8 +89,11 @@ fn bench_indexed(
 fn glm_decode_matvecs_report_effective_bandwidth() {
     let len: usize = 2 << 30;
     let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
-    let ptr = unsafe { std::alloc::alloc(layout) };
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is from `alloc_zeroed`, so every byte is initialised. `ptr` is non-null
+    // (asserted), owns `len` bytes at `PAGE` alignment, and is never freed, so the slice is unique
+    // and may live for the whole test.
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     for b in region.iter_mut() {

@@ -1,3 +1,5 @@
+// Decode-path counters are asserted only on macOS (Metal).
+#![cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 use allpaka_gguf::GgufFile;
 use allpaka_model::{model, pipeline, Config, Model, RopeStyle};
 use std::io::Write;

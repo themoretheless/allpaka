@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 const begin=source.indexOf("$('trace-project').onclick="),end=source.indexOf("$('trace-trash').onclick=",begin);
 class Element{constructor(text=''){this.textContent=text;this.children=[];}append(...rows){this.children.push(...rows);}replaceChildren(...rows){this.children=rows;}}
 const elements={'trace-status':{value:''},'trace-since':{value:''},'trace-until':{value:''},project:{value:'default'},'trace-guardrail':{value:'blocked'},'trace-guardrail-policy':{value:'a'.repeat(64)},'trace-results':new Element(),'trace-project':{}};

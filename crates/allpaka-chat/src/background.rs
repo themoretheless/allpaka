@@ -19,6 +19,7 @@ use tokio::{
 
 const OUTPUT_LIMIT: usize = 128 * 1024;
 use crate::storage::now_ms as timestamp_ms;
+#[cfg_attr(not(unix), allow(dead_code))]
 struct ProcessGroup(u32);
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
@@ -452,10 +453,8 @@ impl Manager {
         {
             bail!("Background task capacity reached; cancel or clean up tasks");
         }
-        #[cfg(unix)]
-        let (program, prog_args) = ("/bin/sh", vec!["-c".to_string(), command.to_string()]);
-        #[cfg(windows)]
-        let (program, prog_args) = ("cmd.exe", vec!["/C".to_string(), command.to_string()]);
+        let &(program, flag) = crate::shell::program();
+        let prog_args = vec![flag.to_string(), command.to_string()];
         let data_dir = self
             .1
             .as_deref()
@@ -492,7 +491,7 @@ impl Manager {
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
         let cancel = CancelToken::new();
-        let mut cancel_rx = cancel.clone();
+        let cancel_rx = cancel.clone();
         let (events, _) = watch::channel(0);
         let task = Arc::new(Task {
             storage: self.1.clone(),

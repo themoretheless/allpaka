@@ -1,26 +1,22 @@
-//! Cooperative cancellation primitive shared across Studio background jobs.
-
+//! One cancellation signal shared by the long-running evaluation jobs.
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use tokio::sync::watch;
 
+#[derive(Debug)]
 struct Inner {
     tx: watch::Sender<bool>,
-    requested: AtomicBool,
+    /// Set once the job finished, so late cancel requests report `false`.
     closed: AtomicBool,
 }
 
-/// Cloneable cooperative cancellation token backed by `tokio::sync::watch`.
-///
-/// Unifies job cancellation across `experiments`, `matrix_jobs`, `judge_runs`,
-/// and `background` without polling loops or disparate channel types.
-#[derive(Clone)]
-pub(crate) struct CancelToken {
-    inner: Arc<Inner>,
-    rx: watch::Receiver<bool>,
-}
+/// A cloneable, one-way stop request: once cancelled it stays cancelled.
+/// Jobs either poll [`CancelToken::is_cancelled`] between steps or race
+/// [`CancelToken::cancelled`] against the step in flight.
+#[derive(Clone, Debug)]
+pub(crate) struct CancelToken(Arc<Inner>);
 
 impl Default for CancelToken {
     fn default() -> Self {
@@ -30,86 +26,99 @@ impl Default for CancelToken {
 
 impl CancelToken {
     pub(crate) fn new() -> Self {
-        let (tx, rx) = watch::channel(false);
-        Self {
-            inner: Arc::new(Inner {
-                tx,
-                requested: AtomicBool::new(false),
-                closed: AtomicBool::new(false),
-            }),
-            rx,
-        }
+        Self(Arc::new(Inner {
+            tx: watch::Sender::new(false),
+            closed: AtomicBool::new(false),
+        }))
     }
-
+    /// A token for a job that has already finished.
     pub(crate) fn closed() -> Self {
         let token = Self::new();
         token.close();
         token
     }
-
-    /// Request cancellation once while the job is still open.
-    /// Returns `true` only on the first cancellation request before `close()`.
+    /// Request cancellation. Returns true only for the call that changed the
+    /// token while the job is still open, so a caller can tell a first
+    /// request from a repeated or late one.
     pub(crate) fn cancel(&self) -> bool {
-        if self.inner.closed.load(Ordering::Acquire) {
+        if self.0.closed.load(Ordering::Acquire) {
             return false;
         }
-        let first = !self.inner.requested.swap(true, Ordering::AcqRel);
-        let _ = self.inner.tx.send(true);
-        first
+        self.0
+            .tx
+            .send_if_modified(|cancelled| !std::mem::replace(cancelled, true))
     }
-
-    /// Request cancellation and return `true` as long as the job is still open.
+    /// Request cancellation and return true as long as the job is still open,
+    /// even when cancellation was already requested.
     pub(crate) fn cancel_active(&self) -> bool {
-        if self.inner.closed.load(Ordering::Acquire) {
+        if self.0.closed.load(Ordering::Acquire) {
             return false;
         }
-        self.inner.requested.store(true, Ordering::Release);
-        let _ = self.inner.tx.send(true);
+        self.0.tx.send_replace(true);
         true
     }
-
-    /// Mark the job as finished so late `cancel()` calls report `false`.
+    /// Mark the job as finished so later cancel calls report `false`.
     pub(crate) fn close(&self) {
-        self.inner.closed.store(true, Ordering::Release);
+        self.0.closed.store(true, Ordering::Release);
     }
-
-    /// Non-blocking check whether cancellation has been requested.
-    #[inline]
+    /// Whether both handles belong to the same token.
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
     pub(crate) fn is_cancelled(&self) -> bool {
-        self.inner.requested.load(Ordering::Acquire) || *self.rx.borrow()
+        *self.0.tx.borrow()
     }
-
-    /// Resolves immediately if already cancelled, or as soon as `cancel()` fires.
-    pub(crate) async fn cancelled(&mut self) {
-        if self.is_cancelled() {
-            return;
-        }
-        while self.rx.changed().await.is_ok() {
-            if *self.rx.borrow() {
-                return;
-            }
-        }
+    /// Resolve once cancellation has been requested, immediately if it
+    /// already has been.
+    pub(crate) async fn cancelled(&self) {
+        let mut receiver = self.0.tx.subscribe();
+        // The sender lives as long as `self`, so waiting cannot fail.
+        let _ = receiver.wait_for(|cancelled| *cancelled).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CancelToken;
+    use super::*;
+    use std::time::Duration;
 
-    #[tokio::test]
-    async fn cancel_wakes_waiters_and_reports_first_request() {
+    #[test]
+    fn only_the_first_cancel_reports_a_change() {
         let token = CancelToken::new();
-        let mut waiter = token.clone();
-        let handle = tokio::spawn(async move {
-            waiter.cancelled().await;
-            waiter.is_cancelled()
-        });
+        let clone = token.clone();
         assert!(!token.is_cancelled());
-        assert!(token.cancel());
+        assert!(clone.cancel());
         assert!(!token.cancel());
+        assert!(token.is_cancelled() && clone.is_cancelled());
+    }
+
+    #[test]
+    fn closed_tokens_reject_late_requests() {
+        let token = CancelToken::new();
+        assert!(token.cancel());
         assert!(token.cancel_active());
-        assert!(handle.await.unwrap());
         token.close();
         assert!(!token.cancel_active());
+        assert!(!token.cancel());
+        assert!(!CancelToken::closed().cancel());
+    }
+
+    #[tokio::test]
+    async fn cancelled_resolves_before_and_after_the_request() {
+        let token = CancelToken::new();
+        let waiter = tokio::spawn({
+            let token = token.clone();
+            async move { token.cancelled().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("a pending waiter wakes on cancel")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), token.cancelled())
+            .await
+            .expect("an already cancelled token resolves at once");
     }
 }

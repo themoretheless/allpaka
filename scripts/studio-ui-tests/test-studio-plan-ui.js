@@ -1,3 +1,4 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 class Element{
  constructor(tag,text){this.tag=tag;this.textContent=text||'';this.children=[];this.attributes={};this.value='';}
@@ -7,11 +8,11 @@ class Element{
  querySelector(selector){for(const node of this.children){if(selector==='input'&&node.tag==='input'||selector==='[data-goal-draft]'&&node.attributes['data-goal-draft'])return node;const found=node.querySelector(selector);if(found)return found;}return null;}
  remove(){if(this.parent)this.parent.children=this.parent.children.filter(node=>node!==this);}
 }
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),elements=Object.fromEntries(['plan','plan-add','plan-revision','plan-checkpoints'].map(id=>[id,new Element('div')])),calls=[];
+const source=appSource(),elements=Object.fromEntries(['plan','plan-add','plan-revision','plan-checkpoints'].map(id=>[id,new Element('div')])),calls=[];
 const items=[{id:'first',title:'First',status:'completed',acceptance:['criterion'],evidence:['reported result']},{id:'next',title:'Next',status:'pending',acceptance:['finish'],evidence:[]}];
 const context={active:'session',current:{id:'session',settings:{mode:'goal'},plan_revision:3,plan:items},lastPlan:'',$:id=>elements[id],node:(tag,text)=>new Element(tag,text),api:async(path,body)=>{calls.push({path,body:JSON.parse(JSON.stringify(body))});return {};},poll:async()=>{},notify:()=>{}};
-vm.createContext(context);vm.runInContext(source.slice(source.indexOf('let lastPlanCheckpointSignature='),source.indexOf('async function branchAt(')),context);
-vm.runInContext(source.slice(source.indexOf("$('plan-add').onclick="),source.indexOf("$('manage-chat').onclick=")),context);
+vm.createContext(context);vm.runInContext(between(source,'let lastPlanCheckpointSignature=','async function branchAt('),context);
+vm.runInContext(between(source,"$('plan-add').onclick=","$('manage-chat').onclick="),context);
 (async()=>{
  context.renderPlan(items);const first=elements.plan.children[0],next=elements.plan.children[1];assert(first.children[3].children[2].disabled);assert(!next.children[3].children[2].disabled);
  const criterion=next.children[3].children[2];criterion.value='Updated criterion\nSecond criterion';criterion.onchange();await Promise.resolve();assert.deepEqual(calls.at(-1).body.steps[1].acceptance,['Updated criterion','Second criterion']);assert.equal(calls.at(-1).body.base_revision,3);assert.equal(calls.at(-1).body.allow_reopen,false);

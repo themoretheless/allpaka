@@ -3,28 +3,61 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum RuleKind {
-    MinBytes,
-    MaxBytes,
-    JsonValid,
-    ForbiddenSubstrings,
-    RequiredSubstrings,
+/// A closed set of words whose stored and API form is the word itself.
+/// An unknown word still parses, into `Unsupported`, so validation keeps
+/// rejecting it at the same point and with the same message as when the
+/// field was text, and an old file keeps its exact bytes.
+macro_rules! word_enum {
+    ($(#[$meta:meta])* $name:ident { $($variant:ident => $word:literal),+ $(,)? }) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(from = "String", into = "String")]
+        pub(crate) enum $name {
+            $($variant,)+
+            Unsupported(String),
+        }
+        impl From<String> for $name {
+            fn from(word: String) -> Self {
+                match word.as_str() {
+                    $($word => Self::$variant,)+
+                    _ => Self::Unsupported(word),
+                }
+            }
+        }
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                match value {
+                    $($name::$variant => $word.into(),)+
+                    $name::Unsupported(word) => word,
+                }
+            }
+        }
+    };
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum GuardrailStage {
-    Input,
-    Output,
+word_enum! {
+    /// What a rule checks.
+    RuleKind {
+        MinBytes => "min_bytes",
+        MaxBytes => "max_bytes",
+        JsonValid => "json_valid",
+        ForbiddenSubstrings => "forbidden_substrings",
+        RequiredSubstrings => "required_substrings",
+    }
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GuardrailAction {
-    Observe,
-    Block,
+word_enum! {
+    /// Which side of a model call a check guards.
+    Stage {
+        Input => "input",
+        Output => "output",
+    }
+}
+word_enum! {
+    /// What a failed check does: record only, or stop the call.
+    Action {
+        Observe => "observe",
+        Block => "block",
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,7 +95,7 @@ impl Manifest {
             {
                 bail!("Invalid or duplicate technical rule ID");
             }
-            match rule.kind {
+            match &rule.kind {
                 RuleKind::MinBytes | RuleKind::MaxBytes => {
                     if !rule.value.as_u64().is_some_and(|n| n <= 64000) {
                         bail!("Invalid byte limit");
@@ -86,6 +119,7 @@ impl Manifest {
                         bail!("Invalid literal fragments");
                     }
                 }
+                RuleKind::Unsupported(_) => bail!("Unsupported guardrail kind"),
             }
             canonical.push(json!([rule.id, rule.kind, rule.value]));
         }
@@ -102,13 +136,11 @@ impl Manifest {
         })
     }
 
-    pub fn check(
-        &self,
-        text: &str,
-        stage: GuardrailStage,
-        action: GuardrailAction,
-    ) -> Result<Value> {
+    pub fn check(&self, text: &str, stage: Stage, action: Action) -> Result<Value> {
         self.validate()?;
+        if matches!(stage, Stage::Unsupported(_)) || matches!(action, Action::Unsupported(_)) {
+            bail!("Invalid guardrail stage or action");
+        }
         if text.len() > 64000 {
             bail!("Guardrail text exceeds 64000 UTF-8 bytes");
         }
@@ -116,7 +148,7 @@ impl Manifest {
             .rules
             .iter()
             .map(|rule| {
-                let passed = match rule.kind {
+                let passed = match &rule.kind {
                     RuleKind::MinBytes => text.len() as u64 >= rule.value.as_u64().unwrap(),
                     RuleKind::MaxBytes => text.len() as u64 <= rule.value.as_u64().unwrap(),
                     RuleKind::RequiredSubstrings => rule
@@ -132,23 +164,15 @@ impl Manifest {
                         .iter()
                         .any(|value| text.contains(value.as_str().unwrap())),
                     RuleKind::JsonValid => crate::strict_json::parse(text).is_ok(),
+                    RuleKind::Unsupported(_) => unreachable!("Validated rule kind"),
                 };
                 json!({"rule_id":rule.id,"kind":rule.kind,"passed":passed})
             })
             .collect::<Vec<_>>();
         let passed = rules.iter().all(|rule| rule["passed"] == true);
-        Ok(json!({
-            "kind": "local_guardrail",
-            "schema_version": 1,
-            "stage": stage,
-            "action": action,
-            "passed": passed,
-            "blocked": !passed && action == GuardrailAction::Block,
-            "rules": rules,
-            "policy_sha256": self.policy_sha256,
-            "provider_calls": 0,
-            "content_captured": false,
-        }))
+        Ok(
+            json!({"kind":"local_guardrail","schema_version":1,"stage":stage,"action":action,"passed":passed,"blocked":!passed&&action==Action::Block,"rules":rules,"policy_sha256":self.policy_sha256,"provider_calls":0,"content_captured":false}),
+        )
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -167,6 +191,35 @@ impl Manifest {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    /// The same cases drive the Python SDK's local checks
+    /// (scripts/test-studio-guardrails.py); both must agree on every result
+    /// and on the policy fingerprint.
+    #[test]
+    fn shared_fixture_matches_the_python_sdk() {
+        let doc: Value =
+            serde_json::from_str(include_str!("../../../sdk/fixtures/guardrail_cases.json"))
+                .unwrap();
+        let cases = doc["cases"].as_array().unwrap();
+        assert!(!cases.is_empty());
+        for case in cases {
+            let rules: Vec<Rule> = serde_json::from_value(case["rules"].clone()).unwrap();
+            let manifest = Manifest::create(rules).unwrap();
+            assert_eq!(manifest.policy_sha256, case["policy_sha256"], "{case}");
+            let stage: Stage = serde_json::from_value(case["stage"].clone()).unwrap();
+            let receipt = manifest
+                .check(case["text"].as_str().unwrap(), stage, Action::Observe)
+                .unwrap();
+            assert_eq!(receipt["passed"], case["passed"], "{case}");
+            let per_rule: Vec<Value> = receipt["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["passed"].clone())
+                .collect();
+            assert_eq!(Value::from(per_rule), case["rule_results"], "{case}");
+        }
+    }
     #[test]
     fn rules_and_tampering() {
         let mut manifest = Manifest::create(vec![Rule {
@@ -192,12 +245,6 @@ mod tests {
             value: json!(0),
         };
         assert!(Manifest::create(vec![rule.clone(), rule]).is_err());
-        assert!(serde_json::from_value::<Rule>(json!({
-            "id": "unknown",
-            "kind": "unsupported_kind",
-            "value": true,
-        }))
-        .is_err());
     }
     #[test]
     fn persistent_store_roundtrip_and_corruption() {
@@ -246,18 +293,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             manifest
-                .check(
-                    "Привет ready",
-                    GuardrailStage::Output,
-                    GuardrailAction::Block
-                )
+                .check("Привет ready", Stage::Output, Action::Block)
                 .unwrap()["passed"],
             true
         );
         for text in ["Привет", "привет ready", "ready"] {
-            let receipt = manifest
-                .check(text, GuardrailStage::Output, GuardrailAction::Block)
-                .unwrap();
+            let receipt = manifest.check(text, Stage::Output, Action::Block).unwrap();
             assert_eq!(receipt["blocked"], true);
             assert_eq!(receipt["rules"][0]["kind"], "required_substrings");
             assert!(!receipt.to_string().contains("Привет"));
@@ -269,7 +310,7 @@ mod tests {
         }
         assert_eq!(
             manifest
-                .check("ready", GuardrailStage::Input, GuardrailAction::Observe)
+                .check("ready", Stage::Input, Action::Observe)
                 .unwrap()["blocked"],
             false
         );
@@ -291,21 +332,15 @@ mod tests {
         }])
         .unwrap();
         assert_eq!(
-            length
-                .check("яя", GuardrailStage::Input, GuardrailAction::Block)
-                .unwrap()["passed"],
+            length.check("яя", Stage::Input, Action::Block).unwrap()["passed"],
             true
         );
         assert_eq!(
-            length
-                .check("яяX", GuardrailStage::Input, GuardrailAction::Block)
-                .unwrap()["blocked"],
+            length.check("яяX", Stage::Input, Action::Block).unwrap()["blocked"],
             true
         );
         assert_eq!(
-            length
-                .check("яяX", GuardrailStage::Output, GuardrailAction::Observe)
-                .unwrap()["blocked"],
+            length.check("яяX", Stage::Output, Action::Observe).unwrap()["blocked"],
             false
         );
         let manifest = Manifest::create(vec![Rule {
@@ -321,30 +356,22 @@ mod tests {
             "{\"nested\":{\"a\":1,\"a\":2}}",
         ] {
             assert_eq!(
-                manifest
-                    .check(text, GuardrailStage::Output, GuardrailAction::Block)
-                    .unwrap()["blocked"],
+                manifest.check(text, Stage::Output, Action::Block).unwrap()["blocked"],
                 true
             );
         }
         assert_eq!(
             manifest
-                .check(
-                    "{\"a\":[true,null,1]}",
-                    GuardrailStage::Output,
-                    GuardrailAction::Block
-                )
+                .check("{\"a\":[true,null,1]}", Stage::Output, Action::Block)
                 .unwrap()["passed"],
             true
         );
         assert!(manifest
-            .check(
-                &"x".repeat(64001),
-                GuardrailStage::Input,
-                GuardrailAction::Observe
-            )
+            .check(&"x".repeat(64001), Stage::Input, Action::Observe)
             .is_err());
-        assert!(serde_json::from_value::<GuardrailStage>(json!("unknown")).is_err());
+        assert!(manifest
+            .check("{}", Stage::from("unknown".to_string()), Action::Block)
+            .is_err());
         let private = Manifest::create(vec![Rule {
             id: "literal".into(),
             kind: RuleKind::ForbiddenSubstrings,
@@ -352,7 +379,7 @@ mod tests {
         }])
         .unwrap();
         let receipt = private
-            .check("PRIVATE", GuardrailStage::Input, GuardrailAction::Block)
+            .check("PRIVATE", Stage::Input, Action::Block)
             .unwrap();
         assert_eq!(receipt["blocked"], true);
         assert!(!receipt.to_string().contains("PRIVATE"));
@@ -378,7 +405,7 @@ mod tests {
         let selection = Selection {
             input_policy_sha256: manifest.policy_sha256.clone(),
             output_policy_sha256: manifest.policy_sha256.clone(),
-            action: GuardrailAction::Block,
+            action: Action::Block,
         };
         let prepared = selection.prepare(&store).unwrap();
         std::fs::write(store.path(&manifest.policy_sha256).unwrap(), b"corrupt").unwrap();
@@ -393,6 +420,63 @@ mod tests {
         assert_eq!(serde_json::to_value(&settings).unwrap(), original);
         let restored: crate::types::Settings = serde_json::from_value(original).unwrap();
         assert!(restored.prepared_guardrails.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn closed_words_keep_their_wire_form_and_old_rejections() {
+        let wire = json!({"id":"r","kind":"max_bytes","value":4});
+        let rule: Rule = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(rule.kind, RuleKind::MaxBytes);
+        assert_eq!(serde_json::to_value(&rule).unwrap(), wire);
+        let unknown: Rule =
+            serde_json::from_value(json!({"id":"r","kind":"regex","value":4})).unwrap();
+        assert_eq!(serde_json::to_value(&unknown).unwrap()["kind"], "regex");
+        assert_eq!(
+            Manifest::create(vec![unknown]).unwrap_err().to_string(),
+            "Unsupported guardrail kind"
+        );
+        let both: Rule = serde_json::from_value(json!({"id":"","kind":"regex","value":4})).unwrap();
+        assert_eq!(
+            Manifest::create(vec![both]).unwrap_err().to_string(),
+            "Invalid or duplicate technical rule ID",
+            "an invalid ID is still reported before an unknown kind"
+        );
+        let manifest = Manifest::create(vec![rule]).unwrap();
+        let receipt = manifest.check("ok", Stage::Input, Action::Observe).unwrap();
+        assert_eq!(
+            (
+                &receipt["stage"],
+                &receipt["action"],
+                &receipt["rules"][0]["kind"]
+            ),
+            (&json!("input"), &json!("observe"), &json!("max_bytes"))
+        );
+        assert_eq!(
+            manifest
+                .check("ok", Stage::from("both".to_string()), Action::Block)
+                .unwrap_err()
+                .to_string(),
+            "Invalid guardrail stage or action"
+        );
+        let hash = "0".repeat(64);
+        let wire = json!({"input_policy_sha256":hash,"output_policy_sha256":hash,"action":"warn"});
+        let selection: Selection = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&selection).unwrap(), wire);
+        let root = std::env::temp_dir().join(format!(
+            "allpaka-policy-words-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert_eq!(
+            selection
+                .prepare(&Store::open(&root).unwrap())
+                .unwrap_err()
+                .to_string(),
+            "Choose explicit guardrail action"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -615,8 +699,8 @@ pub(crate) async fn create_api(
 #[serde(deny_unknown_fields)]
 struct Check {
     text: String,
-    stage: GuardrailStage,
-    action: GuardrailAction,
+    stage: Stage,
+    action: Action,
 }
 pub(crate) async fn check_api(
     axum::extract::State(app): axum::extract::State<crate::App>,
@@ -643,34 +727,37 @@ pub(crate) async fn check_api(
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Selection {
+pub(crate) struct Selection {
     pub input_policy_sha256: String,
     pub output_policy_sha256: String,
-    pub action: GuardrailAction,
+    pub action: Action,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Prepared {
     input: Manifest,
     output: Manifest,
-    action: GuardrailAction,
+    action: Action,
 }
 impl Selection {
-    pub(crate) fn prepare(&self, store: &Store) -> Result<Prepared> {
+    pub fn prepare(&self, store: &Store) -> Result<Prepared> {
+        if matches!(self.action, Action::Unsupported(_)) {
+            bail!("Choose explicit guardrail action");
+        }
         Ok(Prepared {
             input: store.get(&self.input_policy_sha256)?,
             output: store.get(&self.output_policy_sha256)?,
-            action: self.action,
+            action: self.action.clone(),
         })
     }
 }
 impl Prepared {
     pub fn input(&self, text: &str) -> Result<Value> {
-        self.input.check(text, GuardrailStage::Input, self.action)
+        self.input.check(text, Stage::Input, self.action.clone())
     }
     pub fn output(&self, text: &str) -> Result<Value> {
-        self.output.check(text, GuardrailStage::Output, self.action)
+        self.output.check(text, Stage::Output, self.action.clone())
     }
     pub fn buffers_output(&self) -> bool {
-        self.action == GuardrailAction::Block
+        self.action == Action::Block
     }
 }

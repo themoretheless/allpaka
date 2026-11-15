@@ -1,6 +1,7 @@
+const {appSource}=require('./harness');
 // Exercise the actual import handler with API receipts and a minimal DOM.
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 const start=source.indexOf('let evaluationMatrixEpoch=0;');
 const end=source.indexOf('let studioMatrixDraft=',start);
 assert(start>=0&&end>start);

@@ -7,167 +7,131 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ToolEligibility {
-    /// Available in every mode, including `Chat` and `Swarm`.
+type Handler = fn(&ToolCall<'_>) -> Result<Value>;
+
+/// When a built-in tool is offered to the model.
+#[derive(Clone, Copy)]
+enum Offer {
+    /// In every mode.
     Always,
-    /// Available in structured/agent modes (`Plan`, `Auto`, `Goal`, `Swarm`), omitted in `Chat`.
-    StructuredModes,
-    /// Available only in `Auto` or `Goal` when `settings.allow_writes` is enabled.
-    WriteModes,
-    /// Available only in `Auto` or `Goal` when shell execution is enabled.
-    CommandModes,
+    /// In every mode except Chat.
+    BeyondChat,
+    /// In Auto and Goal with workspace writes enabled.
+    Writes,
+    /// In Auto and Goal with command execution unlocked.
+    Commands,
 }
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ToolCapability {
-    Read,
-    Write,
-    Plan,
-    Command,
-}
-
-type ToolHandler = fn(&Path, &Value, Option<&Path>) -> Result<Value>;
-
-struct ToolSpec {
-    name: &'static str,
-    description: &'static str,
-    parameters: fn() -> (Value, Value),
-    eligibility: ToolEligibility,
-    capability: ToolCapability,
-    handler: Option<ToolHandler>,
-}
-
-impl ToolSpec {
-    fn is_enabled(&self, settings: &Settings, cmd_enabled: bool) -> bool {
-        match self.eligibility {
-            ToolEligibility::Always => true,
-            ToolEligibility::StructuredModes => settings.mode != Mode::Chat,
-            ToolEligibility::WriteModes => {
-                matches!(settings.mode, Mode::Auto | Mode::Goal) && settings.allow_writes
-            }
-            ToolEligibility::CommandModes => {
-                matches!(settings.mode, Mode::Auto | Mode::Goal) && cmd_enabled
-            }
+impl Offer {
+    fn allows(self, settings: &Settings, cmd_enabled: bool) -> bool {
+        let acting = matches!(settings.mode, Mode::Auto | Mode::Goal);
+        match self {
+            Offer::Always => true,
+            Offer::BeyondChat => settings.mode != Mode::Chat,
+            Offer::Writes => acting && settings.allow_writes,
+            Offer::Commands => acting && cmd_enabled,
         }
     }
-
+}
+/// How a built-in tool is executed.
+#[derive(Clone, Copy)]
+enum Kind {
+    /// Only inspects the connected context; Swarm members get these.
+    Read(Handler),
+    /// Changes workspace files.
+    Write(Handler),
+    /// Executed by the turn runtime (plan, commands), never by execute_scoped.
+    Runtime,
+}
+/// One built-in tool: its schema, when it is offered and how it runs.
+struct Tool {
+    name: &'static str,
+    description: &'static str,
+    properties: fn() -> Value,
+    required: &'static [&'static str],
+    offer: Offer,
+    kind: Kind,
+}
+impl Tool {
     fn schema(&self) -> Value {
-        let (properties, required) = (self.parameters)();
-        json!({
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                    "additionalProperties": false
-                }
-            }
-        })
+        json!({"type":"function","function":{"name":self.name,"description":self.description,"parameters":{"type":"object","properties":(self.properties)(),"required":self.required,"additionalProperties":false}}})
     }
 }
-
-const REGISTRY: &[ToolSpec] = &[
-    ToolSpec {
+/// Every built-in tool, in the order its schema is offered. Adding a tool is
+/// one entry here.
+const TOOLS: &[Tool] = &[
+    Tool {
         name: "list_files",
         description: "List one workspace directory (up to 200 entries).",
-        parameters: || (json!({"path":{"type":"string"}}), json!(["path"])),
-        eligibility: ToolEligibility::Always,
-        capability: ToolCapability::Read,
-        handler: Some(exec_list_files),
+        properties: || json!({"path":{"type":"string"}}),
+        required: &["path"],
+        offer: Offer::Always,
+        kind: Kind::Read(list_files),
     },
-    ToolSpec {
+    Tool {
         name: "read_file",
         description: "Read a UTF-8 file (up to 8 MiB) with optional inclusive 1-based start_line/end_line. Output at most 128 KiB.",
-        parameters: || {
-            (
-                json!({"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}),
-                json!(["path"]),
-            )
-        },
-        eligibility: ToolEligibility::Always,
-        capability: ToolCapability::Read,
-        handler: Some(exec_read_file),
+        properties: || json!({"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}),
+        required: &["path"],
+        offer: Offer::Always,
+        kind: Kind::Read(read_file),
     },
-    ToolSpec {
+    Tool {
         name: "set_plan",
         description: "Publish/update the durable task plan. Retain milestone IDs. Goal requires current base_revision, acceptance criteria for each milestone and reported evidence for completion. Completed Goal milestones cannot be silently removed, changed or repeated.",
-        parameters: || {
-            (
-                json!({"base_revision":{"type":"integer","minimum":0},"steps":{"type":"array","maxItems":30,"items":{"type":"object","properties":{"id":{"type":"string","maxLength":80},"title":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]},"acceptance":{"type":"array","maxItems":4,"items":{"type":"string"}},"evidence":{"type":"array","maxItems":4,"items":{"type":"string"}}},"required":["title","status"],"additionalProperties":false}}}),
-                json!(["steps"]),
-            )
-        },
-        eligibility: ToolEligibility::StructuredModes,
-        capability: ToolCapability::Plan,
-        handler: None,
+        properties: || json!({"base_revision":{"type":"integer","minimum":0},"steps":{"type":"array","maxItems":30,"items":{"type":"object","properties":{"id":{"type":"string","maxLength":80},"title":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]},"acceptance":{"type":"array","maxItems":4,"items":{"type":"string"}},"evidence":{"type":"array","maxItems":4,"items":{"type":"string"}}},"required":["title","status"],"additionalProperties":false}}}),
+        required: &["steps"],
+        offer: Offer::BeyondChat,
+        kind: Kind::Runtime,
     },
-    ToolSpec {
+    Tool {
         name: "edit_file",
         description: "Replace one exact, unique non-empty fragment in an existing UTF-8 file. Fails if absent or ambiguous. Returns the actual diff.",
-        parameters: || {
-            (
-                json!({"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}}),
-                json!(["path", "old_text", "new_text"]),
-            )
-        },
-        eligibility: ToolEligibility::WriteModes,
-        capability: ToolCapability::Write,
-        handler: Some(exec_edit_file),
+        properties: || json!({"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}}),
+        required: &["path", "old_text", "new_text"],
+        offer: Offer::Writes,
+        kind: Kind::Write(edit_file),
     },
-    ToolSpec {
+    Tool {
         name: "write_file",
         description: "Create or replace a UTF-8 file inside the workspace. Read existing content first. Cannot access hidden paths or leave the workspace.",
-        parameters: || {
-            (
-                json!({"path":{"type":"string"},"content":{"type":"string"}}),
-                json!(["path", "content"]),
-            )
-        },
-        eligibility: ToolEligibility::WriteModes,
-        capability: ToolCapability::Write,
-        handler: Some(exec_write_file),
+        properties: || json!({"path":{"type":"string"},"content":{"type":"string"}}),
+        required: &["path", "content"],
+        offer: Offer::Writes,
+        kind: Kind::Write(write_file),
     },
-    ToolSpec {
+    Tool {
         name: "run_command",
         description: "Run a shell command in the project root directory. Returns stdout, stderr and exit code. Timeout 30s by default (max 120s). Output truncated at 128 KiB.",
-        parameters: || {
-            (
-                json!({"command":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":120}}),
-                json!(["command"]),
-            )
-        },
-        eligibility: ToolEligibility::CommandModes,
-        capability: ToolCapability::Command,
-        handler: None,
+        properties: || json!({"command":{"type":"string"},"timeout":{"type":"integer","minimum":1,"maximum":120}}),
+        required: &["command"],
+        offer: Offer::Commands,
+        kind: Kind::Runtime,
     },
-    ToolSpec {
+    Tool {
         name: "agentgrep",
         description: "Search a context file or directory for literal text. Returns line numbers and preceding declaration hints (heuristic, not AST). Skips hidden files, symlinks and binary files. Bounded to 100 matches and 32 MiB scanned.",
-        parameters: || {
-            (
-                json!({"path":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":1000},"limit":{"type":"integer","minimum":1,"maximum":100}}),
-                json!(["path", "query"]),
-            )
-        },
-        eligibility: ToolEligibility::Always,
-        capability: ToolCapability::Read,
-        handler: Some(exec_agentgrep),
+        properties: || json!({"path":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":1000},"limit":{"type":"integer","minimum":1,"maximum":100}}),
+        required: &["path", "query"],
+        offer: Offer::Always,
+        kind: Kind::Read(agentgrep),
+    },
+    Tool {
+        name: "git_diff",
+        description: "Show uncommitted changes in the git repository that contains a context path: `git diff` of the working tree, or of the index with staged=true, limited to that path. Read-only; output at most 128 KiB.",
+        properties: || json!({"path":{"type":"string"},"staged":{"type":"boolean"}}),
+        required: &["path"],
+        offer: Offer::Always,
+        kind: Kind::Read(git_diff),
     },
 ];
-
-fn find_tool(name: &str) -> Option<&'static ToolSpec> {
-    REGISTRY.iter().find(|spec| spec.name == name)
+fn tool(name: &str) -> Option<&'static Tool> {
+    TOOLS.iter().find(|tool| tool.name == name)
 }
-
 pub fn schemas(settings: &Settings, cmd_enabled: bool) -> Vec<Value> {
-    REGISTRY
+    TOOLS
         .iter()
-        .filter(|spec| spec.is_enabled(settings, cmd_enabled))
-        .map(ToolSpec::schema)
+        .filter(|tool| tool.offer.allows(settings, cmd_enabled))
+        .map(Tool::schema)
         .collect()
 }
 pub(crate) fn resolve(root: &Path, path: &str, write: bool) -> Result<PathBuf> {
@@ -260,25 +224,28 @@ pub(crate) fn execute_scoped(
     args: &Value,
     excluded: Option<&Path>,
 ) -> Result<Value> {
-    let Some(spec) = find_tool(name) else {
-        bail!("Unknown tool: {name}");
+    let run = match tool(name).map(|tool| tool.kind) {
+        Some(Kind::Read(run) | Kind::Write(run)) => run,
+        Some(Kind::Runtime) | None => bail!("Unknown tool: {name}"),
     };
-    let Some(handler) = spec.handler else {
-        bail!("Unknown tool: {name}");
-    };
-    if spec.capability == ToolCapability::Write
-        && (!matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes)
-    {
-        bail!("Writing requires Auto or Goal mode and enabled workspace writes");
-    }
-    handler(root, args, excluded)
+    run(&ToolCall {
+        root,
+        settings,
+        args,
+        excluded,
+    })
 }
-
-fn exec_agentgrep(root: &Path, args: &Value, excluded: Option<&Path>) -> Result<Value> {
-    crate::code_search::search(root, args, excluded)
+/// What a built-in tool runs against: the resolved workspace root, the
+/// turn's settings, the call's arguments and a directory hidden from search.
+#[derive(Clone, Copy)]
+struct ToolCall<'a> {
+    root: &'a Path,
+    settings: &'a Settings,
+    args: &'a Value,
+    excluded: Option<&'a Path>,
 }
-
-fn exec_list_files(root: &Path, args: &Value, _excluded: Option<&Path>) -> Result<Value> {
+fn list_files(call: &ToolCall<'_>) -> Result<Value> {
+    let ToolCall { root, args, .. } = *call;
     let path = resolve(
         root,
         args["path"].as_str().context("path is required")?,
@@ -297,8 +264,8 @@ fn exec_list_files(root: &Path, args: &Value, _excluded: Option<&Path>) -> Resul
     entries.truncate(200);
     Ok(json!({"entries":entries,"truncated":truncated}))
 }
-
-fn exec_read_file(root: &Path, args: &Value, _excluded: Option<&Path>) -> Result<Value> {
+fn read_file(call: &ToolCall<'_>) -> Result<Value> {
+    let ToolCall { root, args, .. } = *call;
     let path = resolve(
         root,
         args["path"].as_str().context("path is required")?,
@@ -325,8 +292,16 @@ fn exec_read_file(root: &Path, args: &Value, _excluded: Option<&Path>) -> Result
         json!({"content":selected,"start_line":start,"end_line":end.min(lines.len()),"total_lines":lines.len()}),
     )
 }
-
-fn exec_edit_file(root: &Path, args: &Value, _excluded: Option<&Path>) -> Result<Value> {
+fn edit_file(call: &ToolCall<'_>) -> Result<Value> {
+    let ToolCall {
+        root,
+        settings,
+        args,
+        ..
+    } = *call;
+    if !matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes {
+        bail!("Writing requires Auto or Goal mode and enabled workspace writes");
+    }
     let name = args["path"].as_str().context("path is required")?;
     let path = resolve(root, name, false)?;
     let lock = mutation_lock(&path);
@@ -343,14 +318,57 @@ fn exec_edit_file(root: &Path, args: &Value, _excluded: Option<&Path>) -> Result
     if after.len() > 131072 {
         bail!("Write exceeds 128 KiB");
     }
-    fs::write(&path, &after)?;
-    Ok(json!({"written":name,"bytes":after.len(),"diff":unified_diff(name,&before,&after)}))
+    write_verified(&path, &after)?;
+    Ok(json!({
+        "written": name,
+        "bytes": after.len(),
+        "diff": unified_diff(name, &before, &after),
+        CHECKPOINT_KEY: checkpoint(&path, Some(&before), &after),
+    }))
 }
 
-fn exec_write_file(root: &Path, args: &Value, _excluded: Option<&Path>) -> Result<Value> {
-    let rel_path = args["path"].as_str().context("path is required")?;
-    create_parents(root, rel_path)?;
-    let path = resolve(root, rel_path, true)?;
+/// Result field that carries a write's undo record from the tool to the turn,
+/// which stores it and removes it before the model sees the result.
+pub(crate) const CHECKPOINT_KEY: &str = "_checkpoint";
+
+fn checkpoint(path: &Path, before: Option<&str>, after: &str) -> Value {
+    json!({
+        "path": path.to_string_lossy(),
+        "before": before,
+        "after_sha256": crate::storage::hex_sha256(after.as_bytes()),
+    })
+}
+
+/// Write `content` and read it back: the file must hold exactly these bytes
+/// before the tool reports success.
+pub(crate) fn write_verified(path: &Path, content: &str) -> Result<()> {
+    fs::write(path, content)?;
+    let written = fs::read(path)?;
+    if written != content.as_bytes() {
+        bail!(
+            "The file does not hold what was written ({} bytes read back, {} written); it may be changing under another program",
+            written.len(),
+            content.len()
+        );
+    }
+    Ok(())
+}
+fn write_file(call: &ToolCall<'_>) -> Result<Value> {
+    let ToolCall {
+        root,
+        settings,
+        args,
+        ..
+    } = *call;
+    if !matches!(settings.mode, Mode::Auto | Mode::Goal) || !settings.allow_writes {
+        bail!("Writing requires Auto or Goal mode and enabled workspace writes");
+    }
+    create_parents(root, args["path"].as_str().context("path is required")?)?;
+    let path = resolve(
+        root,
+        args["path"].as_str().context("path is required")?,
+        true,
+    )?;
     let lock = mutation_lock(&path);
     let _guard = lock
         .lock()
@@ -362,23 +380,89 @@ fn exec_write_file(root: &Path, args: &Value, _excluded: Option<&Path>) -> Resul
     if path.exists() && !path.is_file() {
         bail!("Not a regular file");
     }
-    let before = if path.exists() {
+    let existed = path.exists();
+    let before = if existed {
         read_text(&path, 131072)?
     } else {
         String::new()
     };
-    fs::write(&path, content)?;
-    Ok(
-        json!({"written":rel_path,"bytes":content.len(),"diff":unified_diff(rel_path,&before,content)}),
-    )
+    write_verified(&path, content)?;
+    Ok(json!({
+        "written": args["path"],
+        "bytes": content.len(),
+        "diff": unified_diff(args["path"].as_str().unwrap(), &before, content),
+        CHECKPOINT_KEY: checkpoint(&path, existed.then_some(before.as_str()), content),
+    }))
+}
+/// `git diff` for one path, run without a shell and without anything the
+/// repository's config could turn into a program: no external diff tool, no
+/// text conversion filters, no pager, no colour.
+fn git_diff(call: &ToolCall<'_>) -> Result<Value> {
+    let ToolCall { root, args, .. } = *call;
+    let path = resolve(
+        root,
+        args["path"].as_str().context("path is required")?,
+        false,
+    )?;
+    let staged = args
+        .get("staged")
+        .map(|v| v.as_bool().context("staged must be a boolean"))
+        .transpose()?
+        .unwrap_or(false);
+    let dir = if path.is_dir() {
+        path.clone()
+    } else {
+        path.parent().context("path has no parent")?.to_path_buf()
+    };
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("-C")
+        .arg(&dir)
+        .args([
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "diff.external=",
+            "--no-pager",
+            "diff",
+        ])
+        .args(["--no-color", "--no-ext-diff", "--no-textconv"]);
+    if staged {
+        command.arg("--cached");
+    }
+    let output = command
+        .arg("--")
+        .arg(&path)
+        .env("GIT_PAGER", "cat")
+        .env_remove("GIT_EXTERNAL_DIFF")
+        .output()
+        .context("git is not available")?;
+    if !output.status.success() {
+        bail!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    const LIMIT: usize = 131072;
+    let truncated = output.stdout.len() > LIMIT;
+    let shown = &output.stdout[..output.stdout.len().min(LIMIT)];
+    Ok(json!({
+        "diff": String::from_utf8_lossy(shown),
+        "staged": staged,
+        "truncated": truncated,
+        "clean": output.stdout.is_empty(),
+    }))
+}
+fn agentgrep(call: &ToolCall<'_>) -> Result<Value> {
+    crate::code_search::search(call.root, call.args, call.excluded)
 }
 
 pub fn writes(name: &str) -> bool {
-    find_tool(name).is_some_and(|spec| spec.capability == ToolCapability::Write)
+    tool(name).is_some_and(|tool| matches!(tool.kind, Kind::Write(_)))
 }
 /// Tools that only inspect the connected context. Swarm members get these.
 pub fn reads(name: &str) -> bool {
-    find_tool(name).is_some_and(|spec| spec.capability == ToolCapability::Read)
+    tool(name).is_some_and(|tool| matches!(tool.kind, Kind::Read(_)))
 }
 fn line_arg(args: &Value, key: &str) -> Result<Option<usize>> {
     match args.get(key) {
@@ -479,8 +563,9 @@ mod tests {
             approval_policy: Default::default(),
             permission_preset: None,
             team_mode: false,
+            budget: Default::default(),
         };
-        assert_eq!(schemas(&s, false).len(), 4);
+        assert_eq!(schemas(&s, false).len(), 5);
         assert!(execute(
             Path::new("/tmp"),
             &s,
@@ -581,7 +666,7 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(s.mode, Mode::Swarm));
-        assert_eq!(schemas(&s, false).len(), 4);
+        assert_eq!(schemas(&s, false).len(), 5);
         assert!(execute(
             Path::new("/tmp"),
             &s,
@@ -590,7 +675,7 @@ mod tests {
         )
         .is_err());
         s.mode = Mode::Chat;
-        assert_eq!(schemas(&s, false).len(), 3);
+        assert_eq!(schemas(&s, false).len(), 4);
     }
     #[test]
     fn concurrent_edits_preserve_every_change() {
@@ -679,5 +764,153 @@ mod tests {
         }
         assert!(!root.join(".hidden").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+}
+#[cfg(test)]
+mod registry {
+    use super::*;
+    fn offered(mode: &str, allow_writes: bool, cmd_enabled: bool) -> Vec<String> {
+        let settings: Settings = serde_json::from_value(json!({"provider":"p","model":"m","project_id":"x","mode":mode,"allow_writes":allow_writes})).unwrap();
+        schemas(&settings, cmd_enabled)
+            .iter()
+            .map(|schema| schema["function"]["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    /// The diff of a real repository: a change shows, a clean tree says so,
+    /// and staged changes are reported only when asked for.
+    #[test]
+    fn git_diff_reports_working_tree_and_index_changes() {
+        let root =
+            std::env::temp_dir().join(format!("allpaka-gitdiff-{}", crate::evaluation::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        // The temp directory may be reached through a short or linked name.
+        let root = root.canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "test"]);
+        fs::write(
+            root.join("a.txt"),
+            "one
+",
+        )
+        .unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let settings: Settings =
+            serde_json::from_value(json!({"provider": "local", "model": "mock"})).unwrap();
+        let diff = |staged: bool| {
+            execute(
+                &root,
+                &settings,
+                "git_diff",
+                &json!({"path": "a.txt", "staged": staged}),
+            )
+            .unwrap()
+        };
+        assert_eq!(diff(false)["clean"], true);
+        fs::write(
+            root.join("a.txt"),
+            "one
+two
+",
+        )
+        .unwrap();
+        let unstaged = diff(false);
+        assert!(
+            unstaged["diff"].as_str().unwrap().contains("+two"),
+            "{unstaged}"
+        );
+        assert_eq!(diff(true)["clean"], true);
+        git(&["add", "a.txt"]);
+        assert!(diff(true)["diff"].as_str().unwrap().contains("+two"));
+        assert_eq!(diff(false)["clean"], true);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn offers_tools_by_mode_in_a_stable_order() {
+        let read_only = ["list_files", "read_file", "agentgrep", "git_diff"];
+        assert_eq!(offered("chat", true, true), read_only);
+        assert_eq!(
+            offered("plan", true, true),
+            [
+                "list_files",
+                "read_file",
+                "set_plan",
+                "agentgrep",
+                "git_diff"
+            ]
+        );
+        assert_eq!(
+            offered("swarm", true, true),
+            [
+                "list_files",
+                "read_file",
+                "set_plan",
+                "agentgrep",
+                "git_diff"
+            ]
+        );
+        assert_eq!(
+            offered("auto", false, false),
+            [
+                "list_files",
+                "read_file",
+                "set_plan",
+                "agentgrep",
+                "git_diff"
+            ]
+        );
+        assert_eq!(
+            offered("goal", true, true),
+            [
+                "list_files",
+                "read_file",
+                "set_plan",
+                "edit_file",
+                "write_file",
+                "run_command",
+                "agentgrep",
+                "git_diff"
+            ]
+        );
+    }
+    #[test]
+    fn runtime_tools_are_not_executed_here_and_access_follows_the_table() {
+        let mut names: Vec<_> = TOOLS.iter().map(|tool| tool.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), TOOLS.len(), "tool names must be unique");
+        let root = std::env::temp_dir();
+        let settings: Settings = serde_json::from_value(
+            json!({"provider":"p","model":"m","project_id":"x","mode":"goal","allow_writes":true}),
+        )
+        .unwrap();
+        for name in ["set_plan", "run_command", "missing"] {
+            let error = execute(&root, &settings, name, &json!({})).unwrap_err();
+            assert_eq!(error.to_string(), format!("Unknown tool: {name}"));
+        }
+        for name in ["list_files", "read_file", "agentgrep", "git_diff"] {
+            assert!(reads(name) && !writes(name), "{name}");
+        }
+        for name in ["edit_file", "write_file"] {
+            assert!(writes(name) && !reads(name), "{name}");
+        }
+        for name in ["set_plan", "run_command", "missing"] {
+            assert!(!reads(name) && !writes(name), "{name}");
+        }
     }
 }

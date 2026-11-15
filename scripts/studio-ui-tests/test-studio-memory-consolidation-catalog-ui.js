@@ -1,9 +1,10 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 const pending=[],elements={project:{value:'p'},'memory-scope':{value:'p'},'memory-dialog':{open:true},'memory-name':{},'memory-content':{},'memory-receipt':{}};
 function node(tag,text){return {tag,text,children:[],append(...items){this.children.push(...items)},replaceChildren(...items){this.children=items}}}
 const pins=[{id:'a',version:1,sha256:'a'.repeat(64)},{id:'b',version:2,sha256:'b'.repeat(64)}],row={id:'proposal',project_id:'p',source_count:2,note_count:1,source_sha256:'c'.repeat(64)};
 const context={node,$:id=>elements[id],TextEncoder,URLSearchParams,memoryEditorEpoch:0,api:(path)=>new Promise(resolve=>pending.push({path,resolve}))};context.showMemory=()=>{context.memoryEditorEpoch++;context.memoryProposalSource=null;context.memoryConsolidationSources=null};vm.createContext(context);
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('function memoryConsolidationCatalogPanel('),source.indexOf('function memoryConsolidationComposer(')),context);
+const source=appSource();vm.runInContext(between(source,'function memoryConsolidationCatalogPanel(','function memoryConsolidationComposer('),context);
 const catalog=()=>({kind:'memory_consolidation_catalog',project_id:'p',offset:0,limit:20,total:1,provider_calls:0,has_more:false,proposals:[row]});const proposal=()=>({kind:'memory_consolidation_proposal',...row,accepted:false,consolidation_sources:pins,notes:[{name:'Draft',content:'Reviewed later'}]});
 (async()=>{const panel=context.memoryConsolidationCatalogPanel(),load=panel.children[1],status=panel.children[2],body=panel.children[3];let task=load.onclick();await load.onclick();assert.equal(pending.length,1);assert.equal(pending[0].path,'memory/consolidation-proposals?project_id=p&offset=0&limit=20');pending[0].resolve(catalog());await task;
 let open=body.children[0];task=open.onclick();pending[1].resolve(proposal());await task;assert.equal(elements['memory-content'].value,'Reviewed later');assert.equal(context.memoryProposalSource.proposal_id,'proposal');assert.deepEqual(context.memoryConsolidationSources,pins);

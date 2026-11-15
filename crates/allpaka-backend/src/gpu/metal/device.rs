@@ -1180,3 +1180,31 @@ fn pin_mmid_narrow(consts: &metal::FunctionConstantValues) {
         20,
     );
 }
+
+/// Gemma 3 local-layer RoPE frequencies; only the CUDA token path uses them.
+pub fn set_rope_inv_freq_swa(_inv_freq: &[f32]) -> bool {
+    false
+}
+
+/// Prefill GEMMs on quantized weights; CUDA-only.
+pub fn set_quant_gemm(_on: bool) -> bool {
+    false
+}
+
+/// Sliding window for prefill attention; CUDA-only.
+pub fn set_attn_window(window: Option<usize>) -> bool {
+    window.is_none()
+}
+
+/// Release a mapping handed to [`attach`]. Metal windows are no-copy views of
+/// host memory, so a later mapping at the same address is read live and
+/// nothing can go stale; the windows stay until the process exits.
+pub fn detach(_mapping: &[u8]) {}
+
+/// Prefill graph replay is CUDA-only.
+pub fn prefill_graph_key(_key: u64) {}
+
+/// Batched decode staging; CUDA only (`MultiRow` declines elsewhere).
+pub fn multi_stage(_key: u64, _positions: &[u32], _ropes: &[f32]) -> Option<()> {
+    None
+}

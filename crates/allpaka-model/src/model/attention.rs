@@ -9,6 +9,53 @@ use crate::profile;
 use allpaka_backend::{ops, thread_pool::par_chunks_mut};
 use anyhow::Result;
 
+/// The weights one attention call reads.
+pub(crate) struct AttnLayer<'l, 'a> {
+    pub aw: &'l AttnWeights<'a>,
+    pub q_norm: Option<&'l [f32]>,
+    pub k_norm: Option<&'l [f32]>,
+    pub bias: Option<&'l AttnBias<'a>>,
+    /// Sliding-window attention (Gemma 3's local layers): a row at position
+    /// `p` sees only positions `p - window + 1 ..= p`, as llama.cpp's
+    /// `LLAMA_SWA_TYPE_STANDARD` masks. None = full causal attention.
+    pub window: Option<usize>,
+}
+
+/// Projected q/k/v for `m` rows starting at `base_pos`, and their RoPE table.
+pub(crate) struct AttnInputs<'r> {
+    pub q: Vec<f32>,
+    pub k: Vec<f32>,
+    pub v: Vec<f32>,
+    pub m: usize,
+    pub base_pos: usize,
+    pub rope_flat: &'r [[f32; 2]],
+}
+
+/// How an attention call treats the KV cache and the GPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttnMode {
+    /// A trunk layer: append to the cache, GPU attention allowed. A traced
+    /// layer reports its intermediate tensors.
+    Trunk { trace_layer: Option<usize> },
+    /// The MTP block: rewrite its cache slot in place, CPU attention only.
+    Mtp,
+}
+
+impl AttnMode {
+    fn rewrite_kv(self) -> bool {
+        matches!(self, AttnMode::Mtp)
+    }
+    fn allow_gpu_attend(self) -> bool {
+        matches!(self, AttnMode::Trunk { .. })
+    }
+    fn trace_layer(self) -> Option<usize> {
+        match self {
+            AttnMode::Trunk { trace_layer } => trace_layer,
+            AttnMode::Mtp => None,
+        }
+    }
+}
+
 impl<'a> Model<'a> {
     /// Rotate one head by a per-position table from [`ops::rope_sin_cos`].
     #[inline]
@@ -30,22 +77,30 @@ impl<'a> Model<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_cpu_attention_from_qkv(
         &self,
-        aw: &AttnWeights<'a>,
-        q_norm: Option<&[f32]>,
-        k_norm: Option<&[f32]>,
-        bias: Option<&AttnBias<'a>>,
-        mut q: Vec<f32>,
-        mut k: Vec<f32>,
-        mut v: Vec<f32>,
-        m: usize,
-        base_pos: usize,
-        rope_flat: &[[f32; 2]],
+        layer: AttnLayer<'_, 'a>,
+        inputs: AttnInputs<'_>,
         kv: &mut KvCache,
         kv_layer: usize,
-        rewrite_kv: bool,
-        allow_gpu_attend: bool,
-        trace_layer: Option<usize>,
+        mode: AttnMode,
     ) -> Result<Vec<f32>> {
+        let AttnLayer {
+            aw,
+            q_norm,
+            k_norm,
+            bias,
+            window,
+        } = layer;
+        let AttnInputs {
+            mut q,
+            mut k,
+            mut v,
+            m,
+            base_pos,
+            rope_flat,
+        } = inputs;
+        let rewrite_kv = mode.rewrite_kv();
+        let allow_gpu_attend = mode.allow_gpu_attend();
+        let trace_layer = mode.trace_layer();
         let c = &self.config;
         let head_dim = c.head_dim as usize;
         let q_dim = c.q_dim();
@@ -144,23 +199,27 @@ impl<'a> Model<'a> {
         };
 
         let scale = 1.0 / (head_dim as f32).sqrt();
+        // A sliding window is a later start row: each GPU request shifts its
+        // K/V offsets to the first row it may see and shortens its count.
         let cpu_only = !allow_gpu_attend || cpu_attn_enabled();
+        let first_seen = |pos: usize| window.map_or(0, |w| (pos + 1).saturating_sub(w));
 
         // Single-token decode path: try fused attend + wo projection on GPU when !gate_in_q.
         if m == 1 && trace_layer.is_none() && !cpu_only && !aw.gate_in_q {
             let fused = {
                 let _s = profile::span(profile::Phase::Attend);
                 kv.gpu_view_ref(kv_layer).and_then(|(cache, k_off, v_off)| {
+                    let first = first_seen(base_pos);
                     aw.wo.attend_project(&allpaka_backend::gpu::AttnReq {
                         cache,
-                        k_off,
-                        v_off,
+                        k_off: k_off + first * kv_dim,
+                        v_off: v_off + first * kv_dim,
                         q: &q,
                         kv_dim,
                         head_dim,
                         n_q_heads: c.n_heads as usize,
                         group: c.group_size(),
-                        n_pos: base_pos + 1,
+                        n_pos: base_pos + 1 - first,
                         scale,
                     })
                 })
@@ -177,17 +236,20 @@ impl<'a> Model<'a> {
             let on_gpu = if m > 1 && !cpu_only && cache_synced {
                 kv.gpu_view(kv_layer).and_then(|(cache, k_off, v_off)| {
                     let reqs: Vec<allpaka_backend::gpu::AttnReq> = (0..m)
-                        .map(|i| allpaka_backend::gpu::AttnReq {
-                            cache,
-                            k_off,
-                            v_off,
-                            q: &q_ref[i * q_dim..(i + 1) * q_dim],
-                            kv_dim,
-                            head_dim,
-                            n_q_heads: c.n_heads as usize,
-                            group: c.group_size(),
-                            n_pos: base_pos + i + 1,
-                            scale,
+                        .map(|i| {
+                            let first = first_seen(base_pos + i);
+                            allpaka_backend::gpu::AttnReq {
+                                cache,
+                                k_off: k_off + first * kv_dim,
+                                v_off: v_off + first * kv_dim,
+                                q: &q_ref[i * q_dim..(i + 1) * q_dim],
+                                kv_dim,
+                                head_dim,
+                                n_q_heads: c.n_heads as usize,
+                                group: c.group_size(),
+                                n_pos: base_pos + i + 1 - first,
+                                scale,
+                            }
                         })
                         .collect();
                     allpaka_backend::gpu::attend_batch(&reqs)
@@ -196,6 +258,16 @@ impl<'a> Model<'a> {
                 None
             };
 
+            // GPU paths keep K/V on the device alone; the CPU attention below
+            // reads the host copy, so pull the earlier rows it will see (on a
+            // discrete GPU; a no-op otherwise). This call's own rows were
+            // just stored from the host.
+            if on_gpu.is_none() && !rewrite_kv {
+                let first = first_seen(base_pos);
+                if first < base_pos {
+                    kv.pull_gpu_range(kv_layer, first..base_pos);
+                }
+            }
             match on_gpu {
                 Some(rows) => {
                     for (out, row) in attn_out.chunks_mut(q_dim).zip(rows) {
@@ -210,6 +282,7 @@ impl<'a> Model<'a> {
                             c,
                             kv_ref,
                             kv_layer,
+                            first_seen(base_pos),
                             base_pos,
                             &q_ref[kv_head * group_span..(kv_head + 1) * group_span],
                             kv_head,
@@ -230,6 +303,7 @@ impl<'a> Model<'a> {
                                 c,
                                 kv_ref,
                                 kv_layer,
+                                first_seen(base_pos + row),
                                 base_pos + row,
                                 &q_ref[row * q_dim..(row + 1) * q_dim],
                                 out_row,
@@ -264,6 +338,7 @@ pub(crate) fn attend_group(
     c: &Config,
     kv: &KvCache,
     layer: usize,
+    first: usize,
     pos: usize,
     q_group: &[f32],
     kv_head: usize,
@@ -287,7 +362,7 @@ pub(crate) fn attend_group(
         (&mut heap_maxes, &mut heap_denoms)
     };
 
-    for t in 0..=pos {
+    for t in first..=pos {
         let kt = kv.k_at(layer, t, kv_head, head_dim);
         let vt = kv.v_at(layer, t, kv_head, head_dim);
 
@@ -324,10 +399,12 @@ pub(crate) fn attend_group(
 }
 
 /// All heads of one token row attending over the cache: one group pass per kv head.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn attend_one(
     c: &Config,
     kv: &KvCache,
     layer: usize,
+    first: usize,
     pos: usize,
     q_row: &[f32],
     out_row: &mut [f32],
@@ -341,6 +418,7 @@ pub(crate) fn attend_one(
             c,
             kv,
             layer,
+            first,
             pos,
             &q_row[at..at + group * head_dim],
             kv_head,
@@ -396,8 +474,11 @@ mod attention_tests {
         *REGION.get_or_init(|| {
             const PAGE: usize = 16384;
             let layout = std::alloc::Layout::from_size_align(PAGE, PAGE).unwrap();
+            // SAFETY: non-zero size, power-of-two alignment; null is asserted below.
             let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
             assert!(!ptr.is_null());
+            // SAFETY: `ptr` is a zeroed PAGE-byte allocation that is never freed (it
+            // is leaked into the OnceLock on purpose), so a `'static` shared view is valid.
             let region: &'static [u8] = unsafe { std::slice::from_raw_parts(ptr, PAGE) };
             allpaka_backend::gpu::attach(region)
         })
@@ -432,6 +513,7 @@ mod attention_tests {
             ssm: None,
             has_qk_norm: false,
             moe: None,
+            gemma: None,
             has_attn_bias: false,
             rope_dim: head_dim as u32,
             nextn: false,
@@ -474,7 +556,7 @@ mod attention_tests {
         };
 
         let mut want = vec![0f32; c.q_dim()];
-        attend_one(&c, &kv, 0, pos, &q, &mut want, scale);
+        attend_one(&c, &kv, 0, 0, pos, &q, &mut want, scale);
 
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
             assert!(
@@ -504,6 +586,7 @@ mod attention_tests {
             ssm: None,
             has_qk_norm: false,
             moe: None,
+            gemma: None,
             has_attn_bias: false,
             rope_dim: head_dim as u32,
             nextn: false,
@@ -526,7 +609,7 @@ mod attention_tests {
         let pos = positions - 1;
 
         let mut got = vec![0f32; c.q_dim()];
-        attend_one(&c, &kv, 0, pos, &q, &mut got, scale);
+        attend_one(&c, &kv, 0, 0, pos, &q, &mut got, scale);
 
         let mut want = vec![0f32; c.q_dim()];
         for qi in 0..n_heads as usize {

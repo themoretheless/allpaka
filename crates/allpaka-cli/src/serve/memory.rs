@@ -10,7 +10,12 @@ pub(super) fn snapshot(budget: &Budget) -> serde_json::Value {
         "peak_reserved_bytes": state.peak_reserved_bytes,
         "gpu_arena_bytes": gpu_arena_bytes,
         "effective_used_bytes": state.reserved_bytes.saturating_add(gpu_arena_bytes),
-        "scope": "weights,prefix capacity,session KV/SSM/RoPE,GPU arenas; excludes CPU scratch and process overhead"
+        "scope": "weights,prefix capacity,session KV/SSM/RoPE,GPU arenas; excludes CPU scratch and process overhead",
+        // The boundary, spelled out: only `admitted` counts against `limit_bytes`.
+        "admitted": ["model weights", "prefix cache capacity", "session KV/SSM/RoPE"],
+        "reported_only": ["gpu_arena_bytes"],
+        "not_counted": ["CPU scratch", "model auxiliary allocations", "HTTP buffers", "process overhead"],
+        "hard_cap": false
     })
 }
 
@@ -23,7 +28,10 @@ pub(super) fn session_bytes(
     let c = &model.config;
     let layers = u128::from(c.n_layers);
     let page = |bytes: u128| bytes.div_ceil(16384) * 16384;
-    let kv = page(layers * c.kv_dim() as u128 * capacity as u128 * 4);
+    // Keys and values for every layer, plus the zero tail a decode attention
+    // slot may read past the last layer.
+    let tail = allpaka_model::kv::slot_tail_rows(capacity) as u128;
+    let kv = page((layers * capacity as u128 * 2 + tail) * c.kv_dim() as u128 * 2);
     let ssm = c.ssm.as_ref().map_or(0, |s| {
         let channels = u128::from(s.d_inner) + 2 * u128::from(s.n_group) * u128::from(s.d_state);
         let conv = u128::from(s.d_conv.saturating_sub(1)) * channels;
@@ -38,6 +46,24 @@ pub(super) fn session_bytes(
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// `/stats` says which bytes the limit covers; the arenas it only reports
+    /// must not be listed as admitted.
+    #[test]
+    fn snapshot_states_the_admission_boundary() {
+        let view = snapshot(&Budget::new(1 << 20));
+        assert_eq!(view["hard_cap"], false);
+        assert_eq!(
+            view["reported_only"],
+            serde_json::json!(["gpu_arena_bytes"])
+        );
+        let admitted = view["admitted"].as_array().unwrap();
+        assert_eq!(admitted.len(), 3);
+        assert!(admitted
+            .iter()
+            .all(|item| !item.as_str().unwrap().contains("arena")));
+        assert!(!view["not_counted"].as_array().unwrap().is_empty());
+    }
     #[test]
     fn failed_reservation_is_atomic_and_drop_releases() {
         let budget = Budget::new(100);

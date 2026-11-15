@@ -26,11 +26,19 @@ impl SharedRegion {
     pub const fn is_discrete(&self) -> bool {
         false
     }
+
+    /// No prefill graphs on this backend.
+    #[inline]
+    pub fn graph_id(&self) -> u64 {
+        0
+    }
 }
 
 pub fn attach(_mapping: &[u8]) -> bool {
     false
 }
+
+pub fn detach(_mapping: &[u8]) {}
 
 pub fn is_attached() -> bool {
     false
@@ -164,6 +172,13 @@ pub fn prefill_replay(_xs: &[f32]) -> Option<Vec<f32>> {
     None
 }
 
+pub fn prefill_graph_key(_key: u64) {}
+
+/// Batched decode staging; CUDA only (`MultiRow` declines elsewhere).
+pub fn multi_stage(_key: u64, _positions: &[u32], _ropes: &[f32]) -> Option<()> {
+    None
+}
+
 pub fn prefill_end(_xs: &mut [f32]) -> Option<()> {
     None
 }
@@ -184,4 +199,19 @@ pub fn prefill_gdn_block(_req: &PrefillGdnReq) -> Option<Vec<f32>> {
 
 pub fn shared_activation_stats() -> crate::activation::SharedStats {
     crate::activation::SharedStats::default()
+}
+
+/// Gemma 3 local-layer RoPE frequencies; only the CUDA token path uses them.
+pub fn set_rope_inv_freq_swa(_inv_freq: &[f32]) -> bool {
+    false
+}
+
+/// Prefill GEMMs on quantized weights; CUDA-only.
+pub fn set_quant_gemm(_on: bool) -> bool {
+    false
+}
+
+/// Sliding window for prefill attention; CUDA-only.
+pub fn set_attn_window(window: Option<usize>) -> bool {
+    window.is_none()
 }

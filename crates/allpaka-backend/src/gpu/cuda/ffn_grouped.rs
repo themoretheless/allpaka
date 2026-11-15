@@ -10,6 +10,13 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             return Some(out);
         }
     }
+    if req
+        .fused
+        .as_ref()
+        .is_some_and(|c| c.gelu || c.post_norm.is_some())
+    {
+        return None;
+    }
 
     // GPU routing: logits live in y_arena from the fused attn block; rebuild
     // groups/tok/CSR on the host from pf_hs + those logits, then fall through.
@@ -65,7 +72,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                     s.0 *= route.scale;
                 }
             }
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            scored.sort_by(|a, b| b.0.total_cmp(&a.0));
             let mut picks: Vec<(usize, f32)> = scored
                 .into_iter()
                 .take(route.n_used)
@@ -140,6 +147,8 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                     hit_w,
                     m,
                     next_norm: None,
+                    post_norm: None,
+                    gelu: false,
                 }),
                 Some(hs),
             )
@@ -282,6 +291,7 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             if !gpu.pf_active {
                 return None;
             }
+            gpu.pf_flush_add()?;
             gpu.ensure_arenas(down_out.len() * 4, 4)?;
             gpu.stream
                 .memcpy_htod(&down_out, &mut gpu.y_arena.slice_mut(0..down_out.len()))

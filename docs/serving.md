@@ -26,14 +26,44 @@ configuration, allpaka applies a compatible cached autotune result for the
 model and Metal device. An incompatible cache entry is ignored rather than
 partially applied.
 
+Autotune results are per workload. `allpaka autotune <gguf> --workload W`
+measures the three profiles and keeps the one that serves `W` best:
+
+- `latency` (default) - the highest decode rate;
+- `throughput` - the highest rate over a 2 048-token prompt plus a 256-token
+  answer, each at its measured rate, with prefill measured on a 512-token chunk;
+- `memory` - the least GPU working memory among the profiles whose decode is
+  within 10% of the fastest.
+
+`serve` applies the entry for `ALLPAKA_WORKLOAD` (`latency` when unset); a
+model tuned for one workload has no entry for another until it is tuned for it.
+
 ## Scheduling contract
 
 `--max-queued` bounds accepted work. `--max-batch` and
 `--batch-context-tokens` bound each model-aware scheduling decision. The
 current batching mode is `model-aware-admission`: requests are grouped fairly
-by model, then executed serially by the inference owner. It is not yet a
-multi-session fused GPU kernel, and `GET /stats` reports
-`"kernel_batching": false` explicitly.
+by model and admitted by the inference owner.
+
+Up to four long chat completions for the same model run at once, each in its
+own session (a named one, checked out for the run, or a temporary one): the first on the owner thread, the others on
+worker threads. They take turns through a FIFO gate at every prefill chunk,
+and their decode steps are batched: whichever generation holds the turn runs
+one step for every generation then waiting to decode, as one pass over the
+weights (`Model::forward_multi`, a captured CUDA graph per set of sessions).
+`GET /stats` reports `"kernel_batching": true` for models this covers (dense
+attention layers); others decode the waiting steps one after another. On
+Qwen2.5-7B, four concurrent requests decode at 10.8-12.2 ms per token each
+instead of 16.2 ms taking turns
+(`docs/benchmarks/2026-11-14-serve-two-long-7b-rtx5090.md`).
+
+A short chat request does not wait for a long one to finish. Between the
+steps of a running generation (each prefill chunk and each decode token),
+`serve` looks at the queue; a waiting chat completion for the same model,
+without `session_id`, whose prompt plus `max_tokens` is at most a quarter of
+the running request's, is served to completion right there in a temporary
+session (no prefix cache read or written), and the long generation resumes.
+Other requests wait their turn as before.
 
 ## Prefix-cache contract
 
@@ -84,7 +114,7 @@ rules decide what they can claim:
   says "held by the model lock". `--interval-ms` bounds each probe, which is
   what makes a held probe observable at all.
 * **Residency is not reuse.** `PrefixCacheResident` reports entries and bytes
-  from `/stats`, which is what A4 of the roadmap calls residency - not hit
+  from `/stats`, which is residency (entries held) - not hit
   rate. `MemoryHeadroom` compares `reserved_bytes` to `limit_bytes`, and
   reports `no cap set` when the limit is the `u64::MAX` sentinel `serve` uses
   for an unbudgeted process.
@@ -116,6 +146,51 @@ The census the vision increments are planned from is:
 and the tensors grouped by top-level name prefix, and claims nothing beyond what
 the file contains.
 
+## Tool calls
+
+With `tools` in the request (ChatML models), a `<tool_call>` block the model
+writes is returned in the OpenAI `tool_calls` shape only if it is well formed
+**and** fits the declarations: the name is one of the request's tools, the
+arguments are a JSON object, and they satisfy the tool's `parameters` schema.
+The schema keywords checked are `type`, `properties`, `required`,
+`additionalProperties: false`, `items` and `enum`; others are ignored.
+
+A block that fails is not a tool call. Its text stays in `content`, exactly as
+a malformed block does, and the choice carries the reasons:
+
+```json
+"tool_call_rejections": [
+  {"name": "search", "reason": "arguments: missing required `query`"},
+  {"name": "rm_rf",  "reason": "tool `rm_rf` was not declared in this request"}
+]
+```
+
+The field is absent when nothing was refused. With `stream: true` the text is
+streamed up to the first `<tool_call>`, then the parsed calls arrive as one
+`tool_calls` delta and the refusals as one chunk before the final one. The built-in RAG tool loop never executes a refused call.
+
+Generation is held to the declarations too. Once the model has written
+`<tool_call>`, the sampler only accepts tokens that continue
+
+```text
+<tool_call>
+{"name": "<a declared tool>", "arguments": <a value of its schema>}
+</tool_call>
+```
+
+so a call cannot name another tool, miss a required argument, add an
+undeclared one to a closed object, or stop half-written. Outside a call the
+text is free. `tool_choice` forces the matter: `"required"` makes the whole
+reply one call to any declared tool, and
+`{"type": "function", "function": {"name": "..."}}` one call to that tool;
+either without `tools`, or naming an undeclared tool, is a 400, and neither
+works with the built-in RAG loop. Inside a call greedy decoding reads the full
+logits instead of the on-device argmax, and prompt-lookup drafting pauses.
+`enum` is enforced for string members only; schema keywords beyond the six
+above leave their value free-form JSON, and the after-the-fact check still
+applies. `ALLPAKA_TOOL_GRAMMAR=0` turns the constraint off, and `tool_choice`
+with it: the model is then free to answer in text.
+
 ## Request lifetime and sessions
 
 HTTP admission continues while inference runs. Readers are limited to 16, with
@@ -134,7 +209,10 @@ starts, interruption returns HTTP 408; during SSE it emits an error event and
 `[DONE]`. Completion removes the request registration.
 
 A model retains at most four named sessions. Idle sessions expire after ten
-minutes and are collected on the next model request. A request without
+minutes and are collected on the next model request. A session is checked
+out for the whole of a request, so requests for different sessions run side
+by side, and a request for a session another request is using waits for it
+(`scripts/check-named-sessions.py`). A request without
 `session_id` has independent KV state. Named sessions are scoped to the model
 and reuse their own state. The service has no tenant authentication; expose it
 only to trusted clients or place an authenticating proxy in front of it.
@@ -158,9 +236,16 @@ are retained, and account for old/new buffer overlap during replacement.
 Insufficient request capacity returns HTTP 429 before streaming; startup fails
 if model weights and cache capacity alone exceed the limit. `/stats` exposes
 `memory_admission.limit_bytes`, `reserved_bytes`, and `peak_reserved_bytes`.
-These are reservation counters, not measured RSS. GPU scratch, model-side
-auxiliary allocations, HTTP buffers, and other process overhead are not yet
-covered; this is not a hard process memory cap.
+These are reservation counters, not measured RSS, and this is not a hard
+process memory cap. The same block states the boundary:
+
+- `admitted` - what counts against `limit_bytes`: model weights, prefix cache
+  capacity and session KV/SSM/RoPE storage;
+- `reported_only` - `gpu_arena_bytes`, the GPU scratch arenas, shown (and added
+  into `effective_used_bytes`) but never the reason for a 429;
+- `not_counted` - CPU scratch, model-side auxiliary allocations, HTTP buffers
+  and other process overhead;
+- `hard_cap: false`.
 
 Validation: `python3 scripts/test-serving-memory.py` exercises actual memory
 rejection, reservation release, and a successful request after rejection.

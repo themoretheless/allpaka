@@ -1,145 +1,7 @@
-//! Connection routing: classify an HTTP request line against the declarative
-//! route table, answer lock-free ingress probes immediately, resolve the target
-//! model, and dispatch queued requests to their typed endpoint.
+//! Connection routing: read and classify a request, resolve the model it
+//! names, and dispatch it to the matching endpoint handler.
 
 use super::*;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum IngressRoute<'a> {
-    Health,
-    Resources,
-    Cancel(&'a str),
-    Queued(QueuedRoute),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum QueuedRoute {
-    Catalog,
-    Launch,
-    Models,
-    Model(ModelRoute),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ModelRoute {
-    Stats,
-    ChatPage,
-    CorsOptions,
-    PromptPredict,
-    PromptPrewarm,
-    ChatCompletions,
-    Unknown,
-}
-
-impl ModelRoute {
-    #[inline]
-    pub(super) const fn uses_chat_session(self) -> bool {
-        matches!(self, Self::ChatCompletions | Self::PromptPrewarm)
-    }
-}
-
-struct RouteEntry {
-    method: &'static str,
-    path: &'static str,
-    route: QueuedRoute,
-}
-
-/// Declarative table for all post-ingress routes matched by `(method, path)`
-/// after stripping any `?query` suffix.
-const STATIC_ROUTES: &[RouteEntry] = &[
-    RouteEntry {
-        method: "GET",
-        path: "/v1/catalog",
-        route: QueuedRoute::Catalog,
-    },
-    RouteEntry {
-        method: "POST",
-        path: "/v1/launch",
-        route: QueuedRoute::Launch,
-    },
-    RouteEntry {
-        method: "GET",
-        path: "/v1/models",
-        route: QueuedRoute::Models,
-    },
-    RouteEntry {
-        method: "GET",
-        path: "/stats",
-        route: QueuedRoute::Model(ModelRoute::Stats),
-    },
-    RouteEntry {
-        method: "GET",
-        path: "/",
-        route: QueuedRoute::Model(ModelRoute::ChatPage),
-    },
-    RouteEntry {
-        method: "GET",
-        path: "/index",
-        route: QueuedRoute::Model(ModelRoute::ChatPage),
-    },
-    RouteEntry {
-        method: "GET",
-        path: "/index.html",
-        route: QueuedRoute::Model(ModelRoute::ChatPage),
-    },
-    RouteEntry {
-        method: "POST",
-        path: "/v1/prompt/predict",
-        route: QueuedRoute::Model(ModelRoute::PromptPredict),
-    },
-    RouteEntry {
-        method: "POST",
-        path: "/v1/prompt/prewarm",
-        route: QueuedRoute::Model(ModelRoute::PromptPrewarm),
-    },
-    RouteEntry {
-        method: "POST",
-        path: "/v1/chat/completions",
-        route: QueuedRoute::Model(ModelRoute::ChatCompletions),
-    },
-];
-
-pub(super) fn classify_request_line(request_line: &str) -> IngressRoute<'_> {
-    // Exact request line: a prefix match here used to answer 200 for
-    // `/healthz` and anything else starting with `/health`.
-    if request_line == "GET /health HTTP/1.1" {
-        return IngressRoute::Health;
-    }
-    if let Some(route) = request_line.strip_prefix("POST /v1/requests/") {
-        if let Some(id) = route.strip_suffix("/cancel HTTP/1.1") {
-            if !id.is_empty() && !id.contains('/') && !id.contains(' ') {
-                return IngressRoute::Cancel(id);
-            }
-        }
-    }
-
-    let mut parts = request_line.split_whitespace();
-    let Some(method) = parts.next() else {
-        return IngressRoute::Queued(QueuedRoute::Model(ModelRoute::Unknown));
-    };
-    let Some(target) = parts.next() else {
-        return IngressRoute::Queued(QueuedRoute::Model(ModelRoute::Unknown));
-    };
-    if parts.next().is_none() || parts.next().is_some() {
-        return IngressRoute::Queued(QueuedRoute::Model(ModelRoute::Unknown));
-    }
-
-    if method == "OPTIONS" {
-        return IngressRoute::Queued(QueuedRoute::Model(ModelRoute::CorsOptions));
-    }
-
-    let path = target.split_once('?').map_or(target, |(p, _)| p);
-    if method == "GET" && path == "/resources" {
-        return IngressRoute::Resources;
-    }
-
-    for entry in STATIC_ROUTES {
-        if entry.method == method && entry.path == path {
-            return IngressRoute::Queued(entry.route);
-        }
-    }
-    IngressRoute::Queued(QueuedRoute::Model(ModelRoute::Unknown))
-}
 
 /// Answers every request that does not need a loaded model. Which routes are in
 /// this set is a contract, not a cache: `/health` and `/resources` are the only
@@ -154,27 +16,30 @@ pub(super) fn prepare_connection(
     registry: &Arc<RequestRegistry>,
 ) -> Result<Option<(String, usize, QueuedConnection)>> {
     let (request_line, body) = read_request(&mut stream)?;
-    let route = match classify_request_line(&request_line) {
-        IngressRoute::Health => {
+    match routes::classify(&request_line) {
+        Some(Matched {
+            route: Route::Health,
+            ..
+        }) => {
             respond(&mut stream, 200, &json!({"status":"ok"}))?;
             return Ok(None);
         }
-        IngressRoute::Resources => {
+        Some(Matched {
+            route: Route::Resources,
+            ..
+        }) => {
             respond(&mut stream, 200, &resources::snapshot())?;
             return Ok(None);
         }
-        IngressRoute::Cancel(id) => {
-            let cancelled = registry.cancel(id);
-            respond(
-                &mut stream,
-                if cancelled { 200 } else { 404 },
-                &json!({"cancelled":cancelled}),
-            )?;
+        Some(Matched {
+            route: Route::CancelRequest,
+            param: id,
+        }) => {
+            cancel_request(&mut stream, registry, id)?;
             return Ok(None);
         }
-        IngressRoute::Queued(queued) => queued,
-    };
-
+        _ => {}
+    }
     let body_len = body.len();
     let request: Value = if body.is_empty() {
         json!({})
@@ -225,11 +90,33 @@ pub(super) fn prepare_connection(
         context_tokens,
         QueuedConnection {
             stream,
-            route,
+            request_line,
             request,
             control,
         },
     )))
+}
+
+/// End a connection so the client sees the end of the reply, not a reset.
+///
+/// A streamed reply has no length: the client reads until the connection
+/// ends. Dropping the socket straight after the last write ended about 4% of
+/// streamed replies on Windows with a connection reset instead (13 of 300 on
+/// the loopback fixture; 0 of 300 with this). So: say we are done writing,
+/// then wait briefly for the client to close its side, discarding anything it
+/// still sends.
+pub(super) fn close_politely(mut stream: TcpStream) {
+    use std::io::Read;
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
+    let mut sink = [0u8; 1024];
+    // Bounded: a peer that keeps sending is not waited on.
+    for _ in 0..16 {
+        match stream.read(&mut sink) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
 }
 
 pub(super) fn resolve_model_name(requested: &str, available: &[String]) -> Option<String> {
@@ -249,45 +136,27 @@ pub(super) fn dispatch_connection(
     connection: QueuedConnection,
     runtime: &mut ServerRuntime,
     rag: &RagTools,
+    interrupt: Option<Interrupt<'_>>,
 ) -> Result<()> {
-    let model_route = match connection.route {
-        QueuedRoute::Catalog => {
-            return respond(
-                &mut connection.stream.try_clone()?,
-                200,
-                &json!({"object": "list", "data": launch::list_models()}),
-            );
-        }
-        QueuedRoute::Launch => {
-            let path = connection.request["path"].as_str().unwrap_or("");
+    let route = routes::classify(&connection.request_line).map(|matched| matched.route);
+    if route.is_none() {
+        let allow = routes::allowed(&connection.request_line);
+        if !allow.is_empty() {
             let mut stream = connection.stream;
-            match launch::schedule(path, "") {
-                Ok(()) => {
-                    respond(&mut stream, 200, &json!({"status": "restarting"}))?;
-                    let _ = stream.flush();
-                    println!("relaunch: {path}");
-                    std::process::exit(0);
-                }
-                Err(error) => {
-                    return respond(&mut stream, 400, &json!({"error": error.to_string()}));
-                }
-            }
-        }
-        QueuedRoute::Models => {
-            let data = runtime
-                .model_names()
-                .into_iter()
-                .map(|id| json!({"id": id, "object": "model", "owned_by": "allpaka"}))
-                .collect::<Vec<_>>();
-            return respond(
-                &mut connection.stream.try_clone()?,
-                200,
-                &json!({"object": "list", "data": data}),
+            return respond_with_headers(
+                &mut stream,
+                405,
+                &[("Allow", &allow.join(", "))],
+                &json!({"error": "method not allowed", "allow": allow}),
             );
         }
-        QueuedRoute::Model(route) => route,
-    };
-
+    }
+    match route {
+        Some(Route::Catalog) => return catalog(&connection.stream),
+        Some(Route::Launch) => return relaunch(connection),
+        Some(Route::Models) => return list_models(&connection.stream, runtime),
+        _ => {}
+    }
     let available_models = runtime.model_names();
     let Some(model_name) = resolve_model_name(&model_name, &available_models) else {
         let mut stream = connection.stream;
@@ -303,7 +172,7 @@ pub(super) fn dispatch_connection(
     let mut service = service
         .lock()
         .map_err(|_| anyhow::anyhow!("model service lock poisoned: {model_name}"))?;
-    let is_chat = model_route.uses_chat_session();
+    let is_chat = matches!(route, Some(Route::ChatCompletions | Route::PromptPrewarm));
     let session_id = connection
         .request
         .get("session_id")
@@ -315,11 +184,6 @@ pub(super) fn dispatch_connection(
                 .context("session_id must be a non-empty string of at most 128 bytes")
         })
         .transpose()?;
-    let now = std::time::Instant::now();
-    service
-        .sessions
-        .retain(|_, (_, used)| now.duration_since(*used).as_secs() < 600);
-
     let ModelService {
         model,
         tokenizer,
@@ -334,30 +198,23 @@ pub(super) fn dispatch_connection(
     let mut checked_out_session: Option<(String, ChatState, bool)> = None;
     if is_chat {
         if let Some(id) = session_id {
-            if !sessions.contains_key(&id) && sessions.len() >= 4 {
-                let mut stream = connection.stream;
-                return respond(
-                    &mut stream,
-                    429,
-                    &json!({"error":"resident session capacity exhausted"}),
-                );
-            }
-            match sessions.remove(&id) {
-                Some((session_chat, _)) => {
-                    checked_out_session = Some((id, session_chat, true));
+            // A worker generation (`interleave`) may still be running this
+            // session: wait for it, as a request queued behind it would,
+            // passing it the turn this thread holds meanwhile.
+            while named_in_use(&id) && connection.control.check().is_ok() {
+                match super::interleave::current() {
+                    Some(gate) => gate.pass(),
+                    None => std::thread::sleep(std::time::Duration::from_millis(5)),
                 }
-                None => match ChatState::new(model, &default_chat.memory.budget(), 1) {
-                    Ok(session_chat) => {
-                        checked_out_session = Some((id, session_chat, false));
-                    }
-                    Err(error) => {
-                        return respond(
-                            &mut connection.stream.try_clone()?,
-                            429,
-                            &json!({"error":error.to_string()}),
-                        );
-                    }
-                },
+            }
+            match check_out_named(sessions, &id, model, &default_chat.memory.budget()) {
+                Ok((session_chat, existed)) => {
+                    checked_out_session = Some((id, session_chat, existed));
+                }
+                Err((status, message)) => {
+                    let mut stream = connection.stream;
+                    return respond(&mut stream, status, &json!({ "error": message }));
+                }
             }
         }
     }
@@ -380,7 +237,7 @@ pub(super) fn dispatch_connection(
     let mut error_stream = connection.stream.try_clone()?;
     let outcome = handle(
         connection.stream,
-        model_route,
+        route,
         connection.request,
         ServeRequestContext {
             model_name: &model_name,
@@ -392,6 +249,7 @@ pub(super) fn dispatch_connection(
                 prefixes,
                 prefix_namespace,
                 control: &connection.control,
+                interrupt,
             },
             rag,
         },
@@ -413,22 +271,76 @@ pub(super) fn dispatch_connection(
             respond(&mut error_stream, status, &body)?;
         }
     }
+    close_politely(error_stream);
     if is_chat {
         if !succeeded {
             active_chat.sanitize_after_failure(model)?;
         }
         if let Some((id, session_chat, had_existing_session)) = checked_out_session {
-            if succeeded || had_existing_session {
-                sessions.insert(id, (session_chat, std::time::Instant::now()));
-            }
+            check_in_named(
+                sessions,
+                id,
+                session_chat,
+                succeeded || had_existing_session,
+            );
         }
     }
     Ok(())
 }
 
+/// `POST /v1/requests/{id}/cancel`: 200 when a live request was cancelled,
+/// 404 when no request has that id.
+fn cancel_request(stream: &mut TcpStream, registry: &RequestRegistry, id: &str) -> Result<()> {
+    let cancelled = registry.cancel(id);
+    respond(
+        stream,
+        if cancelled { 200 } else { 404 },
+        &json!({"cancelled":cancelled}),
+    )
+}
+
+/// `GET /v1/catalog`: GGUF files found on disk that `/v1/launch` can start.
+fn catalog(stream: &TcpStream) -> Result<()> {
+    respond(
+        &mut stream.try_clone()?,
+        200,
+        &json!({"object": "list", "data": launch::list_models()}),
+    )
+}
+
+/// `POST /v1/launch`: schedule a restart on another model and exit, or 400
+/// when the path cannot be launched.
+fn relaunch(connection: QueuedConnection) -> Result<()> {
+    let path = connection.request["path"].as_str().unwrap_or("");
+    let mut stream = connection.stream;
+    match launch::schedule(path, "") {
+        Ok(()) => {
+            respond(&mut stream, 200, &json!({"status": "restarting"}))?;
+            let _ = stream.flush();
+            println!("relaunch: {path}");
+            std::process::exit(0);
+        }
+        Err(error) => respond(&mut stream, 400, &json!({"error": error.to_string()})),
+    }
+}
+
+/// `GET /v1/models`: the resident models, OpenAI list shape.
+fn list_models(stream: &TcpStream, runtime: &ServerRuntime) -> Result<()> {
+    let data = runtime
+        .model_names()
+        .into_iter()
+        .map(|id| json!({"id": id, "object": "model", "owned_by": "allpaka"}))
+        .collect::<Vec<_>>();
+    respond(
+        &mut stream.try_clone()?,
+        200,
+        &json!({"object": "list", "data": data}),
+    )
+}
+
 #[cfg(test)]
 mod model_resolution_tests {
-    use super::{classify_request_line, resolve_model_name, IngressRoute, ModelRoute, QueuedRoute};
+    use super::resolve_model_name;
 
     #[test]
     fn aliases_must_be_unique_and_exact_names_win() {
@@ -444,61 +356,5 @@ mod model_resolution_tests {
         );
         assert_eq!(resolve_model_name("qwen", &names), None);
         assert_eq!(resolve_model_name("mistral", &names), None);
-    }
-
-    #[test]
-    fn declarative_route_table_preserves_prelock_contract_and_rejects_lookalikes() {
-        assert_eq!(
-            classify_request_line("GET /health HTTP/1.1"),
-            IngressRoute::Health
-        );
-        assert_eq!(
-            classify_request_line("GET /healthz HTTP/1.1"),
-            IngressRoute::Queued(QueuedRoute::Model(ModelRoute::Unknown))
-        );
-        assert_eq!(
-            classify_request_line("GET /resources?ts=1 HTTP/1.1"),
-            IngressRoute::Resources
-        );
-        assert_eq!(
-            classify_request_line("POST /v1/requests/req-42/cancel HTTP/1.1"),
-            IngressRoute::Cancel("req-42")
-        );
-        assert_eq!(
-            classify_request_line("GET /v1/models HTTP/1.1"),
-            IngressRoute::Queued(QueuedRoute::Models)
-        );
-        assert_eq!(
-            classify_request_line("GET /v1/models_extra HTTP/1.1"),
-            IngressRoute::Queued(QueuedRoute::Model(ModelRoute::Unknown))
-        );
-        assert_eq!(
-            classify_request_line("GET /stats?ts=1730000000 HTTP/1.1"),
-            IngressRoute::Queued(QueuedRoute::Model(ModelRoute::Stats))
-        );
-        assert_eq!(
-            classify_request_line("GET / HTTP/1.1"),
-            IngressRoute::Queued(QueuedRoute::Model(ModelRoute::ChatPage))
-        );
-        assert_eq!(
-            classify_request_line("GET /index.html HTTP/1.1"),
-            IngressRoute::Queued(QueuedRoute::Model(ModelRoute::ChatPage))
-        );
-        assert_eq!(
-            classify_request_line("OPTIONS /v1/chat/completions HTTP/1.1"),
-            IngressRoute::Queued(QueuedRoute::Model(ModelRoute::CorsOptions))
-        );
-        assert_eq!(
-            classify_request_line("POST /v1/prompt/prewarm HTTP/1.1"),
-            IngressRoute::Queued(QueuedRoute::Model(ModelRoute::PromptPrewarm))
-        );
-        assert_eq!(
-            classify_request_line("POST /v1/chat/completions HTTP/1.1"),
-            IngressRoute::Queued(QueuedRoute::Model(ModelRoute::ChatCompletions))
-        );
-        assert!(ModelRoute::ChatCompletions.uses_chat_session());
-        assert!(ModelRoute::PromptPrewarm.uses_chat_session());
-        assert!(!ModelRoute::Stats.uses_chat_session());
-        assert!(!ModelRoute::PromptPredict.uses_chat_session());
     }
 }

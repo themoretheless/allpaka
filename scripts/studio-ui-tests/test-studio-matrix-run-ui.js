@@ -1,5 +1,6 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 const candidates=()=>['base','next'].map(label=>({label,sha256:'hash',request:{dataset_id:'data',dataset_version:1,metrics:['exact_match'],settings:{model:label,project_id:'project',mode:'chat',allow_writes:false},prompt_template:'{{input}}'}}));
 function setup(){
   const calls=[];let stopped=false;
@@ -13,7 +14,7 @@ function setup(){
     if(path==='evaluation/matrices/matrix')return matrix;
     throw new Error('unexpected request '+path);
   }};
-  vm.createContext(context);vm.runInContext(source.slice(source.indexOf('function verifyStudioMatrixJob('),source.indexOf('let evaluationMatrixEpoch=')),context);return {context,calls,job,matrix};
+  vm.createContext(context);vm.runInContext(between(source,'function verifyStudioMatrixJob(','let evaluationMatrixEpoch='),context);return {context,calls,job,matrix};
 }
 const hooks=()=>({cancelled:()=>false,wait:async()=>{},progress:()=>{}});
 (async()=>{

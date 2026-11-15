@@ -1,8 +1,9 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 const pending=[],elements={};function node(tag,text){return {tag,text,children:[],value:'',append(...x){this.children.push(...x)},replaceChildren(...x){this.children=x},setAttribute(){},showModal(){this.open=true},close(){this.open=false;this.onclose?.()}};}
 for(const id of ['project','review-queues-dialog','review-queues-list','review-queue-detail','review-queues-open','review-queues-close','review-queues-refresh','review-queues-status','review-queues-reviewer','review-queues-name','review-queues-archive'])elements[id]=node('div');elements.project.value='p';
 const context={node,TextEncoder,$:id=>elements[id],Option:function(text,value){return {text,value}},URLSearchParams,encodeURIComponent,traceView:trace=>node('trace',trace.id),api:(path,body)=>new Promise((resolve,reject)=>pending.push({path,body,resolve,reject}))};
-vm.createContext(context);const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('function reviewQueueCreationPanel('),source.indexOf('function feedbackHistoryPanel(')),context);
+vm.createContext(context);const source=appSource();vm.runInContext(between(source,'function reviewQueueCreationPanel(','function feedbackHistoryPanel('),context);
 const packet=(offset=0)=>({filters:{status:null,reviewer:null,name:null,archived:null},kind:'review_queue_catalog',project_id:'p',offset,limit:20,total:21,has_more:offset===0,order:'id_desc',provider_calls:0,queues:Array.from({length:offset===0?20:1},(_,i)=>({id:'q'+String(21-offset-i).padStart(3,'0'),project_id:'p',name:'Queue '+(21-offset-i),target_count:1,completed_count:0}))});
 const queue=(id='q21',version=1)=>({id,project_id:'p',name:'Queue',instructions:'Check accuracy',version,targets:[{trace_id:'trace-one',span_id:1}],assignments:{},completions:{}});
 (async()=>{

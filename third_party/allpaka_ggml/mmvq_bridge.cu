@@ -1,5 +1,16 @@
 // Direct llama MMVQ entry (no ggml cgraph). Linked into allpaka_ggml.dll.
 
+// This file pokes ggml_backend_cuda_context fields (streams, cublas handles,
+// pools) by offset, so it must see the struct exactly as ggml-cuda.dll was
+// built. ggml-cuda builds with GGML_CUDA_GRAPHS=ON, which adds the
+// cuda_graphs map before `pools`; without the define here, `pools[d][0]`
+// aliased last_graph_eviction_sweep and reset_stream_helpers() called a
+// "destructor" through a timestamp - an intermittent access violation in
+// serve on the first prefill after a decode.
+#ifndef GGML_CUDA_USE_GRAPHS
+#error "build mmvq_bridge.cu with -DGGML_CUDA_USE_GRAPHS to match ggml-cuda (GGML_CUDA_GRAPHS=ON)"
+#endif
+
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
@@ -112,6 +123,14 @@ extern "C" void allpaka_peer_clear_shared(void) {
     }
     cudaStream_t & slot = g_ctx->streams[g_ctx->device][0];
     if (g_shared_stream && slot == g_peer) {
+        // reset_stream_helpers() destroys the cuBLAS handle and memory pool
+        // of stream slot 0; decode work queued on the shared stream may still
+        // be using them, so drain it first (once per prefill).
+        cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+        if (g_peer && cudaStreamIsCapturing(g_peer, &cap) == cudaSuccess
+            && cap == cudaStreamCaptureStatusNone) {
+            cudaStreamSynchronize(g_peer);
+        }
         // Prefer the parked private stream; else null -> create on demand.
         slot = g_ggml_private;
         g_ggml_private = nullptr;
@@ -278,6 +297,94 @@ extern "C" int allpaka_direct_mmvq(
     if (calls == 1 || calls == 100 || calls == 1000) {
         fprintf(stderr, "allpaka_ggml: direct_mmvq calls=%d\n", calls);
     }
+    return 0;
+}
+
+extern "C" int allpaka_direct_mmvq_m(
+    void * cuda_ctx_v,
+    const void * w_dev,
+    const float * x_dev,
+    float * y_dev,
+    int32_t n_in,
+    int32_t n_out,
+    int32_t m,
+    int32_t w_type)
+{
+    // m columns at once (a batched decode step, one per session): llama's
+    // MMVQ reads each weight once for up to 8 of them.
+    if (m < 1 || m > 8) {
+        return -9;
+    }
+    if (!cuda_ctx_v || !w_dev || !x_dev || !y_dev || n_in <= 0 || n_out <= 0) {
+        return -2;
+    }
+    const ggml_type ty = (ggml_type)w_type;
+    if (ty != GGML_TYPE_Q4_K && ty != GGML_TYPE_Q6_K) {
+        return -3;
+    }
+    if (n_in % ggml_blck_size(ty) != 0) {
+        return -4;
+    }
+
+    auto & ctx = *static_cast<ggml_backend_cuda_context *>(cuda_ctx_v);
+    g_ctx = &ctx;
+    inject_shared_stream();
+
+    ggml_tensor W;
+    ggml_tensor X;
+    ggml_tensor Y;
+    std::memset(&W, 0, sizeof(W));
+    std::memset(&X, 0, sizeof(X));
+    std::memset(&Y, 0, sizeof(Y));
+
+    W.type = ty;
+    W.ne[0] = n_in;
+    W.ne[1] = n_out;
+    W.ne[2] = 1;
+    W.ne[3] = 1;
+    W.nb[0] = ggml_type_size(ty);
+    W.nb[1] = ggml_row_size(ty, n_in);
+    W.nb[2] = W.nb[1] * (size_t)n_out;
+    W.nb[3] = W.nb[2];
+    W.data = const_cast<void *>(w_dev);
+
+    X.type = GGML_TYPE_F32;
+    X.ne[0] = n_in;
+    X.ne[1] = m;
+    X.ne[2] = 1;
+    X.ne[3] = 1;
+    X.nb[0] = sizeof(float);
+    X.nb[1] = sizeof(float) * (size_t)n_in;
+    X.nb[2] = X.nb[1] * (size_t)m;
+    X.nb[3] = X.nb[2];
+    X.data = const_cast<float *>(x_dev);
+
+    Y.type = GGML_TYPE_F32;
+    Y.ne[0] = n_out;
+    Y.ne[1] = m;
+    Y.ne[2] = 1;
+    Y.ne[3] = 1;
+    Y.nb[0] = sizeof(float);
+    Y.nb[1] = sizeof(float) * (size_t)n_out;
+    Y.nb[2] = Y.nb[1] * (size_t)m;
+    Y.nb[3] = Y.nb[2];
+    Y.data = y_dev;
+    Y.src[0] = &W;
+    Y.src[1] = &X;
+    Y.op = GGML_OP_MUL_MAT;
+
+    ggml_backend_buffer buf_w{};
+    ggml_backend_buffer buf_x{};
+    ggml_backend_buffer buf_y{};
+    buf_w.usage = GGML_BACKEND_BUFFER_USAGE_WEIGHTS;
+    buf_x.usage = GGML_BACKEND_BUFFER_USAGE_COMPUTE;
+    buf_y.usage = GGML_BACKEND_BUFFER_USAGE_COMPUTE;
+    W.buffer = &buf_w;
+    X.buffer = &buf_x;
+    Y.buffer = &buf_y;
+
+
+    ggml_cuda_mul_mat_vec_q(ctx, &W, &X, nullptr, &Y, nullptr);
     return 0;
 }
 

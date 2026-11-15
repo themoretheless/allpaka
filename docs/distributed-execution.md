@@ -93,8 +93,46 @@ This uses the existing cluster planner and emits a JSON manifest containing
 ordered stage ranges, each worker's argument array and gateway arguments. Node
 names must match the configuration. Memory planning uses the engine's 16-bit KV
 cache representation. Infeasible models and missing worker endpoints fail.
-The manifest does not execute SSH commands or assume remote model paths; copy
-arguments to the named machines and use their corresponding GGUF paths.
+The manifest does not execute SSH commands or assume remote model paths.
+
+Start it with one command per machine instead of copying arguments:
+
+```sh
+allpaka pipeline-plan ... > manifest.json
+# on machine-a (node "mac"); --model is this machine's path to the GGUF
+allpaka pipeline-up manifest.json --node mac --model /models/model.gguf
+# on machine-b, which also runs the gateway
+allpaka pipeline-up manifest.json --node desktop --gateway --model D:\models\model.gguf
+```
+
+`pipeline-up` starts the stages the manifest places on the named node with the
+manifest's own arguments, and with `--gateway` the chat gateway once every
+stage endpoint, local or remote, accepts connections (`--wait-secs`, 300 by
+default). It runs only `allpaka stage` and `allpaka pipeline-serve` entries,
+with its own executable; a manifest naming anything else is refused. It stays
+in the foreground and stops everything it started when one of them exits.
+`--all --bind-host 127.0.0.1` runs the whole split on one machine. The
+children exit when `pipeline-up` is gone, however it went: each holds a pipe
+to it and stops when the pipe closes.
+
+Watch the split as a phase plus conditions, from any machine that can reach
+the stages:
+
+```sh
+allpaka watch --manifest manifest.json --config allpaka.toml --gateway machine-b:8099
+```
+
+- `StageReachable/<node>` - the stage's endpoint accepted a TCP connection.
+- `LayersPlaced` - the stages cover the layers from 0 without gaps or overlaps.
+- `LinkVerified` - every hop between two different nodes has its own
+  measurement in the cluster config. A hop covered only by the `[link]`
+  fallback, or a run without `--config`, does not hold it.
+- `GatewayReachable` - with `--gateway`, the gateway answered `/v1/models`.
+
+The phase is `Stopped` when nothing answers, `Starting` while some stage or
+the gateway does not, `Degraded` when everything answers but the layers or a
+link do not check out, and `Ready` otherwise. `--once` prints the status and
+exits; `--json` prints one object per transition.
 
 The remote-agent integration test starts a real HTTP worker and a deterministic
 model endpoint. The model requests a file from the worker-owned project; the

@@ -39,18 +39,27 @@ struct Region {
     layout: std::alloc::Layout,
 }
 
-// The region is plain memory owned by this struct; the raw pointer is an
-// implementation detail of the alignment, not shared mutable state.
+// SAFETY: `Region` uniquely owns its allocation (freed only in Drop) and has
+// no interior mutability, so moving it to another thread moves that ownership
+// like a `Box<[u16]>` would; the raw pointer is only there for page alignment.
 unsafe impl Send for Region {}
+// SAFETY: shared access only yields `&[u16]` / `&[u8]` (the `_mut` accessors
+// take `&mut self`), so `&Region` across threads is like `&[u16]`.
 unsafe impl Sync for Region {}
 
 impl Region {
     const PAGE: usize = 16384;
 
+    /// Always zeroed: the accessors hand out `&[u16]` / `&[u8]` over the
+    /// whole region, and a reference to uninitialised integers is undefined
+    /// behaviour. At least one page, because a zero-sized `alloc` is too
+    /// (an empty cache, e.g. `capacity == 0`, still gets a valid region).
     fn zeroed(elems: usize) -> Self {
-        let bytes = (elems * 2).div_ceil(Self::PAGE) * Self::PAGE;
+        let bytes = (elems * 2).div_ceil(Self::PAGE).max(1) * Self::PAGE;
         let layout =
             std::alloc::Layout::from_size_align(bytes, Self::PAGE).expect("kv cache layout");
+        // SAFETY: `layout` has a non-zero size (at least one page) and a valid
+        // power-of-two alignment, as `alloc_zeroed` requires; null is checked below.
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) } as *mut u16;
         assert!(!ptr.is_null(), "out of memory for a {bytes}-byte kv cache");
         Self {
@@ -60,38 +69,34 @@ impl Region {
         }
     }
 
-    fn uninit(elems: usize) -> Self {
-        let bytes = (elems * 2).div_ceil(Self::PAGE) * Self::PAGE;
-        let layout =
-            std::alloc::Layout::from_size_align(bytes, Self::PAGE).expect("kv cache layout");
-        let ptr = unsafe { std::alloc::alloc(layout) } as *mut u16;
-        assert!(!ptr.is_null(), "out of memory for a {bytes}-byte kv cache");
-        Self {
-            ptr,
-            elems: bytes / 2,
-            layout,
-        }
-    }
-
     fn as_slice(&self) -> &[u16] {
+        // SAFETY: `ptr` is a live, zero-initialised allocation of `elems * 2` bytes
+        // aligned to PAGE (so to u16) and owned by `self`, which the borrow keeps alive.
+        // The GPU may also write this memory through a wrapped SharedRegion; callers
+        // must not hold a CPU view across a backend call that writes it asynchronously.
         unsafe { std::slice::from_raw_parts(self.ptr, self.elems) }
     }
 
     fn as_mut_slice(&mut self) -> &mut [u16] {
+        // SAFETY: as `as_slice`, and `&mut self` makes this the only live view.
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.elems) }
     }
 
     fn as_bytes(&self) -> &[u8] {
+        // SAFETY: the same `elems * 2` initialised bytes viewed as u8 (align 1).
         unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.elems * 2) }
     }
 
     fn as_bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: as `as_bytes`, unique through `&mut self`.
         unsafe { std::slice::from_raw_parts_mut(self.ptr as *mut u8, self.elems * 2) }
     }
 }
 
 impl Drop for Region {
     fn drop(&mut self) {
+        // SAFETY: `ptr` came from `alloc_zeroed` with exactly this `layout` and is
+        // freed once, here; no view can outlive `self`.
         unsafe { std::alloc::dealloc(self.ptr as *mut u8, self.layout) }
     }
 }
@@ -201,7 +206,7 @@ impl SsmCache {
             .as_ref()
             .is_none_or(|store| store.as_slice().len() < needed_elems);
         if needs_alloc {
-            let store = Region::uninit(needed_elems);
+            let store = Region::zeroed(needed_elems);
             self.slot_shared = allpaka_backend::gpu::wrap_region(store.as_bytes());
             self.slot_store = Some(store);
         }
@@ -240,6 +245,10 @@ impl SsmCache {
     pub fn slot(&self, i: usize) -> &[f32] {
         let store = self.slot_store.as_ref().expect("slots not allocated");
         let s = store.as_slice();
+        // SAFETY: the slot region is PAGE-aligned, so its u16 storage is f32-aligned,
+        // and `s.len() / 2` f32s cover exactly its `2 * s.len()` initialised bytes
+        // (zeroed at allocation, any bit pattern is a valid f32). The borrow of `self`
+        // keeps the region alive.
         let floats = unsafe { std::slice::from_raw_parts(s.as_ptr() as *const f32, s.len() / 2) };
         let n = self.total_elems();
         &floats[i * n..(i + 1) * n]
@@ -266,6 +275,10 @@ impl SsmCache {
                 allpaka_backend::gpu::download_region_range(slot_sh, slot_byte_off, dst);
             }
         }
+        // SAFETY: `slot(i)` is `n` floats inside `slot_store` and the destination is
+        // the first `n` floats of `store` (which holds `total_elems() == n` floats);
+        // the two are separate allocations, so they cannot overlap. `self.slot(i)` ends
+        // its shared borrow before `as_mut_slice` takes the unique one.
         unsafe {
             let sp = self.slot(i).as_ptr();
             let dp = self.store.as_mut_slice().as_mut_ptr() as *mut f32;
@@ -282,11 +295,14 @@ impl SsmCache {
 
     fn floats(&self) -> &[f32] {
         let s = self.store.as_slice();
+        // SAFETY: PAGE-aligned region, so f32-aligned; `s.len() / 2` f32s span its
+        // initialised bytes, and any bits are a valid f32.
         unsafe { std::slice::from_raw_parts(s.as_ptr() as *const f32, s.len() / 2) }
     }
 
     fn floats_mut(&mut self) -> &mut [f32] {
         let s = self.store.as_mut_slice();
+        // SAFETY: as `floats`, unique through `&mut self`.
         unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr() as *mut f32, s.len() / 2) }
     }
 
@@ -324,6 +340,8 @@ impl SsmCache {
         if let Some(sh) = self.shared.as_ref() {
             if sh.is_discrete() {
                 let mut out = vec![0.0f32; n];
+                // SAFETY: `out` is `n` initialised f32s, i.e. `n * 4` bytes, viewed as u8
+                // (align 1) for the download; `dst` is the only live view of `out`.
                 let dst =
                     unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, n * 4) };
                 if allpaka_backend::gpu::download_region_range(sh, 0, dst) {
@@ -362,6 +380,12 @@ impl SsmCache {
         let conv_off = slot * n_conv;
         let state_off = self.conv_elems + slot * n_state;
         let total = self.total_elems();
+        // SAFETY: `conv_off + n_conv <= conv_elems` and `state_off + n_state <=
+        // total` (the slot index is below the active-layer count the region was sized
+        // for), so both `add`s stay inside `store`; `dp` points at `slot_store`, a
+        // separate allocation. Callers may write through `dp` but must not read
+        // through the conv/state pointers after taking `&mut` views of the store
+        // (see the slot copy in `gdn.rs`).
         unsafe {
             let sp = self.store.as_slice().as_ptr() as *const f32;
             let dp = self
@@ -459,6 +483,26 @@ pub struct KvCache {
     shared: Option<allpaka_backend::gpu::SharedRegion>,
 }
 
+/// The largest floor a decode attention slot may be given
+/// (`ALLPAKA_FA_KV_FLOOR`); a slot is a power of two no smaller than this.
+const FA_SLOT_FLOOR_MAX: usize = 8192;
+
+/// Rows of zeroes kept after the last layer's values.
+///
+/// The CUDA decode attention reads K and V through a slot whose length is a
+/// power of two at least as large as the context, not the context itself, and
+/// masks the rows past the current position. For every layer but the last
+/// those rows are the next layer's (finite) rows; for the last layer's values
+/// they would lie past the end of the cache, where the memory is not ours and
+/// a stray Inf or NaN turns a masked row's zero weight into NaN. The tail
+/// makes every slot the cache can be asked for land inside it, on zeroes.
+pub fn slot_tail_rows(capacity: usize) -> usize {
+    capacity
+        .next_power_of_two()
+        .max(FA_SLOT_FLOOR_MAX)
+        .saturating_sub(capacity)
+}
+
 impl KvCache {
     pub fn new(n_layers: usize, kv_dim: usize, capacity: usize) -> Self {
         let active = vec![true; n_layers];
@@ -479,7 +523,7 @@ impl KvCache {
         let n_slots = n_active.max(1);
         let layer_stride = kv_dim * capacity;
         let half = n_slots * layer_stride;
-        let store = Region::zeroed(half * 2);
+        let store = Region::zeroed(half * 2 + slot_tail_rows(capacity) * kv_dim);
         let shared = allpaka_backend::gpu::wrap_region(store.as_bytes());
         Self {
             store,
@@ -652,6 +696,38 @@ impl KvCache {
         ops::f16::from_f32(v, &mut store[vr.start + at..vr.start + at + kv_dim]);
     }
 
+    /// The reverse of [`sync_gpu_range`]: bring `positions` of `layer` back
+    /// from device VRAM into the host store (dUMA only; a no-op on UMA or
+    /// without a GPU). GPU paths write K/V on the device alone; a CPU
+    /// attention over rows they wrote (Gemma 3's sliding window past the
+    /// GPU kernels' reach) must pull them first.
+    pub fn pull_gpu_range(&mut self, layer: usize, positions: std::ops::Range<usize>) -> bool {
+        if positions.start > positions.end || positions.end > self.capacity {
+            return false;
+        }
+        let slot = self.slot_of(layer);
+        let Some(shared) = self.shared.as_ref() else {
+            return true;
+        };
+        if !shared.is_discrete() || positions.is_empty() {
+            return true;
+        }
+        let count = (positions.end - positions.start) * self.kv_dim;
+        let k_at = slot * self.layer_stride + positions.start * self.kv_dim;
+        let v_at = self.v_base + k_at;
+        let (k_bytes, v_bytes, byte_count) = (k_at * 2, v_at * 2, count * 2);
+        let bytes = self.store.as_bytes_mut();
+        allpaka_backend::gpu::download_region_range(
+            shared,
+            k_bytes,
+            &mut bytes[k_bytes..k_bytes + byte_count],
+        ) && allpaka_backend::gpu::download_region_range(
+            shared,
+            v_bytes,
+            &mut bytes[v_bytes..v_bytes + byte_count],
+        )
+    }
+
     /// Synchronize a range of host-written KV positions to the GPU cache.
     ///
     /// * On **UMA** (`SharedRegion::is_unified()`), host and GPU share physical
@@ -750,6 +826,29 @@ impl KvCache {
 
 #[cfg(test)]
 mod tests {
+    /// Whatever slot the decode attention is given, the last layer's values
+    /// still end inside the cache, on zeroes.
+    #[test]
+    fn every_attention_slot_ends_inside_the_cache() {
+        let (layers, kv_dim) = (3usize, 8usize);
+        for capacity in [1usize, 132, 300, 5000, 8192, 9000, 16472] {
+            let cache = super::KvCache::new(layers, kv_dim, capacity);
+            let (_, v_off) = cache.layer_offsets(layers - 1);
+            // The slot for the last position, with the largest allowed floor.
+            let slot = capacity.next_power_of_two().max(8192);
+            let end = v_off + slot * kv_dim;
+            let store = cache.store.as_slice();
+            assert!(
+                end <= store.len(),
+                "capacity {capacity}: {end} > {}",
+                store.len()
+            );
+            let tail = &store[v_off + capacity * kv_dim..end];
+            assert!(tail.iter().all(|&bits| bits == 0), "capacity {capacity}");
+            assert_eq!(super::slot_tail_rows(capacity), slot - capacity);
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -788,9 +887,12 @@ mod tests {
         let ssm_mask = [true, true, true, false, true, true, true, false];
         let kv_full = KvCache::new(8, 256, 64);
         let mut kv_compact = KvCache::with_active_layers(&kv_mask, 256, 64);
+        // Two of eight layers hold KV: a quarter of the rows, plus the same
+        // slot tail either way.
+        let tail = slot_tail_rows(64) * 256;
         assert_eq!(
-            kv_compact.store.as_slice().len() * 4,
-            kv_full.store.as_slice().len()
+            (kv_compact.store.as_slice().len() - tail) * 4,
+            kv_full.store.as_slice().len() - tail
         );
         assert_eq!(kv_compact.slot_of(3), 0);
         assert_eq!(kv_compact.slot_of(7), 1);
@@ -828,6 +930,9 @@ mod tests {
         if let Some((cp, sp, dp, conv_off, state_off, n_conv, n_state, stride)) =
             ssm.slot_write_ptrs(0)
         {
+            // SAFETY: `arm_slots(2)` sized `slot_store` for two whole-region copies,
+            // so `stride + conv_off + n_conv` and `state_off + n_state` are within it, and
+            // the sources are inside `store`; no reference to either region is live here.
             unsafe {
                 std::ptr::copy_nonoverlapping(cp, dp.add(conv_off), n_conv);
                 std::ptr::copy_nonoverlapping(sp, dp.add(state_off), n_state);
@@ -845,5 +950,32 @@ mod tests {
         ssm.restore(&snap);
         assert_eq!(ssm.conv_layer(0)[0], 1.5);
         assert_eq!(ssm.state_layer(1)[3], -2.25);
+    }
+
+    /// Empty caches used to request a zero-sized allocation, which is
+    /// undefined behaviour for the global allocator; they now get a page.
+    #[test]
+    fn empty_caches_allocate_a_valid_region() {
+        let kv = KvCache::new(2, 8, 0);
+        assert!(!kv.store.as_bytes().is_empty());
+        let kv = KvCache::new(0, 0, 16);
+        assert!(!kv.store.as_bytes().is_empty());
+        let mut ssm = SsmCache::new(1, 2, 4, 1, 2);
+        ssm.arm_slots(0);
+        assert!(ssm
+            .slot_store
+            .as_ref()
+            .is_some_and(|s| !s.as_bytes().is_empty()));
+    }
+
+    /// Rollback slots are handed out as `&[f32]` before any row writes them,
+    /// so the buffer must start initialised (it used to be `alloc`ed raw).
+    #[test]
+    fn armed_slots_start_zeroed() {
+        let mut ssm = SsmCache::new(2, 3, 8, 2, 4);
+        ssm.arm_slots(3);
+        for i in 0..3 {
+            assert!(ssm.slot(i).iter().all(|&v| v == 0.0));
+        }
     }
 }

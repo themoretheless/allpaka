@@ -1,5 +1,8 @@
 //! allpaka - decide whether splitting a model across your machines is worth it,
 //! and if so, where to cut it.
+// clap's derived `Subcommand` impl builds one large command tree; newer
+// clippy flags its unoptimised stack frame. The derive output is not ours.
+#![allow(unknown_lints, clippy::large_unopt_stack_frames)]
 
 mod airbug;
 mod autotune;
@@ -7,7 +10,6 @@ mod bench;
 mod benchmark_report;
 mod client;
 mod config;
-mod dispatch;
 mod explain;
 mod model_registry;
 mod scheduler;
@@ -15,13 +17,17 @@ mod serving_runtime;
 use allpaka_gguf as gguf;
 mod airbug_llama;
 mod pipeline;
+mod pipeline_up;
 mod rag_mcp;
 mod report;
 mod serve;
 mod verify;
 mod watch;
+mod watch_split;
 
-use anyhow::Result;
+use allpaka_core::fleet::FleetMember;
+use allpaka_core::{fleet, plan, presets, replicate, Model, PlanRequest, Speculation, Verdict};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -33,7 +39,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
-pub(crate) enum Command {
+enum Command {
     /// Run a contiguous transformer stage on this machine.
     Stage {
         model: PathBuf,
@@ -61,6 +67,32 @@ pub(crate) enum Command {
         endpoints: Vec<String>,
         #[arg(long)]
         context: Option<u32>,
+    },
+    /// Start the stages (and gateway) a pipeline-plan manifest places on this machine.
+    PipelineUp {
+        /// The JSON `pipeline-plan` printed.
+        manifest: PathBuf,
+        /// Start the stages of this node; repeat for several.
+        #[arg(long = "node")]
+        nodes: Vec<String>,
+        /// Start every stage here: a single-machine run.
+        #[arg(long)]
+        all: bool,
+        /// Also start the chat gateway once every stage endpoint is listening.
+        #[arg(long)]
+        gateway: bool,
+        /// This machine's path to the GGUF, when it differs from the manifest's.
+        #[arg(long)]
+        model: Option<PathBuf>,
+        /// Host the stages bind to instead of the manifest's 0.0.0.0.
+        #[arg(long)]
+        bind_host: Option<String>,
+        /// Address the gateway binds to.
+        #[arg(long)]
+        gateway_bind: Option<String>,
+        /// Seconds to wait for the stage endpoints before starting the gateway.
+        #[arg(long, default_value_t = 300)]
+        wait_secs: u64,
     },
     /// Expose a distributed model to Studio through a local chat API.
     PipelineServe {
@@ -129,6 +161,11 @@ pub(crate) enum Command {
         cache: Option<PathBuf>,
         #[arg(long)]
         force: bool,
+        /// What to tune for: latency (decode rate), throughput (long prompt
+        /// plus short answer) or memory (least working memory within 10% of
+        /// the fastest decode). `serve` picks the entry by ALLPAKA_WORKLOAD.
+        #[arg(long, default_value = "latency")]
+        workload: autotune::Workload,
     },
     /// Print an example allpaka.toml to stdout.
     Init,
@@ -179,41 +216,7 @@ pub(crate) enum Command {
     },
 
     /// Paired allpaka vs llama.cpp throughput via airbug (AB/BA process pairs).
-    Airbug {
-        /// GGUF model path.
-        #[arg(value_name = "GGUF")]
-        model: PathBuf,
-        /// Prefill tokens (ALLPAKA_BENCH_PP / llama -p).
-        #[arg(long, default_value_t = 480)]
-        pp: u32,
-        /// Decode tokens (ALLPAKA_BENCH_TG / llama -n).
-        #[arg(long, default_value_t = 32)]
-        tg: u32,
-        /// Independent AB/BA process pairs.
-        #[arg(long, default_value_t = 5)]
-        repeats: u32,
-        /// Discarded warmup pairs before measurement (GPU clock settle).
-        #[arg(long, default_value_t = 1)]
-        warmup: u32,
-        /// Sleep between engines within a pair, milliseconds.
-        #[arg(long, default_value_t = 1500)]
-        cooldown_ms: u64,
-        /// Relative regression threshold percent for airbug compare.
-        #[arg(long, default_value_t = 5.0)]
-        threshold: f64,
-        /// allpaka binary (default: this executable / ALLPAKA_BIN).
-        #[arg(long)]
-        allpaka: Option<PathBuf>,
-        /// llama-bench binary (default: llama-bench / LLAMA_BENCH).
-        #[arg(long)]
-        llama_bench: Option<PathBuf>,
-        /// Fail with exit 1 if airbug reports a regression vs llama.
-        #[arg(long)]
-        check: bool,
-        /// Output directory for run.json / comparison.json / raw logs.
-        #[arg(long)]
-        out: Option<PathBuf>,
-    },
+    Airbug(AirbugArgs),
 
     /// Place several models one per memory pool, one endpoint each.
     ///
@@ -246,36 +249,7 @@ pub(crate) enum Command {
     },
 
     /// Serve a model over an OpenAI-compatible chat API, on our own engine.
-    Serve {
-        /// Path to a .gguf to serve; repeat --model for multi-model serving.
-        #[arg(long, required = true)]
-        model: Vec<PathBuf>,
-        /// Address to listen on.
-        #[arg(long, default_value = "127.0.0.1:8099")]
-        bind: String,
-        /// Typed runtime profile and overrides from allpaka.toml.
-        #[arg(long)]
-        config: Option<PathBuf>,
-        /// Maximum accepted connections waiting for inference.
-        #[arg(long, default_value_t = 256)]
-        max_queued: usize,
-        /// Maximum requests selected in one model-aware scheduling batch.
-        #[arg(long, default_value_t = 16)]
-        max_batch: usize,
-        /// Maximum aggregate prompt tokens in a scheduling batch.
-        #[arg(long, default_value_t = 32768)]
-        batch_context_tokens: usize,
-        /// Total resident model budget in GiB; zero means unlimited.
-        #[arg(long, default_value_t = 0)]
-        model_budget_gib: u64,
-        /// Shared weights, prefix capacity and KV/SSM admission budget; zero is unlimited.
-        /// GPU scratch and process overhead are not included yet.
-        #[arg(long, default_value_t = 0)]
-        memory_budget_mib: u64,
-        /// Prefix-cache budget in MiB.
-        #[arg(long, default_value_t = 512)]
-        prefix_cache_mib: usize,
-    },
+    Serve(ServeArgs),
 
     /// Probe a running `allpaka serve`: /health plus /stats.
     Status {
@@ -299,6 +273,20 @@ pub(crate) enum Command {
         /// One JSON object per transition, for scripts.
         #[arg(long)]
         json: bool,
+        /// Watch a layer split instead: the manifest `pipeline-plan` printed.
+        /// Probes every stage endpoint; `--addr` is then ignored.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// With --manifest: the cluster config, to check that every hop between
+        /// two machines was measured.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// With --manifest: the chat gateway's address, to probe it too.
+        #[arg(long)]
+        gateway: Option<String>,
+        /// With --manifest: print the current status and exit.
+        #[arg(long)]
+        once: bool,
     },
 
     /// Send one chat request to a running `allpaka serve`.
@@ -356,11 +344,22 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 6)]
         decode: usize,
         /// Maximum acceptable |log-prob| difference. Defaults to 0.15 for a
-        /// dense model and 0.5 for a MoE: measured llama.cpp Metal-vs-CPU
-        /// disagreement on Qwen3-30B-A3B reaches 0.45 by itself, so a MoE
-        /// tolerance below that would fail a correct engine.
+        /// dense model of up to 32 layers, 0.4 for a deeper one (0.9 per decode step) and 0.5 for a
+        /// MoE: llama.cpp's own backends disagree by up to 0.24 on Qwen3-32B
+        /// and 0.45 on Qwen3-30B-A3B, so a tighter default would fail a
+        /// correct engine.
         #[arg(long)]
         tol: Option<f64>,
+        /// Record the reference alone into this file (prompt tokens and its
+        /// top log-probs along its own greedy continuation), without loading
+        /// the model here. With `--replay` later, a model too large to sit
+        /// next to llama-server is still compared on the GPU.
+        #[arg(long, conflicts_with = "replay")]
+        record: Option<PathBuf>,
+        /// Compare against a reference recorded with `--record`, without a
+        /// running llama-server.
+        #[arg(long)]
+        replay: Option<PathBuf>,
     },
 
     /// Split one model across the cluster by layers.
@@ -391,6 +390,78 @@ pub(crate) enum Command {
     },
 }
 
+// Arguments of `allpaka airbug`. No doc comment: clap would take it as the
+// subcommand's about text instead of the variant's.
+#[derive(clap::Args)]
+struct AirbugArgs {
+    /// GGUF model path.
+    #[arg(value_name = "GGUF")]
+    model: PathBuf,
+    /// Prefill tokens (ALLPAKA_BENCH_PP / llama -p).
+    #[arg(long, default_value_t = 480)]
+    pp: u32,
+    /// Decode tokens (ALLPAKA_BENCH_TG / llama -n).
+    #[arg(long, default_value_t = 32)]
+    tg: u32,
+    /// Independent AB/BA process pairs.
+    #[arg(long, default_value_t = 5)]
+    repeats: u32,
+    /// Discarded warmup pairs before measurement (GPU clock settle).
+    #[arg(long, default_value_t = 1)]
+    warmup: u32,
+    /// Sleep between engines within a pair, milliseconds.
+    #[arg(long, default_value_t = 1500)]
+    cooldown_ms: u64,
+    /// Relative regression threshold percent for airbug compare.
+    #[arg(long, default_value_t = 5.0)]
+    threshold: f64,
+    /// allpaka binary (default: this executable / ALLPAKA_BIN).
+    #[arg(long)]
+    allpaka: Option<PathBuf>,
+    /// llama-bench binary (default: llama-bench / LLAMA_BENCH).
+    #[arg(long)]
+    llama_bench: Option<PathBuf>,
+    /// Fail with exit 1 if airbug reports a regression vs llama.
+    #[arg(long)]
+    check: bool,
+    /// Output directory for run.json / comparison.json / raw logs.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+// Arguments of `allpaka serve`; see `AirbugArgs` for the missing doc comment.
+#[derive(clap::Args)]
+struct ServeArgs {
+    /// Path to a .gguf to serve; repeat --model for multi-model serving.
+    #[arg(long, required = true)]
+    model: Vec<PathBuf>,
+    /// Address to listen on.
+    #[arg(long, default_value = "127.0.0.1:8099")]
+    bind: String,
+    /// Typed runtime profile and overrides from allpaka.toml.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Maximum accepted connections waiting for inference.
+    #[arg(long, default_value_t = 256)]
+    max_queued: usize,
+    /// Maximum requests selected in one model-aware scheduling batch.
+    #[arg(long, default_value_t = 16)]
+    max_batch: usize,
+    /// Maximum aggregate prompt tokens in a scheduling batch.
+    #[arg(long, default_value_t = 32768)]
+    batch_context_tokens: usize,
+    /// Total resident model budget in GiB; zero means unlimited.
+    #[arg(long, default_value_t = 0)]
+    model_budget_gib: u64,
+    /// Shared weights, prefix capacity and KV/SSM admission budget; zero is unlimited.
+    /// GPU scratch and process overhead are not included yet.
+    #[arg(long, default_value_t = 0)]
+    memory_budget_mib: u64,
+    /// Prefix-cache budget in MiB.
+    #[arg(long, default_value_t = 512)]
+    prefix_cache_mib: usize,
+}
+
 fn main() -> Result<()> {
     if let Ok(profile) = std::env::var("ALLPAKA_PROFILE") {
         let profile: allpaka_backend::profile::RuntimeProfile = profile.parse()?;
@@ -399,7 +470,493 @@ fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     airbug::install();
-    dispatch::run(cli.command)
+    pipeline_up::exit_with_parent();
+    dispatch(cli.command)
+}
+
+/// One function per subcommand; the arms only unpack clap's fields.
+fn dispatch(command: Command) -> Result<()> {
+    match command {
+        Command::Studio {
+            bind,
+            workspace,
+            data_dir,
+            profile,
+            headless,
+            prompt,
+            dump_config,
+            acp,
+        } => allpaka_chat::run_with_options(allpaka_chat::StudioOptions {
+            bind,
+            workspace,
+            data_dir,
+            profile,
+            headless,
+            prompt,
+            dump_config,
+            acp,
+        }),
+        Command::Explain {
+            engine,
+            profile,
+            json,
+        } => explain::run(&engine, &profile, json),
+        Command::Autotune {
+            engine,
+            cache,
+            force,
+            workload,
+        } => autotune::run(&engine, cache.as_deref(), force, workload),
+        Command::Init => run_init(),
+        Command::PipelinePlan {
+            model,
+            config,
+            model_id,
+            endpoints,
+            context,
+        } => pipeline::plan_manifest(&model, &config, &model_id, &endpoints, context),
+        Command::PipelineUp {
+            manifest,
+            nodes,
+            all,
+            gateway,
+            model,
+            bind_host,
+            gateway_bind,
+            wait_secs,
+        } => pipeline_up::run(
+            &manifest,
+            &pipeline_up::Options {
+                nodes: &nodes,
+                all,
+                gateway,
+                model: model.as_deref(),
+                bind_host: bind_host.as_deref(),
+                gateway_bind: gateway_bind.as_deref(),
+            },
+            wait_secs,
+        ),
+        Command::PipelineServe {
+            stages,
+            tokenizer,
+            model_id,
+            bind,
+            context,
+        } => pipeline::serve_chat(&stages, &tokenizer, &model_id, bind, context),
+        Command::Stage {
+            model,
+            first,
+            end,
+            model_id,
+            bind,
+            context,
+        } => pipeline::serve(&model, first, end, model_id, bind, context),
+        Command::Pipeline {
+            stages,
+            tokens,
+            context,
+            generate,
+        } => pipeline::generate(&stages, &tokens, context, generate),
+        Command::Presets => run_presets(),
+        Command::Inspect { model, mmproj } => run_inspect(&model, mmproj),
+        Command::Bench {
+            serve,
+            bind,
+            connect,
+            mem,
+            engine,
+            draft,
+            config,
+        } => run_bench(serve, bind, connect, mem, engine, draft, config),
+        Command::Airbug(args) => run_airbug(args),
+        Command::Plan {
+            model,
+            config: config_path,
+            ctx,
+            prompt,
+            draft,
+            draft_len,
+            accept,
+        } => run_plan_command(&model, &config_path, ctx, prompt, draft, draft_len, accept),
+        Command::Fleet {
+            config: config_path,
+            models,
+            ctx,
+        } => run_fleet(&config_path, &models, ctx),
+        Command::Launch {
+            config: config_path,
+        } => run_launch(&config_path),
+        Command::Verify {
+            model,
+            addr,
+            prompt,
+            top,
+            tol,
+            decode,
+            record,
+            replay,
+        } => match (record, replay) {
+            (Some(file), _) => verify::record(&addr, &prompt, top, decode, &file),
+            (None, Some(file)) => verify::replay(&model, &file, tol),
+            (None, None) => verify::run(&model, &addr, &prompt, top, tol, decode),
+        },
+        Command::Serve(args) => run_serve(args),
+        Command::Status { addr } => client::status(&addr),
+        Command::Watch {
+            addr,
+            interval_ms,
+            json,
+            manifest,
+            config,
+            gateway,
+            once,
+        } => {
+            let interval = std::time::Duration::from_millis(interval_ms);
+            match manifest {
+                Some(manifest) => watch_split::watch(
+                    &manifest,
+                    config.as_deref(),
+                    gateway.as_deref(),
+                    interval,
+                    json,
+                    once,
+                ),
+                None => watch::watch(&addr, interval, json),
+            }
+        }
+        Command::Chat {
+            prompt,
+            system,
+            rag,
+            max_tokens,
+            model_name,
+            addr,
+        } => client::chat(
+            &addr,
+            &prompt,
+            system.as_deref(),
+            rag,
+            max_tokens,
+            &model_name,
+        ),
+        Command::RagTest { model_name, addr } => client::rag_test(&addr, &model_name),
+    }
+}
+
+fn run_init() -> Result<()> {
+    print!("{}", config::EXAMPLE);
+    Ok(())
+}
+
+fn run_presets() -> Result<()> {
+    report::presets(presets::PRESETS);
+    Ok(())
+}
+
+fn run_inspect(model: &std::path::Path, mmproj: bool) -> Result<()> {
+    if mmproj {
+        report::vision_census(model, &gguf::vision::VisionCensus::read(model)?);
+    } else {
+        report::gguf(model, &gguf::read(model)?);
+    }
+    Ok(())
+}
+
+fn run_bench(
+    serve: bool,
+    bind: String,
+    connect: Option<String>,
+    mem: bool,
+    engine: Option<PathBuf>,
+    draft: Option<PathBuf>,
+    config: Option<PathBuf>,
+) -> Result<()> {
+    match (engine, mem, serve, connect) {
+        (Some(model), _, _, _) => {
+            apply_runtime_config(config.as_deref(), Some(&model))?;
+            bench::measure_engine(&model, draft.as_deref())
+        }
+        (None, true, _, _) => bench::measure_memory(),
+        (None, false, true, _) => bench::serve(&bind),
+        (None, false, false, Some(addr)) => {
+            println!("measuring path to {addr} ...");
+            let link = bench::measure(&addr)?;
+            report::link(&link);
+            Ok(())
+        }
+        (None, false, false, None) => {
+            bail!("pass --serve, --connect <host:port>, --mem, or --engine <model>")
+        }
+    }
+}
+
+fn run_airbug(args: AirbugArgs) -> Result<()> {
+    let AirbugArgs {
+        model,
+        pp,
+        tg,
+        repeats,
+        warmup,
+        cooldown_ms,
+        threshold,
+        allpaka,
+        llama_bench,
+        check,
+        out,
+    } = args;
+    airbug_llama::run(airbug_llama::Options {
+        model,
+        pp,
+        tg,
+        repeats,
+        warmup,
+        cooldown_ms,
+        threshold_percent: threshold,
+        check,
+        allpaka_bin: airbug_llama::resolve_allpaka_bin(allpaka)?,
+        llama_bench: airbug_llama::resolve_llama_bench(llama_bench),
+        out: out.unwrap_or_else(airbug_llama::default_out_dir),
+    })
+}
+
+/// `allpaka plan`: reads the draft model, when there is one, before planning.
+fn run_plan_command(
+    model: &std::path::Path,
+    config_path: &std::path::Path,
+    ctx: Option<u32>,
+    prompt: Option<u32>,
+    draft: Option<PathBuf>,
+    draft_len: u32,
+    accept: f64,
+) -> Result<()> {
+    let spec = match draft {
+        None => None,
+        Some(path) => {
+            if !(0.0..=1.0).contains(&accept) {
+                bail!("--accept must be between 0 and 1, got {accept}");
+            }
+            let d = gguf::read(&path)?;
+            Some(Speculation {
+                draft_weight_bytes: d.file_bytes,
+                draft_tokens: draft_len,
+                acceptance_rate: accept,
+            })
+        }
+    };
+    run_plan(model, config_path, ctx, prompt, spec)
+}
+
+fn run_serve(args: ServeArgs) -> Result<()> {
+    let ServeArgs {
+        model,
+        bind,
+        config,
+        max_queued,
+        max_batch,
+        batch_context_tokens,
+        model_budget_gib,
+        memory_budget_mib,
+        prefix_cache_mib,
+    } = args;
+    apply_runtime_config(config.as_deref(), model.first().map(PathBuf::as_path))?;
+    let limits = serving_runtime::ServingLimits {
+        max_queued,
+        max_batch,
+        max_batch_context_tokens: batch_context_tokens,
+        model_budget_bytes: if model_budget_gib == 0 {
+            u64::MAX
+        } else {
+            model_budget_gib.saturating_mul(1 << 30)
+        },
+        prefix_budget_bytes: prefix_cache_mib.saturating_mul(1 << 20),
+        memory_budget_bytes: if memory_budget_mib == 0 {
+            u64::MAX
+        } else {
+            memory_budget_mib
+                .checked_mul(1 << 20)
+                .context("memory budget overflow")?
+        },
+    };
+    serve::run(&model, &bind, limits)
+}
+
+/// Runtime knobs for a run on the local engine. With `--config`, its typed
+/// runtime section; without, the autotune cache entry for `model` (if any)
+/// and then the default runtime config. A bad `--config` fails here, before
+/// any limits are checked.
+fn apply_runtime_config(
+    config: Option<&std::path::Path>,
+    model: Option<&std::path::Path>,
+) -> Result<()> {
+    if config.is_none() {
+        if let Some(model) = model {
+            autotune::apply_cached(model, None)?;
+        }
+    }
+    let runtime = config.map(config::Config::load).transpose()?;
+    runtime
+        .as_ref()
+        .map_or_else(config::RuntimeConfig::default, |c| c.runtime.clone())
+        .apply();
+    Ok(())
+}
+
+/// Build the planner's view of a model from a GGUF file on disk.
+fn load_model(path: &std::path::Path, kv_cache_dtype_bytes: u64) -> Result<Model> {
+    let info = gguf::read(path)?;
+    Ok(Model {
+        name: path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| info.architecture.clone()),
+        n_layers: info.block_count,
+        hidden_size: info.embedding_length,
+        total_weight_bytes: info.file_bytes,
+        kv_bytes_per_token_per_layer: info.kv_bytes_per_token_per_layer(kv_cache_dtype_bytes),
+        activation_bytes: 2,
+        active_weight_fraction: info.active_weight_fraction(),
+        param_count: info.param_count,
+    })
+}
+
+fn run_fleet(config_path: &std::path::Path, ad_hoc: &[PathBuf], ctx: Option<u32>) -> Result<()> {
+    let cfg = config::Config::load(config_path).with_context(|| {
+        format!(
+            "loading cluster config; run `allpaka init > {}` to create one",
+            config_path.display()
+        )
+    })?;
+    let nodes = cfg.resolve_nodes()?;
+    let kv = cfg.defaults.kv_cache_dtype_bytes;
+
+    let members: Vec<FleetMember> = if !ad_hoc.is_empty() {
+        ad_hoc
+            .iter()
+            .map(|p| {
+                Ok(FleetMember {
+                    model: load_model(p, kv)?,
+                    context_tokens: ctx.unwrap_or(cfg.defaults.context_tokens),
+                    prompt_tokens: cfg.defaults.prompt_tokens,
+                    pin: None,
+                    speculation: None,
+                })
+            })
+            .collect::<Result<_>>()?
+    } else {
+        members_from_config(&cfg, config_path)?
+    };
+
+    let plan = fleet(&members, &nodes)?;
+    let ports: Vec<Option<u16>> = if ad_hoc.is_empty() {
+        cfg.agents.iter().map(|a| a.port).collect()
+    } else {
+        vec![None; members.len()]
+    };
+    report::fleet(&members, &nodes, &plan, &ports);
+    Ok(())
+}
+
+/// Build the fleet members declared in `[[agents]]`.
+fn members_from_config(
+    cfg: &config::Config,
+    config_path: &std::path::Path,
+) -> Result<Vec<FleetMember>> {
+    if cfg.agents.is_empty() {
+        bail!(
+            "{} declares no [[agents]]; add them there, or pass --model for a one-off",
+            config_path.display()
+        );
+    }
+    let kv = cfg.defaults.kv_cache_dtype_bytes;
+    cfg.agents
+        .iter()
+        .map(|a| {
+            let mut model = load_model(&a.model, kv)?;
+            // The agent's own name is what the operator recognises; the
+            // file stem is an implementation detail of where it was saved.
+            model.name = a.name.clone();
+            let speculation = match &a.draft {
+                None => None,
+                Some(d) => {
+                    if !(0.0..=1.0).contains(&a.accept) {
+                        bail!("agent {:?}: accept must be between 0 and 1", a.name);
+                    }
+                    Some(Speculation {
+                        draft_weight_bytes: gguf::read(d)?.file_bytes,
+                        draft_tokens: a.draft_len,
+                        acceptance_rate: a.accept,
+                    })
+                }
+            };
+            Ok(FleetMember {
+                model,
+                context_tokens: a.ctx.unwrap_or(cfg.defaults.context_tokens),
+                prompt_tokens: a.prompt.unwrap_or(cfg.defaults.prompt_tokens),
+                pin: cfg.pin_index(a)?,
+                speculation,
+            })
+        })
+        .collect()
+}
+
+fn run_launch(config_path: &std::path::Path) -> Result<()> {
+    let cfg = config::Config::load(config_path).with_context(|| {
+        format!(
+            "loading cluster config; run `allpaka init > {}` to create one",
+            config_path.display()
+        )
+    })?;
+    let nodes = cfg.resolve_nodes()?;
+    let members = members_from_config(&cfg, config_path)?;
+    let plan = fleet(&members, &nodes)?;
+    report::launch(&cfg, &nodes, &plan);
+    Ok(())
+}
+
+fn run_plan(
+    model_path: &std::path::Path,
+    config_path: &std::path::Path,
+    ctx: Option<u32>,
+    prompt: Option<u32>,
+    speculation: Option<Speculation>,
+) -> Result<()> {
+    let cfg = config::Config::load(config_path).with_context(|| {
+        format!(
+            "loading cluster config; run `allpaka init > {}` to create one",
+            config_path.display()
+        )
+    })?;
+    let nodes = cfg.resolve_nodes()?;
+
+    let req = PlanRequest {
+        context_tokens: ctx.unwrap_or(cfg.defaults.context_tokens),
+        prompt_tokens: prompt.unwrap_or(cfg.defaults.prompt_tokens),
+        speculation,
+    };
+
+    let model = load_model(model_path, cfg.defaults.kv_cache_dtype_bytes)?;
+
+    let fabric = cfg.resolve_fabric()?;
+    if fabric.is_empty() {
+        report::missing_link(&nodes, &model, &req);
+        return Ok(());
+    }
+
+    let verdict = plan(&nodes, &model, &fabric, &req);
+    report::verdict(&nodes, &model, &req, &fabric, &verdict);
+
+    // Replication is a different question, so it is reported next to the split
+    // rather than folded into the verdict.
+    let reference = match &verdict {
+        Verdict::SplitWins { plan, .. }
+        | Verdict::SplitRequired { plan }
+        | Verdict::UseSingleNode { plan, .. } => Some(plan),
+        Verdict::Infeasible { .. } => None,
+    };
+    if let Some(reference) = reference {
+        report::replication(replicate(&nodes, &model, &req).as_ref(), reference);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

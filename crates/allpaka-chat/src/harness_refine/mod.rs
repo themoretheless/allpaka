@@ -43,7 +43,7 @@ mod engine;
 mod http;
 mod store;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod types;
 mod validation;
 mod workspace;

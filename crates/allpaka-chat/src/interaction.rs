@@ -229,6 +229,7 @@ fn is_read_only_builtin(tool: &str, args: &Value) -> bool {
         "list_files"
             | "read_file"
             | "agentgrep"
+            | "git_diff"
             | "glob_files"
             | "read_spill"
             | "conversation_search"

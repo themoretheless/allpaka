@@ -12,9 +12,9 @@ pub(crate) struct GdnLayer<'a> {
     /// Pre-transposed `[d_conv][channels]` conv1d weights for contiguous SIMD FMA.
     pub(crate) conv1d_t: Vec<f32>,
     pub(crate) conv1d_raw: &'a [u8],
-    pub(crate) a: &'a [f32],
-    pub(crate) dt: &'a [f32],
-    pub(crate) ssm_norm: &'a [f32],
+    pub(crate) a: Vec<f32>,
+    pub(crate) dt: Vec<f32>,
+    pub(crate) ssm_norm: Vec<f32>,
     pub(crate) ssm_out: QuantMat<'a>,
 }
 
@@ -112,8 +112,8 @@ impl<'a> Model<'a> {
             for (((dst, &x), &dt), &a) in gate_i
                 .iter_mut()
                 .zip(&alpha[i * heads_v..(i + 1) * heads_v])
-                .zip(g.dt)
-                .zip(g.a)
+                .zip(&g.dt)
+                .zip(&g.a)
             {
                 *dst = ops::softplus(x + dt) * a;
             }
@@ -136,18 +136,31 @@ impl<'a> Model<'a> {
             // silu(z) (llama.cpp build_norm_gated).
             for h in 0..heads_v {
                 let y = &mut out[i * value_dim + h * d_state..i * value_dim + (h + 1) * d_state];
-                ops::rmsnorm(y, g.ssm_norm, eps);
+                ops::rmsnorm(y, &g.ssm_norm, eps);
                 let z_head = &z[i * value_dim + h * d_state..][..d_state];
                 for (y, &zv) in y.iter_mut().zip(z_head) {
                     *y *= ops::silu(zv);
                 }
             }
             // MTP rollback slot: this row's window and state, mirrored.
-            if let Some((cp, sp, dp, conv_off, state_off, ncv, nst, total)) = slot_ptrs {
+            if let Some((_, _, dp, conv_off, state_off, ncv, nst, total)) = slot_ptrs {
+                // Copy from `conv` / `state` themselves rather than from the
+                // conv/state pointers `slot_write_ptrs` returned: those were
+                // derived before `both_mut` created the live `&mut` slices
+                // over the same memory, and reading through them after
+                // writes via those slices is undefined behaviour under
+                // Rust's aliasing rules. Same addresses, same bytes.
+                debug_assert_eq!((conv.len(), state.len()), (ncv, nst));
+                // SAFETY: `slot_write_ptrs` returned `dp` for a slot buffer armed with one
+                // whole-region slot per chunk row (`total` floats each), so
+                // `i * total + conv_off + ncv` and `i * total + state_off + nst` are in bounds
+                // for `i < m`. `conv` / `state` are exactly `ncv` / `nst` long (asserted in debug
+                // above) and live in `store`, a different allocation, so the copies cannot
+                // overlap.
                 unsafe {
                     let slot = dp.add(i * total);
-                    std::ptr::copy_nonoverlapping(cp, slot.add(conv_off), ncv);
-                    std::ptr::copy_nonoverlapping(sp, slot.add(state_off), nst);
+                    std::ptr::copy_nonoverlapping(conv.as_ptr(), slot.add(conv_off), ncv);
+                    std::ptr::copy_nonoverlapping(state.as_ptr(), slot.add(state_off), nst);
                 }
             }
             if i == 0 {

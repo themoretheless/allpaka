@@ -69,7 +69,12 @@ mod tests {
     #[test]
     fn spans_record_duration_and_call_count() {
         reset();
-        drop(span(Phase::Router));
+        // Hold one span over a sleep: two empty spans can both measure 0 ns
+        // on a 100 ns clock (Windows), which failed the duration check below
+        // about one run in three.
+        let held = span(Phase::Router);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        drop(held);
         drop(span(Phase::Router));
         let (ns, calls) = take_with_counts();
         // The slots are process-wide and the end-to-end tests in this binary run

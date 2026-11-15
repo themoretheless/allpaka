@@ -74,6 +74,9 @@ pub struct AttnBlockReq<'a> {
     pub n_kv_heads: usize,
     pub pos: usize,
     pub scale: f32,
+    /// Sliding window (Gemma 3 local layers): attend over the last `w`
+    /// positions only. None = full causal.
+    pub window: Option<usize>,
 }
 
 /// One gated-delta-net (linear attention) layer inside [`TokenLayer`].
@@ -128,6 +131,21 @@ pub struct TokenLayer<'a> {
     pub k_off: usize,
     pub v_off: usize,
     pub ffn: TokenFfn<'a>,
+    /// Gemma 3: sandwich norms on the attention and FFN outputs (applied
+    /// before each residual add), GeGLU instead of SwiGLU, and a local
+    /// layer rotated with the second RoPE table (`set_rope_inv_freq_swa`).
+    /// Only the CUDA fused token path implements these; others decline.
+    pub post_attn_norm: Option<&'a [f32]>,
+    pub post_ffn_norm: Option<&'a [f32]>,
+    pub gelu: bool,
+    pub swa_rope: bool,
+}
+
+impl TokenLayer<'_> {
+    /// Uses any Gemma-only feature.
+    pub fn gemma_extras(&self) -> bool {
+        self.post_attn_norm.is_some() || self.post_ffn_norm.is_some() || self.gelu || self.swa_rope
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -290,6 +308,10 @@ pub struct PrefillFusion<'a> {
     /// F32 raw router weights, `n_expert * hidden` floats.
     pub router: &'a [u8],
     pub n_expert: usize,
+    /// Gemma's post-attention norm (raw F32), applied to the attention
+    /// output before the residual add; empty for every other family. Only
+    /// the CUDA device-resident block implements it; the rest decline.
+    pub post_attn_norm: &'a [u8],
 }
 
 pub struct PrefillAttnReq<'a> {
@@ -327,6 +349,19 @@ pub struct PrefillAttnReq<'a> {
     pub base: usize,
     pub scale: f32,
     pub fusion: Option<PrefillFusion<'a>>,
+    /// Row `i` is one decode token of a different session: its K/V go to
+    /// `multi[i].cache` at `multi[i].pos` and it attends over that cache's
+    /// first `pos + 1` positions. `cache`, `k_off`, `v_off` and `base` are
+    /// then ignored. Fused (`fusion`) path only.
+    pub multi: Option<&'a [MultiRow<'a>]>,
+}
+
+/// One session's row in a batched decode step; see [`PrefillAttnReq::multi`].
+pub struct MultiRow<'a> {
+    pub cache: &'a SharedRegion,
+    pub k_off: usize,
+    pub v_off: usize,
+    pub pos: usize,
 }
 
 /// A prefill chunk of one gated-delta-net layer (qwen35moe linear
@@ -400,6 +435,11 @@ pub struct GroupedCombine<'a> {
     pub m: usize,
     /// The NEXT layer's attention-norm weight (raw F32) plus RMS eps.
     pub next_norm: Option<(&'a [u8], f32)>,
+    /// Gemma: post-FFN norm (raw F32 plus RMS eps) on the down projection
+    /// before the residual add, and GeGLU instead of SwiGLU. Only the CUDA
+    /// dense device-resident FFN implements these; the rest decline.
+    pub post_norm: Option<(&'a [u8], f32)>,
+    pub gelu: bool,
 }
 
 /// A prefill chunk's whole routed FFN — every expert group's gate, up,

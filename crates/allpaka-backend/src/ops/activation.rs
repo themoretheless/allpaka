@@ -39,6 +39,17 @@ pub fn sigmoid(x: &mut [f32]) {
     }
 }
 
+/// GeGLU with the tanh GELU (Gemma's FFN): `gelu_tanh(gate) * up`,
+/// elementwise into `gate`; the same formula as ggml's `ggml_gelu`.
+pub fn geglu_tanh(gate: &mut [f32], up: &[f32]) {
+    assert_eq!(gate.len(), up.len());
+    const SQRT_2_OVER_PI: f32 = 0.797_884_6;
+    for (g, &u) in gate.iter_mut().zip(up) {
+        let x = *g;
+        *g = 0.5 * x * (1.0 + (SQRT_2_OVER_PI * x * (1.0 + 0.044_715 * x * x)).tanh()) * u;
+    }
+}
+
 /// SwiGLU: `silu(gate) * up`, elementwise into `gate`.
 ///
 /// This is the FFN nonlinearity of every model this engine targets; the two
@@ -46,6 +57,10 @@ pub fn sigmoid(x: &mut [f32]) {
 pub fn swiglu(gate: &mut [f32], up: &[f32]) {
     assert_eq!(gate.len(), up.len());
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `gate.len() == up.len()` (asserted above); the vector loop reads and
+    // writes 4 f32 at `i` only while `i + 4 <= n`, and the scalar tail stops at
+    // `n`, so every access through `gp`/`up_p` is inside its slice. `gate` is a
+    // unique borrow, so writing through `gp` cannot alias `up`.
     unsafe {
         use std::arch::aarch64::*;
         let n = gate.len();

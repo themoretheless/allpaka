@@ -1,4 +1,5 @@
-const assert=require('assert'),fs=require('fs'),vm=require('vm');const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),start=source.indexOf('function playgroundSavedSamplePanel('),end=source.indexOf('function showEvaluationRun(',start),pending=[];
+const {appSource}=require('./harness');
+const assert=require('assert'),fs=require('fs'),vm=require('vm');const source=appSource(),start=source.indexOf('function playgroundSavedSamplePanel('),end=source.indexOf('function showEvaluationRun(',start),pending=[];
 function node(tag,text){return {tag,text,children:[],append(...x){this.children.push(...x)},replaceChildren(...x){this.children=x}}}
 const context={node,encodeURIComponent,api:path=>new Promise(resolve=>pending.push({path,resolve}))};vm.createContext(context);vm.runInContext(source.slice(start,end),context);
 const run={dataset_id:'d',project_id:'p',dataset_version:1,dataset_sha256:'a'.repeat(64),items:[{sample_id:'input'}]},receipt=()=>({id:'d',project_id:'p',version:1,sha256:run.dataset_sha256,samples:[{id:'input',input:'Original question',expected_output:'Original reference',contexts:['Original context']}]});

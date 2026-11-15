@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 const start=source.indexOf('async function loadTraceSummary('),end=source.indexOf("$('trace-summary-refresh').onclick=",start);
 const elements={},pending=[];
 const element=id=>elements[id]??=( {value:id==='project'?'project':id==='trace-summary-scope'?'project':id==='trace-summary-status'?'failed':'',open:true,disabled:false,children:[],replaceChildren(...rows){this.children=rows;}} );

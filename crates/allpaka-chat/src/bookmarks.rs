@@ -40,34 +40,40 @@ pub(crate) async fn save(
     Path(id): Path<String>,
     Json(input): Json<Save>,
 ) -> crate::ApiResult<Value> {
-    mutate(&app, &id, |s| {
-        if let Some(mark) = s
-            .bookmarks
-            .iter_mut()
-            .find(|m| m.message_index == input.message_index)
-        {
-            mark.label = input.label.trim().to_owned();
-        } else {
-            s.bookmarks.push(Bookmark {
-                message_index: input.message_index,
-                label: input.label.trim().to_owned(),
-                created_ms: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-                    .min(u64::MAX as u128) as u64,
-            });
-        }
-        s.bookmarks.sort_by_key(|m| m.message_index);
+    crate::blocking(move || {
+        mutate(&app, &id, |s| {
+            if let Some(mark) = s
+                .bookmarks
+                .iter_mut()
+                .find(|m| m.message_index == input.message_index)
+            {
+                mark.label = input.label.trim().to_owned();
+            } else {
+                s.bookmarks.push(Bookmark {
+                    message_index: input.message_index,
+                    label: input.label.trim().to_owned(),
+                    created_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        .min(u64::MAX as u128) as u64,
+                });
+            }
+            s.bookmarks.sort_by_key(|m| m.message_index);
+        })
     })
+    .await
 }
 pub(crate) async fn remove(
     State(app): State<App>,
     Path((id, index)): Path<(String, usize)>,
 ) -> crate::ApiResult<Value> {
-    mutate(&app, &id, |s| {
-        s.bookmarks.retain(|m| m.message_index != index)
+    crate::blocking(move || {
+        mutate(&app, &id, |s| {
+            s.bookmarks.retain(|m| m.message_index != index)
+        })
     })
+    .await
 }
 fn mutate(app: &App, id: &str, update: impl FnOnce(&mut Session)) -> crate::ApiResult<Value> {
     let shared = {

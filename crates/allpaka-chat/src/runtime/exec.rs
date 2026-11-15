@@ -51,10 +51,8 @@ pub(crate) async fn execute_command_ctx(
         bail!("command must not be empty");
     }
     let timeout_secs = args["timeout"].as_u64().unwrap_or(30).clamp(1, 120);
-    #[cfg(unix)]
-    let (program, prog_args) = ("/bin/sh", vec!["-c".to_string(), command.to_string()]);
-    #[cfg(windows)]
-    let (program, prog_args) = ("cmd.exe", vec!["/C".to_string(), command.to_string()]);
+    let &(program, flag) = crate::shell::program();
+    let prog_args = vec![flag.to_string(), command.to_string()];
 
     let data_fallback = std::path::Path::new("/nonexistent");
     let data_dir = ctx.data.unwrap_or(data_fallback);

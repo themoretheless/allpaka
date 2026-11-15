@@ -22,6 +22,9 @@ pub fn from_f32(src: &[f32], dst: &mut [u16]) {
 pub fn dot(a: &[f32], b: &[u16]) -> f32 {
     let n = a.len().min(b.len());
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `n = min(a.len(), b.len())`; loads read 16 or 4 elements at `i` only
+    // while `i + 16 <= n` / `i + 4 <= n`, from typed slices (aligned). The
+    // transmutes reinterpret uint16x4_t as float16x4_t: same size, any bits valid.
     unsafe {
         use std::arch::aarch64::*;
         // Four independent accumulators for the same reason ops::dot has
@@ -71,6 +74,9 @@ pub fn dot(a: &[f32], b: &[u16]) -> f32 {
 pub fn axpy(acc: &mut [f32], p: f32, v: &[u16]) {
     let n = acc.len().min(v.len());
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `n = min(acc.len(), v.len())` bounds every load/store (16 or 4 wide,
+    // guarded by `i + 16 <= n` / `i + 4 <= n`); `acc` is a unique borrow, so the
+    // stores cannot alias `v`. The transmutes are same-size vector reinterpretations.
     unsafe {
         use std::arch::aarch64::*;
         let pv = vdupq_n_f32(p);

@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 const begin=source.indexOf('let traceBulkEpoch=0;'),end=source.indexOf("$('trace-project').onclick=",begin);
 assert(begin>=0&&end>begin);
 function setup(){

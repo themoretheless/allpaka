@@ -88,6 +88,11 @@ fn reference_top(addr: &str, tokens: &[u32], n: usize) -> Result<Vec<(u32, f64)>
             "n_probs": n,
             "temperature": 0.0,
             "post_sampling_probs": false,
+            // The server reuses its cached prefix by default, so each step
+            // evaluates only the new token (its decode path);
+            // ALLPAKA_VERIFY_NO_CACHE=1 recomputes the whole context as one
+            // batch (its prefill path).
+            "cache_prompt": std::env::var_os("ALLPAKA_VERIFY_NO_CACHE").is_none(),
         }),
     )?;
     // The shape has drifted across llama.cpp versions; walk the tree and
@@ -132,6 +137,20 @@ fn log_partition_and_argmax(logits: &[f32]) -> (f64, usize) {
 fn log_softmax(logits: &[f32]) -> Vec<f64> {
     let (log_z, _) = log_partition_and_argmax(logits);
     logits.iter().map(|&v| v as f64 - log_z).collect()
+}
+
+/// The decode-step tolerance. Dense models deeper than 32 layers get 0.9:
+/// on Qwen3-32B llama.cpp's own decode and batch paths (same GPU, same
+/// weights) disagree by up to 0.87 at a position, and allpaka's GPU path sits
+/// inside that spread on three prompts
+/// (docs/benchmarks/2026-11-14-verify-qwen3-32b-gpu-rtx5090.md). Otherwise
+/// 1.6x the single-position tolerance.
+fn decode_tolerance(config: &allpaka_model::config::Config, tolerance: f64, explicit: bool) -> f64 {
+    if !explicit && config.moe.is_none() && config.n_layers > 32 {
+        0.9
+    } else {
+        tolerance * 1.6
+    }
 }
 
 pub fn run(
@@ -185,8 +204,18 @@ pub fn run(
     // A MoE re-routes on numeric near-ties, so two correct implementations
     // legitimately drift further apart than two dense ones. llama.cpp's own
     // Metal and CPU backends disagree by up to ~0.45 on Qwen3-30B-A3B.
+    // Deep dense models drift further too: on Qwen3-32B (64 layers) llama.cpp's
+    // CPU and CUDA builds differ by up to 0.24 on the default prompt, where
+    // Qwen2.5-7B (28 layers) stays within 0.15
+    // (docs/benchmarks/matrix-cuda-rtx5090.md).
+    let explicit = tolerance.is_some();
     let tolerance = tolerance.unwrap_or(if model.config.moe.is_some() {
         0.5
+    } else if model.config.n_layers > 32 {
+        // llama.cpp's own batch and token-by-token passes over a prompt
+        // differ by up to 0.32 on Qwen3-32B
+        // (docs/benchmarks/2026-11-14-verify-qwen3-32b-gpu-rtx5090.md).
+        0.4
     } else {
         0.15
     });
@@ -250,7 +279,7 @@ pub fn run(
     // 0.73 on exactly the steps where we read 0.70 - the spikes belong to
     // the positions (MoE re-routing on near-ties), not the implementation.
     // 1.6x the single-position tolerance covers that with the same margin.
-    let decode_tolerance = tolerance * 1.6;
+    let decode_tolerance = decode_tolerance(&model.config, tolerance, explicit);
     let mut context = tokens.clone();
     let mut logits = logits;
     let mut worst = 0f64;
@@ -308,5 +337,154 @@ pub fn run(
         );
     }
     println!("verdict: PASS (tolerance {tolerance})");
+    Ok(())
+}
+
+/// `--record`: the reference alone. Tokenises the prompt, then walks the
+/// reference's own greedy continuation for `decode` steps, keeping its top
+/// log-probs at every position, and writes it all to `file`.
+pub fn record(addr: &str, prompt: &str, top: usize, decode: usize, file: &Path) -> Result<()> {
+    println!("reference: llama-server at {addr}");
+    let tokens = tokenize(addr, prompt)?;
+    let mut context = tokens.clone();
+    let mut steps = Vec::with_capacity(decode + 1);
+    for _ in 0..=decode {
+        let theirs = reference_top(addr, &context, top)?;
+        let (next, _) = *theirs.first().context("reference returned no tokens")?;
+        steps.push(json!(theirs
+            .iter()
+            .map(|&(id, lp)| json!([id, lp]))
+            .collect::<Vec<_>>()));
+        context.push(next);
+    }
+    let record = json!({"prompt": prompt, "tokens": tokens, "steps": steps});
+    std::fs::write(file, serde_json::to_vec_pretty(&record)?)?;
+    println!(
+        "recorded {} prompt tokens and {} positions to {}",
+        tokens.len(),
+        steps.len(),
+        file.display()
+    );
+    Ok(())
+}
+
+/// `--replay`: our engine alone, on whatever path `Model::load` picks (the
+/// GPU when it fits), fed the reference's tokens (teacher forcing): position
+/// 0 is the prefill, then each decode step consumes the reference's greedy
+/// pick, so both sides score identical contexts.
+pub fn replay(model_path: &Path, file: &Path, tolerance: Option<f64>) -> Result<()> {
+    let record: Value = serde_json::from_slice(&std::fs::read(file)?)
+        .with_context(|| format!("reading {}", file.display()))?;
+    let tokens: Vec<u32> = record["tokens"]
+        .as_array()
+        .context("record has no tokens")?
+        .iter()
+        .map(|v| v.as_u64().map(|t| t as u32).context("bad token"))
+        .collect::<Result<_>>()?;
+    let steps: Vec<Vec<(u32, f64)>> = record["steps"]
+        .as_array()
+        .context("record has no steps")?
+        .iter()
+        .map(|step| {
+            step.as_array()
+                .context("bad step")?
+                .iter()
+                .map(|pair| {
+                    Ok((
+                        pair[0].as_u64().context("bad id")? as u32,
+                        pair[1].as_f64().context("bad logprob")?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .collect::<Result<_>>()?;
+    let file_model = allpaka_gguf::GgufFile::open(model_path)?;
+    let model = allpaka_model::Model::load(&file_model)?;
+    let explicit = tolerance.is_some();
+    let tolerance = tolerance.unwrap_or(if model.config.moe.is_some() {
+        0.5
+    } else if model.config.n_layers > 32 {
+        // llama.cpp's own batch and token-by-token passes over a prompt
+        // differ by up to 0.32 on Qwen3-32B
+        // (docs/benchmarks/2026-11-14-verify-qwen3-32b-gpu-rtx5090.md).
+        0.4
+    } else {
+        0.15
+    });
+    let decode_tolerance = decode_tolerance(&model.config, tolerance, explicit);
+    println!(
+        "replaying {} positions of {} on {}",
+        steps.len(),
+        file.display(),
+        if allpaka_backend::gpu::is_attached() {
+            "the GPU"
+        } else {
+            "the CPU"
+        }
+    );
+    let mut session = model.new_session(tokens.len() + steps.len() + 1);
+    // ALLPAKA_VERIFY_STEP_PROMPT=1 feeds the prompt one token at a time (the
+    // decode path) instead of as one batch.
+    let mut logits = if std::env::var_os("ALLPAKA_VERIFY_STEP_PROMPT").is_some() {
+        let mut last = Vec::new();
+        for &t in &tokens {
+            last = model.forward(t, &mut session)?;
+        }
+        last
+    } else {
+        model.forward_batch(&tokens, &mut session)?
+    };
+    let mut worst = (0f64, 0f64);
+    for (step, theirs) in steps.iter().enumerate() {
+        let (log_z, ours) = log_partition_and_argmax(&logits);
+        let (ref_argmax, ref_top_lp) = *theirs.first().context("empty step")?;
+        let (mut diff, mut at) = (0f64, (0u32, 0f64, 0f64));
+        for &(id, lp) in theirs {
+            let our_lp = logits
+                .get(id as usize)
+                .map_or(f64::NEG_INFINITY, |&v| v as f64 - log_z);
+            if (our_lp - lp).abs() > diff {
+                diff = (our_lp - lp).abs();
+                at = (id, lp, our_lp);
+            }
+        }
+        let limit = if step == 0 {
+            tolerance
+        } else {
+            decode_tolerance
+        };
+        println!(
+            "  {} {step}: max diff {diff:.4} (token {} ref {:.3} ours {:.3}), argmax ref {ref_argmax} ours {ours}",
+            if step == 0 { "prefill" } else { "decode step" },
+            at.0,
+            at.1,
+            at.2
+        );
+        if ours as u32 != ref_argmax {
+            let our_pick_lp = theirs
+                .iter()
+                .find(|&&(id, _)| id == ours as u32)
+                .map_or(f64::NEG_INFINITY, |&(_, lp)| lp);
+            if (ref_top_lp - our_pick_lp).abs() > limit {
+                bail!("position {step}: argmax diverged beyond tolerance (reference {ref_argmax}, ours {ours})");
+            }
+            println!("    near-tie argmax split, within tolerance");
+        }
+        if diff > limit {
+            bail!("position {step}: log-prob difference {diff:.4} exceeds {limit}");
+        }
+        if step == 0 {
+            worst.0 = diff;
+        } else {
+            worst.1 = worst.1.max(diff);
+        }
+        if step + 1 < steps.len() {
+            logits = model.forward(ref_argmax, &mut session)?;
+        }
+    }
+    println!(
+        "verdict: PASS (prefill {:.4} within {tolerance}, decode max {:.4} within {decode_tolerance})",
+        worst.0, worst.1
+    );
     Ok(())
 }

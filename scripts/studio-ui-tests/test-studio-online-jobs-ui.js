@@ -1,8 +1,9 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 const pending=[],elements={};function node(tag,text){return {tag,text,children:[],value:'',append(...items){this.children.push(...items)},replaceChildren(...items){this.children=items},showModal(){this.open=true},close(){this.open=false;this.onclose?.()}};}
 for(const id of ['project','online-jobs-open','online-jobs-close','online-jobs-dialog','online-jobs-refresh','online-jobs-body'])elements[id]=node('div');elements.project.value='default';
 const context={node,$:id=>elements[id],URLSearchParams,api:path=>new Promise((resolve,reject)=>pending.push({path,resolve,reject}))};vm.createContext(context);
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('let onlineJobsEpoch='),source.indexOf('let callbackSummaryEpoch=')),context);
+const source=appSource();vm.runInContext(between(source,'let onlineJobsEpoch=','let callbackSummaryEpoch='),context);
 const row=i=>({status:'pending',job:{kind:'online_evaluation_job',schema_version:1,project_id:'default',trace_id:'trace-'+i,trace_sha256:'a'.repeat(64),selection_sha256:i.toString(16).padStart(64,'0'),status:'pending',provider_calls:0},result:null});
 const packet=(offset=0)=>({kind:'online_evaluation_job_catalog',project_id:'default',offset,limit:20,total:21,has_more:offset===0,order:'selection_sha256_ascending',provider_calls:0,automatic_execution:false,jobs:Array.from({length:offset===0?20:1},(_,i)=>row(offset+i+1))});
 (async()=>{

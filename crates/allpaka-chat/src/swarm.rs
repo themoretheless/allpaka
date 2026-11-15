@@ -900,6 +900,8 @@ async fn run_member_inner(
         } else {
             note(shared, index, slot, round, MemberStatus::Done, None);
         }
+        // A remote member reports the usage of all its steps as one figure.
+        shared.lock().unwrap().usage_total.add(&result.usage);
         persist(app, shared);
         return Ok(MemberOutcome {
             usage: result.usage,
@@ -915,6 +917,12 @@ async fn run_member_inner(
         let finalizing = step > steps;
         if finalizing {
             history.push(Message::text("user", "Лимит исследования исчерпан. Сейчас верни итоговый отчёт по уже полученным данным. Инструменты недоступны. Явно укажи ограничения и что осталось непроверенным; не обещай продолжить исследование."));
+        }
+        if let Some(spent) = member_settings
+            .budget
+            .exhausted(&shared.lock().unwrap().usage_total)
+        {
+            bail!("Conversation budget reached ({spent}). Raise the budget to continue.");
         }
         note(
             shared,
@@ -965,6 +973,7 @@ async fn run_member_inner(
             )
             .await
             .with_context(|| format!("участник {label}"))?;
+        shared.lock().unwrap().usage_total.add(&step_usage);
         usage = merge_usage(usage, step_usage);
         if let Some(prepared) = &guards {
             crate::enforce_guardrail(prepared.output(&message.content)?, trace, parent)?;
@@ -1160,6 +1169,7 @@ async fn merge_pass(
         })
         .await;
     let result = result.and_then(|(message, usage)| {
+        shared.lock().unwrap().usage_total.add(&usage);
         if let Some(prepared) = &guards {
             crate::enforce_guardrail(prepared.output(&message.content)?, trace, span.id())?;
         }

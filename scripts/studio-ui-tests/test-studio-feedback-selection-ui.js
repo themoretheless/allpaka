@@ -1,7 +1,8 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 const pending=[];function node(tag,text){return {tag,text,children:[],value:'',append(...x){this.children.push(...x)},replaceChildren(...x){this.children=x},setAttribute(){}};}
 const context={node,Option:function(text,value){return {text,value}},encodeURIComponent,api:path=>new Promise((resolve,reject)=>pending.push({path,resolve,reject})),notify:()=>{}};
-vm.createContext(context);const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('function feedbackHistoryPanel('),source.indexOf('function guardrailReceiptRows(')),context);
+vm.createContext(context);const source=appSource();vm.runInContext(between(source,'function feedbackHistoryPanel(','function guardrailReceiptRows('),context);
 const receipt=version=>({trace_id:'trace-test',version,annotations:[],summaries:[]});
 (async()=>{
  const panel=context.feedbackPanel({id:'trace-test',spans:[]}),content=panel.children[1];panel.open=true;panel.ontoggle();pending[0].resolve(receipt(3));await new Promise(setImmediate);

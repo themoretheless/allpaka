@@ -88,6 +88,20 @@ pub(super) struct RagTools {
 }
 
 impl RagTools {
+    /// Grep backend with no MCP child, for tests that need a `RagTools` but
+    /// must not spawn `rag-mcp` from whatever the host has installed.
+    #[cfg(test)]
+    pub(super) fn grep_only() -> Self {
+        let cfg = RagToolConfig::load();
+        let mcp_cfg = RagMcpConfig::from_env(&cfg.notes_dir);
+        RagTools {
+            cfg,
+            backend: RagBackend::Grep,
+            mcp_cfg,
+            mcp: RefCell::new(None),
+        }
+    }
+
     pub(super) fn load() -> Self {
         let cfg = RagToolConfig::load();
         let backend = RagBackend::load();

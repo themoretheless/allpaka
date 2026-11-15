@@ -361,6 +361,63 @@ mod gdn_tests {
         }
     }
 
+    /// The `[f32; 2]` table variants must match the tuple ones exactly,
+    /// including partial rotary where the tail passes through.
+    #[test]
+    fn array_rope_tables_match_the_tuple_tables() {
+        let inv = rope_inv_freq(8, 10000.0);
+        let mut table = Vec::new();
+        for pos in [0u32, 3, 4097] {
+            rope_sin_cos(pos, &inv, &mut table);
+            let arrays: Vec<[f32; 2]> = table.iter().map(|&(s, c)| [s, c]).collect();
+            let orig: Vec<f32> = (0..8).map(|i| (i as f32) * 0.7 - 2.0).collect();
+
+            let (mut a, mut b) = (orig.clone(), orig.clone());
+            rope_norm_cached(&mut a, &table);
+            rope_norm_cached_from_array(&mut b, &arrays);
+            assert_eq!(a, b, "norm at pos {pos}");
+
+            let (mut a, mut b) = (orig.clone(), orig.clone());
+            rope_neox_cached(&mut a, &table);
+            rope_neox_cached_from_array(&mut b, &arrays);
+            assert_eq!(a, b, "neox at pos {pos}");
+
+            // Partial rotary: a 12-wide head rotating its first 8 channels.
+            let mut wide: Vec<f32> = orig.iter().copied().chain([9.0, 8.0, 7.0, 6.0]).collect();
+            let mut expect = wide.clone();
+            rope_neox_cached(&mut expect[..8], &table);
+            rope_neox_cached_from_array(&mut wide, &arrays);
+            assert_eq!(wide, expect, "partial neox at pos {pos}");
+        }
+    }
+
+    /// The SIMD bodies index both slices by the first one's length, so a
+    /// shorter second slice must be rejected in release builds too.
+    #[test]
+    #[should_panic]
+    fn add_assign_slice_rejects_a_shorter_source() {
+        let mut a = vec![0f32; 64];
+        add_assign_slice(&mut a, &[1.0; 8]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn add_scaled_slice_rejects_a_shorter_source() {
+        let mut a = vec![0f32; 64];
+        add_scaled_slice(&mut a, &[1.0; 8], 2.0);
+    }
+
+    /// The parallel path writes `rows * n` floats into `dst` through raw
+    /// pointers, so a short `dst` must be refused up front.
+    #[test]
+    #[should_panic(expected = "dst holds fewer rows than src")]
+    fn rmsnorm_rows_into_rejects_a_short_destination() {
+        let n = 1024;
+        let src = vec![1.0f32; 64 * n];
+        let mut dst = vec![0f32; 8 * n];
+        rmsnorm_rows_into(&mut dst, &src, &vec![1.0; n], 1e-6);
+    }
+
     #[test]
     fn l2_norm_unitizes_and_softplus_is_stable() {
         let mut x = vec![3.0f32, 4.0];

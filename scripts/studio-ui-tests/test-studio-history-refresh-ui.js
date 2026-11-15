@@ -1,3 +1,4 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 class Element{constructor(text=''){this.textContent=text;this.children=[];this.hidden=false;}append(...items){for(const item of items)this.children.push(...(item.fragment?item.children:[item]));}replaceChildren(...items){this.children=items;}}
 const elements=Object.fromEntries(['sessions','sessions-status','search','project','history-folder','history-sort','history-bookmarked'].map(id=>[id,new Element()]));
@@ -6,8 +7,8 @@ elements['history-folder'].value='active';
 let rows=[{id:'a',title:'First',status:'idle'}],error=null,more=[];
 const context={$:id=>elements[id],active:'a',URLSearchParams,node:(_,text)=>new Element(text),document:{createDocumentFragment:()=>Object.assign(new Element(),{fragment:true})},api:async()=>{if(error)throw error;return rows;},chatRow:row=>Object.assign(new Element(row.title),{id:row.id}),renderHistoryMore:value=>more.push(value),fail:e=>{throw e;}};
 vm.createContext(context);
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
-vm.runInContext(source.slice(source.indexOf('let chatListRequest='),source.indexOf('function chatRow(')),context);
+const source=appSource();
+vm.runInContext(between(source,'let chatListRequest=','function chatRow('),context);
 (async()=>{
  await context.listChats();const original=elements.sessions.children[0];
  await context.listChats('auto');assert.strictEqual(elements.sessions.children[0],original);

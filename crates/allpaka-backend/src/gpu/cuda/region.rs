@@ -6,6 +6,11 @@ use super::*;
 pub struct SharedRegion {
     pub(super) buf: CudaSlice<u8>,
     pub(crate) len: usize,
+    /// Distinct for every device buffer this process ever wrapped. State
+    /// derived from a region (a captured decode graph, cached KV offsets) is
+    /// keyed by this, never by where the struct lives: a session that is
+    /// replaced in place gets a new buffer at the old address.
+    pub(crate) id: u64,
     #[allow(dead_code)]
     pub(super) host: usize,
 }
@@ -30,9 +35,27 @@ impl SharedRegion {
     pub const fn is_discrete(&self) -> bool {
         true
     }
+
+    /// Device address mixed with the length: what a captured prefill graph
+    /// bakes in for this region (0 if the device is unavailable).
+    pub fn graph_id(&self) -> u64 {
+        with_gpu(|gpu| {
+            let (p, g) = DevicePtr::device_ptr(&self.buf, &gpu.stream);
+            drop(g);
+            Some(p ^ ((self.len as u64).rotate_left(40)))
+        })
+        .unwrap_or(0)
+    }
 }
 
+// SAFETY: the fields are a `CudaSlice<u8>` (cudarc already declares it Send + Sync) and
+// two `usize`s; `host` is only an address recorded for diagnostics and is never turned
+// back into a pointer, so no host memory is reachable through a `SharedRegion`. The
+// device buffer is only touched through `with_gpu`, i.e. under the global `GPU` mutex,
+// and `&SharedRegion` methods only read `len` or pass `&buf` to stream-ordered copies.
+// These impls are therefore what the auto traits would already derive.
 unsafe impl Send for SharedRegion {}
+// SAFETY: see the `Send` impl above; shared access never mutates any field.
 unsafe impl Sync for SharedRegion {}
 
 pub fn wrap_region(region: &[u8]) -> Option<SharedRegion> {
@@ -43,9 +66,11 @@ pub fn wrap_region(region: &[u8]) -> Option<SharedRegion> {
     with_gpu(|gpu| {
         let mut buf = unsafe { gpu.stream.alloc::<u8>(region.len()) }.ok()?;
         gpu.stream.memcpy_htod(region, &mut buf).ok()?;
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Some(SharedRegion {
             buf,
             len: region.len(),
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             host: region.as_ptr() as usize,
         })
     })
@@ -90,9 +115,7 @@ pub fn download_region_range(region: &SharedRegion, offset: usize, dst: &mut [u8
 }
 
 pub fn decode_attention_capacity_safe(capacity: usize) -> bool {
-    let native = std::env::var("ALLPAKA_NATIVE_ATTEND")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let native = crate::runtime::get().cuda_native_attend;
     !crate::gpu::cuda::ggml::enabled()
         || native
         || capacity >= crate::gpu::cuda::ggml::fa_kv_floor()

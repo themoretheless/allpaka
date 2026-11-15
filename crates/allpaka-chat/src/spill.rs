@@ -280,7 +280,7 @@ pub(crate) async fn get_api(
     Query(query): Query<SpillQuery>,
 ) -> ApiResult<Value> {
     ensure_session_exists(&app, &id)?;
-    blocking(move || {
+    blocking(move || -> ApiResult<Value> {
         let offset = query.offset.unwrap_or(0);
         let limit = query
             .limit
@@ -297,7 +297,9 @@ pub(crate) async fn get_api(
     })
     .await
     .map_err(|e| {
-        if e.status == axum::http::StatusCode::NOT_FOUND {
+        if e.status == axum::http::StatusCode::NOT_FOUND
+            || e.status == axum::http::StatusCode::BAD_REQUEST
+        {
             e
         } else {
             internal(e.message)

@@ -5,6 +5,8 @@ use super::blas::dot;
 #[inline]
 pub(crate) fn sum_sq_f64(x: &[f32]) -> f64 {
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: loads read 8 f32 at `i` only while `i + 8 <= n = x.len()`; the tail
+    // below uses safe indexing. `x` is a typed slice, so `xp` is f32-aligned.
     unsafe {
         use std::arch::aarch64::*;
         let mut acc0 = vdupq_n_f64(0.0);
@@ -70,6 +72,8 @@ pub(crate) fn sum_sq_f64(x: &[f32]) -> f64 {
                 }
                 total
             }
+            // SAFETY: avx2 and fma were detected at runtime just above; the function
+            // reads only indices below `x.len()`.
             return unsafe { sum_sq_avx2(x) };
         }
         let mut acc = [0.0f64; 4];
@@ -113,6 +117,8 @@ pub fn rmsnorm(x: &mut [f32], weight: &[f32], eps: f32) {
     let mean_sq = sum_sq_f64(x) / x.len() as f64;
     let scale = 1.0 / (mean_sq + eps as f64).sqrt();
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `x.len() == weight.len()` (asserted above) and every access is at
+    // `i < n = x.len()`; `x` is a unique borrow, so writes cannot alias `weight`.
     unsafe {
         use std::arch::aarch64::*;
         let vscale = vdupq_n_f64(scale);
@@ -165,6 +171,8 @@ pub fn rmsnorm(x: &mut [f32], weight: &[f32], eps: f32) {
                     i += 1;
                 }
             }
+            // SAFETY: avx2 was detected at runtime just above; the function touches
+            // indices below `x.len()`, which equals `weight.len()` per the assert.
             unsafe { rmsnorm_avx2(x, weight, scale) };
             return;
         }
@@ -188,6 +196,9 @@ pub fn rmsnorm_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
     let mean_sq = sum_sq_f64(src) / src.len() as f64;
     let scale = 1.0 / (mean_sq + eps as f64).sqrt();
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `dst`, `src` and `weight` have the same length (asserted above) and
+    // every access is at `i < n = src.len()`; `dst` is a unique borrow, so writes
+    // alias neither input.
     unsafe {
         use std::arch::aarch64::*;
         let vscale = vdupq_n_f64(scale);
@@ -242,6 +253,8 @@ pub fn rmsnorm_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
                     i += 1;
                 }
             }
+            // SAFETY: avx2 was detected at runtime just above; all three slices have
+            // `src.len()` elements per the asserts, and the function stays below that.
             unsafe { rmsnorm_into_avx2(dst, src, weight, scale) };
             return;
         }
@@ -262,6 +275,7 @@ pub fn rmsnorm_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
 pub fn rmsnorm_rows_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32) {
     let n = weight.len();
     let rows = src.len() / n;
+    assert!(dst.len() >= rows * n, "dst holds fewer rows than src");
     let threads = crate::thread_pool::cpu_threads().min(rows.max(1));
     if threads <= 1 || rows < 4 || src.len() < 16_384 {
         for (d, s) in dst.chunks_mut(n).zip(src.chunks(n)) {
@@ -273,8 +287,14 @@ pub fn rmsnorm_rows_into(dst: &mut [f32], src: &[f32], weight: &[f32], eps: f32)
     let src_addr = src.as_ptr() as usize;
     crate::thread_pool::par_for_chunks(rows, threads, |_worker, start, end| {
         let len = (end - start) * n;
+        // SAFETY: row ranges `[start, end)` from par_for_chunks are disjoint and end at
+        // `rows`, so `(start * n, len)` is a unique sub-slice of `dst` as long as `dst`
+        // holds `rows * n` floats (checked at the top). `dst` stays mutably borrowed
+        // until par_for_chunks returns, after every worker finished.
         let dc =
             unsafe { std::slice::from_raw_parts_mut((dst_addr as *mut f32).add(start * n), len) };
+        // SAFETY: the same row range of `src`, which has at least `rows * n` floats by the
+        // definition of `rows`; it is only read and cannot overlap the unique `dst`.
         let sc =
             unsafe { std::slice::from_raw_parts((src_addr as *const f32).add(start * n), len) };
         for (d, s) in dc.chunks_mut(n).zip(sc.chunks(n)) {
@@ -288,6 +308,8 @@ pub fn l2_norm(x: &mut [f32], eps: f32) {
     let s = dot(x, x);
     let inv = 1.0 / (s + eps).sqrt();
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: every access is at `i < n = x.len()` (8-wide while `i + 8 <= n`, then
+    // scalar) through a pointer from the unique borrow `x`.
     unsafe {
         use std::arch::aarch64::*;
         let vinv = vdupq_n_f32(inv);

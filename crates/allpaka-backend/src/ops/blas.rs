@@ -23,8 +23,12 @@ pub fn matmul_f32(x: &[f32], w: &[f32], m: usize, k: usize, n: usize) -> Vec<f32
 
 #[inline(always)]
 pub fn add_scaled_slice(dst: &mut [f32], src: &[f32], scale: f32) {
-    debug_assert_eq!(dst.len(), src.len());
+    assert_eq!(dst.len(), src.len());
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: every access is at `i < n = dst.len()` (16-wide steps while
+    // `i + 16 <= n`, then scalar), and `src.len() == dst.len()` is asserted
+    // above, so reads of `src` are in bounds too. `dst` is a unique borrow, so
+    // it cannot overlap `src`.
     unsafe {
         use std::arch::aarch64::*;
         let vs = vdupq_n_f32(scale);
@@ -82,6 +86,8 @@ pub fn add_scaled_slice(dst: &mut [f32], src: &[f32], scale: f32) {
                     i += 1;
                 }
             }
+            // SAFETY: avx2 and fma were detected at runtime just above; the function only
+            // touches indices below `dst.len()`, which equals `src.len()` per the assert.
             unsafe { add_scaled_avx2(dst, src, scale) };
             return;
         }
@@ -97,8 +103,11 @@ pub fn add_scaled_slice(dst: &mut [f32], src: &[f32], scale: f32) {
 
 #[inline(always)]
 pub fn add_assign_slice(a: &mut [f32], b: &[f32]) {
-    debug_assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: every access is at `i < n = a.len()`, and `b.len() == a.len()` is
+    // asserted above, so reads of `b` are in bounds too; `a` is a unique borrow
+    // and cannot overlap `b`.
     unsafe {
         use std::arch::aarch64::*;
         let mut i = 0usize;
@@ -153,6 +162,8 @@ pub fn add_assign_slice(a: &mut [f32], b: &[f32]) {
                     i += 1;
                 }
             }
+            // SAFETY: avx2 was detected at runtime just above; the function only touches
+            // indices below `a.len()`, which equals `b.len()` per the assert.
             unsafe { add_assign_avx2(a, b) };
             return;
         }
@@ -185,9 +196,15 @@ pub fn add_assign_par(a: &mut [f32], b: &[f32]) {
         let elem_end = (c_end * per).min(total);
         if elem_start < elem_end {
             let len = elem_end - elem_start;
+            // SAFETY: `a` is borrowed mutably for the whole call and outlives the pool
+            // dispatch (par_for_chunks returns only after every chunk ran). Chunks
+            // `[c_start * per, min(c_end * per, total))` are disjoint per worker and end at
+            // `total = a.len()`, so each worker gets a unique, in-bounds sub-slice.
             let ac = unsafe {
                 std::slice::from_raw_parts_mut((a_addr as *mut f32).add(elem_start), len)
             };
+            // SAFETY: same range in `b`, which has `a.len()` elements (asserted) and is only
+            // read; it cannot overlap `a` because `a` is a unique borrow.
             let bc =
                 unsafe { std::slice::from_raw_parts((b_addr as *const f32).add(elem_start), len) };
             add_assign_slice(ac, bc);
@@ -203,6 +220,9 @@ pub fn add_assign_par(a: &mut [f32], b: &[f32]) {
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().min(b.len());
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: `n = min(a.len(), b.len())` and every vector load reads 4 f32 at
+    // `i` only while `i + 16 <= n` / `i + 4 <= n`; both pointers come from typed
+    // f32 slices, so they are aligned for f32.
     unsafe {
         use std::arch::aarch64::*;
         let mut acc0 = vdupq_n_f32(0.0);
@@ -291,6 +311,8 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
                 }
                 total
             }
+            // SAFETY: avx2 and fma were detected at runtime just above, and
+            // `n = min(a.len(), b.len())` bounds every load inside `dot_avx2`.
             return unsafe { dot_avx2(a, b, n) };
         }
         let a = &a[..n];

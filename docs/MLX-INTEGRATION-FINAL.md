@@ -143,11 +143,7 @@ test result: ok. 6 passed; 0 failed
 
 ## Next Steps for Production Use
 
-1. **Runtime kernel integration**: Implement GPU-accelerated matmul directly on MLX blocks without full dequantization
-2. **Repacking path**: Convert MLX weights into allpaka's optimized block format at load time
-3. **Checkpoint downloading**: Add automatic download of reference checkpoints for CI validation
-4. **Real benchmark execution**: Integrate with `scripts/bench-matrix.sh` for gated testing against preregistration thresholds
-5. **FFI feature toggle**: Enable `libmlx` feature when `/opt/homebrew/lib/libmlxc.dylib` is available
+Tracked in [roadmap.md](roadmap.md), item A7.
 
 ## Preregistration Readiness
 

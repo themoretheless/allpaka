@@ -1,226 +1,353 @@
 # Roadmap
 
-Единственный источник правды по развитию allpaka. Правила ниже — часть
-документа, а не пожелание:
+Единственный план развития allpaka. Сюда сведены и отсюда удалены:
+`docs/runtime-roadmap.md`, `docs/refactor/PLAN.md`,
+`docs/code-review-2026-11-07.md`, разделы «Next steps / Future work / Still
+open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
+`docs/mlx-format-integration.md`, `docs/decode-opts.md`,
+`docs/benchmarks/matrix-2026-09-12.md`,
+`docs/benchmarks/allpaka-vs-llama-metal-status.md` и «Что дальше» из README.
+Реализованное в план не переносилось — история в git.
+
+Правила документа:
 
 1. Строка без критерия готовности (**DoD**) не считается задачей.
 2. Число без ссылки на артефакт не считается результатом.
-3. У каждого внешнего источника либо «актуален», либо «заменён X».
+3. Сделанный пункт удаляется из плана, а не помечается «done».
 
-Сверено с рабочим деревом и с wiki-снимком. Даты здесь не проставляются:
-источник правды по времени — git, здесь фиксируется состояние.
+Сверено с деревом на `11343d5`.
 
-## Провенанс: что с чем стало
+## Что осталось — сводка
 
-| Было | Где жило | Стало |
-|---|---|---|
-| 8 пунктов рантайма | `docs/runtime-roadmap.md` (удалён) | Трек A |
-| Ближайшие шаги | `README.md`, «Что дальше» | Трек B (из README теперь ссылка сюда) |
-| Приоритеты P0/P1/P2 | `docs/research/chat-2026-09-21/README.md` | Трек C (P0 закрыт, P1/P2 перенесены) |
-| Статус движка | `wiki://allpaka-engine-status` | Часть строк закрыта кодом (профили, autotune-кэш, multi-model serve, отмена/дедлайны); остаток «remaining architecture work» разложен по A3–A7. Страница — снимок на 2026-09-02 |
-| `codex://allpaka/gpu-recovery/2026-08-29` | RAG-корпус (`updates`) | **Заменён**: `wiki://allpaka-engine-status` объявляет его superseded. В планировании не используется |
-| MTP | `docs/mtp.md` | «Снято / парковка» с условием возврата |
-| Опровергнутые оптимизации | `docs/moe-prefill.md` | «Снято / не делать без новых данных» |
-| `google/ax` (Go-оркестратор агентских нагрузок на Kubernetes) | внешний, актуален на 2026-09-24 | Заимствовано ровно одно: форма статуса (`phase` как одно слово, `conditions` как деталь, `watch` как переходы) → `allpaka watch`, и там же — `SwarmReport.status`/`Session.status` из `String` в enum с теми же словами на проводе (`types.rs`), а шаг tool-цикла переехал из строки `running · шаг N` в поле `step`. Песочницы, egress-allowlist, `suspend`/`resume` акторов, Redis-контролплейн и `atespace` не перенесены: у allpaka узкое место - пропускная способность памяти и хвост задержки линка, а не планирование кластера. `suspend`/`resume` к тому же закрыты на уровне сессии в Studio |
-| `deepseek-ai/deepseek-harness` | внешний, актуален | Реализован полный паритет подсистем в Studio/Harness/CLI/SDK/UI (Waves 1–8): см. `docs/deepseek-harness-parity.md` и задачу C5 ниже |
-| Структура репо и метрики «непонятности» | вне репо, в рабочем плане | Разбор по шести метрикам проведён и закрыт коммитами начиная с `90f259d` (гинтлинок, `state_file`, кластеры Studio, `/health`, README). Сам документ с метриками в `docs/` заведён не был: `roadmap.md` объявлен единственным источником правды, а `docs/benchmarks` уже занимает 1042 из 1207 трекаемых файлов |
+| Мешает | Пункты |
+|---|---|
+| Можно делать здесь (Windows + RTX 5090) | — |
+| Нужен Mac (Metal) | P4, P5, P6, P7, D3, D4, A7, D2 (Metal-раннер) |
+| Нужна вторая машина | B1 → B3 |
+| Нужны вы | D1 (push и зелёный CI), D2, D6, раздел «Ждёт решения владельца» |
+
+
+## Где мы сейчас
+
+- **CUDA (RTX 5090, Qwen3-32B Q4_K_M):** decode ~111% llama.cpp; prefill
+  pp512 ~108%, pp2048 ~103.5% (чанк prefill на CUDA — 2048). Хэш логитов
+  prefill и greedy-поток decode повторяются между запусками.
+  Артефакты: `docs/benchmarks/2026-11-10-allpaka-vs-llama-rtx5090.md`,
+  `docs/benchmarks/2026-11-13-cuda-prefill-determinism-rtx5090.md`.
+  `allpaka_ggml.dll` и эталонный `llama-bench` собираются одним скриптом
+  `third_party/build_allpaka_ggml.bat`; ревизия и патч llama.cpp закреплены
+  рядом (`llama.cpp.rev`, `llama.cpp.patch`).
+  Tool calls через `serve` на Qwen2.5-7B: в режимах auto, `required`, по имени
+  и в потоке вызов разбирается без отказов, обычный вопрос получает обычный
+  ответ; скорость decode внутри вызова та же, что без грамматики (268 против
+  269 tok/s при обычных настройках, 265 против 214 при `repeat_penalty: 1.0`).
+  `allpaka verify --decode 32` на Qwen2.5-7B проходит против CUDA-сборки
+  llama-server (max |Δlog-prob| 0.2312 при допуске 0.24); против Vulkan-сборки
+  из winget тот же прогон выходит за допуск на 8-м шаге (0.2454).
+- **Metal (M4 Max):** 30B pp ~0.90× (плюс специализация `MMID_NARROW` для хвостовых тайлов grouped expert matmul, +9.5% prefill на Qwen3-30B), GLM-Air decode ~0.86×, 235B decode ~0.72×.
+  Артефакт: `docs/benchmarks/allpaka-vs-llama-metal-status.md`.
+- **Сервинг:** изолированные сессии, отмена, дедлайны, backpressure, блочный
+  prefix cache с hit/miss — есть (`docs/serving.md`). Бюджет памяти —
+  reservation-счётчики с явно названной границей в `/stats`, не hard-cap. Длинные запросы
+  (до четырёх) идут одновременно, их шаги decode батчатся в один проход по
+  весам, `kernel_batching: true` для плотных моделей.
+- **Распределённый движок:** разрез по слоям на TCP-стадии, gateway с
+  токенизатором и `pipeline-plan` и запуск по манифесту (`pipeline-up`) есть; loopback-регрессия
+  `scripts/test-distributed.py` сравнивает с монолитом
+  (`docs/distributed-execution.md`). Квалификации на двух машинах нет.
 
 ---
 
-## Трек A — движок и сервинг
+## Трек P — производительность движка
 
-Статусы сверены с кодом. Сравнения от 2 сентября сняты на разных токен-стримах и не доказывают цель 1.10x.
+### P4. Metal: GLM-Air decode ≥ llama
 
-### A1. Сопоставимые бенчмарки — в работе
+Эксперты доминируют (down ~33%, gate_up ~25%), shared expert добавляет Q5+Q8
+трафик. Не замерены на холодной машине: `ALLPAKA_MV_ID` (по умолчанию ON),
+`ALLPAKA_SHARED_STAGGER=1`, `ALLPAKA_MV_TG` ∈ {64,128,256}. Харнесс —
+`scripts/glm-ab-stagger.sh` (запускать вне песочницы агента).
 
-Точный token replay, KV-точность, matched contexts. Часть сделана: метаданные
-работы, строгий GPU-coverage, alternating context-matched прогоны.
+Правило: `MV_ID` остаётся ON только если холодный GLM decode ≥ llama, иначе
+`ALLPAKA_MV_ID=0`. Если после A/B всё ещё <1.0× — Metal GPU capture одного
+токена: эффективный GB/s indexed Q8_0 down `[4096×1408]` и Q4_K gate/up
+`[1408×4096]` против `mul_mv_q8_0`/`mul_mv_q4_K` llama, плюс простой между
+стадиями. Новых fuse-флагов до этих цифр не добавлять.
 
-**DoD:** token replay против llama.cpp на одном и том же токен-стриме;
-артефакт по стабильной JSON-схеме с явным флагом comparability. Для MoE
-идентичные формы тензоров не означают идентичный роутинг экспертов — это
-должно быть отражено в отчёте.
+**DoD:** холодный A/B GLM decode ≥ 1.0× llama с артефактом, либо отрицательный
+результат с GPU capture в реестре.
 
-**Пруф:** `docs/benchmarks/qwen3-30b-m4-max-2026-09-02.md`, `docs/benchmarks/*.json`.
+### P5. Metal: 235B decode (Q2_K путь)
 
-### A3. Единый бюджет памяти — в работе
+Строго после P4. **DoD:** decode ≥ 0.9× llama на холодной машине, артефакт.
 
-Сделано: reservations для mapped-весов, полной capacity prefix-cache и живых
-сессий; отказ до старта стрима; освобождение; `peak_reserved_bytes` в `/stats`.
+### P6. Metal: остаток pp на 30B
 
-Осталось: единый KV/scratch admission. GPU scratch, вспомогательные аллокации
-модели и HTTP-буферы не покрыты — это reservation-счётчики, а **не** hard-cap
-процесса.
+pp480 — 481 dispatch в одном command buffer, GPU занят 321/322 мс; остаток
+~10% — пропускная способность mm-ядер внутри графа (на изолированном
+микробенче паритет с llama). Открыто: аномалия `mmbench` q6_k, перемерить на
+тихой машине (`MM_FMT=q6_k MM_NIN=12288 MM_NOUT=4096 MM_M=480 MM_LLAMA=1` +
+контроль q4_k той же формы).
 
-**DoD:** либо покрыть эти статьи, либо честно назвать границу в `docs/serving.md`
-и в самом ответе API (сейчас формулировка уже честная — довести до конца).
+**DoD:** объяснённый (capture) разрыв in-graph vs microbench и либо ≥1.0× pp,
+либо отрицательный результат.
 
-### A5. Step scheduler + chunked prefill — ожидает
+### P7. Перемеры, устаревшие после смены дефолтов
 
-Сейчас `batching_mode: model-aware-admission`, `kernel_batching: false`, инференс
-сериализован одним владельцем.
+- qwen35-35B: SWFUSE стал opt-in 2026-09-26, строки
+  `docs/benchmarks/qwen35-35b-m4-max-pending.md` сняты в fused-режиме.
+- Сравнение с llama.cpp на 8B/30B и перемер BASELINE на тихом Mac (порядок в
+  `docs/bench-vs-llama-remote.md`).
 
-**DoD:** chunked prefill плюс метрика максимальной decode-задержки под
-конкурентной нагрузкой; задержка ограничена, а не «как получится».
+**DoD:** свежие парные артефакты, pending-файлы закрыты или переименованы.
 
-### A6. Fused batching независимых сессий на GPU — ожидает, строго после A5
+### P8. Новые модели в матрице
 
-**DoD:** parity-тесты батча против последовательного выполнения; `/stats`
-перестаёт сообщать `kernel_batching: false`.
+Dense Qwen на CUDA — в матрице с паритетом (`docs/benchmarks/matrix-cuda-rtx5090.md`:
+Qwen3-32B, Qwen2.5-7B). Осталось:
 
-### A7. Workload-aware autotune — ожидает
+1. Gemma 4 (head_dim=512) — GGUF на машине нет. Gemma 3 в матрице и за
+   окном 1024 (`2026-11-15-verify-gemma3-12b-rtx5090.md`).
+2. Опционально MTP-35B для паритета спекуляции.
 
-Профили `safe` / `balanced` / `max-performance` и версионированный кэш autotune
-уже есть.
+**DoD:** модель проходит greedy-паритет и попадает в матрицу с артефактом.
 
-**DoD:** выбор профиля под рабочую нагрузку (latency / throughput / memory), а
-не только под пару модель+устройство.
+---
 
-### A8. Structured output + валидированные tool calls — ожидает
+## Трек A — сервинг
 
-**DoD:** constrained decoding по JSON-схеме инструмента и явный отказ при
-несоответствии аргументов; тест на «модель выдала мусор», а не только happy path.
+### A4. Чередование долгих запросов и fused batching на GPU
+
+Короткий запрос уже не ждёт длинный: между шагами (чанк prefill или токен
+decode) длинной генерации `serve` обслуживает ожидающий чат, если тот в 4 раза
+короче, во временной сессии без кэша префиксов; первый токен чата — 134–149 мс
+вместо 4 с (`docs/benchmarks/2026-11-14-serve-preemption-7b-rtx5090.md`).
+Переключение сессий почти бесплатно (`3b39cbe`). Длинные запросы (до четырёх) теперь
+чередуются по шагам: второй идёт в рабочем потоке со своей временной сессией,
+ход передаётся через FIFO-очередь (`serve/interleave.rs`); первый токен
+второго — 735 мс вместо ~4.9 с, переключение стоит 2–3%
+(`docs/benchmarks/2026-11-14-serve-two-long-7b-rtx5090.md`).
+
+Шаги decode одновременных генераций батчатся: `Model::forward_multi` гонит
+N сессий одним проходом по весам — fused-блоки prefill на N строк, у каждой
+строки свой KV-кэш и позиция (`MultiRow`), внимание через split-KV FA llama.cpp,
+матрицы через MMVQ на N колонок (мост теперь принимает 2–8 строк), шаг
+захватывается CUDA-графом и переигрывается, пока набор сессий тот же.
+Parity-тест `cuda_decode_multi_parity` (teacher forcing, четыре сессии):
+64/64 greedy-токенов совпадают, логиты расходятся не больше эталонного
+послойного батча. Скорость шага: 1.79 мс на токен вчетвером против 3.67 мс
+по одному (×2.05); в `serve` четыре запроса — 10.8–12.2 мс на токен каждому
+против 16.2 мс при чередовании. `/stats` сообщает `kernel_batching: true`
+для плотных моделей. По дороге найдены и исправлены две гонки в мосту FA:
+маска, записанная хостом, и строки разных слотов KV в одном шаге.
+
+Запросы с `session_id` тоже идут параллельно: именованные сессии вынесены из
+замка сервиса в общую карту, запрос забирает свою сессию на время работы и
+возвращает после; запрос к занятой сессии ждёт её
+(`scripts/check-named-sessions.py`: вторая сессия стримит, пока первая
+работает; сессия сохраняется — 6409 из 6409 токенов из кэша при повторе).
+Не покрыто батчем: MoE и GDN-слои (их шаги идут по очереди).
+
+**DoD:** ~~два длинных запроса чередуются по шагам~~; ~~fused-батч быстрее
+N×одиночного~~; ~~parity-тест батча против последовательного выполнения~~;
+~~`/stats` перестаёт сообщать `kernel_batching: false`~~; ~~`session_id`-запросы
+параллельно~~ — сделано.
+
+Найдено попутно: `tests/dense_forward.rs` падает с фичей `cuda` (и потому в
+`cargo test --workspace`, где фичи объединяются) — синтетическая модель на GPU
+даёт нестабильные логиты; падает и на `HEAD` до этих изменений, и с
+`ALLPAKA_GGML=0`. Без `cuda` проходит.
+
+### A5. Autotune: кандидаты, различимые на CUDA
+
+Выбор профиля под нагрузку (`--workload latency|throughput|memory`) работает и
+прогнан на Qwen2.5-7B (`docs/benchmarks/2026-11-14-autotune-workloads-rtx5090.md`),
+но на CUDA три профиля дают одинаковые скорости и память: они переключают
+только Metal-опции, и выбор решает шум.
+
+**DoD:** среди кандидатов autotune есть настройки, меняющие CUDA-путь (размер
+чанка prefill, повтор графа, кэш f16-весов), и для каждой нагрузки выбор
+отличается от шума; либо тот же прогон на Metal с различимыми профилями.
+
+### A7. MLX-формат в рантайме
+
+Загрузка, деквант и харнесс есть (`docs/mlx-format-integration.md`).
+
+**DoD (по шагам):** matmul прямо по MLX-блокам без полного декванта, либо
+перепаковка в формат allpaka при загрузке; гейтинговый прогон
+`docs/benchmarks/2026-09-27-mlx-qwen-matrix/wait-then-run.sh` с артефактом;
+CI-проверка на скачиваемом эталонном чекпоинте.
 
 ---
 
 ## Трек B — распределённый инференс
 
-Источник: `README.md`, «Что дальше». Планировщик (`plan.rs`, `fleet.rs`,
-`fabric.rs`) есть; исполнителя разреза нет: `allpaka launch` печатает команды
-для llama-server, а разрез собственного движка по слоям через сеть отсутствует.
+### B1. Квалификация на двух машинах
 
-### B1. Loopback-разрез на два процесса
+Запуск (`pipeline-up`) и наблюдение (`watch --manifest`: `StageReachable`,
+`LayersPlaced`, `LinkVerified`) готовы и проверяются на loopback в
+`scripts/test-distributed.py`; на двух машинах не запускались.
 
-**DoD:** одна модель разрезана по слоям между двумя процессами на одной машине;
-greedy-стрим бит-совместим с монолитным прогоном.
+**DoD:** одна модель разрезана между mac и PC; greedy-стрим совпадает с
+монолитом; predicted tok/s по `allpaka.toml` против measured в пределах
+заявленного допуска. Хоп односторонний — платится p99, а не среднее;
+неизмеренный стык блокирует разрез.
 
-**Exit-критерий трека:** если бит-паритет недостижим — трек закрывается, модель
-стоимости в `plan.rs` остаётся как есть, а README переписывается без обещания
-исполнителя. Это точка честного отказа, а не «продолжим как-нибудь».
+### B3. Спекуляция на разрезе
 
-### B2. Разрез по измеренному линку
-
-**DoD:** predicted tok/s по `allpaka.toml` против measured на mac↔PC в пределах
-заявленного допуска; неизмеренный стык по-прежнему блокирует разрез.
-Напоминание из README: хоп односторонний, на проход платится p99, а не среднее.
-
-### B3. Спекуляция на разрезе + запуск по конфигу
-
-**DoD:** спекуляция поверх B2 не меняет сравнение «разрез vs монолит» (она
-множитель к обеим конфигурациям, а не лечение задержки); запуск идёт по конфигу
-планировщика вместо печати чужих команд.
-
-Форма наблюдения за таким запуском уже есть для одного сервера: `allpaka watch`
-(`crates/allpaka-cli/src/watch.rs`) сводит опрос ручек в `phase` плюс
-`conditions` и печатает переходы. Разрез унаследует тот же словарь, а не
-новый: `Reachable` становится `StageReachable` на каждый узел, и к нему
-добавляются `LinkVerified` (стык измерен, иначе по правилам B2 разрез
-запрещён) и `LayersPlaced`. Пока подъём разреза не запускается программно
-(`launch` печатает команды), кода для этих условий нет и заводить их заранее
-нельзя - классификатор обязан оставаться функцией над измеренным.
+**DoD:** спекуляция поверх B1 не меняет сравнение «разрез vs монолит» (она
+множитель к обеим конфигурациям).
 
 ---
 
 ## Трек C — Studio
 
-Источник: `docs/research/chat-2026-09-21/README.md` (P1/P2). P0 закрыт.
+Сделаны: C1 — `@путь[:START-END]` разбирается на сервере (provenance, бюджет
+вложений; `docs/studio.md`, «Файлы через `@`»); C2 — verified writes, `undo`,
+`git_diff`, `apply_patch`/checkpoints, PTY-терминалы, worktrees и Forge PR;
+C3 — извлечение PDF/DOCX/XLSX на чистом Rust (`zip` + `quick-xml`, `lopdf`),
+URL через `reqwest`, OCR и аудио/видео через внешние `tesseract`/`ffmpeg`/whisper CLI
+с явной ошибкой при их отсутствии (`docs/studio.md`, «Извлечение вложений»);
+C5 — функциональный паритет с `deepseek-ai/deepseek-harness` (`docs/deepseek-harness-parity.md`).
 
-### C1. Поиск/RAG по папкам проекта — ожидает
+### C4. Fallback и provider routing
 
-**DoD:** цитаты с provenance (файл + строки), видимый бюджет контекста, выбор
-файлов через `@`; тест на актуальность — изменённый файл не выдаётся из кэша как
-свежий.
+Сумма расхода по беседе и бюджет готовы (`docs/studio.md`), включая Swarm и
+сжатие истории.
 
-### C2. Checkpoints/undo, git diff, безопасные патчи, shell — закрыто в базовом контуре
-
-Реализованы `apply_patch` (`Begin Patch` / unified diff), автоматические чекпоинты с откатом (`patch.rs`), интерактивные PTY-терминалы (`terminal.rs`), Git worktrees и Forge PR (`worktree.rs`, `forge.rs`).
-
-**DoD:** отмена с последующей сверкой фактического состояния; применение патча проверяется на исходной копии.
-
-**Пруф:** unit-тесты `patch::tests::*`, `terminal::tests::*`, `worktree::tests::*` (`cargo test -p allpaka-chat --offline`) и сквозная проверка отката/PTY в `scripts/test-studio.py`.
-
-### C3. Извлечение PDF/DOCX/XLSX/OCR/URL/аудио/видео — частично закрыто
-
-Реализованы встроенное извлечение текста PDF/DOCX/XLSX/PPTX/ODF/HTML/XML с лимитами распаковки (`documents.rs`), веб-поиск/чтение URL с SSRF-защитой (`web_tools.rs`) и внешний STT seam для аудио (`automation_seams.rs`). Локальный OCR без внешних бинарей и декодирование видеопотоков остаются открытыми.
-
-**DoD:** реальное извлечение, лимиты MIME/размера, сохранение исходника, а также OCR и видеопотоки при расширении за пределы текстовых/офисных форматов.
-
-**Пруф:** `documents::tests::*`, `web_tools::tests::*`, `automation_seams::tests::*` и проверки `/api/documents/extract` / `/api/voice/transcribe` в `scripts/test-studio.py`.
-
-### C4. Стоимость/лимиты, сравнение моделей, фоновые задачи, память — ожидает
-
-**DoD:** точные usage/cost и бюджеты (сейчас `usage` относится к последнему
-запросу, суммарных бюджетов нет) и долговечный планировщик с восстановлением
-после рестарта.
-
-### C5. Функциональный паритет с `deepseek-ai/deepseek-harness` — закрыто
-
-Реализованы все 8 волн: spill-выгрузка, OS-песочница с fail-closed профилями прав, интерактивные approvals/questions, `apply_patch`/checkpoints/PTY/LSP/worktrees/Forge/SSH, субагенты + Team DAG, Programmatic Tool Calling (`run_code`) + DAG workflows, веб/документы/seams, профили/бандлы/ACP/schedules/HMAC-webhooks/LiveShare/OTLP, CLI-флаги (`--headless`, `--prompt`, `--profile`, `--dump-config`, `--acp`), UI «Операции» (`web/harness-ext.js`) и Python SDK (`sdk/python/allpaka_studio.py`).
-
-**DoD:** все 10 проверочных прогонов репозитория (`cargo fmt --all -- --check`, `check-backends.sh`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test -p allpaka-chat --offline`, `cargo test --workspace --offline`, `node --check`, `test-studio-content.cjs`, `studio-ui-tests/run.sh`, `test-studio-sdk.py`, `test-studio.py`) проходят без ошибок, без новых зависимостей Cargo и без правок продовых GPU-ядер.
-
-**Пруф:** `docs/deepseek-harness-parity.md`, `cargo test --workspace --offline`, `scripts/studio-ui-tests/run.sh`, `scripts/test-studio-sdk.py`, `scripts/test-studio.py`.
+**DoD:** при отказе или лимите провайдера ход продолжается на запасном
+провайдере по явной настройке, с записью в трассе, кто ответил.
 
 ---
 
+## Трек D — гигиена и корректность
+
+Слито с `origin/main` (волна `refactor/architecture-wave`, 28 коммитов с другой
+машины): в CI добавлены `scripts/check-backends.sh`, CUDA-кросс-clippy
+(`x86_64-pc-windows-msvc`) и `scripts/studio-ui-tests/run.sh`; `gpu/` разложен на
+`metal/*`, `cuda/*`, `common.rs`, шейдеры Metal — из `shaders/kernels.metal`;
+clippy-долг backend/model закрыт на той стороне. CUDA-бэкенд и модель взяты с
+локальной стороны (Gemma 3, окно SWA, исправления арены и RoPE): `rope_norm` из
+CUDA-ядер той стороны не нужен — загрузчик переводит Llama/Mistral в NEOX.
+
+### D1. CI: первый зелёный прогон расширенного набора
+
+Состояние на 2026-11-15 (`main` после слияния с `origin/main`, раннер
+`macos-latest`): fmt, cross-backend check и clippy зелёные. `cargo test
+--workspace` красный на одном тесте —
+`crates/allpaka-backend/tests/gpu_parity.rs::rope_norm_end_to_end_gpu_paths_match_cpu`:
+Metal `prefill_attn_block(rope_norm=true)` расходится с CPU на одном элементе
+(−1.545 против −1.653, допуск ~0.055), KV-кэш совпадает. Тест и Metal-код — с
+той стороны слияния, в CI запущен впервые; оставлен падать намеренно до
+проверки на Mac (баг Metal или слияния). `gpu_moe_tail.rs::attend_mm_db_variants_are_bit_identical`
+пропускается на хостед-раннере GitHub (`attend_mm_fq` падает на виртуальном GPU),
+на настоящем Mac запускается. **DoD:** оба проверены на Mac, `cargo test
+--workspace` зелёный в CI, следующие шаги (сборка без default features,
+Studio-проверки) пройдены.
+
+`.github/workflows/ci.yml` теперь гоняет `fmt --check`, `clippy -D warnings`,
+`cargo test --workspace`, сборку CLI без default-features, node-проверки Studio
+и `scripts/test-studio.py`. Локально проверено на Windows (fmt, clippy, node) и
+clippy backend/model под `aarch64-apple-darwin`; на раннере `macos-14` набор
+ещё не запускался. `test-studio.py` на Windows не проходит целиком: проверка
+`signal==15` у фоновых задач POSIX-специфична.
+
+**DoD:** зелёный прогон на `macos-14` после push; проверки отмечены
+обязательными в защите ветки.
+
+### D2. Self-hosted GPU-раннеры
+
+**DoD:** CI покрывает GPU-ядра и smoke-тесты с моделями на Metal; желательно
+также Windows/CUDA-раннер, раз основная работа по скорости идёт там.
+
+### D3. Metal: `decode_token` → стадии
+
+1 657 строк горячего пути; вместе с ним — request-структуры для Metal-лаунчеров
+и билдер dispatch-бойлерплейта (`set_pipeline + set_buffer×N + dispatch`).
+Нужен Mac. **DoD:** A B A B без регрессии за пределы шума, greedy-паритет.
+
+### D4. Soundness-FIXME
+
+- `gpu/metal/ffn_grouped.rs:216` — гонка рестейджинга GLM router bias
+  (вероятный баг GLM fused prefill). Нужен Mac.
+- `gpu/metal/verify.rs:361` — дамп `ALLPAKA_VERIFY_DEBUG`.
+- `tests/gpu_parity.rs`: запись в общий срез убрана (все матрицы готовятся один
+  раз до attach), но файл собирается только под macOS — здесь он прошёл лишь
+  clippy под `aarch64-apple-darwin`. Осталось прогнать на Metal.
+
+**DoD:** `grep 'FIXME(soundness)'` пуст, на каждый — тест или обоснование.
+
+### D6. Мусор и мёртвый код
+
+- Одноразовые debug-пробы (`ALLPAKA_*_ZERO`, `ROWS_DEBUG`, `TOKENBUF_DEBUG`,
+  …): либо результат задокументирован с датой и проба удаляется, либо остаётся
+  как инструмент в `docs/env-reference.md`. Требует решения владельца по
+  каждой.
+- Неотслеживаемые артефакты в корне и `docs/benchmarks/` (`sizeof_q8.obj`,
+  `overlay-off-*.out/.err`, `nsys-decode-32b.*`) — закоммитить как артефакт или
+  удалить.
+
+**DoD:** перечисленного нет в дереве, `git status` чист после сборки.
+
+---
+
+## Ждёт решения владельца
+
+Пункты 1–5 решены 2026-11-14 по умолчанию (цель «сделать план без вопросов»);
+владелец может пересмотреть любое:
+
+1. `memory_extract` → 409 при удалении беседы (`0d194ed`): оставлено (безопасно:
+   не пишет в удалённую беседу).
+2. Маршруты `serve`: API-пути матчатся с границей (`/stats`, `/stats?ts=1`,
+   `/v1/models/qwen3` — да; `/statsx`, `/v1/modelsx` — нет), известный путь с
+   чужим методом отвечает 405 с `Allow` (`serve/routes.rs::allowed`).
+3. Два правила id (`d702ed3`), megakernel и проигравшие варианты на месте:
+   оставлено как есть.
+4. Отказ tool call не по схеме: оставлена текущая форма (блок в `content`,
+   причина в `tool_call_rejections`, `finish_reason` прежний) — совместима с
+   клиентами OpenAI.
+5. Шаг, замедляющий горячий путь больше шума (±3% на тихой машине), не
+   принимается без замера рядом с llama.cpp — постоянное правило, см.
+   «Сквозные инварианты».
+6. C1 и C3 решены так же (см. трек C): разбор `@` на сервере; чистый Rust для
+   документов и внешние утилиты для OCR/аудио/видео.
+
 ## Снято / не делать без новых данных
 
-- **MTP-спекуляция в `serve`.** Бит-экзактна, но ~0.8× от plain (`docs/mtp.md`),
-  в `serve` не подключена. Условие возврата: либо verify дешевле (глобальные
-  matvec-ядра или one-buffer драфт-шаг ~2 мс → ~1 мс), либо явный DoD «≥1.15×
-  plain»; не выполнено — путь уходит в `docs/negative-results`.
-- **Tensor parallel** вместо pipeline: all-reduce внутри каждого слоя — хуже.
-- **Сжатие активаций** между узлами: 10 КБ — микросекунды против миллисекунд
-  задержки.
-- **Порт `kernel_mul_mm_id_q4_K`** из llama.cpp — закрыто инспекцией и
-  измерением (`docs/moe-prefill.md`).
-- Всё остальное из «What was tried and falsified» в `docs/moe-prefill.md` и из
-  реестра отрицательных результатов.
+- **MTP-спекуляция в `serve`.** Бит-экзактна, но ~0.8× от plain (`docs/mtp.md`).
+  Возврат: verify дешевле (one-buffer драфт-шаг ~2 мс → ~1 мс) или DoD «≥1.15×
+  plain».
+- **Megakernel / `moe_ffn_mega`.** Device-atomic busy-wait вешал GPU-планировщик
+  Mac. Возврат только с encoder-barrier стадиями и тестом, который не может
+  повесить GPU.
+- **RFUSE, GUFUSE, CFUSE, RTOPK, SHARED_TAIL, NR0≠2, Q8 K-split+shmem** —
+  `docs/decode-opts.md`.
+- **Порт `kernel_mul_mm_id_q4_K`** и прочее из «What was tried and falsified» —
+  `docs/moe-prefill.md`.
+- **Tensor parallel** вместо pipeline; **сжатие активаций** между узлами.
+- **Кэш дескрипторов `token_layers`** — эффект ниже шума.
 
 ## Сквозные инварианты
 
 1. Любая цифра производительности имеет артефакт в `docs/benchmarks/` и
-   воспроизводимую команду.
-2. Замер — парные/back-to-back прогоны; вывод из одного числа не принимается
-   (методология: `wiki://allpaka-measurement-methodology`).
-3. Отрицательный результат публикуется, а не забывается; образец — раздел
-   «What was tried and falsified» в `docs/moe-prefill.md`.
-4. Регрессия ловится до мержа: все проверки, которые уже существуют в
-   репозитории, подключены к CI (см. D1).
+   воспроизводимую команду; каждый бенчмарк allpaka идёт парно со свежим
+   прогоном llama.cpp.
+2. Замер — парные/back-to-back прогоны (A B A B); вывод из одного числа не
+   принимается.
+3. Горячие пути правятся только с парным замером и greedy-паритетом.
+4. Поведение, HTTP-контракты и форматы файлов не меняются без явного решения.
+5. Перенос кода, правка логики и форматирование — разные коммиты; баг по
+   дороге — отдельный коммит с тестом.
+6. Отрицательный результат публикуется, а не забывается.
 
----
+## Приложение: GPU-job для D2 (черновик, не применён)
 
-## Трек D — гигиена (сквозной)
-
-### D1. CI: подключить существующие проверки — закрыто
-
-Подключены в `.github/workflows/ci.yml`: `cargo fmt --all -- --check`,
-`bash scripts/check-backends.sh`, `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo clippy -p allpaka-backend --target x86_64-pc-windows-msvc --features allpaka-backend/cuda -- -D warnings`,
-`cargo test --workspace`, `node --check crates/allpaka-chat/web/app.js`,
-`node --check crates/allpaka-chat/web/harness-ext.js`, `node scripts/test-studio-content.cjs`,
-`node scripts/test-studio-key-save.cjs`, `bash scripts/studio-ui-tests/run.sh`,
-`python3 scripts/test-studio-sdk.py`, `python3 scripts/test-studio-files.py`,
-`python3 scripts/test-studio-callback-ci.py`, `python3 scripts/test-studio-guardrails.py`,
-`python3 scripts/test-studio-online-worker.py`, `python3 scripts/test-distributed.py` и
-`python3 scripts/test-studio.py`.
-GPU/GGUF-зависимые `scripts/test-serving-controls.py` и `scripts/test-serving-memory.py`
-относятся к треку self-hosted раннера D2.
-
-**DoD:** всё, что не требует Metal/GGUF, выполняется в CI и является обязательной
-проверкой.
-
-**Пруф:** `.github/workflows/ci.yml`.
-
-### D2. Self-hosted Metal-раннер — ожидает
-
-**DoD:** CI покрывает GPU-кернелы и smoke-тесты с настоящими моделями, а не
-только CPU-часть.
-
-### Допущения, требующие подтверждения
-
-- Паритет Windows/CUDA проверяется по релизным пунктам, а не на каждом этапе.
-  Иначе стоимость проверки каждого пункта удваивается.
-- Порядок исполнения по умолчанию: A → B → C, при этом D1 идёт первым как
-  самый дешёвый и разблокирующий.
-
+```yaml
+  gpu:                        # self-hosted Metal; цель D2, до неё не блокирует PR
+    if: github.event_name == 'push'
+    runs-on: [self-hosted, macos, metal]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --workspace -- --test-threads=1
+      - run: python3 scripts/test-serving-controls.py
+      - run: python3 scripts/test-serving-memory.py
+```

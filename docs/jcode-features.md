@@ -273,3 +273,27 @@ Conversation extraction source status: GET `/api/memory/proposals/:id/source-sta
 Studio extraction source review: opened conversation proposal receipts now include an explicit source-check button. It displays current/changed/unavailable prefix status, distinguishes revision comparison from factual correctness, and reports running conversations. The UI validates receipt identity/project/boundary/hash, status consistency and no-inference/no-mutation metadata. Duplicate clicks and late replies after session/project/dialog/panel changes are excluded. UI contract tests for all three statuses and malformed/stale replies pass alongside existing memory save and consolidation catalog tests. Real-browser qualification and changed/unavailable HTTP cases remain pending.
 
 Extraction source status HTTP qualification now covers all statuses: appended messages retain current status and the original hash; an isolated test history rewritten while Studio is stopped returns changed after restart; a test history moved outside the data directory returns unavailable. Retained proposals remain exactly readable, notes remain unchanged, and status requests make no additional mock-provider calls. The full Studio contract suite passes (`/tmp/allpaka-extraction-source-status-cases.log`). Source-check browser visual qualification remains pending.
+
+### Memory qualification status (2026-11-14)
+
+The memory entries above are a changelog: an increment notes what it left
+pending, and later entries close it. Read together, as of this date:
+
+- **Closed by later entries:** consolidation authoring in a browser, the
+  source-status button in a browser, model consolidation in a browser, saved
+  proposal review in a browser, source-status and catalog HTTP qualification,
+  proposal-storage rejection with zero provider calls, and extraction source
+  status over HTTP for current, changed and unavailable.
+- **Closed now:** extraction source check in a real browser. Studio with a
+  streaming mock provider; one conversation, one saved extraction proposal;
+  Memory -> "Открыть сохранённые предложения" -> the proposal -> "Проверить
+  источник разговора" shows "Исходная часть разговора совпадает с
+  предложением. Проверены исходные сообщения, а не достоверность фактов."
+  Changed and unavailable need a history rewritten while Studio is stopped;
+  their HTTP cases and their rendering (UI fixtures) are covered, not a browser
+  pass of those two states.
+- **Limitations, not pending work:** the quality of model-written
+  consolidations on a live model is not qualified (the mock writes a fixed
+  candidate); there is no automatic consolidation, contradiction resolution or
+  source-expiry interpretation; a status check compares revisions, never the
+  truth of a note.

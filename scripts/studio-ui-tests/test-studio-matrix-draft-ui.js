@@ -1,9 +1,10 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 class Element{constructor(text){this.textContent=text;this.value='';this.children=[];this.checked=false;}append(...items){this.children.push(...items);}replaceChildren(...items){this.children=items;}setAttribute(){}}
 const ids=['matrix-job-id','matrix-job-open','matrix-jobs-show','matrix-jobs-list','matrix-job-result','matrix-draft-rows','matrix-draft-add','matrix-draft-run','matrix-draft-stop','matrix-draft-status','evaluation-prompt','evaluation-matrix-id','evaluation-bigram-f1','evaluation-exact','evaluation-contains','evaluation-json','evaluation-json-equals','evaluation-token-f1'];const elements=Object.fromEntries(ids.map(id=>[id,new Element()]));elements['evaluation-exact'].checked=true;elements['evaluation-prompt'].value='{{input}}';
 const profile={model:'base',provider:'local'},calls=[];
 const context={TextEncoder,evaluationDataset:{id:'data',version:1,sha256:'hash'},evaluationProject:'project',evaluationPrompt:null,promptOrigin:null,settings:()=>profile,$:id=>elements[id],node:(_,text)=>new Element(text),savedExperimentMatrixPanel:receipt=>new Element(receipt.id),runServerStudioMatrix:async(candidates,hooks)=>{calls.push(JSON.parse(JSON.stringify(candidates)));return {matrix:{id:'saved'}};}};
-vm.createContext(context);const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('let studioMatrixDraft='),source.indexOf('let evaluationPrompt=')),context);
+vm.createContext(context);const source=appSource();vm.runInContext(between(source,'let studioMatrixDraft=','let evaluationPrompt='),context);
 (async()=>{
 assert(elements['matrix-draft-run'].disabled);elements['matrix-draft-add'].onclick();profile.model='next';elements['matrix-draft-add'].onclick();assert.equal(elements['matrix-draft-rows'].children[0].children[1].value,'base');assert.equal(elements['matrix-draft-rows'].children[1].children[1].value,'next');assert(!elements['matrix-draft-run'].disabled);
 const template=elements['matrix-draft-rows'].children[1].children[4];template.value='Improve: {{input}}';template.oninput();

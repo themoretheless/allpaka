@@ -179,6 +179,13 @@ pub fn prefill_abort() {
 }
 
 pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
+    if req
+        .fusion
+        .as_ref()
+        .is_some_and(|f| !f.post_attn_norm.is_empty())
+    {
+        return None;
+    }
     let hidden = req.hs.len() / req.m.max(1);
     let hd = req.head_dim;
     // 128 everywhere; 256 on qwen35moe's full-attention layers. Below the
@@ -645,9 +652,17 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             // synced to consumers by a device counter instead of a pipeline
             // barrier. gate_in_q (GLM) keeps the two-dispatch path: its q
             // rows are double-wide, which this kernel does not handle.
+            // On GitHub Actions' paravirtualised macOS Metal GPU, cross-threadgroup
+            // device-counter spin-waits inside one dispatch do not complete
+            // reliably (see gpu_moe_tail::attend_mm_db_variants_are_bit_identical),
+            // so hosted CI uses the barrier-backed qk_prep_batch + attend_mm path
+            // unless ALLPAKA_PF_FQK=1 is requested explicitly.
             let tiles = (req.m as u32).div_ceil(8);
+            let fqk_allowed = crate::runtime::get().pf_fused_qk
+                && (std::env::var_os("GITHUB_ACTIONS").is_none()
+                    || std::env::var("ALLPAKA_PF_FQK").as_deref() == Ok("1"));
             let fused_qk = attend_mm()
-                && crate::runtime::get().pf_fused_qk
+                && fqk_allowed
                 && !req.gate_in_q
                 && req.n_heads >= 2 * req.n_kv_heads
                 && tiles <= 64;

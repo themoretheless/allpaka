@@ -23,6 +23,10 @@ fn late_windows_read_the_same_bytes_as_the_cpu() {
     let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is a non-null (asserted) `alloc_zeroed` allocation of exactly `len` bytes at
+    // `PAGE` alignment, so all bytes are initialised and nothing else refers to them. It is never
+    // deallocated (the GPU keeps wrapping it after `attach`), so the slice may live for the rest of
+    // the test.
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     if !gpu::attach(region) {
         eprintln!("SKIP: no Metal device");

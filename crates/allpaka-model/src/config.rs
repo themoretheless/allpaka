@@ -6,149 +6,9 @@
 //! norms), and both are decided here, once, from the file - not scattered
 //! through the forward pass as architecture ifs.
 
-use crate::error::ModelError;
+use crate::arch::Architecture;
+use crate::error::{bail, Context, Result};
 use allpaka_gguf::GgufFile;
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use std::fmt;
-
-/// Typed model architecture resolved once from GGUF `general.architecture`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(into = "String", from = "String")]
-pub enum Architecture {
-    Qwen2,
-    Qwen3,
-    Qwen3Moe,
-    Qwen35Moe,
-    Llama,
-    Mistral,
-    Glm4Moe,
-    DeepSeek2,
-    DeepSeek3,
-    Gemma4,
-    Other(String),
-}
-
-impl Architecture {
-    pub fn parse(raw: &str) -> Self {
-        if raw.eq_ignore_ascii_case("qwen2") {
-            Self::Qwen2
-        } else if raw.eq_ignore_ascii_case("qwen3") {
-            Self::Qwen3
-        } else if raw.eq_ignore_ascii_case("qwen3moe") || raw.eq_ignore_ascii_case("qwen3_moe") {
-            Self::Qwen3Moe
-        } else if raw.eq_ignore_ascii_case("qwen35moe")
-            || raw.eq_ignore_ascii_case("qwen3.5moe")
-            || raw.eq_ignore_ascii_case("qwen3_5_moe")
-        {
-            Self::Qwen35Moe
-        } else if raw.eq_ignore_ascii_case("llama") || raw.eq_ignore_ascii_case("llama3") {
-            Self::Llama
-        } else if raw.eq_ignore_ascii_case("mistral") {
-            Self::Mistral
-        } else if raw.eq_ignore_ascii_case("glm4moe")
-            || raw.eq_ignore_ascii_case("glm4_moe")
-            || raw.eq_ignore_ascii_case("glm_moe")
-        {
-            Self::Glm4Moe
-        } else if raw.eq_ignore_ascii_case("deepseek")
-            || raw.eq_ignore_ascii_case("deepseek2")
-            || raw.eq_ignore_ascii_case("deepseek_mla")
-        {
-            Self::DeepSeek2
-        } else if raw.eq_ignore_ascii_case("deepseek3") {
-            Self::DeepSeek3
-        } else if raw.eq_ignore_ascii_case("gemma4") {
-            Self::Gemma4
-        } else {
-            Self::Other(raw.to_string())
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Qwen2 => "qwen2",
-            Self::Qwen3 => "qwen3",
-            Self::Qwen3Moe => "qwen3moe",
-            Self::Qwen35Moe => "qwen35moe",
-            Self::Llama => "llama",
-            Self::Mistral => "mistral",
-            Self::Glm4Moe => "glm4moe",
-            Self::DeepSeek2 => "deepseek2",
-            Self::DeepSeek3 => "deepseek3",
-            Self::Gemma4 => "gemma4",
-            Self::Other(raw) => raw.as_str(),
-        }
-    }
-
-    pub fn rope_style(&self) -> RopeStyle {
-        match self {
-            Self::Llama | Self::Mistral => RopeStyle::Norm,
-            _ => RopeStyle::Neox,
-        }
-    }
-
-    pub fn capability(&self) -> ModelCapability {
-        match self {
-            // qwen2 (Qwen2.5 GGUF arch tag) shares the dense Neox+GQA graph with qwen3;
-            // QK norms are detected from tensors, so absence on qwen2 is fine.
-            Self::Qwen2 | Self::Qwen3 | Self::Qwen3Moe | Self::Qwen35Moe => ModelCapability {
-                support: ModelSupport::Supported,
-                reason: "Qwen dense, MoE, and hybrid GDN kernels are implemented",
-            },
-            Self::Llama | Self::Mistral => ModelCapability {
-                support: ModelSupport::Supported,
-                reason: "Llama-like dense graph with adjacent-pair RoPE is implemented",
-            },
-            Self::Glm4Moe => ModelCapability {
-                support: ModelSupport::Experimental,
-                reason: "sigmoid MoE, shared experts, bias, and partial RoPE are implemented",
-            },
-            Self::DeepSeek2 | Self::DeepSeek3 => ModelCapability {
-                support: ModelSupport::Unsupported,
-                reason: "MLA KV cache and attention kernels are not implemented",
-            },
-            Self::Gemma4 => ModelCapability {
-                support: ModelSupport::Unsupported,
-                reason: "head_dim=512 attention kernels are not implemented",
-            },
-            Self::Other(_) => ModelCapability {
-                support: ModelSupport::Unsupported,
-                reason: "architecture has no registered execution capability",
-            },
-        }
-    }
-}
-
-impl fmt::Display for Architecture {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl From<String> for Architecture {
-    fn from(raw: String) -> Self {
-        Self::parse(&raw)
-    }
-}
-
-impl From<&str> for Architecture {
-    fn from(raw: &str) -> Self {
-        Self::parse(raw)
-    }
-}
-
-impl From<Architecture> for String {
-    fn from(arch: Architecture) -> Self {
-        arch.as_str().to_string()
-    }
-}
-
-impl PartialEq<&str> for Architecture {
-    fn eq(&self, other: &&str) -> bool {
-        self == &Self::parse(other)
-    }
-}
 
 /// Which channels rotate together in RoPE. Getting this wrong produces
 /// grammatical nonsense rather than an error, which is why it is decided from
@@ -204,6 +64,31 @@ pub struct MoeConfig {
     pub weights_scale: f32,
 }
 
+/// Gemma 3's departures from the Llama graph, all read from the file:
+/// embeddings scaled by sqrt(hidden), sandwich norms around attention and
+/// the FFN, GeGLU (tanh GELU) instead of SwiGLU, and sliding-window local
+/// layers with their own RoPE base.
+#[derive(Debug, Clone)]
+pub struct GemmaConfig {
+    /// Local layers attend over this many positions (`attention.sliding_window`).
+    pub swa_window: u32,
+    /// Every `swa_pattern`-th layer (index % pattern == pattern - 1) is
+    /// global; the rest are local. llama.cpp's default is 6.
+    pub swa_pattern: u32,
+    /// RoPE base of the local layers (`rope.freq_base_swa`, default 10000,
+    /// no scaling).
+    pub swa_rope_base: f32,
+    /// Linear RoPE scaling of the global layers (`rope.scaling.factor`):
+    /// their frequencies are divided by it.
+    pub rope_scale: f32,
+}
+
+impl GemmaConfig {
+    pub fn is_local(&self, layer: usize) -> bool {
+        self.swa_window > 0 && (layer as u32) % self.swa_pattern < self.swa_pattern - 1
+    }
+}
+
 /// Gated delta net (linear attention) layer parameters, qwen35moe. Layers
 /// with `(index + 1) % full_attention_interval != 0` are GDN; the rest are
 /// full attention.
@@ -255,35 +140,62 @@ pub struct Config {
     /// Present for a mixture of experts; the FFN then routes instead of being
     /// one dense block.
     pub moe: Option<MoeConfig>,
+    /// Present for Gemma 3.
+    pub gemma: Option<GemmaConfig>,
 }
 
 impl Config {
     pub fn capability(&self) -> ModelCapability {
-        self.architecture.capability()
+        use Architecture as A;
+        match self.architecture {
+            // qwen2 (Qwen2.5 GGUF arch tag) shares the dense Neox+GQA graph with qwen3;
+            // QK norms are detected from tensors, so absence on qwen2 is fine.
+            A::Qwen2 | A::Qwen3 | A::Qwen3Moe | A::Qwen35Moe => ModelCapability {
+                support: ModelSupport::Supported,
+                reason: "Qwen dense, MoE, and hybrid GDN kernels are implemented",
+            },
+            A::Llama | A::Mistral => ModelCapability {
+                support: ModelSupport::Supported,
+                reason: "Llama-like dense graph with adjacent-pair RoPE is implemented",
+            },
+            A::Glm4Moe => ModelCapability {
+                support: ModelSupport::Experimental,
+                reason: "sigmoid MoE, shared experts, bias, and partial RoPE are implemented",
+            },
+            A::DeepSeek2 | A::DeepSeek3 => ModelCapability {
+                support: ModelSupport::Unsupported,
+                reason: "MLA KV cache and attention kernels are not implemented",
+            },
+            A::Gemma3 => ModelCapability {
+                support: ModelSupport::Experimental,
+                reason: "GeGLU, sandwich norms, sliding-window attention on the per-layer path",
+            },
+            A::Gemma4 => ModelCapability {
+                support: ModelSupport::Unsupported,
+                reason: "head_dim=512 attention kernels are not implemented",
+            },
+            A::Other(_) => ModelCapability {
+                support: ModelSupport::Unsupported,
+                reason: "architecture has no registered execution capability",
+            },
+        }
     }
 
     pub fn from_gguf(f: &GgufFile) -> Result<Self> {
-        let raw_arch = f.architecture();
-        let architecture = Architecture::parse(raw_arch);
-        let key = |suffix: &str| format!("{raw_arch}.{suffix}");
+        let arch = f.architecture().to_string();
+        let key = |suffix: &str| format!("{arch}.{suffix}");
         let need = |suffix: &str| -> Result<u32> {
-            let k = key(suffix);
-            f.meta_u32(&k)
-                .ok_or_else(|| ModelError::MissingMetadata(k).into())
+            f.meta_u32(&key(suffix))
+                .with_context(|| format!("GGUF has no {}", key(suffix)))
         };
 
         let n_expert = f.meta_u32(&key("expert_count")).unwrap_or(0);
         let moe = if n_expert > 0 {
-            let n_used = f.meta_u32(&key("expert_used_count")).ok_or_else(|| {
-                ModelError::InvalidConfig(format!(
-                    "{raw_arch} declares experts but no expert_used_count"
-                ))
-            })?;
+            let n_used = f
+                .meta_u32(&key("expert_used_count"))
+                .with_context(|| format!("{arch} declares experts but no expert_used_count"))?;
             if n_used == 0 || n_used > n_expert {
-                return Err(ModelError::InvalidConfig(format!(
-                    "{raw_arch} uses {n_used} of {n_expert} experts, which makes no sense"
-                ))
-                .into());
+                bail!("{arch} uses {n_used} of {n_expert} experts, which makes no sense");
             }
             // expert_gating_func: 0/absent = softmax, 2 = sigmoid (llama.cpp's
             // enum; 1 is softmax-with-groups, treated as softmax here).
@@ -318,17 +230,15 @@ impl Config {
         // tokenizer metadata is needed to produce logits.
         let embd = f
             .tensor("token_embd.weight")
-            .ok_or_else(|| ModelError::MissingTensor("token_embd.weight".into()))?;
+            .context("GGUF has no token_embd.weight tensor")?;
         if embd.dims.len() != 2 || embd.dims[0] != hidden as u64 {
-            return Err(ModelError::ShapeMismatch {
-                tensor: "token_embd.weight".into(),
-                actual: embd.dims.clone(),
-                expected: format!("[{hidden}, vocab]"),
-            }
-            .into());
+            bail!(
+                "token_embd.weight has shape {:?}, expected [{hidden}, vocab]",
+                embd.dims
+            );
         }
 
-        let rope_style = architecture.rope_style();
+        let rope_style = Architecture::parse(&arch).rope_style();
 
         // GLM rotates only `rope.dimension_count` of the head_dim channels.
         let rope_dim = f
@@ -336,10 +246,7 @@ impl Config {
             .unwrap_or(head_dim)
             .min(head_dim);
         if rope_dim == 0 || rope_dim % 2 != 0 {
-            return Err(ModelError::InvalidConfig(format!(
-                "{raw_arch}: rope.dimension_count {rope_dim} must be a positive even number"
-            ))
-            .into());
+            bail!("{arch}: rope.dimension_count {rope_dim} must be a positive even number");
         }
 
         // Some converters count speculative (MTP) blocks in block_count but do
@@ -394,7 +301,19 @@ impl Config {
                 .any(|i| f.tensor(&format!("blk.{i}.attn_q_norm.weight")).is_some()),
             has_attn_bias: f.tensor("blk.0.attn_q.bias").is_some(),
             rope_dim,
-            architecture,
+            gemma: (Architecture::parse(&arch) == Architecture::Gemma3).then(|| GemmaConfig {
+                swa_window: f.meta_u32(&key("attention.sliding_window")).unwrap_or(0),
+                swa_pattern: f
+                    .meta_u32(&key("attention.sliding_window_pattern"))
+                    .unwrap_or(6)
+                    .max(1),
+                swa_rope_base: f.meta_f32(&key("rope.freq_base_swa")).unwrap_or(10000.0),
+                rope_scale: match f.meta_str(&key("rope.scaling.type")) {
+                    Some("linear") => f.meta_f32(&key("rope.scaling.factor")).unwrap_or(1.0),
+                    _ => 1.0,
+                },
+            }),
+            architecture: Architecture::parse(&arch),
             n_heads,
             hidden,
             head_dim,
@@ -412,5 +331,69 @@ impl Config {
     /// How many query heads share one kv head under grouped-query attention.
     pub fn group_size(&self) -> usize {
         (self.n_heads / self.n_kv_heads.max(1)) as usize
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    fn config(arch: &str) -> Config {
+        Config {
+            architecture: arch.into(),
+            n_layers: 1,
+            nextn: false,
+            hidden: 8,
+            n_heads: 1,
+            n_kv_heads: 1,
+            head_dim: 8,
+            ffn_hidden: 8,
+            vocab: 8,
+            rms_eps: 1e-5,
+            rope_freq_base: 10000.0,
+            rope_style: RopeStyle::Neox,
+            rope_sections: [0; 4],
+            full_attention_interval: 0,
+            ssm: None,
+            has_qk_norm: false,
+            has_attn_bias: false,
+            rope_dim: 8,
+            moe: None,
+            gemma: None,
+        }
+    }
+
+    #[test]
+    fn capability_follows_the_architecture() {
+        for arch in [
+            "qwen2",
+            "qwen3",
+            "qwen3moe",
+            "qwen35moe",
+            "llama",
+            "mistral",
+        ] {
+            assert_eq!(
+                config(arch).capability().support,
+                ModelSupport::Supported,
+                "{arch}"
+            );
+        }
+        assert_eq!(
+            config("glm4moe").capability().support,
+            ModelSupport::Experimental
+        );
+        for arch in ["deepseek2", "deepseek3", "gemma4", "phi3"] {
+            assert_eq!(
+                config(arch).capability().support,
+                ModelSupport::Unsupported,
+                "{arch}"
+            );
+        }
+        // Families the engine runs are exactly the ones with requirements.
+        for arch in ["qwen3", "qwen35moe", "llama", "glm4moe", "deepseek3"] {
+            assert!(crate::requirements::ModelRequirements::for_architecture(arch).is_some());
+        }
+        assert!(crate::requirements::ModelRequirements::for_architecture("phi3").is_none());
     }
 }

@@ -1,5 +1,5 @@
-//! GPU-vs-CPU parity for `RopeStyle::Norm` (Llama / Mistral adjacent-pair RoPE)
-//! across every Metal GPU execution path:
+//! GPU-vs-CPU parity for Llama / Mistral (`general.architecture = "llama"`)
+//! loaded with NEOX head-row permutation across every Metal GPU execution path:
 //! 1. Fused prefill (`forward_batch` with `attend_mm_fq`),
 //! 2. Batched `qk_prep_batch` prefill (`ALLPAKA_PF_FQK=0`),
 //! 3. Whole-token decode (`forward`, verifying `decode_path_stats` succeeds),
@@ -286,29 +286,41 @@ fn reset_env() {
     std::env::remove_var("ALLPAKA_NO_TOKENBUF");
     std::env::remove_var("ALLPAKA_PF_FQK");
     std::env::remove_var("ALLPAKA_GREEDY_CHAIN");
+    std::env::remove_var("ALLPAKA_ROPE_NORM");
 }
 
 fn verify_llama_gpu_parity(tag: &str, file: &GgufFile) {
     reset_env();
+    // Reference model in native NORM RoPE order on CPU (`ALLPAKA_ROPE_NORM=1` + `ALLPAKA_CPU_ATTN=1`).
+    std::env::set_var("ALLPAKA_ROPE_NORM", "1");
+    let ref_model = Model::load(file).unwrap();
+    reset_env();
+    assert_eq!(
+        ref_model.config.rope_style,
+        allpaka_model::RopeStyle::Norm,
+        "{tag}: expected native Llama Norm RoPE reference"
+    );
+
+    // Production model loaded with NEOX head-row permutation.
     let model = Model::load(file).unwrap();
     assert_eq!(
         model.config.rope_style,
-        allpaka_model::RopeStyle::Norm,
-        "expected Llama Norm RoPE"
+        allpaka_model::RopeStyle::Neox,
+        "{tag}: expected Llama loaded in NEOX order"
     );
 
     // 20 tokens >= MM_MIN_M (16), exercising GPU tile-matmul prefill!
     let prompt: Vec<u32> = (0..20).map(|i| ((i * 7 + 3) % VOCAB) as u32).collect();
 
-    // 1. CPU reference prefill + 4-step decode.
+    // 1. CPU reference prefill + 4-step decode on native NORM RoPE weights.
     std::env::set_var("ALLPAKA_CPU_ATTN", "1");
     std::env::set_var("ALLPAKA_NO_TOKENBUF", "1");
-    let mut s_cpu = model.new_session(64);
-    let pf_cpu = model.forward_batch(&prompt, &mut s_cpu).unwrap();
+    let mut s_cpu = ref_model.new_session(64);
+    let pf_cpu = ref_model.forward_batch(&prompt, &mut s_cpu).unwrap();
     let mut cpu_steps = Vec::new();
     let mut next_tok = argmax(&pf_cpu);
     for _ in 0..4 {
-        let logits = model.forward(next_tok, &mut s_cpu).unwrap();
+        let logits = ref_model.forward(next_tok, &mut s_cpu).unwrap();
         next_tok = argmax(&logits);
         cpu_steps.push(logits);
     }
@@ -416,6 +428,7 @@ fn llama_norm_rope_gpu_paths_match_cpu_full_and_partial_rotary() {
     let g2 = GgufFile::open(&p2).unwrap();
     verify_llama_gpu_parity("full128", &g1);
     verify_llama_gpu_parity("half64", &g2);
+    reset_env();
     drop(g2);
     drop(g1);
     std::fs::remove_file(p1).ok();

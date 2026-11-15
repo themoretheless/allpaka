@@ -23,7 +23,6 @@
 | Файл | LOC |
 |---|---:|
 | `allpaka-backend/src/gpu/metal.rs` | 10 236 |
-| `allpaka-backend/src/gpu/shaders/kernels.metal` | 8 564 |
 | `allpaka-backend/src/gpu/cuda/mod.rs` | 4 914 |
 | `allpaka-backend/src/gpu/cuda/kernels.rs` | 3 703 |
 | `allpaka-chat/src/observability.rs` | 2 845 |
@@ -97,6 +96,28 @@ Electron-приложений), параллельно шли сборки др�
 а A/B-эксперименты с эффектом меньше ~10% сейчас неразличимы. Перемерить на
 машине со свободным GPU: `scripts/bench-matrix.sh` и пары A B A B.
 
+### CUDA, RTX 5090, Windows 11 (2026-11-10)
+
+Первый заход на не-Mac машине. До него на Windows workspace не собирался
+(F16C immediate в dtype, Metal-only examples), а после сборки `cargo test
+--workspace` давал 12 падений в chat, 1 в cli, 3 в model (UB при `transmute` в
+CUDA-графах, устаревшие веса в VRAM, NaN в сортировке роутера) и 1 в тесте
+паритета CUDA GEMM. Сейчас всё зелёное.
+
+| Что | До захода | После |
+|---|---|---|
+| `cargo test --workspace` (Windows, CUDA) | не собирается | зелёный |
+| `clippy --workspace --all-targets` (CUDA) | ~50 предупреждений | 0 |
+| Тесты chat (lib) | 194, 12 падают на Windows | 219 |
+| Тесты model | 47 в `lib.rs` | 53 unit + 4 файла `tests/` |
+| Неиспользуемые CUDA-лаунчеры | 5 | 0 |
+| `// SAFETY:` | разрозненно | 173 новых |
+
+A/B горячих правок (1.5, 3.20–3.23) на Qwen2.5-7B, pp512/tg128, 6 пар A B:
+логиты prefill совпали во всех прогонах; медиана Δ prefill +0.9%, decode
+−0.5% при разбросе ±9–13% (машина не тихая). Подробности —
+`docs/benchmarks/2026-11-10-refactor-ab-rtx5090.md`.
+
 ### Серия переключателей под нагрузкой (2026-11-10): неразличимо
 
 11 конфигураций по 6 раундов на 8B и 30B, порядок сдвигается каждый раунд;
@@ -122,7 +143,7 @@ Electron-приложений), параллельно шли сборки др�
 |---|---:|---:|
 | Самый большой `.rs` файл (без тестов и текста ядер) | 10 236 (`gpu/metal.rs`) | 3 250 (`gpu/metal/decode.rs`) |
 | `gpu/metal`: файлов / максимум строк | 1 / 10 236 | 13 / 3 250 |
-| `gpu/cuda/mod.rs` | 4 914 | 254 (+6 модулей, максимум 1 914 в `decode_fused.rs`) |
+| `gpu/cuda/mod.rs` | 4 914 | 254 (+6 модулей; `decode_token_one_fused` 1 885 → ~255 строк) |
 | `gpu/cuda/runtime.rs` | 2 355 | 41 (+7 модулей, максимум 827) |
 | `allpaka-chat/src/lib.rs` | 2 350 | 348 |
 | `allpaka-chat/src/observability.rs` | 2 845 | 8 модулей, максимум 526 (тесты 1 053) |

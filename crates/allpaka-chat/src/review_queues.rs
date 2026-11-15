@@ -8,7 +8,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    io::{Read, Write},
+    io::Read,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -102,7 +102,7 @@ struct Evidence {
     annotation_id: String,
 }
 fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 100 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    crate::storage::valid_id(id)
 }
 impl Store {
     pub(crate) fn new(data: &FsPath) -> Result<Self> {
@@ -141,27 +141,7 @@ impl Store {
     }
     fn write_locked(&self, queue: &Queue, bytes: &[u8]) -> Result<()> {
         let final_path = self.root.join(format!("{}.json", queue.id));
-        let temp = self.root.join(format!("{}.tmp", queue.id));
-        let _ = std::fs::remove_file(&temp);
-        let result = (|| -> Result<()> {
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temp)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            std::fs::rename(&temp, final_path)?;
-            std::fs::File::open(self.root.as_ref())?.sync_all()?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(temp);
-        }
-        result?;
+        crate::storage::atomic_write_bytes_with_sync(&final_path, bytes, true)?;
         Ok(())
     }
     fn create(&self, input: Create) -> Result<Queue> {
@@ -673,6 +653,12 @@ pub(crate) async fn detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// PLAN 3.4: review queue ids follow storage::valid_id.
+    #[test]
+    fn review_queue_identifier_rule() {
+        assert!(valid_id("Ab-9") && valid_id("a_b") && valid_id(&"a".repeat(100)));
+        assert!(!valid_id("") && !valid_id(&"a".repeat(101)) && !valid_id("a.b"));
+    }
     #[test]
     fn durable_queue_preserves_sources_and_rejects_duplicates() {
         let root = std::env::temp_dir().join(crate::evaluation::new_id());

@@ -4,6 +4,13 @@
 use super::*;
 
 pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
+    if req
+        .fused
+        .as_ref()
+        .is_some_and(|c| c.gelu || c.post_norm.is_some())
+    {
+        return None;
+    }
     let route_mode = req.route.is_some();
     if route_mode {
         let r = req.route.as_ref()?;

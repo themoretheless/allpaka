@@ -9,6 +9,10 @@ fn completed_residual_is_owned_and_projects_without_staging() {
     // GPU weight mappings last until process exit, as in the production mmap.
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is a non-null (asserted) `alloc_zeroed` allocation of exactly 16384 bytes at
+    // 16384-byte alignment, so all bytes are initialised and nothing else refers to them. It is
+    // deliberately leaked, like a production mmap that the GPU keeps wrapping until exit, so the
+    // slice may live for the rest of the process.
     let weights = unsafe { std::slice::from_raw_parts_mut(ptr, 16384) };
     let (n_in, n_out) = (32, 64);
     for row in 0..n_out {

@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),start=source.indexOf('let evaluationDatasetCatalogEpoch='),end=source.indexOf('let datasetLifecycleEpoch=',start);
+const source=appSource(),start=source.indexOf('let evaluationDatasetCatalogEpoch='),end=source.indexOf('let datasetLifecycleEpoch=',start);
 const pending=[],select={value:'d',children:[],replaceChildren(...rows){this.children=rows;this.value='';}},elements={project:{value:'p'},'evaluation-dialog':{open:true},'evaluation-dataset':select};
 const context={evaluationProject:'p',$:id=>elements[id],node:(tag,text)=>({tag,text,dataset:{}}),api:()=>new Promise(resolve=>pending.push(resolve))};
 vm.createContext(context);vm.runInContext(source.slice(start,end),context);

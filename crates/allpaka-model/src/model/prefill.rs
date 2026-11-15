@@ -1,5 +1,7 @@
 //! Batched prompt prefill and speculative verification passes.
 
+use super::attention::{AttnInputs, AttnLayer, AttnMode};
+use super::moe::RoutingPolicy;
 use super::{
     attn_zero_enabled, cpu_attn_enabled,
     moe::{route_gated_into_slice, Ffn},
@@ -31,14 +33,22 @@ impl<'a> Model<'a> {
     /// The costs are activation memory (linear in the chunk) and a coarser
     /// unit of work; `ALLPAKA_PREFILL_CHUNK` overrides it for a machine where
     /// that memory is tight.
+    ///
+    /// On CUDA the default is 2048: a 2 048-token prompt on an RTX 5090
+    /// (Qwen3-32B) prefills faster in one chunk than in four, for about
+    /// 1.3 GiB more activation memory
+    /// (docs/benchmarks/2026-11-13-cuda-prefill-determinism-rtx5090.md). Metal
+    /// and the CPU path keep 512, where the larger chunk was not measured. The
+    /// value is read once, on first use, after the model's weights are attached.
     pub fn prefill_chunk() -> usize {
         static CHUNK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         *CHUNK.get_or_init(|| {
+            let on_cuda = cfg!(not(target_os = "macos")) && allpaka_backend::gpu::is_attached();
             std::env::var("ALLPAKA_PREFILL_CHUNK")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|&n| n > 0)
-                .unwrap_or(512)
+                .unwrap_or(if on_cuda { 2048 } else { 512 })
         })
     }
 
@@ -94,8 +104,30 @@ impl<'a> Model<'a> {
         for (i, &t) in tokens.iter().enumerate() {
             embd.row_into(t as usize, &mut xs[i * hidden..(i + 1) * hidden])?;
         }
+        if self.embed_scale != 1.0 {
+            xs.iter_mut().for_each(|v| *v *= self.embed_scale);
+        }
         s.ensure_rope_cache(&self.rope_inv_freq, base + m);
-        let prefill_fused_ok = !cpu_attn_enabled() && !no_tokenbuf_enabled();
+        // Gemma 3's local layers rotate with their own base.
+        let rope_swa: Vec<[f32; 2]> = (base..base + m)
+            .flat_map(|pos| {
+                self.rope_inv_freq_swa
+                    .iter()
+                    .map(move |&freq| (pos as f32 * freq).sin_cos().into())
+            })
+            .collect();
+        // Gemma 3 (sandwich norms, GeGLU, sliding window) is not in the fused
+        // kernels; it takes the step-by-step batch path below.
+        let attn_block_ok = matches!(c.rope_style, RopeStyle::Neox)
+            && !cpu_attn_enabled()
+            && !no_tokenbuf_enabled();
+        // Gemma's local layers past the window need the flash-attention mask
+        // to carry the window (`set_attn_window`); without it they fit only
+        // while the window covers the chunk.
+        let window_ok = c.gemma.as_ref().is_none_or(|g| {
+            base + m <= g.swa_window as usize || allpaka_backend::gpu::set_attn_window(None)
+        });
+        let prefill_fused_ok = attn_block_ok && window_ok;
         drop(embed_span);
 
         // The fully fused prefill: xs lives on the GPU for the whole chunk,
@@ -128,7 +160,7 @@ impl<'a> Model<'a> {
             // The gated-delta-net branch (linear-attention layers): the
             // recurrence is sequential by construction, the projections stay
             // batched over the whole chunk.
-            if let Some(g) = &layer.gdn {
+            if let Some(g) = layer.mixer.gdn() {
                 let projected = self.gdn_forward(li, g, hs, m, s)?;
                 {
                     let _s = profile::span(profile::Phase::AttnOut);
@@ -150,17 +182,22 @@ impl<'a> Model<'a> {
                 trace("l_out", li, &xs[..hidden]);
                 continue;
             }
-            let aw = layer
-                .attn
-                .as_ref()
-                .expect("attention layer without weights");
-            let rope_flat =
-                &s.rope_cache[base * s.rope_cache_pairs..(base + m) * s.rope_cache_pairs];
+            let aw = layer.mixer.attn().expect("attention layer without weights");
+            let rope_flat = if layer.window.is_some() {
+                rope_swa.as_slice()
+            } else {
+                &s.rope_cache[base * s.rope_cache_pairs..(base + m) * s.rope_cache_pairs]
+            };
             // The whole attention half - qkv, per-row norm+rope, cache
             // store, causal attention, output projection - as one command
             // buffer, mirroring the decode token buffer. Declines fall to
-            // the step-by-step path below.
-            if prefill_fused_ok {
+            // the step-by-step path below. It has no sliding window, so a
+            // Gemma local layer takes it only while the window covers the
+            // whole chunk; the sandwich norms run on the host after it.
+            let windowed = layer.window.filter(|&w| base + m > w);
+            if attn_block_ok
+                && (windowed.is_none() || allpaka_backend::gpu::set_attn_window(windowed))
+            {
                 let fused = {
                     let _s = profile::span(profile::Phase::Attend);
                     let scale = 1.0 / (head_dim as f32).sqrt();
@@ -172,11 +209,11 @@ impl<'a> Model<'a> {
                             &aw.wo,
                             hs,
                             m,
-                            layer.q_norm,
-                            layer.k_norm,
+                            layer.q_norm.as_deref(),
+                            layer.k_norm.as_deref(),
                             rope_flat,
                             c.rope_dim as usize,
-                            matches!(c.rope_style, RopeStyle::Norm),
+                            false,
                             aw.gate_in_q,
                             layer.bias.as_ref().map(|b| (b.q.1, b.k.1, b.v.1)),
                             c.rms_eps,
@@ -191,10 +228,19 @@ impl<'a> Model<'a> {
                             base,
                             scale,
                             None,
+                            None,
                         )
                     })
                 };
-                if let Some(projected) = fused {
+                if windowed.is_some() {
+                    allpaka_backend::gpu::set_attn_window(None);
+                }
+                if let Some(mut projected) = fused {
+                    if let Some(w) = &layer.post_attn_norm {
+                        projected
+                            .chunks_mut(hidden)
+                            .for_each(|row| ops::rmsnorm(row, w, c.rms_eps));
+                    }
                     {
                         let _s = profile::span(profile::Phase::AttnOut);
                         ops::add_assign_par(&mut xs, &projected);
@@ -204,7 +250,11 @@ impl<'a> Model<'a> {
                         ops::rmsnorm_rows_into(&mut hs_scratch, &xs, &layer.ffn_norm, c.rms_eps);
                         &hs_scratch
                     };
-                    let down = layer.ffn.forward_batch(hs, m, hidden)?;
+                    let mut down = layer.ffn.forward_batch(hs, m, hidden)?;
+                    if let Some(w) = &layer.post_ffn_norm {
+                        down.chunks_mut(hidden)
+                            .for_each(|row| ops::rmsnorm(row, w, c.rms_eps));
+                    }
                     {
                         let _s = profile::span(profile::Phase::FfnCombine);
                         ops::add_assign_par(&mut xs, &down);
@@ -225,24 +275,34 @@ impl<'a> Model<'a> {
             let q = qkv.pop().expect("q");
 
             let mut projected = self.run_cpu_attention_from_qkv(
-                aw,
-                layer.q_norm,
-                layer.k_norm,
-                layer.bias.as_ref(),
-                q,
-                k,
-                v,
-                m,
-                base,
-                rope_flat,
+                AttnLayer {
+                    window: layer.window,
+                    aw,
+                    q_norm: layer.q_norm.as_deref(),
+                    k_norm: layer.k_norm.as_deref(),
+                    bias: layer.bias.as_ref(),
+                },
+                AttnInputs {
+                    q,
+                    k,
+                    v,
+                    m,
+                    base_pos: base,
+                    rope_flat,
+                },
                 &mut s.kv,
                 li,
-                false,
-                true,
-                Some(li),
+                AttnMode::Trunk {
+                    trace_layer: Some(li),
+                },
             )?;
             if attn_zero_enabled() {
                 projected.iter_mut().for_each(|v| *v = 0.0);
+            }
+            if let Some(w) = &layer.post_attn_norm {
+                projected
+                    .chunks_mut(hidden)
+                    .for_each(|row| ops::rmsnorm(row, w, c.rms_eps));
             }
             trace("attn_output", li, &projected[..hidden]);
             ops::add_assign_slice(&mut xs, &projected);
@@ -255,11 +315,15 @@ impl<'a> Model<'a> {
                 trace("attn_post_norm", li, &hs_scratch[..hidden]);
                 &hs_scratch
             };
-            let down = if moe_zero_enabled() {
+            let mut down = if moe_zero_enabled() {
                 vec![0f32; m * hidden]
             } else {
                 layer.ffn.forward_batch(hs, m, hidden)?
             };
+            if let Some(w) = &layer.post_ffn_norm {
+                down.chunks_mut(hidden)
+                    .for_each(|row| ops::rmsnorm(row, w, c.rms_eps));
+            }
             trace("ffn_out", li, &down[..hidden]);
             {
                 let _s = profile::span(profile::Phase::FfnCombine);
@@ -282,17 +346,61 @@ impl<'a> Model<'a> {
         s: &mut Session,
     ) -> Option<Activation> {
         let hidden = self.config.hidden as usize;
+        allpaka_backend::gpu::prefill_graph_key(self.prefill_graph_key(m, base, s));
         if let Some(done) = allpaka_backend::gpu::prefill_replay(xs) {
             return Some(done.into());
         }
         allpaka_backend::gpu::prefill_begin(xs)?;
         // Deferred buffers of earlier layers may still be in flight when a
         // layer declines; wait them out before the CPU fallback runs.
-        if self.forward_batch_fused_layers(xs, m, base, s).is_none() {
+        let done = self.forward_batch_fused_layers(xs, m, base, s);
+        if self.config.gemma.is_some() {
+            allpaka_backend::gpu::set_attn_window(None);
+        }
+        if done.is_none() {
             allpaka_backend::gpu::prefill_abort();
             return None;
         }
         allpaka_backend::gpu::prefill_end_output(m * hidden)
+    }
+
+    /// Identity of a fused prefill chunk for CUDA graph replay: everything a
+    /// captured chunk bakes in besides its residual input (model, chunk
+    /// length, KV base, KV device buffer, RoPE table slice). 0 (no replay)
+    /// for models with GDN or MoE layers, whose blocks synchronize mid-chunk.
+    fn prefill_graph_key(&self, m: usize, base: usize, s: &mut Session) -> u64 {
+        let dense_attn = self
+            .layers
+            .iter()
+            .all(|l| l.mixer.gdn().is_none() && matches!(l.ffn, Ffn::Dense { .. }));
+        // Small chunks gain nothing from a graph; keep them from evicting
+        // the key of the large chunk in between (0 leaves graph state alone).
+        // Gemma's local RoPE table is rebuilt per call, so it never replays.
+        if !dense_attn || m < 64 || self.config.gemma.is_some() {
+            return 0;
+        }
+        let Some((cache, _, _)) = s.kv.gpu_view(0) else {
+            return 0;
+        };
+        let cache_id = cache.graph_id();
+        if cache_id == 0 {
+            return 0;
+        }
+        let pairs = s.rope_cache_pairs;
+        let rope = s.rope_cache[base * pairs..].as_ptr() as u64;
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for v in [
+            self as *const Self as u64,
+            m as u64,
+            base as u64,
+            cache_id,
+            rope,
+            pairs as u64,
+        ] {
+            h = (h ^ v).wrapping_mul(0x0000_0100_0000_01b3);
+            h ^= h >> 29;
+        }
+        h.max(1)
     }
 
     /// The per-layer loop of the fused prefill chunk, split out so a
@@ -308,22 +416,40 @@ impl<'a> Model<'a> {
         let hidden = c.hidden as usize;
         let head_dim = c.head_dim as usize;
         let scale = 1.0 / (head_dim as f32).sqrt();
-        let rope_flat = &s.rope_cache[base * s.rope_cache_pairs..(base + m) * s.rope_cache_pairs];
+        let rope_global = &s.rope_cache[base * s.rope_cache_pairs..(base + m) * s.rope_cache_pairs];
+        // Gemma 3's local layers rotate with their own base.
+        let rope_swa: Vec<[f32; 2]> = (base..base + m)
+            .flat_map(|pos| {
+                self.rope_inv_freq_swa
+                    .iter()
+                    .map(move |&freq| (pos as f32 * freq).sin_cos().into())
+            })
+            .collect();
         let mut picked_buf = [(0usize, 0.0f32); 256];
         for (li, layer) in self.layers.iter().enumerate() {
             if layer.attn_norm_raw.is_empty() || layer.ffn_norm_raw.is_empty() {
                 return None;
             }
+            if (layer.post_attn_norm.is_some() && layer.post_attn_norm_raw.is_empty())
+                || (layer.post_ffn_norm.is_some() && layer.post_ffn_norm_raw.is_empty())
+            {
+                return None;
+            }
+            let rope_flat = if layer.window.is_some() {
+                rope_swa.as_slice()
+            } else {
+                rope_global
+            };
             // Router bytes for the fused attention block: MoE layers have a
             // real F32 router; a leading Dense layer (GLM's layer 0) has
             // none and skips the router matmul entirely.
             let (router_raw, n_expert) = match &layer.ffn {
                 Ffn::Moe { router, .. } => {
-                    let (router_ty, router_raw, n_expert) = router.desc();
+                    let (router_ty, router_raw) = router.raw();
                     if router_ty != allpaka_gguf::GgmlType::F32 {
                         return None;
                     }
-                    (router_raw, n_expert)
+                    (router_raw, router.n_out)
                 }
                 Ffn::Dense { .. } => (&[][..], 0),
             };
@@ -333,10 +459,11 @@ impl<'a> Model<'a> {
                 ffn_norm: layer.ffn_norm_raw,
                 router: router_raw,
                 n_expert,
+                post_attn_norm: layer.post_attn_norm_raw,
             });
             // The gated-delta-net branch (qwen35moe linear-attention layers):
             // its own fused block, same contract as the attention one.
-            let logits = if let Some(g) = &layer.gdn {
+            let logits = if let Some(g) = layer.mixer.gdn() {
                 let ssm = s.ssm.as_mut().expect("gdn layer without ssm cache");
                 let (conv_off, state_off) = (ssm.conv_off(li), ssm.state_off(li));
                 let (region, slots) = ssm.regions_for_gpu();
@@ -349,9 +476,9 @@ impl<'a> Model<'a> {
                     &g.alpha,
                     &g.beta,
                     g.conv1d_raw,
-                    g.a,
-                    g.dt,
-                    g.ssm_norm,
+                    &g.a,
+                    &g.dt,
+                    &g.ssm_norm,
                     &g.ssm_out,
                     (
                         sc.n_group as usize,
@@ -368,8 +495,12 @@ impl<'a> Model<'a> {
                     fusion,
                 )?
             } else {
-                let aw = layer.attn.as_ref().expect("attn weights");
+                let aw = layer.mixer.attn().expect("attn weights");
                 let _s = profile::span(profile::Phase::Attend);
+                let windowed = layer.window.filter(|&w| base + m > w);
+                if !allpaka_backend::gpu::set_attn_window(windowed) && windowed.is_some() {
+                    return None;
+                }
                 QuantMat::prefill_attn_block(
                     &aw.wq,
                     &aw.wk,
@@ -377,11 +508,11 @@ impl<'a> Model<'a> {
                     &aw.wo,
                     xs,
                     m,
-                    layer.q_norm,
-                    layer.k_norm,
+                    layer.q_norm.as_deref(),
+                    layer.k_norm.as_deref(),
                     rope_flat,
                     c.rope_dim as usize,
-                    matches!(c.rope_style, RopeStyle::Norm),
+                    false,
                     aw.gate_in_q,
                     layer.bias.as_ref().map(|b| (b.q.1, b.k.1, b.v.1)),
                     c.rms_eps,
@@ -396,6 +527,7 @@ impl<'a> Model<'a> {
                     base,
                     scale,
                     fusion,
+                    None,
                 )?
             };
 
@@ -412,10 +544,13 @@ impl<'a> Model<'a> {
                     down_exps,
                     shared,
                     expert_ffn,
-                    n_used,
-                    gating,
-                    weights_norm,
-                    weights_scale,
+                    routing:
+                        RoutingPolicy {
+                            n_used,
+                            gating,
+                            weights_norm,
+                            weights_scale,
+                        },
                     router_bias,
                     ..
                 } => {
@@ -566,6 +701,9 @@ impl<'a> Model<'a> {
                     hit_w: &hit_w,
                     m,
                     next_norm,
+                    post_norm: (!layer.post_ffn_norm_raw.is_empty())
+                        .then_some((layer.post_ffn_norm_raw, c.rms_eps)),
+                    gelu: matches!(layer.ffn, Ffn::Dense { gelu: true, .. }),
                 }),
                 sh_m,
                 gpu_route,

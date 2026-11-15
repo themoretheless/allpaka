@@ -16,6 +16,7 @@ mod documents;
 mod evaluation;
 mod experiments;
 mod ext;
+mod extract;
 mod feedback;
 mod files;
 mod forge;
@@ -34,6 +35,7 @@ mod lsp;
 mod mcp;
 mod memory;
 mod memory_extract;
+mod mentions;
 mod model_evaluators;
 mod observability;
 mod online_evaluation;
@@ -53,6 +55,7 @@ mod review_queues;
 mod runtime;
 mod sandbox;
 mod schedule;
+mod shell;
 mod spill;
 mod ssh;
 mod state_file;
@@ -62,6 +65,7 @@ mod swarm;
 mod terminal;
 mod tools;
 mod types;
+mod undo;
 mod web_tools;
 mod webhook;
 mod workflow;
@@ -102,6 +106,7 @@ pub(crate) struct App {
     pub(crate) judge_runs: judge_runs::Manager,
     pub(crate) judges: Arc<tokio::sync::Semaphore>,
     pub(crate) memory_extractions: Arc<tokio::sync::Semaphore>,
+    pub(crate) memory_extraction_cancels: memory_extract::Cancels,
     pub(crate) prompts: prompts::Store,
     pub(crate) experiments: experiments::Manager,
     pub(crate) matrix_jobs: experiments::matrix_jobs::Manager,
@@ -174,6 +179,11 @@ struct Action {
     #[serde(default)]
     text: String,
     settings: Option<Settings>,
+    /// Filled by the handler from `@` mentions in `text`; never client input.
+    #[serde(skip)]
+    citations: Vec<types::Citation>,
+    #[serde(skip)]
+    context_budget: Option<types::ContextBudget>,
 }
 /// The only kinds `POST /api/sessions/:id/actions` accepts. Serde rejects
 /// anything else, and the actor must name every variant it does not handle,
@@ -195,6 +205,8 @@ enum ActionKind {
     RetryMember,
     Rename,
     Move,
+    /// Restore the file the agent's last write changed, if it is unchanged since.
+    Undo,
 }
 /// A handler failure: an HTTP status and the message sent as `{"error": message}`.
 #[derive(Debug)]
@@ -235,14 +247,23 @@ pub(crate) fn unauthorized(message: impl ToString) -> ApiError {
 pub(crate) fn internal(message: impl ToString) -> ApiError {
     error(StatusCode::INTERNAL_SERVER_ERROR, message)
 }
-/// Execute a synchronous filesystem/store handler body on Tokio's blocking pool
-/// so Axum worker threads are never stalled by directory scans or `sync_all`.
-pub(crate) async fn blocking<T, F>(f: F) -> ApiResult<T>
+/// Run synchronous filesystem work on Tokio's blocking pool so a slow disk
+/// does not stall the async worker threads that serve every other request.
+///
+/// A panic inside `work` is resumed in the caller, exactly as if the work had
+/// run inline; the work itself always runs to completion once started.
+pub(crate) async fn blocking<T, F>(work: F) -> T
 where
+    F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
-    F: FnOnce() -> ApiResult<T> + Send + 'static,
 {
-    tokio::task::spawn_blocking(f).await.map_err(internal)?
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => value,
+        Err(error) => match error.try_into_panic() {
+            Ok(payload) => std::panic::resume_unwind(payload),
+            Err(error) => panic!("Blocking task did not complete: {error}"),
+        },
+    }
 }
 #[derive(Clone, Debug)]
 pub struct StudioOptions {
@@ -401,6 +422,7 @@ pub fn run_with_options(opts: StudioOptions) -> Result<()> {
                 judge_runs: judge_runs::Manager::new(&data)?,
                 judges: Arc::new(tokio::sync::Semaphore::new(2)),
                 memory_extractions: Arc::new(tokio::sync::Semaphore::new(2)),
+                memory_extraction_cancels: Default::default(),
                 prompts: prompts::Store::new(&data)?,
                 experiments: experiments::Manager::new(&data)?,
                 matrix_jobs: experiments::matrix_jobs::Manager::new(&data)?,

@@ -157,6 +157,7 @@ pub(crate) fn default_settings(app: &App, project_id: &str) -> Settings {
         approval_policy: crate::sandbox::ApprovalPolicy::default(),
         permission_preset: None,
         team_mode: false,
+        budget: crate::types::Budget::default(),
     }
 }
 
@@ -186,6 +187,8 @@ pub(crate) fn spawn_scheduled_session(
         kind: crate::ActionKind::Send,
         text: prompt,
         settings: Some(settings),
+        citations: Vec::new(),
+        context_budget: None,
     })
     .map_err(|_| anyhow::anyhow!("Failed to enqueue prompt on scheduled session"))?;
     Ok(id)
@@ -213,6 +216,7 @@ pub(crate) fn test_app(
         judge_runs: crate::judge_runs::Manager::new(&data).unwrap(),
         judges: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
         memory_extractions: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
+        memory_extraction_cancels: Default::default(),
         prompts: crate::prompts::Store::new(&data).unwrap(),
         experiments: crate::experiments::Manager::new(&data).unwrap(),
         matrix_jobs: crate::experiments::matrix_jobs::Manager::new(&data).unwrap(),

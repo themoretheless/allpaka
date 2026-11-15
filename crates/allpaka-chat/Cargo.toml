@@ -14,6 +14,9 @@ axum = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "process", "io-util"] }
 futures-util = "0.3"
+zip = { version = "7.3.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+quick-xml = { version = "0.41.0", default-features = false }
+lopdf = { version = "0.42.0", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", features = ["apple-native"] }

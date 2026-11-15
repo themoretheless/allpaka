@@ -3,6 +3,8 @@
 //! Skips when `ALLPAKA_NO_GPU` is set or no CUDA device is available.
 
 #![cfg(all(feature = "cuda", not(target_os = "macos")))]
+// Reference math indexes several arrays by the same position.
+#![allow(clippy::needless_range_loop)]
 
 use allpaka_backend::gpu;
 use allpaka_gguf::GgmlType;
@@ -81,8 +83,11 @@ fn attach_and_matvec_parity() {
     let (f32_out, f32_in, f32_off) = (4usize, 32usize, PAGE);
     let len = PAGE * 4;
     let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
-    let ptr = unsafe { std::alloc::alloc(layout) };
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is from `alloc_zeroed`, so every byte is initialised. `ptr` is non-null
+    // (asserted), owns `len` bytes at `PAGE` alignment, and is never freed, so the slice is unique
+    // and may live for the whole test.
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0xC0FF_EE00_D15C_AFE1u64;
     for b in region.iter_mut() {
@@ -167,8 +172,11 @@ fn gemm_q4k_q6k_parity() {
     let q6_rb = n_in / 256 * 210;
     let len = PAGE * 5;
     let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
-    let ptr = unsafe { std::alloc::alloc(layout) };
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     assert!(!ptr.is_null());
+    // SAFETY: `ptr` is from `alloc_zeroed`, so every byte is initialised. `ptr` is non-null
+    // (asserted), owns `len` bytes at `PAGE` alignment, and is never freed, so the slice is unique
+    // and may live for the whole test.
     let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
     let mut state = 0xA5A5_5A5A_C0DE_BEEFu64;
     for b in region.iter_mut() {
@@ -250,47 +258,131 @@ fn gemm_q4k_q6k_parity() {
         .unwrap();
         assert_eq!(got.len(), m * n_out);
         let w_f32 = allpaka_gguf::dequant::dequant(ty, w, n_out * n_in).unwrap();
-        // Q8 activation paths match Q8*W, not float*W.
-        // Near-cancelling dots can differ from float by more than 2e-2 abs.
-        let q8_path = matches!(ty, GgmlType::Q4K | GgmlType::Q6K)
-            && std::env::var("ALLPAKA_Q8")
-                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                .unwrap_or(true);
+        // m >= MM_MIN_M goes through the GEMM path: f16 dequant + cuBLASLt by
+        // default, or ggml MMQ (Q8 activations) when that library is loaded.
+        // Compare against float*W with a tolerance that also covers Q8
+        // activation rounding, which grows with sum(|x*w|), not with |dot|.
         for row in 0..m {
             let xr = &x[row * n_in..(row + 1) * n_in];
-            let recon: Vec<f32> = if q8_path {
-                let mut q = vec![0i8; n_in];
-                let mut qd = vec![0f32; n_in / 32];
-                for blk in 0..n_in / 32 {
-                    let base = blk * 32;
-                    let mut amax = 0f32;
-                    for j in 0..32 {
-                        amax = amax.max(xr[base + j].abs());
-                    }
-                    let scale = if amax < 1e-8 * 127.0 {
-                        1.0
-                    } else {
-                        amax / 127.0
-                    };
-                    qd[blk] = scale;
-                    for j in 0..32 {
-                        let qi = (xr[base + j] / scale).round().clamp(-127.0, 127.0) as i32;
-                        q[base + j] = qi as i8;
-                    }
-                }
-                (0..n_in).map(|i| q[i] as f32 * qd[i / 32]).collect()
-            } else {
-                xr.to_vec()
-            };
             for j in 0..n_out {
-                let mut want = 0f32;
-                for k in 0..n_in {
-                    want += recon[k] * w_f32[j * n_in + k];
-                }
+                let wr = &w_f32[j * n_in..(j + 1) * n_in];
+                let want: f32 = xr.iter().zip(wr).map(|(a, b)| a * b).sum();
+                let mag: f32 = xr.iter().zip(wr).map(|(a, b)| (a * b).abs()).sum();
                 let g = got[row * n_out + j];
-                let tol = 2e-2 + 2e-2 * want.abs();
+                let tol = 2e-2 + 2e-2 * want.abs() + 2e-3 * mag;
                 assert!(
                     (g - want).abs() < tol,
+                    "{ty:?} r{row} c{j}: gpu {g} vs cpu {want} (sum|x*w| {mag})"
+                );
+            }
+        }
+    }
+}
+
+/// Every weight format with a `dq_fmt` code runs the batched GEMM path
+/// (`dequant_rows_f16` + cuBLASLt) and must agree with the CPU dequantizer.
+/// A wrong code would dequantize with another format's layout and fail here.
+#[test]
+fn gemm_every_dq_fmt_matches_cpu_dequant() {
+    if std::env::var_os("ALLPAKA_NO_GPU").is_some() {
+        eprintln!("SKIP: ALLPAKA_NO_GPU set");
+        return;
+    }
+    let (n_in, n_out, m) = (256usize, 8usize, 32usize);
+    // (type, block bytes, offsets of f16 scales inside a block)
+    let quant: [(GgmlType, usize, &[usize]); 7] = [
+        (GgmlType::Q4K, 144, &[0, 2]),
+        (GgmlType::Q5K, 176, &[0, 2]),
+        (GgmlType::Q6K, 210, &[208]),
+        (GgmlType::Q8_0, 34, &[0]),
+        (GgmlType::Q2K, 84, &[80, 82]),
+        (GgmlType::Q3K, 110, &[108]),
+        (GgmlType::Q5_0, 22, &[0]),
+    ];
+    let slot = PAGE * 2;
+    let len = slot * (quant.len() + 3);
+    let layout = std::alloc::Layout::from_size_align(len, PAGE).unwrap();
+    let ptr = unsafe { std::alloc::alloc(layout) };
+    assert!(!ptr.is_null());
+    let region = unsafe { std::slice::from_raw_parts_mut(ptr, len) };
+    let mut state = 0x1234_5678_9ABC_DEF0u64;
+    for b in region.iter_mut() {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *b = (state >> 56) as u8;
+    }
+    let mut cases: Vec<(GgmlType, usize, usize)> = Vec::new();
+    for (i, &(ty, bb, scales)) in quant.iter().enumerate() {
+        let off = i * slot;
+        let be = if bb == 34 || bb == 22 { 32 } else { 256 };
+        let rb = n_in / be * bb;
+        let half = 0x211Fu16.to_le_bytes(); // ~0.01
+        for blk in 0..n_out * n_in / be {
+            for &s in scales {
+                let at = off + blk * bb + s;
+                region[at] = half[0];
+                region[at + 1] = half[1];
+            }
+        }
+        cases.push((ty, off, rb));
+    }
+    let value = |i: usize| ((i % 29) as f32 - 14.0) * 0.02;
+    let base = quant.len() * slot;
+    for (i, c) in region[base..base + n_out * n_in * 4]
+        .chunks_exact_mut(4)
+        .enumerate()
+    {
+        c.copy_from_slice(&value(i).to_le_bytes());
+    }
+    cases.push((GgmlType::F32, base, n_in * 4));
+    let base = base + slot;
+    for (i, c) in region[base..base + n_out * n_in * 2]
+        .chunks_exact_mut(2)
+        .enumerate()
+    {
+        c.copy_from_slice(&half::f16::from_f32(value(i)).to_le_bytes());
+    }
+    cases.push((GgmlType::F16, base, n_in * 2));
+    let base = base + slot;
+    for (i, c) in region[base..base + n_out * n_in * 2]
+        .chunks_exact_mut(2)
+        .enumerate()
+    {
+        c.copy_from_slice(&((value(i).to_bits() >> 16) as u16).to_le_bytes());
+    }
+    cases.push((GgmlType::BF16, base, n_in * 2));
+
+    if !gpu::attach(region) {
+        eprintln!("SKIP: no CUDA device / attach failed");
+        return;
+    }
+    let x: Vec<f32> = (0..m * n_in)
+        .map(|i| ((i % 13) as f32 - 6.0) * 0.04)
+        .collect();
+    for (ty, off, rb) in cases {
+        let w = &region[off..off + n_out * rb];
+        let got = gpu::matvec_batch(&[gpu::MatvecReq {
+            ty,
+            w,
+            n_in,
+            n_out,
+            x: &x,
+            m,
+        }])
+        .unwrap_or_else(|| panic!("cuda gemm {ty:?}"))
+        .pop()
+        .unwrap();
+        let w_f32 = allpaka_gguf::dequant::dequant(ty, w, n_out * n_in).unwrap();
+        for row in 0..m {
+            let xr = &x[row * n_in..(row + 1) * n_in];
+            for j in 0..n_out {
+                let wr = &w_f32[j * n_in..(j + 1) * n_in];
+                let want: f32 = xr.iter().zip(wr).map(|(a, b)| a * b).sum();
+                let mag: f32 = xr.iter().zip(wr).map(|(a, b)| (a * b).abs()).sum();
+                let g = got[row * n_out + j];
+                assert!(
+                    (g - want).abs() < 2e-2 + 2e-2 * want.abs() + 2e-3 * mag,
                     "{ty:?} r{row} c{j}: gpu {g} vs cpu {want}"
                 );
             }

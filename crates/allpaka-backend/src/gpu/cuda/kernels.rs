@@ -131,6 +131,49 @@ extern "C" __global__ void rmsnorm_f32(
     }
 }
 
+// x[row] += a[row]; dst[row] = rmsnorm(x[row]) * w. One block per row.
+// residual_add followed by rmsnorm_into_f32 in one launch (same math).
+extern "C" __global__ void add_rmsnorm_into_f32(
+    float* __restrict__ dst,
+    float* __restrict__ x,
+    const float* __restrict__ a,
+    const float* __restrict__ w,
+    unsigned n,
+    float eps,
+    unsigned rows)
+{
+    unsigned row = blockIdx.x;
+    if (row >= rows) return;
+    float* xr = x + (size_t)row * n;
+    const float* ar = a + (size_t)row * n;
+    float* dr = dst + (size_t)row * n;
+    __shared__ float wsum[32];
+    pdl_sync();
+    float local = 0.f;
+    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
+        float v = xr[i] + ar[i];
+        xr[i] = v;
+        local += v * v;
+    }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) local += __shfl_xor_sync(0xffffffffu, local, off);
+    unsigned lane = threadIdx.x & 31u, warp = threadIdx.x >> 5;
+    if (lane == 0) wsum[warp] = local;
+    __syncthreads();
+    if (warp == 0) {
+        unsigned nw = blockDim.x >> 5;
+        float s = lane < nw ? wsum[lane] : 0.f;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) s += __shfl_xor_sync(0xffffffffu, s, off);
+        if (lane == 0) wsum[0] = s;
+    }
+    __syncthreads();
+    float scale = rsqrtf(wsum[0] / (float)n + eps);
+    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
+        dr[i] = xr[i] * scale * w[i];
+    }
+}
+
 extern "C" __global__ void rmsnorm_into_f32(
     float* __restrict__ dst,
     const float* __restrict__ src,
@@ -164,7 +207,12 @@ extern "C" __global__ void rmsnorm_into_f32(
     }
 }
 
-// RMSNorm into dst, then pack dst as block_q8_1 for mmvq reuse.
+// RMSNorm into dst, then pack dst as block_q8_1 for mmvq reuse. One block per
+// row; blockDim is a multiple of 32 (1024 on decode). Each thread keeps its
+// strided elements in registers, the sum of squares reduces by warp shuffle,
+// and every warp quantizes the 32-element block it just normalized, so src is
+// read once and dst never reread. Requires n % 32 == 0.
+#define RMSQ8_REGS 16
 extern "C" __global__ void rmsnorm_into_f32_q8(
     float* __restrict__ dst,
     const float* __restrict__ src,
@@ -179,32 +227,33 @@ extern "C" __global__ void rmsnorm_into_f32_q8(
     if (row >= rows) return;
     const float* sr = src + (size_t)row * n;
     float* dr = dst + (size_t)row * n;
-    __shared__ float buf[256];
-    float local = 0.f;
+    block_q8_1* yr = y + (size_t)row * (n / 32u);
+    const unsigned T = blockDim.x;
+    const unsigned lane = threadIdx.x & 31u;
+    const unsigned warp = threadIdx.x >> 5;
+    __shared__ float wsum[32];
     pdl_sync();
-    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
+    float vals[RMSQ8_REGS];
+    float local = 0.f;
+    unsigned k = 0;
+    for (unsigned i = threadIdx.x; i < n; i += T, ++k) {
         float v = sr[i];
+        if (k < RMSQ8_REGS) vals[k] = v;
         local += v * v;
     }
-    buf[threadIdx.x] = local;
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) local += __shfl_xor_sync(0xffffffffu, local, off);
+    if (lane == 0) wsum[warp] = local;
     __syncthreads();
-    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (threadIdx.x < s) buf[threadIdx.x] += buf[threadIdx.x + s];
-        __syncthreads();
-    }
-    float mean = buf[0] / (float)n;
-    float scale = rsqrtf(mean + eps);
-    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
-        dr[i] = sr[i] * scale * w[i];
-    }
-    __syncthreads();
-    // One warp-worth of lanes quantize 32-groups (blockDim.x should be 256).
-    unsigned nblk = n / 32u;
-    block_q8_1* yr = y + (size_t)row * nblk;
-    for (unsigned blk = threadIdx.x / 32u; blk < nblk; blk += blockDim.x / 32u) {
-        unsigned lane = threadIdx.x & 31u;
-        unsigned base = blk * 32u;
-        float v = dr[base + lane];
+    float tot = lane < (T >> 5) ? wsum[lane] : 0.f;
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) tot += __shfl_xor_sync(0xffffffffu, tot, off);
+    const float scale = rsqrtf(tot / (float)n + eps);
+    k = 0;
+    for (unsigned i = threadIdx.x; i < n; i += T, ++k) {
+        float v = (k < RMSQ8_REGS ? vals[k] : sr[i]) * scale * w[i];
+        dr[i] = v;
+        // The warp covers elements [i - lane, i - lane + 32): one q8 block.
         float amax = fabsf(v);
         #pragma unroll
         for (int off = 16; off > 0; off >>= 1) {
@@ -215,9 +264,79 @@ extern "C" __global__ void rmsnorm_into_f32_q8(
         int qi = __float2int_rn(v / d);
         if (qi > 127) qi = 127;
         if (qi < -127) qi = -127;
+        unsigned blk = i >> 5;
         yr[blk].qs[lane] = (int8_t)qi;
         store_q8_meta(&yr[blk], lane, qi, d);
     }
+}
+
+// Multi-block decode RMSNorm + Q8: grid = (n / 256, rows), 256 threads. Every
+// block redundantly reduces the whole row (an L2-resident 4*n bytes) and then
+// normalizes / packs only its own 256 elements, so the serial one-block latency
+// of rmsnorm_into_f32_q8 is spread over n/256 SMs. The sum of squares follows
+// exactly the 1024-thread reduction order of rmsnorm_into_f32_q8 (thread o sums
+// o, o+1024, ...; xor tree per warp; xor tree over the 32 warp sums), so the
+// output is bit-identical. Requires n % 1024 == 0 and n <= 16384.
+extern "C" __global__ void __launch_bounds__(256) rmsnorm_into_f32_q8_mb(
+    float* __restrict__ dst,
+    const float* __restrict__ src,
+    const float* __restrict__ w,
+    block_q8_1* __restrict__ y,
+    unsigned n,
+    float eps,
+    unsigned rows)
+{
+    unsigned row = blockIdx.y;
+    pdl_lc();
+    if (row >= rows) return;
+    const float* sr = src + (size_t)row * n;
+    float* dr = dst + (size_t)row * n;
+    block_q8_1* yr = y + (size_t)row * (n / 32u);
+    const unsigned t = threadIdx.x;
+    const unsigned lane = t & 31u;
+    const unsigned warp = t >> 5;
+    const unsigned K = n >> 10;
+    const unsigned i = blockIdx.x * 256u + t;
+    __shared__ float wsum[32];
+    float wi = w[i];
+    pdl_sync();
+    float mine = sr[i];
+    // Emulated threads o = t + 256*a, a = 0..3 (warps warp, warp+8, +16, +24).
+    float loc[4] = {0.f, 0.f, 0.f, 0.f};
+    for (unsigned k = 0; k < K; k++) {
+        #pragma unroll
+        for (unsigned a = 0; a < 4; a++) {
+            float v = __ldcg(&sr[t + 256u * a + 1024u * k]);
+            loc[a] += v * v;
+        }
+    }
+    #pragma unroll
+    for (unsigned a = 0; a < 4; a++) {
+        float l = loc[a];
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) l += __shfl_xor_sync(0xffffffffu, l, off);
+        if (lane == 0) wsum[warp + 8u * a] = l;
+    }
+    __syncthreads();
+    float tot = wsum[lane];
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) tot += __shfl_xor_sync(0xffffffffu, tot, off);
+    const float scale = rsqrtf(tot / (float)n + eps);
+    float v = mine * scale * wi;
+    dr[i] = v;
+    float amax = fabsf(v);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+    }
+    float d = amax / 127.f;
+    if (d < 1e-8f) d = 1.f;
+    int qi = __float2int_rn(v / d);
+    if (qi > 127) qi = 127;
+    if (qi < -127) qi = -127;
+    unsigned blk = i >> 5;
+    yr[blk].qs[lane] = (int8_t)qi;
+    store_q8_meta(&yr[blk], lane, qi, d);
 }
 
 extern "C" __global__ void residual_add(
@@ -236,6 +355,54 @@ extern "C" __global__ void swiglu(
 {
     unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) gate[i] = silu_f(gate[i]) * up[i];
+}
+
+// GeGLU with tanh GELU (Gemma): gate = gelu_tanh(gate) * up, ggml_gelu's formula.
+extern "C" __global__ void geglu_tanh(
+    float* __restrict__ gate,
+    const float* __restrict__ up,
+    unsigned n)
+{
+    unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        // 0.5*x*(1+tanh(z)) == x*sigmoid(2z): no 1+tanh cancellation for
+        // negative z, where an approximate tanhf loses most of the digits.
+        float x = gate[i];
+        float z = 0.7978845608f * x * (1.0f + 0.044715f * x * x);
+        gate[i] = x / (1.0f + expf(-2.0f * z)) * up[i];
+    }
+}
+
+// Gemma's sandwich norm into the residual: x[row] += rmsnorm(a[row]) * w.
+// One block (256 threads) per row.
+extern "C" __global__ void rmsnorm_add_f32(
+    float* __restrict__ x,
+    const float* __restrict__ a,
+    const float* __restrict__ w,
+    unsigned n,
+    float eps,
+    unsigned rows)
+{
+    unsigned row = blockIdx.x;
+    if (row >= rows) return;
+    float* xr = x + (size_t)row * n;
+    const float* ar = a + (size_t)row * n;
+    __shared__ float buf[256];
+    float local = 0.f;
+    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
+        float v = ar[i];
+        local += v * v;
+    }
+    buf[threadIdx.x] = local;
+    __syncthreads();
+    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) buf[threadIdx.x] += buf[threadIdx.x + s];
+        __syncthreads();
+    }
+    float scale = rsqrtf(buf[0] / (float)n + eps);
+    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
+        xr[i] += ar[i] * scale * w[i];
+    }
 }
 
 // SwiGLU + block_q8_1 pack in one pass (decode down-proj avoids a separate quantize).
@@ -287,8 +454,7 @@ extern "C" __global__ void cast_f32_to_f16(
     if (i < n) dst[i] = f32_to_half_bits(src[i]);
 }
 
-// RoPE: pairs (x[i], x[i+half]) when rope_norm == 0 (NeoX) or adjacent pairs
-// (x[2*i], x[2*i+1]) when rope_norm != 0 (NORM / Llama 3.x), with table[i] = {sin, cos}.
+// RoPE NeoX: pairs (x[i], x[i+half]) with table[i] = {sin, cos}.
 // Applies to `heads` contiguous heads of dimension `head_dim`, only first
 // `rot_dim` elements of each head (partial rotary when rot_dim < head_dim).
 extern "C" __global__ void rope_neox(
@@ -296,8 +462,7 @@ extern "C" __global__ void rope_neox(
     const float* __restrict__ rope, // [heads, rot_dim/2, 2] as flat sin,cos
     unsigned heads,
     unsigned head_dim,
-    unsigned rot_dim,
-    unsigned rope_norm)
+    unsigned rot_dim)
 {
     unsigned h = blockIdx.x;
     if (h >= heads) return;
@@ -307,16 +472,14 @@ extern "C" __global__ void rope_neox(
     for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
         float sinv = rh[2 * i];
         float cosv = rh[2 * i + 1];
-        unsigned i0 = rope_norm ? (2 * i) : i;
-        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
-        float a = xh[i0];
-        float b = xh[i1];
-        xh[i0] = a * cosv - b * sinv;
-        xh[i1] = a * sinv + b * cosv;
+        float a = xh[i];
+        float b = xh[i + half_n];
+        xh[i] = a * cosv - b * sinv;
+        xh[i + half_n] = a * sinv + b * cosv;
     }
 }
 
-// Per-head RMSNorm (weight w[head_dim]) then RoPE. One block per head.
+// Per-head RMSNorm (weight w[head_dim]) then NeoX RoPE. One block per head.
 extern "C" __global__ void rmsnorm_rope_neox(
     float* __restrict__ x,
     const float* __restrict__ w,
@@ -324,8 +487,7 @@ extern "C" __global__ void rmsnorm_rope_neox(
     unsigned heads,
     unsigned head_dim,
     unsigned rot_dim,
-    float eps,
-    unsigned rope_norm)
+    float eps)
 {
     unsigned h = blockIdx.x;
     if (h >= heads) return;
@@ -352,16 +514,14 @@ extern "C" __global__ void rmsnorm_rope_neox(
     for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
         float sinv = rh[2 * i];
         float cosv = rh[2 * i + 1];
-        unsigned i0 = rope_norm ? (2 * i) : i;
-        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
-        float a = xh[i0];
-        float b = xh[i1];
-        xh[i0] = a * cosv - b * sinv;
-        xh[i1] = a * sinv + b * cosv;
+        float a = xh[i];
+        float b = xh[i + half_n];
+        xh[i] = a * cosv - b * sinv;
+        xh[i + half_n] = a * sinv + b * cosv;
     }
 }
 
-// Per-head RMSNorm + RoPE, then store this head's slice into KV cache (K path).
+// Per-head RMSNorm + NeoX RoPE, then store this head's slice into KV cache (K path).
 extern "C" __global__ void rmsnorm_rope_store_dpos(
     float* __restrict__ x,
     const float* __restrict__ w,
@@ -373,8 +533,7 @@ extern "C" __global__ void rmsnorm_rope_store_dpos(
     unsigned head_dim,
     unsigned rot_dim,
     unsigned kv_dim,
-    float eps,
-    unsigned rope_norm)
+    float eps)
 {
     unsigned h = blockIdx.x;
     if (h >= heads) return;
@@ -401,12 +560,10 @@ extern "C" __global__ void rmsnorm_rope_store_dpos(
     for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
         float sinv = rh[2 * i];
         float cosv = rh[2 * i + 1];
-        unsigned i0 = rope_norm ? (2 * i) : i;
-        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
-        float a = xh[i0];
-        float b = xh[i1];
-        xh[i0] = a * cosv - b * sinv;
-        xh[i1] = a * sinv + b * cosv;
+        float a = xh[i];
+        float b = xh[i + half_n];
+        xh[i] = a * cosv - b * sinv;
+        xh[i + half_n] = a * sinv + b * cosv;
     }
     __syncthreads();
     unsigned pos = d_pos[0];
@@ -416,7 +573,7 @@ extern "C" __global__ void rmsnorm_rope_store_dpos(
     }
 }
 
-// Per-head RMSNorm + RoPE. RoPE angles from inv_freq[i]*d_pos (no H2D table).
+// Per-head RMSNorm + NeoX RoPE. RoPE angles from inv_freq[i]*d_pos (no H2D table).
 extern "C" __global__ void rmsnorm_rope_freq_dpos(
     float* __restrict__ x,
     const float* __restrict__ w,
@@ -425,8 +582,7 @@ extern "C" __global__ void rmsnorm_rope_freq_dpos(
     unsigned heads,
     unsigned head_dim,
     unsigned rot_dim,
-    float eps,
-    unsigned rope_norm)
+    float eps)
 {
     unsigned h = blockIdx.x;
     if (h >= heads) return;
@@ -454,12 +610,10 @@ extern "C" __global__ void rmsnorm_rope_freq_dpos(
         float angle = pos * inv_freq[i];
         float sinv, cosv;
         __sincosf(angle, &sinv, &cosv);
-        unsigned i0 = rope_norm ? (2 * i) : i;
-        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
-        float a = xh[i0];
-        float b = xh[i1];
-        xh[i0] = a * cosv - b * sinv;
-        xh[i1] = a * sinv + b * cosv;
+        float a = xh[i];
+        float b = xh[i + half_n];
+        xh[i] = a * cosv - b * sinv;
+        xh[i + half_n] = a * sinv + b * cosv;
     }
 }
 
@@ -475,8 +629,7 @@ extern "C" __global__ void rmsnorm_rope_store_freq_dpos(
     unsigned head_dim,
     unsigned rot_dim,
     unsigned kv_dim,
-    float eps,
-    unsigned rope_norm)
+    float eps)
 {
     unsigned h = blockIdx.x;
     if (h >= heads) return;
@@ -504,12 +657,10 @@ extern "C" __global__ void rmsnorm_rope_store_freq_dpos(
         float angle = posf * inv_freq[i];
         float sinv, cosv;
         __sincosf(angle, &sinv, &cosv);
-        unsigned i0 = rope_norm ? (2 * i) : i;
-        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
-        float a = xh[i0];
-        float b = xh[i1];
-        xh[i0] = a * cosv - b * sinv;
-        xh[i1] = a * sinv + b * cosv;
+        float a = xh[i];
+        float b = xh[i + half_n];
+        xh[i] = a * cosv - b * sinv;
+        xh[i + half_n] = a * sinv + b * cosv;
     }
     __syncthreads();
     unsigned pos = d_pos[0];
@@ -547,18 +698,21 @@ extern "C" __global__ void rmsnorm_rope_qk_store_table_dpos(
     unsigned head_dim,
     unsigned rot_dim,
     unsigned kv_dim,
-    float eps,
-    unsigned rope_norm)
+    float eps)
 {
     unsigned gh = blockIdx.x;
     bool is_k = gh >= q_heads;
     unsigned h = is_k ? gh - q_heads : gh;
+    pdl_lc();
     if ((!is_k && h >= q_heads) || (is_k && h >= kv_heads)) return;
     float* xh = (is_k ? k : q) + (size_t)h * head_dim;
     const float* w = is_k ? kw : qw;
     __shared__ float buf[256];
     __shared__ float kbuf[256];
     float local = 0.f;
+    // q/k come from the QKV matvec just before; d_pos and the cache are read
+    // and written below. Nothing is touched before this wait.
+    pdl_sync();
     for (unsigned i = threadIdx.x; i < head_dim; i += blockDim.x) {
         float v = xh[i];
         local += v * v;
@@ -591,18 +745,16 @@ extern "C" __global__ void rmsnorm_rope_qk_store_table_dpos(
     for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
         float sinv = rope[2 * i];
         float cosv = rope[2 * i + 1];
-        unsigned i0 = rope_norm ? (2 * i) : i;
-        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
-        float a = is_k ? kbuf[i0] : xh[i0];
-        float b = is_k ? kbuf[i1] : xh[i1];
+        float a = is_k ? kbuf[i] : xh[i];
+        float b = is_k ? kbuf[i + half_n] : xh[i + half_n];
         float r0 = a * cosv - b * sinv;
         float r1 = a * sinv + b * cosv;
         if (is_k) {
-            cache[dst + i0] = f32_to_half_bits(r0);
-            cache[dst + i1] = f32_to_half_bits(r1);
+            cache[dst + i] = f32_to_half_bits(r0);
+            cache[dst + i + half_n] = f32_to_half_bits(r1);
         } else {
-            xh[i0] = r0;
-            xh[i1] = r1;
+            xh[i] = r0;
+            xh[i + half_n] = r1;
         }
     }
     if (is_k) {
@@ -618,8 +770,7 @@ extern "C" __global__ void rope_neox_freq_dpos(
     const unsigned* __restrict__ d_pos,
     unsigned heads,
     unsigned head_dim,
-    unsigned rot_dim,
-    unsigned rope_norm)
+    unsigned rot_dim)
 {
     unsigned h = blockIdx.x;
     if (h >= heads) return;
@@ -630,42 +781,64 @@ extern "C" __global__ void rope_neox_freq_dpos(
         float angle = pos * inv_freq[i];
         float sinv, cosv;
         __sincosf(angle, &sinv, &cosv);
-        unsigned i0 = rope_norm ? (2 * i) : i;
-        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
-        float a = xh[i0];
-        float b = xh[i1];
-        xh[i0] = a * cosv - b * sinv;
-        xh[i1] = a * sinv + b * cosv;
+        float a = xh[i];
+        float b = xh[i + half_n];
+        xh[i] = a * cosv - b * sinv;
+        xh[i + half_n] = a * sinv + b * cosv;
     }
 }
 
+// Single-block argmax for vocab-sized vectors. blockDim is a multiple of 32
+// (1024 on decode); float4 loads when the row is 16-byte aligned and n % 4 == 0.
+// Ties resolve to the lowest index.
+__device__ __forceinline__ void argmax_take(float& best, unsigned& bi, float v, unsigned i)
+{
+    if (v > best || (v == best && i < bi)) { best = v; bi = i; }
+}
 extern "C" __global__ void argmax_f32(
     const float* __restrict__ x,
     unsigned n,
     unsigned* __restrict__ out_idx)
 {
-    // Single-block argmax for vocab-sized vectors.
-    __shared__ float smax[256];
-    __shared__ unsigned sidx[256];
+    pdl_sync();
     float best = (-1.0f/0.0f);
-    unsigned bi = 0;
-    for (unsigned i = threadIdx.x; i < n; i += blockDim.x) {
-        float v = x[i];
-        if (v > best) { best = v; bi = i; }
-    }
-    smax[threadIdx.x] = best;
-    sidx[threadIdx.x] = bi;
-    __syncthreads();
-    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (threadIdx.x < s) {
-            if (smax[threadIdx.x + s] > smax[threadIdx.x]) {
-                smax[threadIdx.x] = smax[threadIdx.x + s];
-                sidx[threadIdx.x] = sidx[threadIdx.x + s];
-            }
+    unsigned bi = 0xffffffffu;
+    const unsigned T = blockDim.x;
+    if ((n & 3u) == 0 && (((unsigned long long)x) & 15ull) == 0) {
+        const float4* x4 = (const float4*)x;
+        for (unsigned q = threadIdx.x; q < n / 4u; q += T) {
+            float4 v = x4[q];
+            unsigned i = q * 4u;
+            argmax_take(best, bi, v.x, i);
+            argmax_take(best, bi, v.y, i + 1u);
+            argmax_take(best, bi, v.z, i + 2u);
+            argmax_take(best, bi, v.w, i + 3u);
         }
-        __syncthreads();
+    } else {
+        for (unsigned i = threadIdx.x; i < n; i += T) argmax_take(best, bi, x[i], i);
     }
-    if (threadIdx.x == 0) out_idx[0] = sidx[0];
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        float ov = __shfl_xor_sync(0xffffffffu, best, off);
+        unsigned oi = __shfl_xor_sync(0xffffffffu, bi, off);
+        argmax_take(best, bi, ov, oi);
+    }
+    __shared__ float wbest[32];
+    __shared__ unsigned widx[32];
+    unsigned lane = threadIdx.x & 31u, warp = threadIdx.x >> 5;
+    if (lane == 0) { wbest[warp] = best; widx[warp] = bi; }
+    __syncthreads();
+    if (warp == 0) {
+        best = lane < (T >> 5) ? wbest[lane] : (-1.0f/0.0f);
+        bi = lane < (T >> 5) ? widx[lane] : 0xffffffffu;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            float ov = __shfl_xor_sync(0xffffffffu, best, off);
+            unsigned oi = __shfl_xor_sync(0xffffffffu, bi, off);
+            argmax_take(best, bi, ov, oi);
+        }
+        if (lane == 0) out_idx[0] = bi == 0xffffffffu ? 0u : bi;
+    }
 }
 
 // Store one K or V row (kv_dim floats) into the f16 cache at element offset.
@@ -730,7 +903,7 @@ extern "C" __global__ void store_kv_batch_f16(
     cache[dst] = f32_to_half_bits(src[(size_t)row * kv_dim + i]);
 }
 
-// RoPE over a batch of tokens. x: [m, heads, head_dim];
+// RoPE NeoX over a batch of tokens. x: [m, heads, head_dim];
 // rope: [m, rot_dim] as interleaved sin,cos (same table for every head).
 extern "C" __global__ void rope_neox_batch(
     float* __restrict__ x,
@@ -738,8 +911,7 @@ extern "C" __global__ void rope_neox_batch(
     unsigned m,
     unsigned heads,
     unsigned head_dim,
-    unsigned rot_dim,
-    unsigned rope_norm)
+    unsigned rot_dim)
 {
     unsigned h = blockIdx.x;
     unsigned row = blockIdx.y;
@@ -750,12 +922,104 @@ extern "C" __global__ void rope_neox_batch(
     for (unsigned i = threadIdx.x; i < half_n; i += blockDim.x) {
         float sinv = rh[2 * i];
         float cosv = rh[2 * i + 1];
-        unsigned i0 = rope_norm ? (2 * i) : i;
-        unsigned i1 = rope_norm ? (2 * i + 1) : (i + half_n);
-        float a = xh[i0];
-        float b = xh[i1];
-        xh[i0] = a * cosv - b * sinv;
-        xh[i1] = a * sinv + b * cosv;
+        float a = xh[i];
+        float b = xh[i + half_n];
+        xh[i] = a * cosv - b * sinv;
+        xh[i + half_n] = a * sinv + b * cosv;
+    }
+}
+
+// Prefill per-head RMSNorm (optional) + RoPE NeoX in one pass, one warp per
+// (token, head). x: [m, heads, head_dim]; rope: [m, rot_dim/2] (sin,cos).
+// store == 0 writes x back in place; store != 0 writes the result as f16 to
+// cache[cache_off + (pos0+row)*kv_dim + h*head_dim + i] instead (the K path:
+// the f32 K is dead after store_kv). NJ = head_dim/32, HJ = rot_dim/64, so
+// each lane owns both elements of a rotation pair. Same math as rmsnorm_f32
+// followed by rope_neox_batch (and store_kv_batch_f16 for K).
+template <int NJ, int HJ>
+__device__ __forceinline__ void prefill_norm_rope_body(
+    float* __restrict__ x, const float* __restrict__ w, const float* __restrict__ rope,
+    uint16_t* __restrict__ cache, unsigned long long cache_off, unsigned warp, unsigned lane,
+    unsigned heads, float eps, unsigned has_norm, unsigned kv_dim, unsigned pos0, unsigned store)
+{
+    const unsigned head_dim = NJ * 32;
+    unsigned row = warp / heads;
+    unsigned h = warp - row * heads;
+    float* xh = x + (size_t)warp * head_dim;
+    float v[NJ];
+    float ss = 0.f;
+    #pragma unroll
+    for (int j = 0; j < NJ; j++) {
+        v[j] = xh[lane + 32 * j];
+        ss += v[j] * v[j];
+    }
+    if (has_norm) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, off);
+        float scale = rsqrtf(ss / (float)head_dim + eps);
+        #pragma unroll
+        for (int j = 0; j < NJ; j++) v[j] = v[j] * scale * w[lane + 32 * j];
+    }
+    const float* rh = rope + (size_t)row * (HJ * 32) * 2;
+    #pragma unroll
+    for (int j = 0; j < HJ; j++) {
+        unsigned i = lane + 32 * j;
+        float2 sc = *reinterpret_cast<const float2*>(rh + 2 * i);
+        float a = v[j];
+        float b = v[j + HJ];
+        v[j] = a * sc.y - b * sc.x;
+        v[j + HJ] = a * sc.x + b * sc.y;
+    }
+    if (store) {
+        uint16_t* dst = cache + cache_off + (unsigned long long)(pos0 + row) * kv_dim
+            + (size_t)h * head_dim;
+        #pragma unroll
+        for (int j = 0; j < NJ; j++) dst[lane + 32 * j] = f32_to_half_bits(v[j]);
+    } else {
+        #pragma unroll
+        for (int j = 0; j < NJ; j++) xh[lane + 32 * j] = v[j];
+    }
+}
+
+extern "C" __global__ void prefill_norm_rope(
+    float* __restrict__ x,
+    const float* __restrict__ w,
+    const float* __restrict__ rope,
+    uint16_t* __restrict__ cache,
+    unsigned long long cache_off,
+    unsigned m,
+    unsigned heads,
+    unsigned head_dim,
+    unsigned rot_dim,
+    float eps,
+    unsigned has_norm,
+    unsigned kv_dim,
+    unsigned pos0,
+    unsigned store)
+{
+    pdl_sync();
+    unsigned warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+    unsigned lane = threadIdx.x & 31;
+    if (warp >= m * heads) return;
+    unsigned key = (head_dim << 16) | rot_dim;
+    switch (key) {
+    case (128u << 16) | 128u:
+        prefill_norm_rope_body<4, 2>(x, w, rope, cache, cache_off, warp, lane, heads, eps, has_norm, kv_dim, pos0, store);
+        break;
+    case (128u << 16) | 64u:
+        prefill_norm_rope_body<4, 1>(x, w, rope, cache, cache_off, warp, lane, heads, eps, has_norm, kv_dim, pos0, store);
+        break;
+    case (64u << 16) | 64u:
+        prefill_norm_rope_body<2, 1>(x, w, rope, cache, cache_off, warp, lane, heads, eps, has_norm, kv_dim, pos0, store);
+        break;
+    case (256u << 16) | 256u:
+        prefill_norm_rope_body<8, 4>(x, w, rope, cache, cache_off, warp, lane, heads, eps, has_norm, kv_dim, pos0, store);
+        break;
+    case (256u << 16) | 128u:
+        prefill_norm_rope_body<8, 2>(x, w, rope, cache, cache_off, warp, lane, heads, eps, has_norm, kv_dim, pos0, store);
+        break;
+    default:
+        break;
     }
 }
 
@@ -1593,6 +1857,193 @@ extern "C" __global__ void permute_q8_m1(
     block_q8_1* b = yq + blk;
     b->qs[lane] = (int8_t)qi;
     store_q8_meta(b, lane, qi, scale);
+}
+
+// Decode attention for head_dim 128, GQA group 8, f16 KV, one token (m = 1).
+// grid = (n_kv_heads, S), 256 threads. Block (kvh, s) handles positions
+// [s*chunk, (s+1)*chunk) of 0..=d_pos[0] (chunk = ceil(L / S) <= 128) for the
+// 8 query heads sharing kv head kvh: K and V rows are fetched together (V is
+// staged in shared memory), and an online-softmax partial (m, l, acc[128]) per
+// head goes to `part`. The last block per kv head (atomic counter, reset
+// afterwards so graph replays stay valid) merges the S partials, writes
+// out[h*128 + d] and packs it as block_q8_1 for the WO matvec. One kernel
+// replaces flash_attn_ext_vec + flash_attn_combine_results +
+// permute_q8_m1_qonly, and it only visits the live positions.
+#define ATT_CH 128u
+extern "C" __global__ void __launch_bounds__(256) attn_decode_g8_q8(
+    const float* __restrict__ q,
+    const uint16_t* __restrict__ cache,
+    unsigned long long k_off,
+    unsigned long long v_off,
+    unsigned kv_dim,
+    const unsigned* __restrict__ d_pos,
+    float scale,
+    float* __restrict__ part,
+    unsigned* __restrict__ cnt,
+    float* __restrict__ out,
+    block_q8_1* __restrict__ yq)
+{
+    const unsigned kvh = blockIdx.x;
+    const unsigned s = blockIdx.y;
+    const unsigned S = gridDim.y;
+    const unsigned t = threadIdx.x;
+    const unsigned lane = t & 31u;
+    const unsigned warp = t >> 5;
+    __shared__ float4 qs[8][32];
+    __shared__ float sc[8][ATT_CH];
+    __shared__ uint2 vs[ATT_CH][32];
+    __shared__ unsigned last;
+    pdl_sync();
+    const unsigned L = d_pos[0] + 1u;
+    const float4 qv = ((const float4*)(q + (size_t)kvh * 1024u))[t];
+    const unsigned chunk = (L + S - 1u) / S;
+    const unsigned p0 = s * chunk;
+    unsigned p1 = p0 + chunk;
+    if (p1 > L) p1 = L;
+    if (p1 > p0 + ATT_CH) p1 = p0 + ATT_CH;
+    const unsigned n = p1 > p0 ? p1 - p0 : 0u;
+    qs[t >> 5][t & 31u] = qv;
+    __syncthreads();
+
+    // Scores: warp handles positions p0+warp, +8, ...; lane covers d = 4*lane..+3.
+    const unsigned d0 = lane * 4u;
+    const unsigned hsel = ((lane >> 4) & 1u) * 4u + ((lane >> 3) & 1u) * 2u + ((lane >> 2) & 1u);
+    const uint16_t* kb = cache + k_off + (size_t)p0 * kv_dim + kvh * 128u + d0;
+    const uint16_t* vb = cache + v_off + (size_t)p0 * kv_dim + kvh * 128u + d0;
+    #pragma unroll 2
+    for (unsigned j = warp; j < n; j += 8u) {
+        uint2 raw = *(const uint2*)(kb + (size_t)j * kv_dim);
+        vs[j][lane] = *(const uint2*)(vb + (size_t)j * kv_dim);
+        float k0 = half_bits_to_f32((uint16_t)(raw.x & 0xffffu));
+        float k1 = half_bits_to_f32((uint16_t)(raw.x >> 16));
+        float k2 = half_bits_to_f32((uint16_t)(raw.y & 0xffffu));
+        float k3 = half_bits_to_f32((uint16_t)(raw.y >> 16));
+        float v[8];
+        #pragma unroll
+        for (unsigned h = 0; h < 8u; h++) {
+            float4 qh = qs[h][lane];
+            v[h] = qh.x * k0 + qh.y * k1 + qh.z * k2 + qh.w * k3;
+        }
+        // Reduce-scatter the 8 head partials over the warp (9 shuffles).
+        #pragma unroll
+        for (unsigned i = 0; i < 4u; i++) {
+            bool hi = (lane & 16u) != 0u;
+            float send = hi ? v[i] : v[i + 4u];
+            float keep = hi ? v[i + 4u] : v[i];
+            v[i] = keep + __shfl_xor_sync(0xffffffffu, send, 16);
+        }
+        #pragma unroll
+        for (unsigned i = 0; i < 2u; i++) {
+            bool hi = (lane & 8u) != 0u;
+            float send = hi ? v[i] : v[i + 2u];
+            float keep = hi ? v[i + 2u] : v[i];
+            v[i] = keep + __shfl_xor_sync(0xffffffffu, send, 8);
+        }
+        {
+            bool hi = (lane & 4u) != 0u;
+            float send = hi ? v[0] : v[1];
+            float keep = hi ? v[1] : v[0];
+            v[0] = keep + __shfl_xor_sync(0xffffffffu, send, 4);
+        }
+        v[0] += __shfl_xor_sync(0xffffffffu, v[0], 2);
+        v[0] += __shfl_xor_sync(0xffffffffu, v[0], 1);
+        if ((lane & 3u) == 0u) sc[hsel][j] = v[0] * scale;
+    }
+    __syncthreads();
+
+    // Softmax partial and P*V: warp == head, lane covers d0..d0+3.
+    const unsigned h = warp;
+    float m = -1e30f;
+    for (unsigned j = lane; j < n; j += 32u) m = fmaxf(m, sc[h][j]);
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, off));
+    float l = 0.f;
+    for (unsigned j = lane; j < n; j += 32u) {
+        float e = expf(sc[h][j] - m);
+        sc[h][j] = e;
+        l += e;
+    }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) l += __shfl_xor_sync(0xffffffffu, l, off);
+    __syncwarp();
+
+    float a0 = 0.f, a1 = 0.f, a2 = 0.f, a3 = 0.f;
+    #pragma unroll 4
+    for (unsigned j = 0; j < n; j++) {
+        uint2 raw = vs[j][lane];
+        float e = sc[h][j];
+        a0 += e * half_bits_to_f32((uint16_t)(raw.x & 0xffffu));
+        a1 += e * half_bits_to_f32((uint16_t)(raw.x >> 16));
+        a2 += e * half_bits_to_f32((uint16_t)(raw.y & 0xffffu));
+        a3 += e * half_bits_to_f32((uint16_t)(raw.y >> 16));
+    }
+    const unsigned oh = kvh * 8u + h;
+    float o0, o1, o2, o3;
+    if (S == 1u) {
+        float inv = 1.f / l;
+        o0 = a0 * inv; o1 = a1 * inv; o2 = a2 * inv; o3 = a3 * inv;
+        pdl_lc();
+    } else {
+        float* pp = part + ((size_t)(kvh * S + s) * 8u + h) * 132u;
+        if (lane == 0) {
+            pp[0] = m;
+            pp[1] = l;
+        }
+        *(float4*)(pp + 4u + d0) = make_float4(a0, a1, a2, a3);
+        __threadfence();
+        __syncthreads();
+        if (t == 0) last = (atomicAdd(&cnt[kvh], 1u) == S - 1u) ? 1u : 0u;
+        __syncthreads();
+        pdl_lc();
+        if (!last) return;
+        __threadfence();
+        // Single-pass online merge of the S partials of head h.
+        float M = -1e30f, den = 0.f;
+        o0 = 0.f; o1 = 0.f; o2 = 0.f; o3 = 0.f;
+        const float* pr = part + ((size_t)(kvh * S) * 8u + h) * 132u;
+        #pragma unroll 4
+        for (unsigned r = 0; r < S; r++, pr += 8u * 132u) {
+            float2 ml = __ldcg((const float2*)pr);
+            float4 a = __ldcg((const float4*)(pr + 4u + d0));
+            float nm = fmaxf(M, ml.x);
+            float c = expf(M - nm);
+            float w = expf(ml.x - nm);
+            den = den * c + w * ml.y;
+            o0 = o0 * c + w * a.x;
+            o1 = o1 * c + w * a.y;
+            o2 = o2 * c + w * a.z;
+            o3 = o3 * c + w * a.w;
+            M = nm;
+        }
+        float inv = 1.f / den;
+        o0 *= inv; o1 *= inv; o2 *= inv; o3 *= inv;
+        if (t == 0) cnt[kvh] = 0u;
+    }
+    *(float4*)(out + (size_t)oh * 128u + d0) = make_float4(o0, o1, o2, o3);
+    // block_q8_1 = 32 values = 8 lanes x 4.
+    float amax = fmaxf(fmaxf(fabsf(o0), fabsf(o1)), fmaxf(fabsf(o2), fabsf(o3)));
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 4));
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));
+    float dsc = amax / 127.f;
+    if (dsc < 1e-8f) dsc = 1.f;
+    float ov[4] = {o0, o1, o2, o3};
+    int packed = 0;
+    int sum = 0;
+    #pragma unroll
+    for (unsigned i = 0; i < 4u; i++) {
+        int qi = __float2int_rn(ov[i] / dsc);
+        if (qi > 127) qi = 127;
+        if (qi < -127) qi = -127;
+        sum += qi;
+        packed |= (qi & 0xff) << (8u * i);
+    }
+    block_q8_1* b = yq + (size_t)oh * 4u + (lane >> 3);
+    unsigned mi = lane & 7u;
+    *(int*)(b->qs + 4u * mi) = packed;
+    int ps = sum + __shfl_xor_sync(0xffffffffu, sum, 4);
+    if (mi < 4u) b->ps[mi] = (int16_t)ps;
+    if (mi == 0u) b->d = dsc;
 }
 
 extern "C" __global__ void permute_q8_m1_qonly(
@@ -3498,16 +3949,17 @@ __device__ __forceinline__ float scale_min_k4(int j, const uint8_t* packed, floa
     return sc;
 }
 
-__device__ __forceinline__ void embed_row_impl(
-    const uint8_t* __restrict__ row,
+extern "C" __global__ void embed_row_f32(
+    const uint8_t* __restrict__ w,
     float* __restrict__ out,
     unsigned n_in,
+    unsigned long long w_off,
     unsigned fmt)
 {
-    unsigned b = blockIdx.y;
     unsigned lane = threadIdx.x;
+    const uint8_t* row = w + w_off;
     if (fmt <= 2u) {
-        if (b * 256u >= n_in) return;
+        unsigned b = blockIdx.y;
         float* o256 = out + b * 256u;
         if (fmt == 0u) {
             const uint8_t* blk = row + b * 144u;
@@ -3575,103 +4027,27 @@ __device__ __forceinline__ void embed_row_impl(
             return;
         }
     }
+    if (lane != 0 || blockIdx.x != 0) return;
     if (fmt == 3u) {
-        for (unsigned ib = 0; ib < 8u; ib++) {
-            unsigned blk_idx = b * 8u + ib;
-            if (blk_idx * 32u >= n_in) break;
-            const uint8_t* blk = row + blk_idx * 34u;
+        unsigned nb = n_in / 32u;
+        for (unsigned b = 0; b < nb; b++) {
+            const uint8_t* blk = row + b * 34u;
             float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
-            const int8_t* qs = (const int8_t*)(blk + 2);
-            out[blk_idx * 32u + lane] = d * (float)qs[lane];
-        }
-        return;
-    }
-    if (fmt == 4u) {
-        if (b * 256u >= n_in) return;
-        float* o256 = out + b * 256u;
-        const uint8_t* blk = row + b * 84u;
-        const uint8_t* scales = blk;
-        const uint8_t* qs = blk + 16;
-        float d = half_bits_to_f32((uint16_t)blk[80] | ((uint16_t)blk[81] << 8));
-        float dmin = half_bits_to_f32((uint16_t)blk[82] | ((uint16_t)blk[83] << 8));
-        unsigned group = lane / 16u;
-        for (unsigned half_i = 0; half_i < 2u; half_i++) {
-            uint8_t q = qs[half_i * 32u + lane];
-            for (unsigned si = 0; si < 4u; si++) {
-                unsigned sub = half_i * 8u + si * 2u + group;
-                uint8_t sc = scales[sub];
-                float dl = d * (float)(sc & 0xFu);
-                float ml = dmin * (float)(sc >> 4u);
-                o256[half_i * 128u + si * 32u + lane] =
-                    dl * (float)((q >> (si * 2u)) & 3u) - ml;
+            for (unsigned i = 0; i < 32u; i++) {
+                out[b * 32u + i] = d * (float)((int8_t)blk[2 + i]);
             }
         }
-        return;
-    }
-    if (fmt == 5u) {
-        if (b * 256u >= n_in) return;
-        float* o256 = out + b * 256u;
-        const uint8_t* blk = row + b * 110u;
-        const uint8_t* hmask = blk;
-        const uint8_t* qs = blk + 32;
-        const uint8_t* packed = blk + 96;
-        float d_all = half_bits_to_f32((uint16_t)blk[108] | ((uint16_t)blk[109] << 8));
-        unsigned group = lane / 16u;
-        uint8_t hm = hmask[lane];
-        for (unsigned half_i = 0; half_i < 2u; half_i++) {
-            uint8_t q = qs[half_i * 32u + lane];
-            for (unsigned si = 0; si < 4u; si++) {
-                unsigned is = half_i * 8u + si * 2u + group;
-                unsigned lo = (is < 8u) ? (packed[is] & 0xFu) : (packed[is - 8u] >> 4u);
-                unsigned hi = (packed[8u + (is % 4u)] >> (2u * (is / 4u))) & 3u;
-                float dl = d_all * (float)((int)(lo | (hi << 4u)) - 32);
-                uint8_t bit = (uint8_t)(1u << (half_i * 4u + si));
-                int qv = (int)((q >> (2u * si)) & 3u) - ((hm & bit) ? 0 : 4);
-                o256[half_i * 128u + si * 32u + lane] = dl * (float)qv;
-            }
-        }
-        return;
-    }
-    if (fmt == 6u) {
-        if (b * 32u >= n_in) return;
-        const uint8_t* blk = row + b * 22u;
-        float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
-        uint32_t qh = (uint32_t)blk[2] | ((uint32_t)blk[3] << 8)
-            | ((uint32_t)blk[4] << 16) | ((uint32_t)blk[5] << 24);
-        const uint8_t* qs = blk + 6;
-        unsigned nib = (lane < 16u) ? (qs[lane] & 0x0Fu) : (qs[lane - 16u] >> 4u);
-        unsigned hb = (qh >> lane) & 1u;
-        int x = (int)(nib | (hb << 4u)) - 16;
-        out[b * 32u + lane] = d * (float)x;
         return;
     }
     if (fmt == 7u) {
         const uint16_t* src = (const uint16_t*)row;
-        unsigned idx = b * 32u + lane;
-        if (idx < n_in) out[idx] = half_bits_to_f32(src[idx]);
+        for (unsigned i = 0; i < n_in; i++) out[i] = half_bits_to_f32(src[i]);
         return;
     }
     if (fmt == 8u) {
         const float* src = (const float*)row;
-        unsigned idx = b * 32u + lane;
-        if (idx < n_in) out[idx] = src[idx];
-        return;
+        for (unsigned i = 0; i < n_in; i++) out[i] = src[i];
     }
-    if (fmt == 9u) {
-        const uint16_t* src = (const uint16_t*)row;
-        unsigned idx = b * 32u + lane;
-        if (idx < n_in) out[idx] = __uint_as_float(((uint32_t)src[idx]) << 16);
-    }
-}
-
-extern "C" __global__ void embed_row_f32(
-    const uint8_t* __restrict__ w,
-    float* __restrict__ out,
-    unsigned n_in,
-    unsigned long long w_off,
-    unsigned fmt)
-{
-    embed_row_impl(w + w_off, out, n_in, fmt);
 }
 
 // Like embed_row_f32 but token id lives on device (greedy chain after argmax).
@@ -3684,8 +4060,99 @@ extern "C" __global__ void embed_row_f32_dtoken(
     unsigned fmt,
     const unsigned* __restrict__ d_token)
 {
+    unsigned lane = threadIdx.x;
     unsigned long long w_off = w_base + (unsigned long long)d_token[0] * (unsigned long long)row_bytes;
-    embed_row_impl(w + w_off, out, n_in, fmt);
+    const uint8_t* row = w + w_off;
+    if (fmt <= 2u) {
+        unsigned b = blockIdx.y;
+        float* o256 = out + b * 256u;
+        if (fmt == 0u) {
+            const uint8_t* blk = row + b * 144u;
+            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+            float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+            const uint8_t* packed = blk + 4;
+            const uint8_t* qs = blk + 16;
+            #pragma unroll
+            for (unsigned pair = 0; pair < 4u; pair++) {
+                float mn1, mn2;
+                float sc1 = scale_min_k4((int)pair * 2, packed, &mn1);
+                float sc2 = scale_min_k4((int)pair * 2 + 1, packed, &mn2);
+                uint8_t qq = qs[pair * 32u + lane];
+                o256[pair * 64u + lane] = d * sc1 * (float)(qq & 0xf) - dmin * mn1;
+                o256[pair * 64u + 32u + lane] = d * sc2 * (float)(qq >> 4) - dmin * mn2;
+            }
+            return;
+        }
+        if (fmt == 1u) {
+            const uint8_t* blk = row + b * 176u;
+            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+            float dmin = half_bits_to_f32((uint16_t)blk[2] | ((uint16_t)blk[3] << 8));
+            const uint8_t* packed = blk + 4;
+            const uint8_t* qh = blk + 16;
+            const uint8_t* qs = blk + 48;
+            #pragma unroll
+            for (unsigned pair = 0; pair < 4u; pair++) {
+                float mn1, mn2;
+                float sc1 = scale_min_k4((int)pair * 2, packed, &mn1);
+                float sc2 = scale_min_k4((int)pair * 2 + 1, packed, &mn2);
+                uint8_t bit1 = (uint8_t)(1u << (pair * 2));
+                uint8_t bit2 = (uint8_t)(1u << (pair * 2 + 1));
+                uint8_t qq = qs[pair * 32u + lane];
+                int hi1 = (qh[lane] & bit1) ? 16 : 0;
+                int hi2 = (qh[lane] & bit2) ? 16 : 0;
+                o256[pair * 64u + lane] =
+                    d * sc1 * (float)((qq & 0xf) + hi1) - dmin * mn1;
+                o256[pair * 64u + 32u + lane] =
+                    d * sc2 * (float)((qq >> 4) + hi2) - dmin * mn2;
+            }
+            return;
+        }
+        {
+            const uint8_t* blk = row + b * 210u;
+            const uint8_t* ql = blk;
+            const uint8_t* qh = blk + 128;
+            const int8_t* scales = (const int8_t*)(blk + 192);
+            float d = half_bits_to_f32((uint16_t)blk[208] | ((uint16_t)blk[209] << 8));
+            #pragma unroll
+            for (unsigned hi = 0; hi < 2u; hi++) {
+                const uint8_t* ql_h = ql + hi * 64u;
+                const uint8_t* qh_h = qh + hi * 32u;
+                const int8_t* sc = scales + hi * 8;
+                float* oh = o256 + hi * 128u;
+                unsigned is = lane / 16u;
+                int q1 = (int)((ql_h[lane] & 0xf) | ((qh_h[lane] & 3) << 4)) - 32;
+                int q2 = (int)((ql_h[lane + 32] & 0xf) | (((qh_h[lane] >> 2) & 3) << 4)) - 32;
+                int q3 = (int)((ql_h[lane] >> 4) | (((qh_h[lane] >> 4) & 3) << 4)) - 32;
+                int q4 = (int)((ql_h[lane + 32] >> 4) | (((qh_h[lane] >> 6) & 3) << 4)) - 32;
+                oh[lane] = d * (float)sc[is] * (float)q1;
+                oh[32u + lane] = d * (float)sc[is + 2] * (float)q2;
+                oh[64u + lane] = d * (float)sc[is + 4] * (float)q3;
+                oh[96u + lane] = d * (float)sc[is + 6] * (float)q4;
+            }
+            return;
+        }
+    }
+    if (lane != 0 || blockIdx.x != 0) return;
+    if (fmt == 3u) {
+        unsigned nb = n_in / 32u;
+        for (unsigned b = 0; b < nb; b++) {
+            const uint8_t* blk = row + b * 34u;
+            float d = half_bits_to_f32((uint16_t)blk[0] | ((uint16_t)blk[1] << 8));
+            for (unsigned i = 0; i < 32u; i++) {
+                out[b * 32u + i] = d * (float)((int8_t)blk[2 + i]);
+            }
+        }
+        return;
+    }
+    if (fmt == 7u) {
+        const uint16_t* src = (const uint16_t*)row;
+        for (unsigned i = 0; i < n_in; i++) out[i] = half_bits_to_f32(src[i]);
+        return;
+    }
+    if (fmt == 8u) {
+        const float* src = (const float*)row;
+        for (unsigned i = 0; i < n_in; i++) out[i] = src[i];
+    }
 }
 
 extern "C" __global__ void inc_u32(unsigned* __restrict__ p) {

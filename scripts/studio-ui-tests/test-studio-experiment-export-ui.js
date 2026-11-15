@@ -1,9 +1,10 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 class Element{constructor(){this.children=[];}append(...items){this.children.push(...items);}setAttribute(){}click(){downloads.push(this.download);}}
 const calls=[],downloads=[],packets=[];
 const context={node:()=>new Element(),api:async path=>{calls.push(path);return {kind:'experiment_export',schema_version:1,metrics:['exact_match'],outputs_included:path.endsWith('true'),items:[]};},URL:{createObjectURL:blob=>{packets.push(blob);return 'blob:fixture';},revokeObjectURL:()=>{}},Blob,setTimeout:fn=>fn(),fail:error=>{throw error;}};
-vm.createContext(context);const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
-vm.runInContext(source.slice(source.indexOf('function experimentExportCsv('),source.indexOf('function showEvaluationRun(')),context);
+vm.createContext(context);const source=appSource();
+vm.runInContext(between(source,'function experimentExportCsv(','function showEvaluationRun('),context);
 (async()=>{const panel=context.experimentExportPanel({id:'run'}),checkbox=panel.children[0].children[0],button=panel.children[1];
 assert.equal(checkbox.checked,false);await button.onclick();assert.equal(calls[0],'evaluation/experiments/run/export?include_outputs=false');
 checkbox.checked=true;await button.onclick();assert.equal(calls[1],'evaluation/experiments/run/export?include_outputs=true');assert.deepEqual(downloads,['experiment-run.json','experiment-run.json']);assert.equal(button.disabled,false);

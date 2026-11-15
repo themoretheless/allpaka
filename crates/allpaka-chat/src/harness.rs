@@ -717,9 +717,7 @@ pub fn materialize_script(
     let path = directory.join(script);
     if !path.exists() {
         std::fs::create_dir_all(path.parent().unwrap())?;
-        let temp = path.with_extension(format!("{}.tmp", crate::evaluation::new_id()));
-        std::fs::write(&temp, text)?;
-        std::fs::rename(temp, &path)?;
+        crate::storage::atomic_write_bytes(&path, text.as_bytes())?;
     }
     Ok(path)
 }
@@ -845,18 +843,19 @@ pub fn list_revisions(data: &std::path::Path, project_id: &str) -> Result<Vec<Re
     list.truncate(200);
     Ok(list)
 }
+fn validate_active(a: &Active) -> Result<()> {
+    if valid_hash(&a.revision) {
+        Ok(())
+    } else {
+        bail!("Invalid harness revision")
+    }
+}
 fn load_active(data: &std::path::Path) -> Result<Vec<Active>> {
     crate::state_file::load_list(
         data.join("harness").as_path(),
         "active",
         "harness",
-        |a: &Active| {
-            if valid_hash(&a.revision) {
-                Ok(())
-            } else {
-                bail!("Invalid harness revision")
-            }
-        },
+        validate_active,
     )
 }
 pub fn active_revision(data: &std::path::Path, project_id: &str) -> Result<Option<Revision>> {
@@ -885,13 +884,7 @@ pub fn activate(data: &std::path::Path, project_id: &str, revision: Option<&str>
         data.join("harness").as_path(),
         "active",
         "harness",
-        |a: &Active| {
-            if valid_hash(&a.revision) {
-                Ok(())
-            } else {
-                bail!("Invalid harness revision")
-            }
-        },
+        validate_active,
         |list| {
             list.retain(|a| a.project_id != project_id);
             if let Some(id) = revision {

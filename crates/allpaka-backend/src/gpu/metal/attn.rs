@@ -33,6 +33,8 @@ pub fn attend_project(req: &AttnReq, wo_ty: GgmlType, wo: &[u8], n_out: usize) -
     let align = |n: usize| (n + 255) & !255;
     let attn_bytes = align(n_in * 4);
     gpu.ensure_arenas(req.q.len() * 4, attn_bytes + align(n_out * 4));
+    // SAFETY: `ensure_arenas(req.q.len() * 4, ..)` just above sized x_arena for
+    // the whole of `q`; nothing is in flight on it (arena rule, `Gpu::x_arena`).
     unsafe {
         std::ptr::copy_nonoverlapping(
             req.q.as_ptr() as *const u8,
@@ -75,6 +77,9 @@ pub fn attend_project(req: &AttnReq, wo_ty: GgmlType, wo: &[u8], n_out: usize) -
         DISPATCHES.fetch_add(2, Ordering::Relaxed);
 
         let mut out = vec![0f32; n_out];
+        // SAFETY: the buffer was waited above, so the GPU is done with y_arena;
+        // `attn_bytes + n_out * 4` fits the `attn_bytes + align(n_out * 4)` bytes
+        // reserved by `ensure_arenas`, and `out` holds exactly `n_out` f32s.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 (gpu.y_arena.contents() as *const u8).add(attn_bytes),
@@ -88,12 +93,7 @@ pub fn attend_project(req: &AttnReq, wo_ty: GgmlType, wo: &[u8], n_out: usize) -
 
 /// Shapes the attention kernel is written for.
 pub(super) fn attn_shape_ok(req: &AttnReq) -> bool {
-    req.head_dim == ATTN_HEAD_DIM
-        && req.n_pos > 0
-        && req.group > 0
-        && req.q.len() == req.n_q_heads * req.head_dim
-        && (req.k_off + req.n_pos * req.kv_dim) * 2 <= req.cache.len
-        && (req.v_off + req.n_pos * req.kv_dim) * 2 <= req.cache.len
+    req.head_dim == ATTN_HEAD_DIM && crate::gpu::common::attn_bounds_ok(req, req.cache.len)
 }
 
 /// Encode attention into an open encoder, q already staged in the x arena and
@@ -151,6 +151,9 @@ pub(super) fn encode_attend_from(
 }
 
 pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
+    if req.window.is_some_and(|w| req.pos >= w) {
+        return None;
+    }
     let hd = req.head_dim;
     let rot_dim = req.rope.len() * 2;
     if hd != ATTN_HEAD_DIM || (rot_dim != hd && rot_dim * 2 != hd) {
@@ -189,6 +192,9 @@ pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
     let attn_off = v_arena + align(kv * 4);
     let out_off = attn_off + align(q_dim * 4);
     gpu.ensure_arenas(align(hidden * 4), out_off + align(hidden * 4));
+    // SAFETY: `hidden` is `req.x.len()`, and `ensure_arenas(align(hidden * 4),
+    // ..)` covers those `hidden * 4` bytes; the arena is idle (arena rule,
+    // `Gpu::x_arena`).
     unsafe {
         std::ptr::copy_nonoverlapping(
             req.x.as_ptr() as *const u8,
@@ -315,6 +321,8 @@ pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
         DISPATCHES.fetch_add(6, Ordering::Relaxed);
 
         let mut out = vec![0f32; hidden];
+        // SAFETY: waited above; `out_off + hidden * 4` is within the
+        // `out_off + align(hidden * 4)` bytes reserved for y, `out` has `hidden` f32s.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 (gpu.y_arena.contents() as *const u8).add(out_off),
@@ -354,6 +362,9 @@ pub fn attend_batch(reqs: &[AttnReq]) -> Option<Vec<Vec<f32>>> {
         y_need += align(r.n_q_heads * r.head_dim * 4);
     }
     gpu.ensure_arenas(x_need, y_need);
+    // SAFETY: `x_need` is the sum of every request's aligned `q.len() * 4`, so
+    // each `x_off + q.len() * 4` stays inside the arena `ensure_arenas` sized;
+    // the arena is idle (arena rule, `Gpu::x_arena`).
     unsafe {
         let xp = gpu.x_arena.contents() as *mut u8;
         for (r, (x_off, _)) in reqs.iter().zip(&offs) {
@@ -388,6 +399,8 @@ pub fn attend_batch(reqs: &[AttnReq]) -> Option<Vec<Vec<f32>>> {
             .map(|(r, (_, y_off))| {
                 let n = r.n_q_heads * r.head_dim;
                 let mut v = vec![0f32; n];
+                // SAFETY: the buffer was waited above; `y_off + n * 4` is inside the
+                // `y_need` bytes reserved, built from the same per-request `n` values.
                 unsafe {
                     std::ptr::copy_nonoverlapping(yp.add(*y_off), v.as_mut_ptr() as *mut u8, n * 4);
                 }
@@ -407,6 +420,8 @@ pub fn attend(req: &AttnReq) -> Option<Vec<f32>> {
 
     let out_len = req.n_q_heads * req.head_dim;
     gpu.ensure_arenas(req.q.len() * 4, out_len * 4);
+    // SAFETY: `ensure_arenas(req.q.len() * 4, ..)` just above sized x_arena for
+    // `q`; nothing is in flight on it (arena rule, `Gpu::x_arena`).
     unsafe {
         std::ptr::copy_nonoverlapping(
             req.q.as_ptr() as *const u8,
@@ -434,6 +449,8 @@ pub fn attend(req: &AttnReq) -> Option<Vec<f32>> {
         DISPATCHES.fetch_add(1, Ordering::Relaxed);
 
         let mut out = vec![0f32; out_len];
+        // SAFETY: the buffer was waited above and `ensure_arenas` reserved
+        // `out_len * 4` bytes of y; `out` has `out_len` f32s.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 gpu.y_arena.contents() as *const u8,

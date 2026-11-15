@@ -4,12 +4,8 @@
 use super::*;
 
 pub(crate) fn q8_decode_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| match std::env::var("ALLPAKA_Q8") {
-        // Default on: Q4_K+Q6_K dp4a mmvq. Set ALLPAKA_Q8=0 to force float Metal.
-        Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
-        Err(_) => true,
-    })
+    // Default on: Q4_K+Q6_K dp4a mmvq. Set ALLPAKA_Q8=0 to force float matvec.
+    crate::runtime::get().cuda_q8
 }
 
 pub(super) fn quantize_q8_cfg(n: u32, rows: u32) -> LaunchConfig {
@@ -153,20 +149,7 @@ pub fn launch_permute_q8_m1_qonly(
     Some(())
 }
 
-pub(super) fn launch_qk_q8_matvec(
-    gpu: &mut CudaGpu,
-    ty: GgmlType,
-    chunk: usize,
-    w_off: u64,
-    n_in: usize,
-    n_out: usize,
-    x_ptr: u64,
-    y_ptr: u64,
-    m: usize,
-    add: bool,
-) -> Option<()> {
+pub(super) fn launch_qk_q8_matvec(gpu: &mut CudaGpu, w: DevWeight, io: MatvecPtrs) -> Option<()> {
     let stream = Arc::clone(&gpu.stream);
-    launch_qk_q8_matvec_on(
-        gpu, &stream, ty, chunk, w_off, n_in, n_out, x_ptr, y_ptr, m, add,
-    )
+    launch_qk_q8_matvec_on(gpu, &stream, w, io)
 }

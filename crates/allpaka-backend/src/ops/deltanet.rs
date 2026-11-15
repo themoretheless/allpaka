@@ -40,6 +40,10 @@ pub fn gated_deltanet_step(
         for i in 0..d {
             let row = &mut s[i * d..(i + 1) * d];
             #[cfg(target_arch = "aarch64")]
+            // SAFETY: `row`, `k_h` and `q_h` are all exactly `d` long (slices of the
+            // asserted `state`, `k` and `q` shapes), and every access is at `j < d`
+            // (8-wide while `j + 8 <= d`, then scalar). `row` is a unique sub-borrow of
+            // `state`, so writes through `rp` alias neither `k` nor `q`.
             unsafe {
                 use std::arch::aarch64::*;
                 let vg = vdupq_n_f32(g);

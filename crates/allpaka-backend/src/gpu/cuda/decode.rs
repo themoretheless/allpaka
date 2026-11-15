@@ -147,10 +147,18 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
         let n_in_u = hidden as u32;
         let fmt_u = fmt;
         let rb_u = rb as u32;
-        let embed_cfg = LaunchConfig {
-            grid_dim: (1, crate::gpu::common::embed_row_groups(fmt, hidden), 1),
-            block_dim: (32, 1, 1),
-            shared_mem_bytes: 0,
+        let embed_cfg = if matches!(fmt, 0..=2) && hidden % 256 == 0 {
+            LaunchConfig {
+                grid_dim: (1, n_in_u / 256, 1),
+                block_dim: (32, 1, 1),
+                shared_mem_bytes: 0,
+            }
+        } else {
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (32, 1, 1),
+                shared_mem_bytes: 0,
+            }
         };
         let one_cfg = LaunchConfig {
             grid_dim: (1, 1, 1),
@@ -182,7 +190,7 @@ pub fn decode_greedy_continue(req: &TokenReq, n_more: usize) -> Option<Vec<u32>>
             gpu.decode_graph
                 .as_ref()?
                 .launch()
-                .inspect_err(|e| {
+                .inspect_err(|&e| {
                     eprintln!("cuda: greedy chain graph launch failed: {e}");
                 })
                 .ok()?;
@@ -441,6 +449,9 @@ pub(super) fn decode_token_one(
         }
     }
 
+    if req.layers.iter().any(|l| l.gemma_extras()) {
+        return None;
+    }
     let hidden = x_in.len();
     let hd = req.head_dim;
     let q_dim = req.n_heads * hd;
@@ -454,7 +465,7 @@ pub(super) fn decode_token_one(
         crate::ops::rmsnorm(&mut h, &attn_w, req.eps);
 
         if let Some(g) = &layer.gdn {
-            if std::env::var_os("ALLPAKA_GDN_ZERO").is_none() {
+            if !crate::runtime::get().gdn_zero {
                 let ssm = req.ssm?;
                 let delta = gdn_decode_layer(g, &h, hidden, req.eps, ssm)?;
                 for (a, b) in x.iter_mut().zip(&delta) {
@@ -510,22 +521,14 @@ pub(super) fn decode_token_one(
                 if let Some(wn) = layer.q_norm {
                     crate::ops::rmsnorm(qh, wn, req.eps);
                 }
-                if req.rope_norm {
-                    crate::ops::rope_norm_cached_from_array(&mut qh[..rot_dim], rope);
-                } else {
-                    crate::ops::rope_neox_cached_from_array(&mut qh[..rot_dim], rope);
-                }
+                crate::ops::rope_neox_cached_from_array(&mut qh[..rot_dim], rope);
             }
             for hi in 0..req.n_kv_heads {
                 let kh = &mut k[hi * hd..(hi + 1) * hd];
                 if let Some(wn) = layer.k_norm {
                     crate::ops::rmsnorm(kh, wn, req.eps);
                 }
-                if req.rope_norm {
-                    crate::ops::rope_norm_cached_from_array(&mut kh[..rot_dim], rope);
-                } else {
-                    crate::ops::rope_neox_cached_from_array(&mut kh[..rot_dim], rope);
-                }
+                crate::ops::rope_neox_cached_from_array(&mut kh[..rot_dim], rope);
             }
 
             store_kv(req.cache, &k, layer.k_off, pos, req.kv_dim)?;
@@ -612,7 +615,7 @@ pub(super) fn decode_token_one(
                         s.0 /= sum;
                     }
                 }
-                scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                scores.sort_by(|a, b| b.0.total_cmp(&a.0));
                 let mut picks: Vec<(usize, f32)> = scores
                     .into_iter()
                     .take(*n_used)
@@ -688,7 +691,7 @@ pub(super) fn decode_token_one(
         let idx = logits
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .map(|(i, _)| i as u32)
             .unwrap_or(0);
         Some(TokenOut::Rows {
@@ -699,7 +702,7 @@ pub(super) fn decode_token_one(
         let idx = logits
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .map(|(i, _)| i as u32)
             .unwrap_or(0);
         Some(TokenOut::Argmax(idx))

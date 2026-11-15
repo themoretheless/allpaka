@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),start=source.indexOf('async function previewSelectedPrompt('),end=source.indexOf('let promptPlaygroundStarting=',start),pending=[];
+const source=appSource(),start=source.indexOf('async function previewSelectedPrompt('),end=source.indexOf('let promptPlaygroundStarting=',start),pending=[];
 const panel={children:[],replaceChildren(...rows){this.children=rows}},elements={project:{value:'p'},'evaluation-dialog':{open:true},'prompt-preview-input':{value:'Question'},'prompt-preview-contexts':{value:'One\n\nTwo'},'prompt-preview-result':panel,'prompt-preview-show':{}};
 const prompt={id:'prompt',version:2,sha256:'a'.repeat(64)},context={evaluationPrompt:prompt,evaluationProject:'p',promptPreviewEpoch:0,encodeURIComponent,$:id=>elements[id],node:(tag,text)=>({tag,text}),api:(path,body)=>new Promise(resolve=>pending.push({path,body,resolve}))};vm.createContext(context);vm.runInContext(source.slice(start,end),context);
 const receipt=()=>({kind:'prompt_preview',project_id:'p',prompt_id:'prompt',prompt_version:2,prompt_sha256:prompt.sha256,provider_calls:0,saved:false,messages:[{role:'system',content:'System'},{role:'user',content:'Rendered question'}]});

@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 const begin=source.indexOf('function firstTextRows('),end=source.indexOf('function timeSeriesView(',begin);
 const context={node:(_,text)=>({textContent:text})};vm.createContext(context);vm.runInContext(source.slice(begin,end),context);
 const text=latency=>context.firstTextRows(latency).map(row=>row.textContent).join('\n');

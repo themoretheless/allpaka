@@ -82,12 +82,26 @@ pub(crate) fn find_header_end(buf: &[u8]) -> Option<usize> {
 }
 
 pub(crate) fn respond(stream: &mut TcpStream, status: u16, body: &Value) -> Result<()> {
+    respond_with_headers(stream, status, &[], body)
+}
+
+/// [`respond`] with extra headers (`Allow` on a 405).
+pub(crate) fn respond_with_headers(
+    stream: &mut TcpStream,
+    status: u16,
+    headers: &[(&str, &str)],
+    body: &Value,
+) -> Result<()> {
     let text = body.to_string();
     let reason = if status == 200 { "OK" } else { "Error" };
+    let extra: String = headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect();
     let response = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n\
          Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Headers: Content-Type\r\n\
+         Access-Control-Allow-Headers: Content-Type\r\n{extra}\
          Content-Length: {}\r\nConnection: close\r\n\r\n{text}",
         text.len()
     );

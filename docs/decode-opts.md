@@ -83,22 +83,8 @@ Ship rule: keep `MV_ID` default ON only if cool GLM decode ≥ llama; otherwise
 
 ## Still open
 
-- In-model mm TFLOPS gap (peak matches llama; in-graph effective still lower).
-- MTP economics on MoE (verify traffic scales with `m`).
-- **MEGA / `moe_ffn_mega` — disabled in code until redesign.** Root cause
-  (M4 Max): in-kernel `mega_sync` used a **device `atomic_uint` busy-wait**
-  across threadgroups, soft-locking the GPU scheduler and freezing the Mac.
-  The spin path is removed and `mega_enabled()` always returns false (env
-  cannot turn it back on). Do not revive casually; need encoder-barrier
-  stage splits or equivalent + a test that cannot wedge the GPU.
-- **Decode without MEGA:** qwen3-30b ≈ 698 dispatches/tok; GLM-Air ≈ 803/tok
-  (shared expert). Experts dominate (`ALLPAKA_SKIP=experts`). Safe next levers
-  are matvec throughput (geometry / ISA), not serial fusions (RFUSE/GUFUSE
-  tuition). Do **not** re-enable `ALLPAKA_DECODE_GUFUSE` / multi-TG device
-  sync without a Mac-safe harness. Judge progress on cool-machine sustained
-  A/B, not hot process-paired airbug.
-- Absolute tok/s drift with thermal state (both engines); prefer Δ% after
-  warmup. GLM 2026-09-12 warm: prefill ≈ llama parity, decode ~0.82×
-  (`docs/benchmarks/glm45-air-m4-max-pending.md`).
-- Confirm Q5/Q8 `_mv` + SWFUSE + ATTN_MV on qwen35: **done** (warm 2026-09-12,
-  `docs/benchmarks/qwen35-35b-m4-max-pending.md` — no overrides, GPU 32/32).
+Tracked in [roadmap.md](roadmap.md): GLM decode and matvec throughput — P4,
+in-graph mm gap — P6, MTP economics and MEGA — «Снято / не делать без новых
+данных». MEGA stays disabled (`mega_enabled()` is always false): its in-kernel
+`mega_sync` busy-waited on a device `atomic_uint` across threadgroups and froze
+the Mac. Judge progress on cool-machine sustained A/B, not hot paired runs.

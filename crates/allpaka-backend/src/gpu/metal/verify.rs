@@ -269,6 +269,13 @@ pub(super) fn encode_verify_tokens(
     let total = amax_at + align(m * (64 * 2 + 1));
     gpu.ensure_arenas(4096, total * 4);
 
+    // SAFETY: `ensure_arenas(4096, total * 4)` reserved all offsets below
+    // `total`. `req.x.len() == m * hidden` (the caller checked `len % m == 0`
+    // and `hidden` is `len / m`), matching the `align(m * hidden)` x and delta
+    // regions; `wts_at + i * max_slots + n_used` is inside the
+    // `align(m * max_slots)` weights region since every MoE layer has
+    // `n_used + 1 == max_slots` when it carries a shared expert. The y arena is
+    // idle (arena rule, `Gpu::x_arena`).
     unsafe {
         let yp = gpu.y_arena.contents() as *mut f32;
         std::ptr::copy_nonoverlapping(req.x.as_ptr(), yp.add(x_at), req.x.len());
@@ -350,13 +357,21 @@ pub(super) fn encode_verify_tokens(
         };
 
         let mut dispatched = 0u64;
-        let vdbg = std::env::var_os("ALLPAKA_VERIFY_DEBUG").is_some();
+        let vdbg = crate::runtime::get().metal_verify_debug;
         for (li, (l, refs)) in req.layers.iter().zip(layers).enumerate() {
             if vdbg {
                 enc.end_encoding();
                 cmd.commit();
                 cmd.wait_until_completed();
                 let yp = gpu.y_arena.contents() as *const f32;
+                // FIXME(soundness): (debug-only, ALLPAKA_VERIFY_DEBUG) `cmd` was just committed and
+                // waited, so the GPU is idle and these shared slices only read. `x0`, `d0`
+                // and `h0` stay inside their `align(m * hidden)` regions. But the layer-1
+                // dump assumes the shape it was written for: `wts_at + 16`, `logits_at + 256`
+                // and `downo_at + 9 * hidden` are not bounded by their regions (they spill
+                // into later ones), and nothing proves they stay below `total` for every
+                // model. Bound each read by its region size (`m * max_slots`,
+                // `m * max_expert`, `m * max_slots * hidden`) to make it sound.
                 unsafe {
                     let x0 = std::slice::from_raw_parts(yp.add(x_at), hidden);
                     let d0 = std::slice::from_raw_parts(yp.add(delta_at), hidden);
@@ -421,7 +436,11 @@ pub(super) fn encode_verify_tokens(
             if let Some(g) = &refs.gdn {
                 // Debug kill switch, mirrors the CPU path's gdn_forward:
                 // zero the branch output (into delta) to isolate bugs.
-                if std::env::var_os("ALLPAKA_GDN_ZERO").is_some() {
+                if crate::runtime::get().gdn_zero {
+                    // SAFETY: (debug kill switch) `delta_at + m * hidden` is the delta region
+                    // inside `total`. The write happens while encoding, before `cmd` is
+                    // committed (or right after the per-layer debug wait), so no GPU work is
+                    // running on the arena.
                     unsafe {
                         std::ptr::write_bytes(
                             (gpu.y_arena.contents() as *mut f32).add(delta_at),
@@ -812,7 +831,11 @@ pub(super) fn encode_verify_tokens(
                 }
                 // Debug kill switch, mirrors the CPU path: zero the
                 // attention branch output (into delta).
-                if std::env::var_os("ALLPAKA_ATTN_ZERO").is_some() {
+                if crate::runtime::get().attn_zero {
+                    // SAFETY: (debug kill switch) `delta_at + m * hidden` is the delta region
+                    // inside `total`. The write happens while encoding, before `cmd` is
+                    // committed (or right after the per-layer debug wait), so no GPU work is
+                    // running on the arena.
                     unsafe {
                         std::ptr::write_bytes(
                             (gpu.y_arena.contents() as *mut f32).add(delta_at),
@@ -841,7 +864,11 @@ pub(super) fn encode_verify_tokens(
             }
             // Debug kill switch, mirrors the CPU path's MOE_ZERO: zero the
             // FFN output (into delta), skipping the whole stage.
-            if std::env::var_os("ALLPAKA_MOE_ZERO").is_some() {
+            if crate::runtime::get().moe_zero {
+                // SAFETY: (debug kill switch) `delta_at + m * hidden` is the delta region
+                // inside `total`. The write happens while encoding, before `cmd` is
+                // committed (or right after the per-layer debug wait), so no GPU work is
+                // running on the arena.
                 unsafe {
                     std::ptr::write_bytes(
                         (gpu.y_arena.contents() as *mut f32).add(delta_at),
@@ -994,7 +1021,7 @@ pub(super) fn encode_verify_tokens(
                     }
                     let a = hidden as u32;
                     let b = *expert_ffn as u32;
-                    if std::env::var_os("ALLPAKA_ROWS_DEBUG").is_some() && li == 0 {
+                    if crate::runtime::get().rows_debug && li == 0 {
                         eprintln!("verify rows pipelines: {}", t_moe_rows[li].is_some());
                     }
                     if let Some(rs) = &t_moe_rows[li] {
@@ -1286,6 +1313,10 @@ pub(super) fn encode_verify_tokens(
 
         let mut argmax = Vec::with_capacity(m);
         let mut hidden_rows = vec![0f32; m * hidden];
+        // SAFETY: `cmd` was committed and waited. Row `i`'s winner sits at
+        // `amax_at + i * 129 + 128`, inside the `align(m * (64 * 2 + 1))` argmax
+        // region (f32-unit offset, so the u32 read is aligned), and `h_at` heads the
+        // `align(m * hidden)` region copied into `hidden_rows` of `m * hidden`.
         unsafe {
             let yp = gpu.y_arena.contents() as *const f32;
             for i in 0..m {

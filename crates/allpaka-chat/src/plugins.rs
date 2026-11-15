@@ -58,11 +58,7 @@ pub struct PluginState {
 pub type Registry = Arc<RwLock<HashMap<String, PluginState>>>;
 
 pub fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() < 80
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    crate::storage::valid_id(id)
 }
 
 pub fn validate(config: &PluginConfig) -> Result<()> {
@@ -308,106 +304,114 @@ pub(crate) fn default_true() -> bool {
     true
 }
 pub(crate) async fn list_plugins(State(app): State<App>) -> Json<Value> {
-    let registry = app.plugins.read().unwrap();
-    let plugins: Vec<Value> = registry
-        .values()
-        .map(|state| {
-            json!({
-                "id": state.config.id,
-                "name": state.config.name,
-                "kind": state.config.kind,
-                "url": state.config.url,
-                "command": state.config.command,
-                "args": state.config.args,
-                "enabled": state.config.enabled,
-                "instructions": state.config.instructions,
-                "unlocks_tool": state.config.unlocks_tool,
-                "connected": state.client.is_some(),
-                "tools": state.client.as_ref().map(|c| c.tools.len()).unwrap_or(0),
-                "resources": state.client.as_ref().map(|c| c.resources.len()).unwrap_or(0),
-                "resource_templates": state.client.as_ref().map(|c| c.resource_templates.len()).unwrap_or(0),
-                "error": state.error,
+    crate::blocking(move || {
+        let registry = app.plugins.read().unwrap();
+        let plugins: Vec<Value> = registry
+            .values()
+            .map(|state| {
+                json!({
+                    "id": state.config.id,
+                    "name": state.config.name,
+                    "kind": state.config.kind,
+                    "url": state.config.url,
+                    "command": state.config.command,
+                    "args": state.config.args,
+                    "enabled": state.config.enabled,
+                    "instructions": state.config.instructions,
+                    "unlocks_tool": state.config.unlocks_tool,
+                    "connected": state.client.is_some(),
+                    "tools": state.client.as_ref().map(|c| c.tools.len()).unwrap_or(0),
+                    "resources": state.client.as_ref().map(|c| c.resources.len()).unwrap_or(0),
+                    "resource_templates": state.client.as_ref().map(|c| c.resource_templates.len()).unwrap_or(0),
+                    "error": state.error,
+                })
             })
-        })
-        .collect();
-    Json(json!({"plugins": plugins}))
+            .collect();
+        Json(json!({"plugins": plugins}))
+    })
+    .await
 }
 pub(crate) async fn save_plugin(
     State(app): State<App>,
     Json(mut input): Json<PluginInput>,
 ) -> ApiResult<Value> {
-    if input.id.trim().is_empty() {
-        input.id = format!(
-            "plugin-{:x}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-    }
-    let kind = match input.kind.as_deref() {
-        Some("skill") => PluginKind::Skill,
-        Some("mcp_stdio") => PluginKind::McpStdio,
-        _ => PluginKind::Mcp,
-    };
-    let config = PluginConfig {
-        id: input.id.trim().to_string(),
-        name: input.name.trim().to_string(),
-        kind: kind.clone(),
-        url: input.url.trim().to_string(),
-        command: input.command.map(|c| c.trim().to_string()),
-        args: input.args,
-        env: input.env,
-        enabled: input.enabled,
-        instructions: input.instructions,
-        unlocks_tool: input.unlocks_tool,
-    };
-    validate(&config).map_err(crate::bad_request)?;
-    {
-        let mut registry = app.plugins.write().unwrap();
-        let mut configs: Vec<PluginConfig> = registry
-            .values()
-            .filter(|state| state.config.id != config.id)
-            .map(|state| state.config.clone())
-            .collect();
-        configs.push(config.clone());
-        save(app.data.as_path(), &configs).map_err(crate::internal)?;
-        match registry.get_mut(&config.id) {
-            Some(state) => {
-                let changed = state.config.url != config.url
-                    || state.config.kind != config.kind
-                    || state.config.command != config.command
-                    || state.config.args != config.args
-                    || state.config.env != config.env
-                    || state.config.instructions != config.instructions;
-                state.config = config.clone();
-                if changed || !config.enabled {
-                    state.client = None;
-                    state.error = None;
+    crate::blocking(move || {
+        if input.id.trim().is_empty() {
+            input.id = format!(
+                "plugin-{:x}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+        }
+        let kind = match input.kind.as_deref() {
+            Some("skill") => PluginKind::Skill,
+            Some("mcp_stdio") => PluginKind::McpStdio,
+            _ => PluginKind::Mcp,
+        };
+        let config = PluginConfig {
+            id: input.id.trim().to_string(),
+            name: input.name.trim().to_string(),
+            kind: kind.clone(),
+            url: input.url.trim().to_string(),
+            command: input.command.map(|c| c.trim().to_string()),
+            args: input.args,
+            env: input.env,
+            enabled: input.enabled,
+            instructions: input.instructions,
+            unlocks_tool: input.unlocks_tool,
+        };
+        validate(&config).map_err(crate::bad_request)?;
+        {
+            // Persist first, under the write lock, so a failed save leaves the
+            // registry unchanged and concurrent saves serialize.
+            let mut registry = app.plugins.write().unwrap();
+            let mut configs: Vec<PluginConfig> = registry
+                .values()
+                .filter(|state| state.config.id != config.id)
+                .map(|state| state.config.clone())
+                .collect();
+            configs.push(config.clone());
+            save(app.data.as_path(), &configs).map_err(crate::internal)?;
+            match registry.get_mut(&config.id) {
+                Some(state) => {
+                    let changed = state.config.url != config.url
+                        || state.config.kind != config.kind
+                        || state.config.command != config.command
+                        || state.config.args != config.args
+                        || state.config.env != config.env
+                        || state.config.instructions != config.instructions;
+                    state.config = config.clone();
+                    if changed || !config.enabled {
+                        state.client = None;
+                        state.error = None;
+                    }
+                }
+                None => {
+                    registry.insert(
+                        config.id.clone(),
+                        PluginState {
+                            config: config.clone(),
+                            client: None,
+                            error: None,
+                        },
+                    );
                 }
             }
-            None => {
-                registry.insert(
-                    config.id.clone(),
-                    PluginState {
-                        config: config.clone(),
-                        client: None,
-                        error: None,
-                    },
-                );
-            }
         }
-    }
-    if config.enabled {
-        spawn_plugin_connect(app.clone(), config.id.clone());
-    }
-    Ok(Json(json!({"id": config.id})))
+        if config.enabled {
+            spawn_plugin_connect(app.clone(), config.id.clone());
+        }
+        Ok(Json(json!({"id": config.id})))
+    })
+    .await
 }
 pub(crate) async fn delete_plugin(
     State(app): State<App>,
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<Value> {
-    {
+    crate::blocking(move || {
         let mut registry = app.plugins.write().unwrap();
         if !registry.contains_key(&id) {
             return Err(error(StatusCode::NOT_FOUND, "Plugin not found"));
@@ -419,26 +423,31 @@ pub(crate) async fn delete_plugin(
             .collect();
         save(app.data.as_path(), &configs).map_err(crate::internal)?;
         registry.remove(&id);
-    }
-    Ok(Json(json!({"deleted": id})))
+        drop(registry);
+        Ok(Json(json!({"deleted": id})))
+    })
+    .await
 }
 pub(crate) async fn reload_plugin(
     State(app): State<App>,
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<Value> {
-    let enabled = {
-        let mut registry = app.plugins.write().unwrap();
-        let Some(state) = registry.get_mut(&id) else {
-            return Err(error(StatusCode::NOT_FOUND, "Plugin not found"));
+    crate::blocking(move || {
+        let enabled = {
+            let mut registry = app.plugins.write().unwrap();
+            let Some(state) = registry.get_mut(&id) else {
+                return Err(error(StatusCode::NOT_FOUND, "Plugin not found"));
+            };
+            state.client = None;
+            state.error = None;
+            state.config.enabled
         };
-        state.client = None;
-        state.error = None;
-        state.config.enabled
-    };
-    if enabled {
-        spawn_plugin_connect(app.clone(), id.clone());
-    }
-    Ok(Json(json!({"id": id, "connecting": enabled})))
+        if enabled {
+            spawn_plugin_connect(app.clone(), id.clone());
+        }
+        Ok(Json(json!({"id": id, "connecting": enabled})))
+    })
+    .await
 }
 
 pub(crate) fn manager_schema() -> Value {

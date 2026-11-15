@@ -1,0 +1,617 @@
+{
+ "about": "Guardrail cases shared by the Rust store (allpaka-chat guardrail_policies) and the Python SDK (allpaka_guardrails); both must reproduce passed, per-rule results and policy_sha256.",
+ "cases": [
+  {
+   "name": "bytes",
+   "rules": [
+    {
+     "id": "min",
+     "kind": "min_bytes",
+     "value": 3
+    },
+    {
+     "id": "max",
+     "kind": "max_bytes",
+     "value": 10
+    }
+   ],
+   "policy_sha256": "00110f6f33dbe65189da0178319f23a9bbb902f664ed29bd908b211c74155b8a",
+   "stage": "input",
+   "text": "ab",
+   "passed": false,
+   "rule_results": [
+    false,
+    true
+   ]
+  },
+  {
+   "name": "bytes",
+   "rules": [
+    {
+     "id": "min",
+     "kind": "min_bytes",
+     "value": 3
+    },
+    {
+     "id": "max",
+     "kind": "max_bytes",
+     "value": 10
+    }
+   ],
+   "policy_sha256": "00110f6f33dbe65189da0178319f23a9bbb902f664ed29bd908b211c74155b8a",
+   "stage": "input",
+   "text": "abc",
+   "passed": true,
+   "rule_results": [
+    true,
+    true
+   ]
+  },
+  {
+   "name": "bytes",
+   "rules": [
+    {
+     "id": "min",
+     "kind": "min_bytes",
+     "value": 3
+    },
+    {
+     "id": "max",
+     "kind": "max_bytes",
+     "value": 10
+    }
+   ],
+   "policy_sha256": "00110f6f33dbe65189da0178319f23a9bbb902f664ed29bd908b211c74155b8a",
+   "stage": "input",
+   "text": "ёжик",
+   "passed": true,
+   "rule_results": [
+    true,
+    true
+   ]
+  },
+  {
+   "name": "bytes",
+   "rules": [
+    {
+     "id": "min",
+     "kind": "min_bytes",
+     "value": 3
+    },
+    {
+     "id": "max",
+     "kind": "max_bytes",
+     "value": 10
+    }
+   ],
+   "policy_sha256": "00110f6f33dbe65189da0178319f23a9bbb902f664ed29bd908b211c74155b8a",
+   "stage": "input",
+   "text": "0123456789X",
+   "passed": false,
+   "rule_results": [
+    true,
+    false
+   ]
+  },
+  {
+   "name": "bytes",
+   "rules": [
+    {
+     "id": "min",
+     "kind": "min_bytes",
+     "value": 3
+    },
+    {
+     "id": "max",
+     "kind": "max_bytes",
+     "value": 10
+    }
+   ],
+   "policy_sha256": "00110f6f33dbe65189da0178319f23a9bbb902f664ed29bd908b211c74155b8a",
+   "stage": "output",
+   "text": "ab",
+   "passed": false,
+   "rule_results": [
+    false,
+    true
+   ]
+  },
+  {
+   "name": "bytes",
+   "rules": [
+    {
+     "id": "min",
+     "kind": "min_bytes",
+     "value": 3
+    },
+    {
+     "id": "max",
+     "kind": "max_bytes",
+     "value": 10
+    }
+   ],
+   "policy_sha256": "00110f6f33dbe65189da0178319f23a9bbb902f664ed29bd908b211c74155b8a",
+   "stage": "output",
+   "text": "abc",
+   "passed": true,
+   "rule_results": [
+    true,
+    true
+   ]
+  },
+  {
+   "name": "bytes",
+   "rules": [
+    {
+     "id": "min",
+     "kind": "min_bytes",
+     "value": 3
+    },
+    {
+     "id": "max",
+     "kind": "max_bytes",
+     "value": 10
+    }
+   ],
+   "policy_sha256": "00110f6f33dbe65189da0178319f23a9bbb902f664ed29bd908b211c74155b8a",
+   "stage": "output",
+   "text": "ёжик",
+   "passed": true,
+   "rule_results": [
+    true,
+    true
+   ]
+  },
+  {
+   "name": "bytes",
+   "rules": [
+    {
+     "id": "min",
+     "kind": "min_bytes",
+     "value": 3
+    },
+    {
+     "id": "max",
+     "kind": "max_bytes",
+     "value": 10
+    }
+   ],
+   "policy_sha256": "00110f6f33dbe65189da0178319f23a9bbb902f664ed29bd908b211c74155b8a",
+   "stage": "output",
+   "text": "0123456789X",
+   "passed": false,
+   "rule_results": [
+    true,
+    false
+   ]
+  },
+  {
+   "name": "substrings",
+   "rules": [
+    {
+     "id": "need",
+     "kind": "required_substrings",
+     "value": [
+      "Привет",
+      "ready"
+     ]
+    },
+    {
+     "id": "ban",
+     "kind": "forbidden_substrings",
+     "value": [
+      "secret"
+     ]
+    }
+   ],
+   "policy_sha256": "2d7c298d114e58f0c445ae84e9f03ad835f21d64c56c6a51585f011db738dbc0",
+   "stage": "input",
+   "text": "Привет: ready",
+   "passed": true,
+   "rule_results": [
+    true,
+    true
+   ]
+  },
+  {
+   "name": "substrings",
+   "rules": [
+    {
+     "id": "need",
+     "kind": "required_substrings",
+     "value": [
+      "Привет",
+      "ready"
+     ]
+    },
+    {
+     "id": "ban",
+     "kind": "forbidden_substrings",
+     "value": [
+      "secret"
+     ]
+    }
+   ],
+   "policy_sha256": "2d7c298d114e58f0c445ae84e9f03ad835f21d64c56c6a51585f011db738dbc0",
+   "stage": "input",
+   "text": "привет ready",
+   "passed": false,
+   "rule_results": [
+    false,
+    true
+   ]
+  },
+  {
+   "name": "substrings",
+   "rules": [
+    {
+     "id": "need",
+     "kind": "required_substrings",
+     "value": [
+      "Привет",
+      "ready"
+     ]
+    },
+    {
+     "id": "ban",
+     "kind": "forbidden_substrings",
+     "value": [
+      "secret"
+     ]
+    }
+   ],
+   "policy_sha256": "2d7c298d114e58f0c445ae84e9f03ad835f21d64c56c6a51585f011db738dbc0",
+   "stage": "input",
+   "text": "Привет ready secret",
+   "passed": false,
+   "rule_results": [
+    true,
+    false
+   ]
+  },
+  {
+   "name": "substrings",
+   "rules": [
+    {
+     "id": "need",
+     "kind": "required_substrings",
+     "value": [
+      "Привет",
+      "ready"
+     ]
+    },
+    {
+     "id": "ban",
+     "kind": "forbidden_substrings",
+     "value": [
+      "secret"
+     ]
+    }
+   ],
+   "policy_sha256": "2d7c298d114e58f0c445ae84e9f03ad835f21d64c56c6a51585f011db738dbc0",
+   "stage": "input",
+   "text": "",
+   "passed": false,
+   "rule_results": [
+    false,
+    true
+   ]
+  },
+  {
+   "name": "substrings",
+   "rules": [
+    {
+     "id": "need",
+     "kind": "required_substrings",
+     "value": [
+      "Привет",
+      "ready"
+     ]
+    },
+    {
+     "id": "ban",
+     "kind": "forbidden_substrings",
+     "value": [
+      "secret"
+     ]
+    }
+   ],
+   "policy_sha256": "2d7c298d114e58f0c445ae84e9f03ad835f21d64c56c6a51585f011db738dbc0",
+   "stage": "output",
+   "text": "Привет: ready",
+   "passed": true,
+   "rule_results": [
+    true,
+    true
+   ]
+  },
+  {
+   "name": "substrings",
+   "rules": [
+    {
+     "id": "need",
+     "kind": "required_substrings",
+     "value": [
+      "Привет",
+      "ready"
+     ]
+    },
+    {
+     "id": "ban",
+     "kind": "forbidden_substrings",
+     "value": [
+      "secret"
+     ]
+    }
+   ],
+   "policy_sha256": "2d7c298d114e58f0c445ae84e9f03ad835f21d64c56c6a51585f011db738dbc0",
+   "stage": "output",
+   "text": "привет ready",
+   "passed": false,
+   "rule_results": [
+    false,
+    true
+   ]
+  },
+  {
+   "name": "substrings",
+   "rules": [
+    {
+     "id": "need",
+     "kind": "required_substrings",
+     "value": [
+      "Привет",
+      "ready"
+     ]
+    },
+    {
+     "id": "ban",
+     "kind": "forbidden_substrings",
+     "value": [
+      "secret"
+     ]
+    }
+   ],
+   "policy_sha256": "2d7c298d114e58f0c445ae84e9f03ad835f21d64c56c6a51585f011db738dbc0",
+   "stage": "output",
+   "text": "Привет ready secret",
+   "passed": false,
+   "rule_results": [
+    true,
+    false
+   ]
+  },
+  {
+   "name": "substrings",
+   "rules": [
+    {
+     "id": "need",
+     "kind": "required_substrings",
+     "value": [
+      "Привет",
+      "ready"
+     ]
+    },
+    {
+     "id": "ban",
+     "kind": "forbidden_substrings",
+     "value": [
+      "secret"
+     ]
+    }
+   ],
+   "policy_sha256": "2d7c298d114e58f0c445ae84e9f03ad835f21d64c56c6a51585f011db738dbc0",
+   "stage": "output",
+   "text": "",
+   "passed": false,
+   "rule_results": [
+    false,
+    true
+   ]
+  },
+  {
+   "name": "json",
+   "rules": [
+    {
+     "id": "json",
+     "kind": "json_valid",
+     "value": true
+    }
+   ],
+   "policy_sha256": "7cdfd5a3d5658f0ef5158f969ecec70edf242f81a4f0643671f143c8bc4b05b0",
+   "stage": "input",
+   "text": "{\"a\":1}",
+   "passed": true,
+   "rule_results": [
+    true
+   ]
+  },
+  {
+   "name": "json",
+   "rules": [
+    {
+     "id": "json",
+     "kind": "json_valid",
+     "value": true
+    }
+   ],
+   "policy_sha256": "7cdfd5a3d5658f0ef5158f969ecec70edf242f81a4f0643671f143c8bc4b05b0",
+   "stage": "input",
+   "text": "{\"a\":1,\"a\":2}",
+   "passed": false,
+   "rule_results": [
+    false
+   ]
+  },
+  {
+   "name": "json",
+   "rules": [
+    {
+     "id": "json",
+     "kind": "json_valid",
+     "value": true
+    }
+   ],
+   "policy_sha256": "7cdfd5a3d5658f0ef5158f969ecec70edf242f81a4f0643671f143c8bc4b05b0",
+   "stage": "input",
+   "text": "[1, 2.5e3]",
+   "passed": true,
+   "rule_results": [
+    true
+   ]
+  },
+  {
+   "name": "json",
+   "rules": [
+    {
+     "id": "json",
+     "kind": "json_valid",
+     "value": true
+    }
+   ],
+   "policy_sha256": "7cdfd5a3d5658f0ef5158f969ecec70edf242f81a4f0643671f143c8bc4b05b0",
+   "stage": "input",
+   "text": "NaN",
+   "passed": false,
+   "rule_results": [
+    false
+   ]
+  },
+  {
+   "name": "json",
+   "rules": [
+    {
+     "id": "json",
+     "kind": "json_valid",
+     "value": true
+    }
+   ],
+   "policy_sha256": "7cdfd5a3d5658f0ef5158f969ecec70edf242f81a4f0643671f143c8bc4b05b0",
+   "stage": "input",
+   "text": "{\"a\":Infinity}",
+   "passed": false,
+   "rule_results": [
+    false
+   ]
+  },
+  {
+   "name": "json",
+   "rules": [
+    {
+     "id": "json",
+     "kind": "json_valid",
+     "value": true
+    }
+   ],
+   "policy_sha256": "7cdfd5a3d5658f0ef5158f969ecec70edf242f81a4f0643671f143c8bc4b05b0",
+   "stage": "input",
+   "text": "not json",
+   "passed": false,
+   "rule_results": [
+    false
+   ]
+  },
+  {
+   "name": "json",
+   "rules": [
+    {
+     "id": "json",
+     "kind": "json_valid",
+     "value": true
+    }
+   ],
+   "policy_sha256": "7cdfd5a3d5658f0ef5158f969ecec70edf242f81a4f0643671f143c8bc4b05b0",
+   "stage": "output",
+   "text": "{\"a\":1}",
+   "passed": true,
+   "rule_results": [
+    true
+   ]
+  },
+  {
+   "name": "json",
+   "rules": [
+    {
+     "id": "json",
+     "kind": "json_valid",
+     "value": true
+    }
+   ],
+   "policy_sha256": "7cdfd5a3d5658f0ef5158f969ecec70edf242f81a4f0643671f143c8bc4b05b0",
+   "stage": "output",
+   "text": "{\"a\":1,\"a\":2}",
+   "passed": false,
+   "rule_results": [
+    false
+   ]
+  },
+  {
+   "name": "json",
+   "rules": [
+    {
+     "id": "json",
+     "kind": "json_valid",
+     "value": true
+    }
+   ],
+   "policy_sha256": "7cdfd5a3d5658f0ef5158f969ecec70edf242f81a4f0643671f143c8bc4b05b0",
+   "stage": "output",
+   "text": "[1, 2.5e3]",
+   "passed": true,
+   "rule_results": [
+    true
+   ]
+  },
+  {
+   "name": "json",
+   "rules": [
+    {
+     "id": "json",
+     "kind": "json_valid",
+     "value": true
+    }
+   ],
+   "policy_sha256": "7cdfd5a3d5658f0ef5158f969ecec70edf242f81a4f0643671f143c8bc4b05b0",
+   "stage": "output",
+   "text": "NaN",
+   "passed": false,
+   "rule_results": [
+    false
+   ]
+  },
+  {
+   "name": "json",
+   "rules": [
+    {
+     "id": "json",
+     "kind": "json_valid",
+     "value": true
+    }
+   ],
+   "policy_sha256": "7cdfd5a3d5658f0ef5158f969ecec70edf242f81a4f0643671f143c8bc4b05b0",
+   "stage": "output",
+   "text": "{\"a\":Infinity}",
+   "passed": false,
+   "rule_results": [
+    false
+   ]
+  },
+  {
+   "name": "json",
+   "rules": [
+    {
+     "id": "json",
+     "kind": "json_valid",
+     "value": true
+    }
+   ],
+   "policy_sha256": "7cdfd5a3d5658f0ef5158f969ecec70edf242f81a4f0643671f143c8bc4b05b0",
+   "stage": "output",
+   "text": "not json",
+   "passed": false,
+   "rule_results": [
+    false
+   ]
+  }
+ ]
+}

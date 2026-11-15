@@ -1,7 +1,8 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 class Element{constructor(text){this.textContent=text;this.children=[];this.value='';this.dataset={};}append(...items){this.children.push(...items);}replaceChildren(...items){this.children=items;}setAttribute(){}}
 const context={node:(_,text)=>new Element(text),evaluationLabels:{completed:'Завершено'},metricLabels:{}};vm.createContext(context);
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('let experimentSamplesView='),source.indexOf('function showEvaluationRun(')),context);
+const source=appSource();vm.runInContext(between(source,'let experimentSamplesView=','function showEvaluationRun('),context);
 const items=[{sample_id:'one',status:'completed',output:'Привет мир',scores:{exact_match:1}},
 {sample_id:'broken',status:'failed',error:'provider_error',output:'partial',scores:{}},
 {sample_id:'waiting',status:'pending',scores:{}},{sample_id:'short',status:'completed',output_truncated:true,output:'<script>literal</script>',scores:{}}];

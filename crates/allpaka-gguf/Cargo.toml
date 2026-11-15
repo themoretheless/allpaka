@@ -9,3 +9,6 @@ description = "GGUF reading for allpaka: metadata, tensor table, mmap'd data, de
 allpaka-dtype.workspace = true
 memmap2.workspace = true
 sha2 = "0.11"
+
+[dev-dependencies]
+anyhow.workspace = true

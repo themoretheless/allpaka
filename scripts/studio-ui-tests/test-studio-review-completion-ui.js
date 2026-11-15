@@ -1,6 +1,7 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 const pending=[];function node(tag,text){return {tag,text,value:'',children:[],append(...x){this.children.push(...x)},replaceChildren(...x){this.children=x},setAttribute(){}};}
-const context={node,Option:function(text,value){return {text,value}},encodeURIComponent,api:(path,body)=>new Promise((resolve,reject)=>pending.push({path,body,resolve,reject}))};vm.createContext(context);const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');vm.runInContext(source.slice(source.indexOf('function reviewQueueCompletionPanel('),source.indexOf('let reviewQueueEpoch=')),context);
+const context={node,Option:function(text,value){return {text,value}},encodeURIComponent,api:(path,body)=>new Promise((resolve,reject)=>pending.push({path,body,resolve,reject}))};vm.createContext(context);const source=appSource();vm.runInContext(between(source,'function reviewQueueCompletionPanel(','let reviewQueueEpoch='),context);
 const queue={id:'q',project_id:'p',version:3,targets:[{trace_id:'t',span_id:1}],assignments:{0:'Reviewer'},completions:{}};
 const annotation={id:'a',author:'Reviewer',span_id:1,deleted:false,comment:'Check saved evidence'};
 (async()=>{let current=true,accepted;const panel=context.reviewQueueCompletionPanel(queue,0,()=>current,q=>accepted=q),[label,version,load,choices,preview,finish,message]=panel.children;

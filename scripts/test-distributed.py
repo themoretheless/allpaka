@@ -121,6 +121,46 @@ def main():
             body = {'model':'fixture','messages':[{'role':'user','content':'hello'}],'temperature':0,'max_tokens':4}
             status, reference = call(local,body)
             assert status == 200, reference
+            # Whole-model serve with tools: the streamed text equals the plain reply.
+            tools = [{'type':'function','function':{'name':'lookup','parameters':{'type':'object','properties':{'q':{'type':'string'}},'required':['q']}}}]
+            status, with_tools = call(local,dict(body,tools=tools))
+            assert status == 200, with_tools
+            with_tools = json.loads(with_tools)['choices'][0]
+            status, tool_stream = call(local,dict(body,tools=tools,stream=True))
+            assert status == 200 and 'data: [DONE]' in tool_stream, tool_stream
+            tool_events = [json.loads(line[6:]) for line in tool_stream.splitlines() if line.startswith('data: {')]
+            streamed = ''.join(event['choices'][0].get('delta',{}).get('content','') for event in tool_events)
+            assert streamed.strip() == with_tools['message']['content'], (streamed, with_tools)
+            assert tool_events[-1]['choices'][0]['finish_reason'] == with_tools['finish_reason']
+            # A model with random weights, made to call a tool: the grammar leaves it
+            # nothing to write but a call that fits the declarations.
+            strict = [{'type':'function','function':{'name':'lookup','parameters':{'type':'object','additionalProperties':False,
+                          'properties':{'mode':{'enum':['fast','slow']},'deep':{'type':'boolean'}},'required':['mode','deep']}}},
+                      {'type':'function','function':{'name':'reset','parameters':{'type':'object','properties':{},'additionalProperties':False}}}]
+            def forced_call(choice, **more):
+                status, reply = call(local,dict(body,tools=strict,tool_choice=choice,max_tokens=400,**more))
+                assert status == 200, reply
+                return reply
+            forced = json.loads(forced_call('required'))['choices'][0]
+            assert forced['finish_reason'] == 'tool_calls' and 'tool_call_rejections' not in forced, forced
+            assert forced['message']['content'] == '' and len(forced['message']['tool_calls']) == 1, forced
+            made = forced['message']['tool_calls'][0]['function']
+            arguments = json.loads(made['arguments'])
+            assert made['name'] in ('lookup','reset'), made
+            if made['name'] == 'lookup':
+                assert set(arguments) == {'mode','deep'} and arguments['mode'] in ('fast','slow') and isinstance(arguments['deep'],bool), made
+            else:
+                assert arguments == {}, made
+            for name in ['lookup','reset']:
+                named = json.loads(forced_call({'type':'function','function':{'name':name}}))['choices'][0]
+                assert [c['function']['name'] for c in named['message']['tool_calls']] == [name], named
+            forced_stream = forced_call('required',stream=True)
+            forced_events = [json.loads(line[6:]) for line in forced_stream.splitlines() if line.startswith('data: {')]
+            streamed_calls = [c for event in forced_events for c in event['choices'][0].get('delta',{}).get('tool_calls',[])]
+            assert [c['function'] for c in streamed_calls] == [made], (streamed_calls, made)
+            assert forced_events[-1]['choices'][0]['finish_reason'] == 'tool_calls'
+            assert call(local,dict(body,tool_choice='required'))[0] == 400
+            assert call(local,dict(body,tools=strict,tool_choice={'type':'function','function':{'name':'absent'}}))[0] == 400
             status, actual = call(gateway,body)
             assert status == 200, actual
             reference, actual = json.loads(reference), json.loads(actual)
@@ -139,6 +179,61 @@ def main():
             assert call(gateway,dict(body,temperature=0.5))[0] == 400
             # Independent requests reconnect and replay without contaminating caches.
             assert json.loads(call(gateway,body)[1])['choices'] == actual['choices']
+            # The same split, started from a manifest by one command instead of by hand.
+            up_first, up_second, up_gateway = [port() for _ in range(3)]
+            stage_argv = lambda index, address: ['allpaka','stage','/elsewhere/model.gguf','--first',str(index),'--end',str(index+1),
+                '--model-id','fixture','--context','256','--bind',f'0.0.0.0:{address}']
+            manifest = root/'manifest.json'
+            manifest.write_text(json.dumps({'model_id':'fixture','context':256,
+                'stages':[{'node':'a','endpoint':f'127.0.0.1:{up_first}','first':0,'end':1,'argv':stage_argv(0,up_first)},
+                          {'node':'b','endpoint':f'127.0.0.1:{up_second}','first':1,'end':2,'argv':stage_argv(1,up_second)}],
+                'gateway_argv':['allpaka','pipeline-serve','--stages',f'127.0.0.1:{up_first},127.0.0.1:{up_second}',
+                    '--tokenizer','/elsewhere/model.gguf','--model-id','fixture','--context','256']}))
+            up_log = open(root/'pipeline-up.log','w')
+            up = subprocess.Popen([binary,'pipeline-up',str(manifest),'--all','--gateway','--model',str(model),
+                '--bind-host','127.0.0.1','--gateway-bind',f'127.0.0.1:{up_gateway}'], env=env, stdout=up_log, stderr=up_log)
+            def stop_up():
+                # Killed outright, not asked: its three children must still go.
+                if up.poll() is None:
+                    up.kill(); up.wait()
+                up_log.close()
+            def watch_split():
+                seen = subprocess.run([binary,'watch','--manifest',str(manifest),'--gateway',f'127.0.0.1:{up_gateway}','--once','--json'],
+                    env=env, capture_output=True, text=True, timeout=30)
+                assert seen.returncode == 0, seen.stderr
+                status = json.loads(seen.stdout)
+                return status['phase'], {c['name']: c['held'] for c in status['conditions']}
+            try:
+                for _ in range(400):
+                    assert up.poll() is None, 'pipeline-up exited'
+                    try:
+                        if call(up_gateway,route='/v1/models')[0] == 200: break
+                    except OSError: pass
+                    time.sleep(0.05)
+                else: raise AssertionError('pipeline-up startup timeout')
+                status, launched = call(up_gateway,body)
+                assert status == 200, launched
+                assert json.loads(launched)['choices'] == actual['choices'], (launched, actual)
+                # Everything answers, but nobody measured the a-b link: not Ready.
+                phase, held = watch_split()
+                assert phase == 'Degraded' and held == {'LayersPlaced':True,'StageReachable/a':True,'StageReachable/b':True,
+                    'LinkVerified':False,'GatewayReachable':True}, (phase, held)
+            except Exception:
+                up_log.flush()
+                print('pipeline-up', (root/'pipeline-up.log').read_text()[-5000:])
+                raise
+            finally:
+                stop_up()
+            for address in [up_first, up_second, up_gateway]:
+                for _ in range(100):
+                    try:
+                        with socket.create_connection(('127.0.0.1',address), timeout=0.2): time.sleep(0.05)
+                    except OSError: break
+                else: raise AssertionError('a pipeline-up child outlived it')
+            phase, held = watch_split()
+            assert phase == 'Stopped' and not held['StageReachable/a'] and not held['GatewayReachable'], (phase, held)
+            unknown = subprocess.run([binary,'pipeline-up',str(manifest),'--node','nowhere'], env=env, capture_output=True, text=True)
+            assert unknown.returncode != 0 and 'no stage on node nowhere' in unknown.stderr, unknown.stderr
             processes[1][0].terminate()
             processes[1][0].wait(timeout=5)
             altered = root/'altered.gguf'
@@ -159,7 +254,7 @@ def main():
             processes[-1][0].terminate()
             processes[-1][0].wait(timeout=5)
             assert call(gateway,body)[0] == 400
-            print('PASS: two native stage processes match whole-model chat; JSON/SSE, context, model, replay, changed weights and failed worker checked')
+            print('PASS: two native stage processes match whole-model chat; JSON/SSE, context, model, replay, forced tool calls, manifest launch and watch, changed weights and failed worker checked')
         except Exception:
             for _,log,name in processes:
                 log.flush()

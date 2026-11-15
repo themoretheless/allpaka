@@ -221,7 +221,41 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
     def act(id,kind,text='',**kw):return api(f'sessions/{id}/actions',dict(kind=kind,text=text,**kw))
     process=start()
     try:
+        # C1: server-side @path[:START-END] attachments carry provenance and a budget; bad paths are 400s.
+        (workspace/'cite.rs').write_text('alpha\nbeta\ngamma\n')
+        cite=create();act(cite,'send','explain @cite.rs:2-3')
+        cited=wait(cite,lambda s:s['status']!='running' and len(s['messages'])>=2)
+        first=cited['messages'][0];c=first['citations'][0]
+        assert (c['path'],c['start_line'],c['end_line'],c['truncated'])==('cite.rs',2,3,False),first
+        assert first['context_budget']['used_bytes']==len('beta\ngamma') and first['context_budget']['limit_bytes']>0
+        assert '<attached_file path="cite.rs" lines="2-3">\nbeta\ngamma\n</attached_file>' in first['content']
+        (workspace/'cite.rs').write_text('alpha\nBETA2\ngamma\n')
+        act(cite,'send','again @cite.rs:2-2')
+        fresh=wait(cite,lambda s:s['status']!='running' and len(s['messages'])>=4)
+        assert 'BETA2' in [m for m in fresh['messages'] if m['role']=='user'][-1]['content']
+        for bad in ['@../outside.rs','@.hidden.rs','@missing.rs','@cite.rs:9-10','@cite.rs:3-1']:
+            try:act(cite,'send','see '+bad);raise AssertionError('bad @ accepted: '+bad)
+            except urllib.error.HTTPError as error:assert error.code==400 and (bad in error.read().decode() or bad.endswith('3-1')),bad
         from allpaka_guardrails import policy_manifest, rules_from_manifest, check_guardrails, GuardrailBlocked
+        # Conversation totals and budgets: the mock answers every plain message with 3+4 tokens.
+        budgeted=create(budget=dict(max_tokens=14))
+        assert api('sessions/'+budgeted)['settings']['budget']=={'max_tokens':14} and 'usage_total' not in api('sessions/'+budgeted)
+        for turn_number in [1,2]:
+            act(budgeted,'send',f'budget turn {turn_number}')
+            spent=wait(budgeted,lambda state:state['status']=='idle' and state.get('usage_total',{}).get('requests')==turn_number)
+            assert spent['usage_total']==dict(requests=turn_number,input_tokens=3*turn_number,output_tokens=4*turn_number,cost=0.0,requests_without_cost=turn_number),spent['usage_total']
+        before_budget=len(requests);act(budgeted,'send','budget turn 3')
+        refused=wait(budgeted,lambda state:state['status']=='error')
+        assert 'budget reached (14 of 14 tokens)' in refused['error'] and refused['usage_total']['requests']==2,refused['error']
+        assert len(requests)==before_budget,'a model call was made past the budget'
+        reject('sessions',dict(settings,budget=dict(max_tokens=0)));reject('sessions',dict(settings,budget=dict(max_cost=-1)))
+        unbudgeted=api('sessions/'+create());assert 'budget' not in unbudgeted['settings'] and 'usage_total' not in unbudgeted
+        # A Swarm turn spends through its members and the synthesis: 2 x (5+6) and 7+8 in the mock.
+        roster=dict(members=[dict(label='a',role='',provider='local',model='mock'),dict(label='b',role='',provider='local',model='mock')],max_steps_per_member=1)
+        swarm_spend=create(mode='swarm',swarm=roster);act(swarm_spend,'send','swarm spend fixture')
+        swarm_total=wait(swarm_spend,lambda state:state['status']=='idle' and state.get('usage_total',{}).get('requests',0)>=3,timeout=20)['usage_total']
+        assert swarm_total==dict(requests=3,input_tokens=17,output_tokens=20,cost=0.0,requests_without_cost=3),swarm_total
+        print('PASS conversation usage totals accumulate per model call, Swarm members and synthesis included; a token budget stops the turn before the next call; unset limits leave the JSON unchanged',flush=True)
         policy_client=Studio(base)
         online_client=Studio(base);online_calls=len(requests)
         online_rule=dict(id='quality',project_id='default',evaluator_id='rubric',evaluator_version=1,sample_rate=0.5,enabled=True)
@@ -2322,6 +2356,17 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         patch_root=root/'patch-check';patch_root.mkdir();(patch_root/'result.txt').write_text('verified write')
         subprocess.run(['git','apply','-'],input=result['diff'].encode(),cwd=patch_root,check=True)
         assert (patch_root/'result.txt').read_bytes()==(workspace/'result.txt').read_bytes()
+        # The undo record never reaches the model, and undo checks what is on disk first.
+        assert '_checkpoint' not in result and edited_state['file_checkpoints'][-1]['before']=='verified write'
+        (workspace/'result.txt').write_text('verified edit, then by hand')
+        reject(f'sessions/{edited}/actions',dict(kind='undo'),409)
+        assert (workspace/'result.txt').read_text()=='verified edit, then by hand'
+        (workspace/'result.txt').write_text('verified edit')
+        undone=act(edited,'undo');assert undone['restored']=='previous content' and undone['remaining']==0,undone
+        assert (workspace/'result.txt').read_bytes()==b'verified write'
+        reject(f'sessions/{edited}/actions',dict(kind='undo'),409)
+        (workspace/'result.txt').write_text('verified edit')  # the state later checks expect
+        print('PASS agent file writes keep an undo record out of the model view; undo restores bytes exactly and refuses after a manual change',flush=True)
         readonly=create(mode='auto',allow_writes=True);act(readonly,'send','TRY_EDIT READONLY')
         denied=wait(readonly,lambda s:s['status']=='idle' and len(s['messages'])>=4)
         assert 'read-only' in next(m['content'] for m in denied['messages'] if m['role']=='tool')
@@ -2577,7 +2622,7 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         merged=[r for r in requests[started:] if 'Собери из них один итоговый ответ' in str(r['messages'][-1]['content'])]
         assert len(requests)-started==3 and len(wave)==2 and len(merged)==1
         member_tools=[t['function']['name'] for t in wave[0]['tools']]
-        assert sorted(member_tools)==['agentgrep','list_files','read_file'] and 'write_file' not in member_tools
+        assert sorted(member_tools)==['agentgrep','git_diff','list_files','read_file'] and 'write_file' not in member_tools
         assert all('swarm' not in message for message in merged[0]['messages'])
         assert state['usage']['completion_tokens']==20 and state['usage']['prompt_tokens']==17
         print('PASS swarm wave runs in parallel, merges to MASTER, members stay read-only and usage is summed')

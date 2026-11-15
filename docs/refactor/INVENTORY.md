@@ -110,6 +110,6 @@
 
 ## Устаревшее в документации
 
-- `docs/roadmap.md` D6: уже сделано, `PlanItem.status` — enum `PlanStatus`
+- Бывший пункт roadmap «stringly `PlanItem.status`»: уже сделано, `PlanItem.status` — enum `PlanStatus`
   (`chat/src/types.rs:298`).
 - README: описаны 9 переменных `ALLPAKA_*` из 153.

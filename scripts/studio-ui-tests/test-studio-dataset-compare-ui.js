@@ -1,5 +1,6 @@
+const {appSource}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8'),start=source.indexOf('let datasetCompareEpoch='),end=source.indexOf('let selectedDatasetLoadEpoch=',start);
+const source=appSource(),start=source.indexOf('let datasetCompareEpoch='),end=source.indexOf('let selectedDatasetLoadEpoch=',start);
 const pending=[],el=()=>({children:[],replaceChildren(...x){this.children=x}}),panel=el(),elements={project:{value:'p'},'evaluation-dialog':{open:true},'evaluation-dataset':{value:'d'},'dataset-compare-from':{value:1},'dataset-compare-to':{value:2},'dataset-compare-show':{},'dataset-compare-result':panel};
 const context={evaluationDataset:{id:'d'},evaluationProject:'p',URLSearchParams,encodeURIComponent,$:id=>elements[id],node:(tag,text)=>Object.assign(el(),{tag,text}),api:()=>new Promise(resolve=>pending.push(resolve))};vm.createContext(context);vm.runInContext(source.slice(start,end),context);
 const receipt=()=>({id:'d',project_id:'p',from:{version:1,sha256:'a'.repeat(64)},to:{version:2,sha256:'b'.repeat(64)},provider_calls:0,offset:0,limit:100,order:'sample_id_asc',total:101,has_more:true,counts:{added:100,removed:0,changed:1,unchanged:0},changes:[{sample_id:'a',kind:'changed',fields:['input']},...Array.from({length:99},(_,i)=>({sample_id:'b'+String(i).padStart(3,'0'),kind:'added',fields:[]}))],name_changed:false});

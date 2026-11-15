@@ -3,38 +3,57 @@
 
 use super::*;
 
-/// Launch dequant+GEMM into `y_arena[y_off..]`. No synchronize / D2H.
+/// One dequant+GEMM launch: `y_arena[y_off..] = X[m, n_in] @ W^T`.
 ///
 /// f16 scratch layout is `[X | W | C]` so Q/K/V (same X, different n_out) can
 /// reuse the X cast. `reuse_x_f16` skips that cast when the front of the arena
 /// already holds `m * n_in` f16 activations. `x_from_pf_hs` reads X from the
 /// prefill residual-norm buffer instead of `x_arena`.
-pub fn launch_gemm_dequant(
-    gpu: &mut CudaGpu,
-    ty: GgmlType,
-    chunk: usize,
-    w_off: u64,
-    n_in: usize,
-    n_out: usize,
-    m: usize,
-    x_already_in_arena: bool,
-    x_elems: &[f32],
-    y_off: usize,
-    reuse_x_f16: bool,
-    x_from_pf_hs: bool,
-    x_dev_override: Option<u64>,
-) -> Option<()> {
+#[derive(Clone, Copy, Debug)]
+pub struct GemmReq<'a> {
+    pub w: DevWeight,
+    pub m: usize,
+    /// X is already in `x_arena`; otherwise `x_elems` is uploaded first.
+    pub x_already_in_arena: bool,
+    pub x_elems: &'a [f32],
+    pub y_off: usize,
+    pub reuse_x_f16: bool,
+    pub x_from_pf_hs: bool,
+    /// Read X from this device address (ggml MMQ path only; otherwise fails).
+    pub x_dev_override: Option<u64>,
+}
+
+/// Launch dequant+GEMM into `y_arena[y_off..]`. No synchronize / D2H.
+pub fn launch_gemm_dequant(gpu: &mut CudaGpu, req: &GemmReq<'_>) -> Option<()> {
+    let GemmReq {
+        w:
+            DevWeight {
+                ty,
+                loc: WeightLoc { chunk, off: w_off },
+                n_in,
+                n_out,
+            },
+        m,
+        x_already_in_arena,
+        x_elems,
+        y_off,
+        reuse_x_f16,
+        x_from_pf_hs,
+        x_dev_override,
+    } = *req;
     gpu.ensure_arenas(m * n_in * 4, (y_off + m * n_out) * 4)?;
     if !x_already_in_arena {
         gpu.stream
             .memcpy_htod(x_elems, &mut gpu.x_arena.slice_mut(0..m * n_in))
             .ok()?;
+        // New values at the same address: the (pointer, n_in, m)-keyed Q8
+        // cache must not serve the previous upload (see run_matvec).
+        gpu.invalidate_q8();
     }
 
     // llama.cpp ggml-cuda MMQ (fast on 5090 vs dequant+cuBLASLt).
     // Opt out with ALLPAKA_GGML_GEMM=0.
-    let ggml_gemm = std::env::var("ALLPAKA_GGML_GEMM")
-        .map_or(true, |v| !(v == "0" || v.eq_ignore_ascii_case("false")));
+    let ggml_gemm = crate::runtime::get().cuda_ggml_gemm;
     if ggml_gemm && crate::gpu::cuda::ggml::enabled() {
         if let Some(wty) = crate::gpu::cuda::ggml::ggml_type_code(ty) {
             if matches!(ty, GgmlType::Q4K | GgmlType::Q6K) && n_in % 256 == 0 {
@@ -72,11 +91,11 @@ pub fn launch_gemm_dequant(
     // Int8 TC MMQ: ALLPAKA_MMQ=1 (NVRTC), =tile (float smem), =nvcc (standalone PTX).
     // Neither beats dequant+cuBLAS yet; all stay opt-in.
     if matches!(ty, GgmlType::Q4K) && n_in % 256 == 0 {
-        let mmq = std::env::var("ALLPAKA_MMQ").unwrap_or_default();
-        if mmq == "1" || mmq == "tile" || mmq == "nvcc" {
+        let mmq = crate::runtime::get().cuda_mmq;
+        if mmq != crate::runtime::CudaMmq::Off {
             let stream = Arc::clone(&gpu.stream);
-            let use_tile = mmq == "tile";
-            let use_nvcc = mmq == "nvcc";
+            let use_tile = mmq == crate::runtime::CudaMmq::Tile;
+            let use_nvcc = mmq == crate::runtime::CudaMmq::Nvcc;
             if !use_tile {
                 let x_ptr = if x_from_pf_hs {
                     let (p, g) = DevicePtr::device_ptr(&gpu.pf_hs, &stream);
@@ -212,6 +231,13 @@ pub fn launch_gemm_dequant(
                 shared_mem_bytes: 0,
             }
         };
+        // The GEMM two launches back read this slot on the compute stream;
+        // without this wait the dequant overwrote W while that GEMM still ran
+        // (prefill output varied run to run with ALLPAKA_GGML=0).
+        {
+            let used = if ping == 0 { &gpu.ev_c0 } else { &gpu.ev_c1 };
+            gpu.dq_stream.wait(used).ok()?;
+        }
         let w = &gpu.chunks[chunk].buf;
         let mut out = gpu.f16_arena.slice_mut(w16..w16 + w_elems);
         unsafe {
@@ -267,30 +293,28 @@ pub fn launch_gemm_dequant(
     }
     let mut used_blas = false;
     if let Some(blas) = gpu.blaslt.as_ref() {
-        let blas_ok = {
-            let (head, mut c16s) = gpu.f16_arena.split_at_mut(c16);
-            let a = head.slice(x16..x16 + m * n_in);
-            let b = head.slice(w16..w16 + w_elems);
-            let cfg = MatmulConfig {
-                transa: true,
-                transb: false,
-                transc: false,
-                m: n_out as u64,
-                n: m as u64,
-                k: n_in as u64,
-                alpha: 1.0,
-                lda: n_in as i64,
-                ldb: n_in as i64,
-                beta: 0.0,
-                ldc: n_out as i64,
-                stride_a: None,
-                stride_b: None,
-                stride_c: None,
-                stride_bias: None,
-                batch_size: None,
-            };
-            unsafe { Matmul::matmul(blas, cfg, &b, &a, &mut c16s, None, None) }.is_ok()
+        let (head, mut c16s) = gpu.f16_arena.split_at_mut(c16);
+        let a = head.slice(x16..x16 + m * n_in);
+        let b = head.slice(w16..w16 + w_elems);
+        let cfg = MatmulConfig {
+            transa: true,
+            transb: false,
+            transc: false,
+            m: n_out as u64,
+            n: m as u64,
+            k: n_in as u64,
+            alpha: 1.0,
+            lda: n_in as i64,
+            ldb: n_in as i64,
+            beta: 0.0,
+            ldc: n_out as i64,
+            stride_a: None,
+            stride_b: None,
+            stride_c: None,
+            stride_bias: None,
+            batch_size: None,
         };
+        let blas_ok = unsafe { Matmul::matmul(blas, cfg, &b, &a, &mut c16s, None, None) }.is_ok();
         if blas_ok {
             let f = gpu.func_owned("cast_f16_to_f32")?;
             let n = (m * n_out) as u32;
@@ -341,6 +365,10 @@ pub fn launch_gemm_dequant(
         }
         .ok()?;
     }
+    {
+        let used = if ping == 0 { &gpu.ev_c0 } else { &gpu.ev_c1 };
+        used.record(&gpu.stream).ok()?;
+    }
     crate::gpu::cuda::ggml::mark_cudarc_dirty();
     Some(())
 }
@@ -348,21 +376,29 @@ pub fn launch_gemm_dequant(
 /// Dequant weight matrix to f16 then GEMM: y[m,n_out] = x[m,n_in] @ W^T.
 pub fn gemm_dequant(
     gpu: &mut CudaGpu,
-    ty: GgmlType,
-    chunk: usize,
-    w_off: u64,
-    n_in: usize,
-    n_out: usize,
+    w: DevWeight,
     m: usize,
     x_elems: &[f32],
 ) -> Option<Vec<f32>> {
     let t0 = Instant::now();
     launch_gemm_dequant(
-        gpu, ty, chunk, w_off, n_in, n_out, m, false, x_elems, 0, false, false, None,
+        gpu,
+        &GemmReq {
+            w,
+            m,
+            x_already_in_arena: false,
+            x_elems,
+            y_off: 0,
+            reuse_x_f16: false,
+            x_from_pf_hs: false,
+            x_dev_override: None,
+        },
     )?;
     let encode_ns = t0.elapsed().as_nanos() as u64;
     let t1 = Instant::now();
     gpu.sync()?;
     note_call(2, encode_ns, t1.elapsed().as_nanos() as u64);
-    gpu.stream.clone_dtoh(&gpu.y_arena.slice(0..m * n_out)).ok()
+    gpu.stream
+        .clone_dtoh(&gpu.y_arena.slice(0..m * w.n_out))
+        .ok()
 }

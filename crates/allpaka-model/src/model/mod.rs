@@ -16,6 +16,7 @@ pub(crate) mod gdn;
 pub(crate) mod loader;
 pub(crate) mod moe;
 pub(crate) mod mtp;
+pub(crate) mod multi;
 pub(crate) mod prefill;
 pub(crate) mod session;
 
@@ -42,16 +43,46 @@ pub(crate) struct Layer<'a> {
     /// tensor is not plain F32 and the whole-token path then declines).
     pub(crate) attn_norm_raw: &'a [u8],
     pub(crate) ffn_norm_raw: &'a [u8],
-    /// Full-attention projections; None on gated-delta-net layers (qwen35moe).
-    pub(crate) attn: Option<AttnWeights<'a>>,
-    /// Gated delta net branch; None on full-attention layers.
-    pub(crate) gdn: Option<GdnLayer<'a>>,
+    /// The token mixer: full attention, or a gated delta net (qwen35moe's
+    /// linear-attention layers). Exactly one per layer.
+    pub(crate) mixer: Mixer<'a>,
     pub(crate) bias: Option<AttnBias<'a>>,
     /// Qwen3 per-head norms, absent on Llama/Mistral.
-    pub(crate) q_norm: Option<&'a [f32]>,
-    pub(crate) k_norm: Option<&'a [f32]>,
+    pub(crate) q_norm: Option<Vec<f32>>,
+    pub(crate) k_norm: Option<Vec<f32>>,
     pub(crate) ffn_norm: Vec<f32>,
     pub(crate) ffn: Ffn<'a>,
+    /// Gemma 3's sandwich norms: applied to the attention output and to the
+    /// FFN output before each is added to the residual stream.
+    pub(crate) post_attn_norm: Option<Vec<f32>>,
+    pub(crate) post_ffn_norm: Option<Vec<f32>>,
+    /// The same two norms as raw F32 mmap bytes for the fused prefill
+    /// (empty when absent).
+    pub(crate) post_attn_norm_raw: &'a [u8],
+    pub(crate) post_ffn_norm_raw: &'a [u8],
+    /// Gemma 3 local layer: sliding-window attention over this many
+    /// positions, rotated with `Model::rope_inv_freq_swa`.
+    pub(crate) window: Option<usize>,
+}
+
+pub(crate) enum Mixer<'a> {
+    Attention(AttnWeights<'a>),
+    Gdn(GdnLayer<'a>),
+}
+
+impl<'a> Mixer<'a> {
+    pub(crate) fn attn(&self) -> Option<&AttnWeights<'a>> {
+        match self {
+            Mixer::Attention(aw) => Some(aw),
+            Mixer::Gdn(_) => None,
+        }
+    }
+    pub(crate) fn gdn(&self) -> Option<&GdnLayer<'a>> {
+        match self {
+            Mixer::Gdn(g) => Some(g),
+            Mixer::Attention(_) => None,
+        }
+    }
 }
 
 pub(crate) struct AttnWeights<'a> {
@@ -70,10 +101,6 @@ pub struct Model<'a> {
     pub(crate) embd: Option<QuantMat<'a>>,
     pub(crate) layer_start: usize,
     pub(crate) layers: Vec<Layer<'a>>,
-    /// Pre-validated static GPU decode layer descriptors (`k_off`/`v_off` stamped per session);
-    /// `Err(decline_reason)` when a norm is non-F32 or sigmoid router gating uses unsupported scale/norm.
-    pub(crate) token_layer_template:
-        Result<Vec<allpaka_backend::gpu::TokenLayer<'a>>, &'static str>,
     /// The MTP (nextn) speculative block past the trunk, when the GGUF
     /// carries one (qwen35moe with nextn_predict_layers).
     pub(crate) mtp: Option<MtpLayer<'a>>,
@@ -82,9 +109,35 @@ pub struct Model<'a> {
     pub(crate) output: Option<QuantMat<'a>>,
     /// `base^(-2i/d)` per rotary pair, hoisted out of the per-head loops.
     pub(crate) rope_inv_freq: Vec<f32>,
+    /// The local layers' RoPE frequencies (Gemma 3), empty otherwise.
+    pub(crate) rope_inv_freq_swa: Vec<f32>,
+    /// Multiplier on the token embedding (Gemma: sqrt(hidden)), else 1.
+    pub(crate) embed_scale: f32,
+    /// File mappings this model handed to `gpu::attach`; released on drop.
+    pub(crate) attached: Vec<&'a [u8]>,
+    /// Set when the weights rule out the whole-token GPU decode.
+    pub(crate) token_path_decline: Option<&'static str>,
     /// Owned F32 buffers converted from BF16 router/gate tensors at load time.
     /// Placed last so it is dropped after all `QuantMat<'a>` fields borrowing from it.
     pub(crate) _owned_weights: Vec<Box<[f32]>>,
+}
+
+impl Drop for Model<'_> {
+    /// Give back every `gpu::attach` this model made. A backend that copies
+    /// weights (CUDA) frees them, so a later model loaded at the same host
+    /// address cannot run on stale device copies.
+    fn drop(&mut self) {
+        for mapping in &self.attached {
+            allpaka_backend::gpu::detach(mapping);
+        }
+        for owned in &self._owned_weights {
+            // SAFETY: the box is alive until this struct's fields drop, which
+            // happens after `drop` returns; f32 has no invalid byte patterns.
+            let bytes =
+                unsafe { std::slice::from_raw_parts(owned.as_ptr() as *const u8, owned.len() * 4) };
+            allpaka_backend::gpu::detach(bytes);
+        }
+    }
 }
 
 static TRACE_HOOK: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
@@ -93,64 +146,72 @@ pub fn set_trace_hook(hook: fn(&str)) {
     let _ = TRACE_HOOK.set(hook);
 }
 
-macro_rules! cached_env_flag {
-    ($fn_name:ident, $var:literal) => {
-        #[inline]
-        pub(crate) fn $fn_name() -> bool {
-            // Integration tests (`tests/*.rs`) compile `allpaka-model` without
-            // `cfg(test)` while toggling `ALLPAKA_*` inside the same process;
-            // keep `debug_assertions` uncached so parity tests see live env vars,
-            // and cache in `--release` so hot-path decode pays one `Relaxed` load.
-            if cfg!(debug_assertions) {
-                std::env::var_os($var).is_some()
-            } else {
-                static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                *V.get_or_init(|| std::env::var_os($var).is_some())
-            }
-        }
-    };
-    ($fn_name:ident, $var:literal, default_true) => {
-        #[inline]
-        pub(crate) fn $fn_name() -> bool {
-            let parse = || {
-                std::env::var($var)
-                    .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
-                    .unwrap_or(true)
-            };
-            if cfg!(debug_assertions) {
-                parse()
-            } else {
-                static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                *V.get_or_init(parse)
-            }
-        }
-    };
+#[inline]
+pub(crate) fn trace_enabled() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("ALLPAKA_TRACE").is_some())
 }
 
-cached_env_flag!(trace_enabled, "ALLPAKA_TRACE");
-cached_env_flag!(gdn_zero_enabled, "ALLPAKA_GDN_ZERO");
-cached_env_flag!(cpu_attn_enabled, "ALLPAKA_CPU_ATTN");
-cached_env_flag!(no_tokenbuf_enabled, "ALLPAKA_NO_TOKENBUF");
-cached_env_flag!(no_argmax_enabled, "ALLPAKA_NO_ARGMAX");
-cached_env_flag!(prefuse_enabled, "ALLPAKA_PREFUSE", default_true);
-cached_env_flag!(attn_zero_enabled, "ALLPAKA_ATTN_ZERO");
-cached_env_flag!(moe_zero_enabled, "ALLPAKA_MOE_ZERO");
-cached_env_flag!(tokenbuf_debug_enabled, "ALLPAKA_TOKENBUF_DEBUG");
-cached_env_flag!(greedy_chain_enabled, "ALLPAKA_GREEDY_CHAIN", default_true);
+#[inline]
+pub(crate) fn gdn_zero_enabled() -> bool {
+    static Z: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *Z.get_or_init(|| std::env::var_os("ALLPAKA_GDN_ZERO").is_some())
+}
+
+#[inline]
+pub(crate) fn cpu_attn_enabled() -> bool {
+    std::env::var_os("ALLPAKA_CPU_ATTN").is_some()
+}
+
+#[inline]
+pub(crate) fn no_tokenbuf_enabled() -> bool {
+    std::env::var_os("ALLPAKA_NO_TOKENBUF").is_some()
+}
+
+#[inline]
+pub(crate) fn no_argmax_enabled() -> bool {
+    std::env::var_os("ALLPAKA_NO_ARGMAX").is_some()
+}
+
+#[inline]
+pub(crate) fn prefuse_enabled() -> bool {
+    static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *P.get_or_init(|| std::env::var("ALLPAKA_PREFUSE").map_or(true, |v| v != "0"))
+}
+
+#[inline]
+pub(crate) fn attn_zero_enabled() -> bool {
+    static Z: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *Z.get_or_init(|| std::env::var_os("ALLPAKA_ATTN_ZERO").is_some())
+}
+
+#[inline]
+pub(crate) fn moe_zero_enabled() -> bool {
+    static Z: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *Z.get_or_init(|| std::env::var_os("ALLPAKA_MOE_ZERO").is_some())
+}
+
+#[inline]
+pub(crate) fn tokenbuf_debug_enabled() -> bool {
+    static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *D.get_or_init(|| std::env::var_os("ALLPAKA_TOKENBUF_DEBUG").is_some())
+}
 
 #[inline]
 pub(crate) fn skip_host_rope_enabled() -> bool {
-    let parse = || {
+    static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *S.get_or_init(|| {
         std::env::var("ALLPAKA_SKIP_HOST_ROPE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
-    };
-    if cfg!(debug_assertions) {
-        parse()
-    } else {
-        static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *S.get_or_init(parse)
-    }
+    })
+}
+
+#[inline]
+pub(crate) fn greedy_chain_enabled() -> bool {
+    std::env::var("ALLPAKA_GREEDY_CHAIN")
+        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+        .unwrap_or(true)
 }
 
 #[inline]

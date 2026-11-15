@@ -220,8 +220,10 @@ where
 {
     let path = path.as_ref();
     let f = std::fs::File::open(path).map_err(|e| MlxError::io_at(path, e))?;
-    // Safety: read-only memory mapping over an opened checkpoint shard;
-    // concurrent truncation by an external writer is outside the container contract.
+    // SAFETY: the map is read-only and owned by the returned `Mmap`, so slices of it
+    // cannot outlive the mapping. A process that truncates or rewrites the shard while
+    // it is mapped would be undefined behaviour; like every mmap-based loader we
+    // accept that model files are not modified while being served.
     unsafe { memmap2::Mmap::map(&f) }.map_err(|e| MlxError::io_at(path, e))
 }
 

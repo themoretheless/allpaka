@@ -357,7 +357,10 @@ pub fn f32_to_f16_slice(src: &[f32], dst: &mut [u16]) {
                     // SAFETY: `*i + 8 <= n` ensures 8 readable `f32`s in `src` and 8 writable `u16`s in `dst`.
                     unsafe {
                         let v = _mm256_loadu_ps(src.as_ptr().add(*i));
-                        let h = _mm256_cvtps_ph(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+                        // VCVTPS2PH reads only imm8[2:0]; recent stdarch rejects the
+                        // _MM_FROUND_NO_EXC bit at compile time, and dropping it does
+                        // not change the instruction's behaviour.
+                        let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(v);
                         _mm_storeu_si128(dst.as_mut_ptr().add(*i) as *mut __m128i, h);
                     }
                     *i += 8;

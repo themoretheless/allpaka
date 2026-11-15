@@ -3,98 +3,109 @@
 
 use super::*;
 
-struct MatvecFlags {
-    nwarps: Option<u8>,
-    mmvq_rows2: bool,
-    out_n4: bool,
-    q6_f32: bool,
-    k8192: bool,
-    k5120: bool,
-    q6_k25600: bool,
-    ggml_mmvq: bool,
-    ggml_decode: bool,
-    gu_q8: bool,
-    gu_n8: bool,
-    k5120_gu: bool,
-    fuse_log: bool,
-    qkv_split: bool,
+/// Matvec activations addressed by raw device pointers: `y[m, n_out] (+)= W · x[m, n_in]`.
+#[derive(Clone, Copy, Debug)]
+pub struct MatvecPtrs {
+    pub x: u64,
+    pub y: u64,
+    pub m: usize,
+    /// Accumulate into `y` instead of overwriting it.
+    pub add: bool,
 }
 
-fn matvec_flags() -> &'static MatvecFlags {
-    static FLAGS: OnceLock<MatvecFlags> = OnceLock::new();
-    FLAGS.get_or_init(|| {
-        let on = |k: &str| {
-            std::env::var(k)
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-        };
-        let off_default_on = |k: &str| {
-            std::env::var(k)
-                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                .unwrap_or(true)
-        };
-        MatvecFlags {
-            nwarps: std::env::var("ALLPAKA_NWARPS")
-                .ok()
-                .and_then(|v| v.parse::<u8>().ok()),
-            mmvq_rows2: std::env::var("ALLPAKA_MMVQ_ROWS")
-                .map(|v| v == "2")
-                .unwrap_or(false),
-            out_n4: off_default_on("ALLPAKA_OUT_N4"),
-            q6_f32: on("ALLPAKA_Q6_F32"),
-            k8192: off_default_on("ALLPAKA_K8192"),
-            k5120: on("ALLPAKA_K5120"),
-            q6_k25600: on("ALLPAKA_Q6_K25600"),
-            ggml_mmvq: on("ALLPAKA_GGML_MMVQ"),
-            ggml_decode: on("ALLPAKA_GGML_DECODE"),
-            gu_q8: std::env::var("ALLPAKA_GU_Q8")
-                .map(|v| v == "1")
-                .unwrap_or(false),
-            gu_n8: std::env::var("ALLPAKA_GU_N8")
-                .map(|v| v == "1")
-                .unwrap_or(false),
-            k5120_gu: on("ALLPAKA_K5120_GU"),
-            fuse_log: std::env::var("ALLPAKA_FUSE_LOG")
-                .map(|v| v == "1")
-                .unwrap_or(false),
-            qkv_split: on("ALLPAKA_QKV_SPLIT"),
-        }
-    })
+/// Matvec activations addressed as f32 offsets into the `y_arena`, whose
+/// device base is resolved once by the caller (CUDA graph capture must not
+/// record per-launch `DevicePtr` events).
+#[derive(Clone, Copy, Debug)]
+pub struct ArenaMatvec {
+    pub y_base: u64,
+    pub x_off: usize,
+    pub y_off: usize,
+    pub m: usize,
+    /// Accumulate into `y` instead of overwriting it.
+    pub add: bool,
+}
+
+/// Fused gate+up Q4_K matvec: both weights share `[n_out, n_in]` and one input.
+#[derive(Clone, Copy, Debug)]
+pub struct GateUpReq {
+    pub gate: WeightLoc,
+    pub up: WeightLoc,
+    pub n_in: usize,
+    pub n_out: usize,
+    pub y_base: u64,
+    pub x_off: usize,
+    pub gate_off: usize,
+    pub up_off: usize,
+    pub m: usize,
+}
+
+/// Destination for V written straight into the f16 KV cache by the fused QKV matvec.
+#[derive(Clone, Copy, Debug)]
+pub struct VCacheDst<'a> {
+    pub buf: &'a CudaSlice<u8>,
+    /// Element offset of this layer's V rows in the cache.
+    pub off: u64,
+    pub kv_dim: u32,
+}
+
+/// Fused Q/K/V matvec over one input; Q and K are Q4_K, V is `v_ty`.
+#[derive(Clone, Copy, Debug)]
+pub struct QkvReq<'a> {
+    pub q: WeightLoc,
+    pub k: WeightLoc,
+    pub v: WeightLoc,
+    pub v_ty: GgmlType,
+    pub n_in: usize,
+    pub n_q: usize,
+    pub n_kv: usize,
+    pub y_base: u64,
+    pub x_off: usize,
+    pub q_off: usize,
+    pub k_off: usize,
+    pub v_off: usize,
+    pub m: usize,
+    pub v_cache: Option<VCacheDst<'a>>,
 }
 
 pub(super) fn launch_qk_q8_matvec_on(
     gpu: &mut CudaGpu,
     stream: &CudaStream,
-    ty: GgmlType,
-    chunk: usize,
-    w_off: u64,
-    n_in: usize,
-    n_out: usize,
-    x_ptr: u64,
-    y_ptr: u64,
-    m: usize,
-    add: bool,
+    w: DevWeight,
+    io: MatvecPtrs,
 ) -> Option<()> {
+    let DevWeight {
+        ty,
+        loc: WeightLoc { chunk, off: w_off },
+        n_in,
+        n_out,
+    } = w;
+    let MatvecPtrs {
+        x: x_ptr,
+        y: y_ptr,
+        m,
+        add,
+    } = io;
     if n_in % 256 != 0 {
         return None;
     }
-    let flags = matvec_flags();
     // Prefer nwarps=8 for long-K Q6 (down-proj). Q4 stays at 4.
     // Huge n_out (LM head ~152k) prefers nwarps=4: more CTAs on short K.
     let long_q6 = matches!(ty, GgmlType::Q6K) && n_in >= 4096;
     let huge_out = n_out >= 65536;
-    let force2 = flags.nwarps == Some(2);
-    let force8 = flags.nwarps == Some(8);
-    let force4 = flags.nwarps == Some(4);
-    let rows2 = flags.mmvq_rows2;
-    let out4 = huge_out && flags.out_n4; // nwarps=4 on LM head (~152k rows) beats n8 on 5090
+    let policy = crate::runtime::get();
+    let force2 = policy.cuda_nwarps == Some(2);
+    let force8 = policy.cuda_nwarps == Some(8);
+    let force4 = policy.cuda_nwarps == Some(4);
+    let rows2 = policy.cuda_mmvq_rows2;
+    let out4 = huge_out && policy.cuda_out_n4; // nwarps=4 on LM head (~152k rows) beats n8 on 5090
     let auto8 = long_q6 && !force2 && !force4 && !rows2 && !(out4 && !force8);
     // Q6 + f32 X: pack Q8 in smem inside the matvec (skip separate quantize_q8_1).
     // Opt-in only: measured slower than quantize+q8 on 5090 (~43 vs ~64 tg).
     let q6_f32 = matches!(ty, GgmlType::Q6K)
         && auto8
         && gpu.fns.contains_key("matvec_q6_k_f32_n8")
-        && flags.q6_f32;
+        && policy.cuda_q6_f32;
     // FA→WO: consume pending FA f32 ptr with fused pack-in-mmvq (skips permute_q8).
     let wo_fa = matches!(ty, GgmlType::Q4K)
         && m == 1
@@ -172,12 +183,16 @@ pub(super) fn launch_qk_q8_matvec_on(
         }
         (GgmlType::Q4K, true, _, _) => ("matvec_q4_k_q8_n8", 8u32, n_out as u32),
         (GgmlType::Q4K, false, true, _) => ("matvec_q4_k_q8_n2", 2u32, n_out as u32),
-        (GgmlType::Q4K, false, false, false) if n_in == 8192 && flags.k8192 => {
+        (GgmlType::Q4K, false, false, false)
+            if n_in == 8192 && crate::runtime::get().cuda_k8192 =>
+        {
             ("matvec_q4_k_q8_k8192", 4u32, n_out as u32)
         }
-        // Opt-in: measured ~61 tg vs ~70.6 generic on Qwen3-32B / 5090.
+        // Default on (ALLPAKA_K5120=0 disables); bit-identical to the generic kernel.
         (GgmlType::Q4K, false, false, false)
-            if n_in == 5120 && gpu.fns.contains_key("matvec_q4_k_q8_k5120") && flags.k5120 =>
+            if n_in == 5120
+                && gpu.fns.contains_key("matvec_q4_k_q8_k5120")
+                && crate::runtime::get().cuda_k5120 =>
         {
             ("matvec_q4_k_q8_k5120", 4u32, n_out as u32)
         }
@@ -186,7 +201,7 @@ pub(super) fn launch_qk_q8_matvec_on(
         (GgmlType::Q6K, true, _, _)
             if n_in == 25600
                 && gpu.fns.contains_key("matvec_q6_k_q8_n8_k25600")
-                && flags.q6_k25600 =>
+                && crate::runtime::get().cuda_q6_k25600 =>
         {
             ("matvec_q6_k_q8_n8_k25600", 8u32, n_out as u32)
         }
@@ -266,13 +281,24 @@ pub fn run_matvec(
     let _ = matvec_kernel(ty)?;
 
     if m >= MM_MIN_M && dq_fmt(ty).is_some() {
-        return gemm_dequant(gpu, ty, chunk, w_off, n_in, n_out, m, x);
+        let w = DevWeight {
+            ty,
+            loc: WeightLoc { chunk, off: w_off },
+            n_in,
+            n_out,
+        };
+        return gemm_dequant(gpu, w, m, x);
     }
 
     gpu.ensure_arenas(m * n_in * 4, m * n_out * 4)?;
     gpu.stream
         .memcpy_htod(x, &mut gpu.x_arena.slice_mut(0..m * n_in))
         .ok()?;
+    // x_arena now holds new values at the same device address. The Q8 cache
+    // is keyed by (pointer, n_in, m), so without this a previous matvec of the
+    // same shape (Qwen2.5-7B: ffn gate/up and wo both read 3584-wide rows)
+    // would feed the stale quantised x into this one.
+    gpu.invalidate_q8();
 
     let t0 = Instant::now();
     if matches!(ty, GgmlType::Q4K | GgmlType::Q6K) && n_in % 256 == 0 && q8_decode_enabled() {
@@ -281,7 +307,19 @@ pub fn run_matvec(
         drop(g);
         let (ybase, g) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
         drop(g);
-        launch_qk_q8_matvec(gpu, ty, chunk, w_off, n_in, n_out, xbase, ybase, m, false)?;
+        let w = DevWeight {
+            ty,
+            loc: WeightLoc { chunk, off: w_off },
+            n_in,
+            n_out,
+        };
+        let io = MatvecPtrs {
+            x: xbase,
+            y: ybase,
+            m,
+            add: false,
+        };
+        launch_qk_q8_matvec(gpu, w, io)?;
     } else {
         let name = matvec_kernel(ty)?;
         let f = gpu.func_owned(name)?;
@@ -330,67 +368,33 @@ pub fn run_matvec(
     gpu.stream.clone_dtoh(&gpu.y_arena.slice(0..m * n_out)).ok()
 }
 
-/// Device-resident matvec: `y_arena[y_off..]` ← W · `y_arena[x_off..]`.
-/// No H2D / D2H / synchronize — caller owns stream ordering.
-#[allow(dead_code)]
-pub fn launch_matvec_y(
-    gpu: &mut CudaGpu,
-    ty: GgmlType,
-    chunk: usize,
-    w_off: u64,
-    n_in: usize,
-    n_out: usize,
-    x_off: usize,
-    y_off: usize,
-    m: usize,
-) -> Option<()> {
-    let stream = Arc::clone(&gpu.stream);
-    let base = {
-        let (p, g) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
-        drop(g);
-        p
-    };
-    launch_matvec_y_ptr(
-        gpu, ty, chunk, w_off, n_in, n_out, x_off, y_off, m, base, false,
-    )
-}
-
 /// Like [`launch_matvec_y`] but uses a pre-resolved `y_arena` device base so
 /// CUDA graph capture can avoid per-launch `DevicePtr` event recording.
-pub fn launch_matvec_y_ptr(
-    gpu: &mut CudaGpu,
-    ty: GgmlType,
-    chunk: usize,
-    w_off: u64,
-    n_in: usize,
-    n_out: usize,
-    x_off: usize,
-    y_off: usize,
-    m: usize,
-    y_base: u64,
-    add: bool,
-) -> Option<()> {
+pub fn launch_matvec_y_ptr(gpu: &mut CudaGpu, w: DevWeight, io: ArenaMatvec) -> Option<()> {
     let stream = Arc::clone(&gpu.stream);
-    launch_matvec_y_ptr_on(
-        gpu, &stream, ty, chunk, w_off, n_in, n_out, x_off, y_off, m, y_base, add,
-    )
+    launch_matvec_y_ptr_on(gpu, &stream, w, io)
 }
 
 /// Device-resident matvec on an explicit stream (for Q/K/V overlap).
 pub fn launch_matvec_y_ptr_on(
     gpu: &mut CudaGpu,
     stream: &CudaStream,
-    ty: GgmlType,
-    chunk: usize,
-    w_off: u64,
-    n_in: usize,
-    n_out: usize,
-    x_off: usize,
-    y_off: usize,
-    m: usize,
-    y_base: u64,
-    add: bool,
+    w: DevWeight,
+    io: ArenaMatvec,
 ) -> Option<()> {
+    let DevWeight {
+        ty,
+        loc: WeightLoc { chunk, off: w_off },
+        n_in,
+        n_out,
+    } = w;
+    let ArenaMatvec {
+        y_base,
+        x_off,
+        y_off,
+        m,
+        add,
+    } = io;
     let xv = y_base + (x_off * std::mem::size_of::<f32>()) as u64;
     let yv = y_base + (y_off * std::mem::size_of::<f32>()) as u64;
 
@@ -398,9 +402,9 @@ pub fn launch_matvec_y_ptr_on(
     // ALLPAKA_GGML_DECODE=1: llama MMVQ for non-add (legacy; disables fusion in decode).
     // ALLPAKA_GGML_MMVQ=1: llama MMVQ for all m=1 including add, keep our QKV/gate fusion.
     // Opt-in: native MMVQ measured ~70 tg vs ~66 ggml on 32B/5090 (hot window).
-    let flags = matvec_flags();
-    let ggml_mmvq =
-        crate::gpu::cuda::ggml::enabled() && (flags.ggml_mmvq || (flags.ggml_decode && !add));
+    let ggml_mmvq = crate::gpu::cuda::ggml::enabled()
+        && (crate::runtime::get().cuda_ggml_mmvq
+            || (crate::runtime::get().cuda_ggml_decode && !add));
     if m == 1 && ggml_mmvq && matches!(ty, GgmlType::Q4K | GgmlType::Q6K) && n_in % 256 == 0 {
         if let Some(wty) = crate::gpu::cuda::ggml::ggml_type_code(ty) {
             // Prefill clears shared stream; force rebind so MMVQ and residual share one queue.
@@ -442,7 +446,13 @@ pub fn launch_matvec_y_ptr_on(
     }
 
     if matches!(ty, GgmlType::Q4K | GgmlType::Q6K) && n_in % 256 == 0 && q8_decode_enabled() {
-        let r = launch_qk_q8_matvec_on(gpu, stream, ty, chunk, w_off, n_in, n_out, xv, yv, m, add);
+        let io = MatvecPtrs {
+            x: xv,
+            y: yv,
+            m,
+            add,
+        };
+        let r = launch_qk_q8_matvec_on(gpu, stream, w, io);
         return r;
     }
     let name = matvec_kernel(ty)?;
@@ -486,20 +496,24 @@ pub fn launch_matvec_y_ptr_on(
 }
 
 /// Fused gate+up Q4_K matvecs (identical shapes). Returns false if types differ.
-pub fn launch_matvec_q4k_2(
-    gpu: &mut CudaGpu,
-    chunk0: usize,
-    chunk1: usize,
-    w_off0: u64,
-    w_off1: u64,
-    n_in: usize,
-    n_out: usize,
-    x_off: usize,
-    y0_off: usize,
-    y1_off: usize,
-    m: usize,
-    y_base: u64,
-) -> Option<()> {
+pub fn launch_matvec_q4k_2(gpu: &mut CudaGpu, req: &GateUpReq) -> Option<()> {
+    let GateUpReq {
+        gate: WeightLoc {
+            chunk: chunk0,
+            off: w_off0,
+        },
+        up: WeightLoc {
+            chunk: chunk1,
+            off: w_off1,
+        },
+        n_in,
+        n_out,
+        y_base,
+        x_off,
+        gate_off: y0_off,
+        up_off: y1_off,
+        m,
+    } = *req;
     if chunk0 != chunk1 || n_in % 256 != 0 {
         return None;
     }
@@ -532,8 +546,10 @@ pub fn launch_matvec_q4k_2(
         }
         // Opt-in SwiGLU→Q8 epilogue (ALLPAKA_GU_Q8=1). Default keeps parallel
         // matvec_q4_k_q8_2 + separate quantize (faster on 5090 than serial-32 pack).
-        let flags = matvec_flags();
-        if n_out % 32 == 0 && gpu.fns.contains_key("matvec_q4_k_q8_2_q8") && flags.gu_q8 {
+        if n_out % 32 == 0
+            && gpu.fns.contains_key("matvec_q4_k_q8_2_q8")
+            && crate::runtime::get().cuda_gu_q8
+        {
             let pack_in = q8_packed_elems(n_in, m);
             let pack_out = q8_packed_elems(n_out, m);
             gpu.ensure_q8_bytes(pack_in + pack_out)?;
@@ -593,18 +609,20 @@ pub fn launch_matvec_q4k_2(
             return Some(());
         }
         // nwarps=4 wins for gate+up on 5090; n8 dual kernel kept for A/B (ALLPAKA_GU_N8=1).
-        let use_n8 = n_in >= 4096 && gpu.fns.contains_key("matvec_q4_k_q8_2_n8") && flags.gu_n8;
+        let use_n8 = n_in >= 4096
+            && gpu.fns.contains_key("matvec_q4_k_q8_2_n8")
+            && crate::runtime::get().cuda_gu_n8;
         // Balanced nb=20 GU dual (5 warps, 2 blocks each). Opt-in; do not enable single-row k5120.
         let use_k5120_gu = !use_n8
             && n_in == 5120
             && gpu.fns.contains_key("matvec_q4_k_q8_2_k5120_bal")
-            && flags.k5120_gu;
-        // Opt-in only; imbalanced 4-warp k5120 regressed on 5090.
+            && crate::runtime::get().cuda_k5120_gu;
+        // Default on: unrolled k5120 dual (bit-identical to _2) measured +0.3% tg on 5090.
         let use_k5120 = !use_n8
             && !use_k5120_gu
             && n_in == 5120
             && gpu.fns.contains_key("matvec_q4_k_q8_2_k5120")
-            && flags.k5120;
+            && crate::runtime::get().cuda_k5120;
         let f = gpu.func_owned(if use_n8 {
             "matvec_q4_k_q8_2_n8"
         } else if use_k5120_gu {
@@ -684,29 +702,34 @@ pub fn launch_matvec_q4k_2(
 
 /// Fused Q/K/V matvecs. Supports Q4/Q4/Q4 or Q4_K_M's Q4/Q4/Q6.
 /// When `v_cache` is set (decode m=1), V is also written as f16 into the KV cache.
-pub fn launch_matvec_q4k_qkv(
-    gpu: &mut CudaGpu,
-    chunk_q: usize,
-    chunk_k: usize,
-    chunk_v: usize,
-    oq: u64,
-    ok: u64,
-    ov: u64,
-    n_in: usize,
-    n_q: usize,
-    n_kv: usize,
-    x_off: usize,
-    q_off: usize,
-    k_off: usize,
-    v_off: usize,
-    m: usize,
-    y_base: u64,
-    v_ty: GgmlType,
-    v_cache: Option<(&cudarc::driver::CudaSlice<u8>, u64, u32)>,
-) -> Option<()> {
-    let flags = matvec_flags();
+pub fn launch_matvec_q4k_qkv(gpu: &mut CudaGpu, req: &QkvReq<'_>) -> Option<()> {
+    let QkvReq {
+        q: WeightLoc {
+            chunk: chunk_q,
+            off: oq,
+        },
+        k: WeightLoc {
+            chunk: chunk_k,
+            off: ok,
+        },
+        v: WeightLoc {
+            chunk: chunk_v,
+            off: ov,
+        },
+        v_ty,
+        n_in,
+        n_q,
+        n_kv,
+        y_base,
+        x_off,
+        q_off,
+        k_off,
+        v_off,
+        m,
+        v_cache,
+    } = *req;
     if chunk_q != chunk_k || chunk_q != chunk_v || n_in % 256 != 0 {
-        if flags.fuse_log {
+        if crate::runtime::get().cuda_fuse_log {
             eprintln!("cuda: qkv fuse skip chunks=({chunk_q},{chunk_k},{chunk_v}) n_in={n_in}");
         }
         return None;
@@ -753,7 +776,10 @@ pub fn launch_matvec_q4k_qkv(
     let f = gpu.func_owned(kern)?;
     // GQA split (opt-in): fat Q4/Q4/Q6 kernel only for n_kv rows; thin Q4 for Q tail.
     // Decode m=1 only — thin matvec stride must match contiguous Q[n_kv..).
-    let split = matches!(v_ty, GgmlType::Q6K) && m == 1 && n_q > n_kv && flags.qkv_split;
+    let split = matches!(v_ty, GgmlType::Q6K)
+        && m == 1
+        && n_q > n_kv
+        && crate::runtime::get().cuda_qkv_split;
     let grid_x = if split { n_kv_u } else { n_q_u.max(n_kv_u) };
     let cfg = LaunchConfig {
         grid_dim: (grid_x, m_u, 1),
@@ -765,11 +791,11 @@ pub fn launch_matvec_q4k_qkv(
     let q8_off = gpu.q8_off;
     let qq = gpu.q8_q.slice(q8_off..q8_off + q_elems);
     let null_u64 = 0u64;
-    let kv_dim_u = v_cache.map(|(_, _, d)| d).unwrap_or(0);
-    let v_cache_off = v_cache.map(|(_, o, _)| o).unwrap_or(0);
+    let kv_dim_u = v_cache.map(|c| c.kv_dim).unwrap_or(0);
+    let v_cache_off = v_cache.map(|c| c.off).unwrap_or(0);
     unsafe {
         match v_cache {
-            Some((cache_buf, _, _)) => gpu
+            Some(VCacheDst { buf: cache_buf, .. }) => gpu
                 .stream
                 .launch_builder_pdl(&f)
                 .arg(wb)
@@ -822,19 +848,23 @@ pub fn launch_matvec_q4k_qkv(
         let oq_tail = oq + (n_kv as u64) * (rb4 as u64);
         let q_tail_ptr = q + (n_kv * 4) as u64;
         // Reuse already-quantized Q8 at gpu.q8_off (same xv).
-        launch_qk_q8_matvec(
-            gpu,
-            GgmlType::Q4K,
-            chunk_q,
-            oq_tail,
+        let w = DevWeight {
+            ty: GgmlType::Q4K,
+            loc: WeightLoc {
+                chunk: chunk_q,
+                off: oq_tail,
+            },
             n_in,
-            q_tail,
-            xv,
-            q_tail_ptr,
+            n_out: q_tail,
+        };
+        let io = MatvecPtrs {
+            x: xv,
+            y: q_tail_ptr,
             m,
-            false,
-        )?;
-        if flags.fuse_log {
+            add: false,
+        };
+        launch_qk_q8_matvec(gpu, w, io)?;
+        if crate::runtime::get().cuda_fuse_log {
             eprintln!("cuda: qkv_split n_kv={n_kv} q_tail={q_tail}");
         }
     }

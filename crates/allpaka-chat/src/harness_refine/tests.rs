@@ -1148,19 +1148,19 @@ async fn pre_tool_blocks_and_post_tool_trims_inside_a_real_turn() {
 
 /// A Studio app wired to a fake OpenAI-compatible model whose replies
 /// come from `model(request)`.
-struct Fixture {
-    root: PathBuf,
-    app: App,
-    provider: crate::provider::Provider,
-    project: context::Project,
-    workspace: PathBuf,
-    data: PathBuf,
-    server: tokio::task::JoinHandle<()>,
+pub(crate) struct Fixture {
+    pub(crate) root: PathBuf,
+    pub(crate) app: App,
+    pub(crate) provider: crate::provider::Provider,
+    pub(crate) project: context::Project,
+    pub(crate) workspace: PathBuf,
+    pub(crate) data: PathBuf,
+    pub(crate) server: tokio::task::JoinHandle<()>,
 }
-fn say(text: &str) -> Value {
+pub(crate) fn say(text: &str) -> Value {
     json!({"choices":[{"delta":{"content":text},"finish_reason":"stop"}]})
 }
-fn call(name: &str, args: Value) -> Value {
+pub(crate) fn call(name: &str, args: Value) -> Value {
     json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("c-{name}-{}", crate::evaluation::new_id()),"type":"function","function":{"name":name,"arguments":args.to_string()}}]},"finish_reason":"tool_calls"}]})
 }
 fn system_of(request: &Value) -> String {
@@ -1179,7 +1179,7 @@ fn tools_of(request: &Value) -> Vec<String> {
         })
         .unwrap_or_default()
 }
-fn results_of(request: &Value) -> Vec<String> {
+pub(crate) fn results_of(request: &Value) -> Vec<String> {
     request["messages"]
         .as_array()
         .unwrap()
@@ -1188,7 +1188,7 @@ fn results_of(request: &Value) -> Vec<String> {
         .map(|m| m["content"].as_str().unwrap().to_string())
         .collect()
 }
-async fn fixture(model: fn(&Value) -> Value) -> Fixture {
+pub(crate) async fn fixture(model: fn(&Value) -> Value) -> Fixture {
     use axum::{response::IntoResponse, routing::post, Router};
     let root = temp();
     std::fs::create_dir_all(root.join("workspace")).unwrap();
@@ -1243,6 +1243,7 @@ async fn fixture(model: fn(&Value) -> Value) -> Fixture {
         judge_runs: crate::judge_runs::Manager::new(&data).unwrap(),
         judges: Arc::new(tokio::sync::Semaphore::new(2)),
         memory_extractions: Arc::new(tokio::sync::Semaphore::new(2)),
+        memory_extraction_cancels: Default::default(),
         prompts: crate::prompts::Store::new(&data).unwrap(),
         experiments: crate::experiments::Manager::new(&data).unwrap(),
         matrix_jobs: crate::experiments::matrix_jobs::Manager::new(&data).unwrap(),
@@ -1267,7 +1268,7 @@ async fn fixture(model: fn(&Value) -> Value) -> Fixture {
         server,
     }
 }
-fn auto_settings() -> Settings {
+pub(crate) fn auto_settings() -> Settings {
     serde_json::from_value(json!({"provider":"fixture","model":"tiny","project_id":"p","mode":"auto","allow_writes":true})).unwrap()
 }
 fn engine(f: &Fixture, task: &str) -> StudioEngine {
@@ -1308,7 +1309,7 @@ fn probe_model(request: &Value) -> Value {
             say(&json!({"files":{},"notes":"KEEP_BASE: runs agree"}).to_string())
         }
     } else if results.is_empty() {
-        assert!(system.contains("# Available skills") && tools.contains(&"load_skill".to_string()));
+        assert!(system.contains("# Available skills") && tools.iter().any(|t| t == "load_skill"));
         call("load_skill", json!({"name":"note"}))
     } else if results.len() == 1 {
         assert!(results[0].contains("Write out.txt"));
@@ -1597,7 +1598,7 @@ fn selector_model(request: &Value) -> Value {
     let (system, tools, results) = (system_of(request), tools_of(request), results_of(request));
     assert!(system.contains("CHECK THE CLAIMS AGAINST THE SOURCE"));
     assert!(
-        tools.contains(&"read_file".to_string())
+        tools.iter().any(|t| t == "read_file")
             && !tools
                 .iter()
                 .any(|t| ["write_file", "edit_file", "run_command"].contains(&t.as_str()))
@@ -1815,11 +1816,11 @@ fn delegate_model(request: &Value) -> Value {
     let (system, tools, results) = (system_of(request), tools_of(request), results_of(request));
     if system.contains("You are the `reader` subagent") {
         assert!(
-            !tools.contains(&"delegate".to_string()),
+            !tools.iter().any(|t| t == "delegate"),
             "subagents cannot delegate again"
         );
         assert!(
-            !tools.contains(&"write_file".to_string()),
+            !tools.iter().any(|t| t == "write_file"),
             "reader has writes: false"
         );
         return if results.is_empty() {
@@ -1900,7 +1901,7 @@ fn files_only_model(request: &Value) -> Value {
             say("child could not execute")
         };
     }
-    assert!(tools.contains(&"delegate".to_string()));
+    assert!(tools.iter().any(|t| t == "delegate"));
     assert!(tools
         .iter()
         .all(|name| !["run_command", "run_script", "background"].contains(&name.as_str())));

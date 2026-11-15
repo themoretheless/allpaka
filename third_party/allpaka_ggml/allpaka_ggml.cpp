@@ -90,6 +90,15 @@ extern "C" int allpaka_fp8_gemm_q(
 
 extern "C" int allpaka_fa_launch_direct(void * fa_tensor_v);
 
+// Largest decode attention slot, in KV positions. Slots are powers of two, so
+// this is also the longest context the direct flash-attention path serves;
+// past it the caller falls back to a path that is orders of magnitude slower.
+static const int32_t ALLPAKA_FA_MAX_KV = 1 << 17;
+
+// Sliding window for the next prefill flash-attention calls (Gemma 3's local
+// layers); 0 = full causal. Set per layer by the caller.
+static int32_t g_fa_window = 0;
+
 namespace {
 
 std::mutex g_mu;
@@ -107,6 +116,38 @@ static bool f16_weights_on() {
 // One-time Q4/Q6 -> f16. Prefill otherwise dequants the same weights on every GEMM.
 static std::unordered_map<const void *, void *> g_f16_w;
 
+// Which weights get an f16 copy must not depend on how much VRAM other
+// programs hold at the moment: a weight that is cached in one run and
+// quantised in the next gives two different roundings of the same prefill.
+// The host sets a byte budget derived from the card and the model
+// (allpaka_ggml_set_f16_budget); weights are cached in call order until it is
+// spent, and the first weight that does not fit closes the cache for good.
+// ALLPAKA_F16_W_MIB overrides the budget. Without either, the old rule
+// applies: cache while 3 GiB stay free.
+static int64_t g_f16_budget = -1;
+static int64_t g_f16_used = 0;
+static bool g_f16_closed = false;
+
+static int64_t f16_budget() {
+    static const int64_t from_env = [] {
+        const char * e = std::getenv("ALLPAKA_F16_W_MIB");
+        if (!e || !e[0]) {
+            return (int64_t) -1;
+        }
+        const long long mib = std::atoll(e);
+        return mib < 0 ? (int64_t) -1 : (int64_t) mib << 20;
+    }();
+    return from_env >= 0 ? from_env : g_f16_budget;
+}
+
+static void f16_close(const char * why) {
+    if (!g_f16_closed) {
+        std::fprintf(stderr, "allpaka_ggml: f16 weight cache closed at %d MiB in %d weights (%s)\n",
+                     (int) (g_f16_used >> 20), (int) g_f16_w.size(), why);
+    }
+    g_f16_closed = true;
+}
+
 static const void * f16_weight(const void * w, int32_t n_in, int32_t n_out, int32_t w_type, int32_t * ty_io) {
     if (!f16_weights_on() || !g_be) {
         return w;
@@ -116,16 +157,31 @@ static const void * f16_weight(const void * w, int32_t n_in, int32_t n_out, int3
         *ty_io = GGML_TYPE_F16;
         return it->second;
     }
+    if (g_f16_closed) {
+        return w;
+    }
     const int64_t n = (int64_t) n_in * (int64_t) n_out;
     if (n <= 0) {
         return w;
     }
+    const size_t need = (size_t) n * sizeof(uint16_t);
+    const int64_t budget = f16_budget();
     size_t free_b = 0, total_b = 0;
     if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) {
         return w;
     }
-    const size_t need = (size_t) n * sizeof(uint16_t);
-    if (free_b < need + (3ull << 30)) {
+    if (budget >= 0) {
+        if (g_f16_used + (int64_t) need > budget) {
+            f16_close("budget spent");
+            return w;
+        }
+        // The budget assumes the card is otherwise ours. If it is not, stop
+        // rather than push the driver into shared system memory.
+        if (free_b < need + (1ull << 30)) {
+            f16_close("VRAM pressure: results may differ from an idle card");
+            return w;
+        }
+    } else if (free_b < need + (3ull << 30)) {
         return w;
     }
     void * dst = nullptr;
@@ -137,6 +193,7 @@ static const void * f16_weight(const void * w, int32_t n_in, int32_t n_out, int3
         return w;
     }
     g_f16_w.emplace(w, dst);
+    g_f16_used += (int64_t) need;
     static int logged = 0;
     if (logged < 3) {
         std::fprintf(stderr, "allpaka_ggml: f16 weight %d MiB (cached %d)\n",
@@ -285,9 +342,12 @@ static Slot * get_or_create_slot(const ShapeKey & key) {
 struct FaKey {
     int32_t head_dim, n_q, n_kv_h, m, n_kv, kv_dim;
     uint32_t scale_bits;
+    // Sliding window baked into a prefill slot's mask (0 = full causal).
+    int32_t window = 0;
     bool operator==(const FaKey & o) const {
         return head_dim == o.head_dim && n_q == o.n_q && n_kv_h == o.n_kv_h
-            && m == o.m && n_kv == o.n_kv && kv_dim == o.kv_dim && scale_bits == o.scale_bits;
+            && m == o.m && n_kv == o.n_kv && kv_dim == o.kv_dim && scale_bits == o.scale_bits
+            && window == o.window;
     }
 };
 
@@ -300,6 +360,7 @@ struct FaKeyHash {
         h = h * 1315423911u + (size_t)k.n_kv;
         h = h * 1315423911u + (size_t)k.kv_dim;
         h = h * 1315423911u + (size_t)k.scale_bits;
+        h = h * 1315423911u + (size_t)k.window;
         return h;
     }
 };
@@ -342,6 +403,10 @@ std::unordered_map<FaKey, FaSlot, FaKeyHash> g_fa;
 // Decode hot path: last m=1 slot (shared across layers).
 static FaKey g_fa_decode_key{};
 static FaSlot * g_fa_decode_slot = nullptr;
+// Decode (m=1) KV slots no smaller than this: a batched decode step sets it to
+// the bucket of its longest session, so every row of the step uses one slot
+// (rows in different slots corrupted the first, see allpaka_fa_set_min_kv).
+static int32_t g_fa_min_kv = 0;
 static bool g_fa_decode_valid = false;
 
 static void free_fa_slot(FaSlot & s) {
@@ -367,14 +432,16 @@ static void free_fa_slot(FaSlot & s) {
     s.gf = nullptr;
 }
 
-static void fill_causal_mask(void * mask_dev, int32_t n_kv, int32_t m, int32_t base) {
+static void fill_causal_mask(void * mask_dev, int32_t n_kv, int32_t m, int32_t base,
+                             int32_t window = 0) {
     std::vector<ggml_fp16_t> host((size_t)n_kv * (size_t)m);
     const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f);
     const ggml_fp16_t neg = ggml_fp32_to_fp16(-INFINITY);
     for (int32_t t = 0; t < m; t++) {
         const int32_t lim = base + t;
         for (int32_t p = 0; p < n_kv; p++) {
-            host[(size_t)t * (size_t)n_kv + (size_t)p] = (p <= lim) ? zero : neg;
+            const bool seen = p <= lim && (window <= 0 || p > lim - window);
+            host[(size_t)t * (size_t)n_kv + (size_t)p] = seen ? zero : neg;
         }
     }
     cudaMemcpy(mask_dev, host.data(), host.size() * sizeof(ggml_fp16_t), cudaMemcpyHostToDevice);
@@ -442,9 +509,17 @@ static FaSlot * get_or_create_fa(const FaKey & key, float scale) {
     s.V->nb[2] = (size_t)hd * sizeof(ggml_fp16_t);
     s.V->nb[3] = (size_t)n_kv * (size_t)kv_dim * sizeof(ggml_fp16_t);
 
-    s.mask = ggml_new_tensor_4d(s.ctx, GGML_TYPE_F16, n_kv, m, 1, 1);
+    // Prefill n_kv is exact (base + m), so it can be odd. The CUDA FA kernels
+    // read mask rows as half2 (and with 16-byte cp.async on aligned tiles) at
+    // stride mask->nb[1]; an odd row length misaligned every other row and
+    // crashed or hung the process (serve: a prefix-cache hit of 3 tokens
+    // then a 512-token chunk -> n_kv 515). Pad the mask width to 64 columns,
+    // all -inf past n_kv; K/V keep the exact length. Decode widths are
+    // already powers of two >= 16.
+    const int32_t mask_w = (m > 1) ? ((n_kv + 63) / 64) * 64 : n_kv;
+    s.mask = ggml_new_tensor_4d(s.ctx, GGML_TYPE_F16, mask_w, m, 1, 1);
 
-    s.mask_bytes = (size_t)n_kv * (size_t)m * sizeof(ggml_fp16_t);
+    s.mask_bytes = (size_t)mask_w * (size_t)m * sizeof(ggml_fp16_t);
     s.fa_bytes = (size_t)hd * (size_t)n_q * (size_t)m * sizeof(float);
     s.n_kv = n_kv;
     s.m = m;
@@ -457,7 +532,7 @@ static FaSlot * get_or_create_fa(const FaKey & key, float scale) {
 
     // Prefill: exact causal. Decode capacity slot: filled on first use.
     if (m > 1) {
-        fill_causal_mask(s.mask_dev, n_kv, m, /*base=*/n_kv - m);
+        fill_causal_mask(s.mask_dev, mask_w, m, /*base=*/n_kv - m, key.window);
         s.mask_lim = n_kv - 1;
     }
 
@@ -514,7 +589,13 @@ static FaSlot * get_or_create_fa(const FaKey & key, float scale) {
     s.out->buffer = s.buf_o; s.out->data = nullptr;
     ggml_backend_buffer_init_tensor(s.buf_perm, s.perm);
     ggml_backend_buffer_init_tensor(s.buf_o, s.out);
-    ggml_build_forward_expand(s.gf, s.out);
+    // The graph computes FA only. ggml_flash_attn_ext returns [hd, n_q, m]
+    // (ne order) = memory [m][n_q][hd], already the [m, q_dim] rows o_proj
+    // reads; callers copy fa_dev -> out with allpaka_fa_permute (an identity
+    // index map). The perm/cont nodes built above used to be the graph
+    // output, but permute(2,1,0,3) stored the result hd-major, so every
+    // prefill chunk of 32+ tokens fed o_proj scrambled attention.
+    ggml_build_forward_expand(s.gf, s.fa);
 
     auto [ins, ok] = g_fa.emplace(key, s);
     (void)ok;
@@ -639,6 +720,14 @@ extern "C" int allpaka_ggml_mul_mat_vec(
     return allpaka_direct_mmvq(g_be->context, w_dev, x_dev, y_dev, n_in, n_out, w_type);
 }
 
+// Keep prefill GEMM weights quantized (MMQ) instead of the f16 cache: the
+// f16 path converts activations to f16, which Gemma's outliers overflow.
+static bool g_quant_gemm = false;
+
+extern "C" void allpaka_ggml_set_quant_gemm(int32_t on) {
+    g_quant_gemm = on != 0;
+}
+
 extern "C" int allpaka_ggml_mul_mat(
     const void * w_dev,
     const float * x_dev,
@@ -651,8 +740,22 @@ extern "C" int allpaka_ggml_mul_mat(
     if (!w_dev || !x_dev || !y_dev || n_in <= 0 || n_out <= 0 || m <= 0) {
         return -2;
     }
-    if (m > 1 && m < 32) {
-        return -10;
+    // 2..31 rows: a batched decode step (one row per session). The weights
+    // stay quantized so ggml's batched MMVQ/MMQ reads them once for all rows;
+    // the f16 cache below only pays off for large prefill chunks.
+    const bool small_batch = m > 1 && m < 32;
+    if (small_batch && m <= 8) {
+        extern int allpaka_direct_mmvq_m(
+            void * cuda_ctx_v, const void * w_dev, const float * x_dev, float * y_dev,
+            int32_t n_in, int32_t n_out, int32_t m, int32_t w_type);
+        if (allpaka_ggml_init(g_device) != 0) {
+            return -1;
+        }
+        std::lock_guard<std::mutex> lock(g_mu);
+        if (g_be && g_be->context &&
+            allpaka_direct_mmvq_m(g_be->context, w_dev, x_dev, y_dev, n_in, n_out, m, w_type) == 0) {
+            return 0;
+        }
     }
     if (allpaka_ggml_init(g_device) != 0) {
         return -1;
@@ -673,7 +776,9 @@ extern "C" int allpaka_ggml_mul_mat(
         return 0;
     }
     int32_t ty_use = w_type;
-    const void * w_use = f16_weight(w_dev, n_in, n_out, w_type, &ty_use);
+    const void * w_use = (small_batch || g_quant_gemm)
+        ? w_dev
+        : f16_weight(w_dev, n_in, n_out, w_type, &ty_use);
     ShapeKey key{n_in, n_out, m, ty_use};
     Slot * slot = get_or_create_slot(key);
     if (!slot) {
@@ -702,6 +807,14 @@ extern "C" int allpaka_ggml_mul_mat(
 
     enum ggml_status st = ggml_backend_graph_compute_async(g_be, slot->gf);
     return st == GGML_STATUS_SUCCESS ? 0 : -7;
+}
+
+extern "C" void allpaka_fa_set_min_kv(int32_t n) {
+    g_fa_min_kv = n > 0 ? n : 0;
+}
+
+extern "C" void allpaka_fa_set_window(int32_t w) {
+    g_fa_window = w > 0 ? w : 0;
 }
 
 extern "C" void allpaka_fa_reset_mask_lim(void) {
@@ -757,16 +870,19 @@ extern "C" int allpaka_ggml_flash_attn(
             }
         }
         n_kv = floor_kv;
-        while (n_kv < need) {
+        while (n_kv < need || n_kv < g_fa_min_kv) {
             n_kv *= 2;
         }
-        if (n_kv > 8192) {
+        if (n_kv > ALLPAKA_FA_MAX_KV) {
             return -6;
         }
     } else {
         n_kv = need;
     }
     FaKey key{head_dim, n_q_heads, n_kv_heads, m, n_kv, kv_dim, scale_bits};
+    if (m > 1) {
+        key.window = g_fa_window;
+    }
 
     FaSlot * slot = nullptr;
     if (m == 1 && g_fa_decode_valid && g_fa_decode_key == key && g_fa_decode_slot) {
@@ -823,7 +939,12 @@ extern "C" int allpaka_ggml_flash_attn(
         const bool want_gcomp = gcomp && (gcomp[0] == '1' || gcomp[0] == 't' || gcomp[0] == 'T');
         if (want_gcomp) {
             enum ggml_status stc = ggml_backend_graph_compute_async(g_be, slot->gf);
-            return stc == GGML_STATUS_SUCCESS ? 0 : -7;
+            if (stc != GGML_STATUS_SUCCESS) {
+                return -7;
+            }
+            fa_permute_out(static_cast<const float *>(slot->fa_dev), out_dev,
+                           head_dim, n_q_heads, 1, st);
+            return 0;
         }
         if (allpaka_fa_launch_direct(slot->fa) != 0) {
             return -7;
@@ -842,8 +963,41 @@ extern "C" int allpaka_ggml_flash_attn(
     slot->perm->data = slot->perm_dev;
     slot->out->data = out_dev;
 
+    // FA output [hd, n_q, m] is already the [m, q_dim] row layout o_proj
+    // reads, so prefill writes it straight into out_dev instead of fa_dev +
+    // an identity copy (allpaka_fa_permute). ALLPAKA_FA_PERMUTE=1 restores
+    // the copy for A/B.
+    static const bool permute_copy = [] {
+        const char * e = std::getenv("ALLPAKA_FA_PERMUTE");
+        return e && e[0] == '1';
+    }();
+    if (!permute_copy) {
+        slot->vfa->ptr = out_dev;
+        slot->fa->data = out_dev;
+    }
     enum ggml_status stc = ggml_backend_graph_compute_async(g_be, slot->gf);
-    return stc == GGML_STATUS_SUCCESS ? 0 : -7;
+    if (!permute_copy) {
+        slot->vfa->ptr = slot->fa_dev;
+        slot->fa->data = slot->fa_dev;
+    }
+    if (stc != GGML_STATUS_SUCCESS) {
+        return -7;
+    }
+    if (permute_copy) {
+        allpaka_fa_permute_launch(static_cast<const float *>(slot->fa_dev), out_dev,
+                                  head_dim, n_q_heads, m, st);
+    }
+    return 0;
+}
+
+extern "C" void allpaka_ggml_set_f16_budget(int64_t bytes)
+{
+    std::lock_guard<std::mutex> lock(g_mu);
+    g_f16_budget = bytes < 0 ? -1 : bytes;
+    // A larger budget reopens a cache that an earlier, smaller one closed.
+    if (g_f16_budget < 0 || g_f16_used < g_f16_budget) {
+        g_f16_closed = false;
+    }
 }
 
 extern "C" int allpaka_hybrid_replay(
@@ -889,7 +1043,7 @@ extern "C" int allpaka_hybrid_replay(
     while (n_kv < need) {
         n_kv *= 2;
     }
-    if (n_kv > 8192) {
+    if (n_kv > ALLPAKA_FA_MAX_KV) {
         return -6;
     }
     FaKey key{head_dim, n_q_heads, n_kv_heads, 1, n_kv, kv_dim, scale_bits};

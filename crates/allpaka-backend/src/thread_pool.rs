@@ -21,6 +21,11 @@ struct TaskFn {
 impl TaskFn {
     #[inline]
     unsafe fn invoke<F: Fn(usize) + Sync>(data: usize, idx: usize) {
+        // SAFETY: `data` was made by `from_ref::<F>` from a `&F` that lives on
+        // `par_workers`' stack, and `call` was instantiated with the same `F`, so the
+        // cast restores the original type. `par_workers` does not return (or unwind)
+        // until `remaining == 0`, i.e. until every worker has finished this call, so the
+        // reference is live; `F: Sync` makes calling it from several threads sound.
         let f = &*(data as *const F);
         f(idx);
     }
@@ -101,6 +106,9 @@ fn spawn_worker(shared: &'static SharedPool, worker_id: usize, initial_gen: u64)
                     st.task.expect("active generation must have a task")
                 };
 
+                // SAFETY: `task` is the TaskFn of the generation this worker just observed;
+                // its closure stays alive until this worker decrements `remaining` below
+                // (see `TaskFn::invoke`).
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
                     task.run(worker_id);
                 }));
@@ -244,6 +252,10 @@ where
         let start = chunk_idx * chunk_size;
         let end = (start + chunk_size).min(total);
         if start < end {
+            // SAFETY: `chunk_idx` ranges over `0..n_chunks` once each, so the ranges
+            // `[start, end)` are disjoint and end at `total = slice.len()`. Each worker gets a
+            // unique, in-bounds sub-slice; `slice` stays mutably borrowed until par_workers
+            // returns after all workers, and `T: Send` allows handing the parts to them.
             let chunk = unsafe {
                 std::slice::from_raw_parts_mut((base_addr as *mut T).add(start), end - start)
             };
@@ -276,6 +288,8 @@ mod tests {
         let mut out = vec![0usize; n];
         let base = out.as_mut_ptr() as usize;
         par_for_chunks(n, 8, |_tid, start, end| {
+            // SAFETY: par_for_chunks hands out disjoint ranges ending at `n = out.len()`,
+            // and `out` outlives the call.
             let sub = unsafe {
                 std::slice::from_raw_parts_mut((base as *mut usize).add(start), end - start)
             };

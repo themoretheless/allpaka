@@ -1,6 +1,7 @@
+const {appSource,between}=require('./harness');
 const assert=require('assert'),fs=require('fs'),vm=require('vm');
 class Element{constructor(text){this.textContent=text||'';this.value='';this.children=[];this.disabled=false;}append(...items){this.children.push(...items);}replaceChildren(...items){this.children=items;}click(){return this.onclick?.();}}
-const source=fs.readFileSync('crates/allpaka-chat/web/app.js','utf8');
+const source=appSource();
 function setup(){
   const elements=Object.fromEntries(['matrix-job-open','matrix-job-id','matrix-jobs-show','matrix-jobs-list','matrix-job-result','evaluation-matrix-id'].map(id=>[id,new Element()]));
   const calls=[],job={kind:'experiment_matrix_job',schema_version:1,id:'job',project_id:'project',status:'interrupted',error:'process_restart',matrix_id:null,automatic_replay:false,automatic_promotion:false,variants:[{label:'base',run_id:'run-1'},{label:'next',run_id:null}]};
@@ -15,8 +16,8 @@ function setup(){
     if(path==='evaluation/matrices/matrix')return JSON.parse(JSON.stringify(matrix));
     throw new Error('unexpected '+path);
   }};
-  vm.createContext(context);vm.runInContext(source.slice(source.indexOf('function verifyStudioMatrixJob('),source.indexOf('let evaluationMatrixEpoch=')),context);
-  vm.runInContext(source.slice(source.indexOf('let studioMatrixJobViewEpoch='),source.indexOf('let evaluationPrompt=')),context);
+  vm.createContext(context);vm.runInContext(between(source,'function verifyStudioMatrixJob(','let evaluationMatrixEpoch='),context);
+  vm.runInContext(between(source,'let studioMatrixJobViewEpoch=','let evaluationPrompt='),context);
   elements['matrix-job-id'].value='job';return {context,elements,calls,job,matrix};
 }
 const button=(panel,text)=>panel.children.find(row=>row.textContent===text);

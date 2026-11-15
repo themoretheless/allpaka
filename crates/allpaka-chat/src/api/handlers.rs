@@ -30,6 +30,13 @@ pub(crate) fn validate_settings(s: &Settings, app: &App) -> Result<()> {
             bail!("Unknown permission preset: {preset}");
         }
     }
+    if s.budget.max_tokens == Some(0)
+        || s.budget
+            .max_cost
+            .is_some_and(|cost| !cost.is_finite() || cost <= 0.0)
+    {
+        bail!("Budget limits must be positive; omit a limit to leave it open");
+    }
     if !(4096..=1000000).contains(&s.compact_threshold) {
         bail!("Compaction threshold must be between 4096 and 1000000 estimated tokens");
     }
@@ -104,14 +111,13 @@ pub(crate) fn validate_settings(s: &Settings, app: &App) -> Result<()> {
     Ok(())
 }
 pub(crate) fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() < 80 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    crate::storage::valid_hex_id(id)
 }
 pub(crate) async fn create_session(
     State(app): State<App>,
     Json(settings): Json<Settings>,
 ) -> ApiResult<Value> {
-    let app_for_attach = app.clone();
-    let (id, session) = tokio::task::spawn_blocking(move || -> std::result::Result<_, ApiError> {
+    crate::blocking(move || {
         validate_settings(&settings, &app).map_err(crate::bad_request)?;
         let id = format!(
             "{:x}-{:x}",
@@ -123,12 +129,10 @@ pub(crate) async fn create_session(
         );
         let session = Session::new(id.clone(), settings);
         save(&app, &session).map_err(crate::internal)?;
-        Ok((id, session))
+        attach(&app, session);
+        Ok(Json(json!({"id":id})))
     })
     .await
-    .map_err(crate::internal)??;
-    attach(&app_for_attach, session);
-    Ok(Json(json!({"id":id})))
 }
 pub(crate) fn attach(app: &App, session: Session) {
     let id = session.id.clone();
@@ -149,61 +153,58 @@ pub(crate) async fn branch_session(
     Path(id): Path<String>,
     Json(request): Json<BranchRequest>,
 ) -> ApiResult<Value> {
-    let source = {
-        let registry = app.sessions.lock().unwrap();
-        let (source, _) = registry
-            .get(&id)
-            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
-        let snapshot = source.lock().unwrap().clone();
-        snapshot
-    };
-    if source.status == SessionStatus::Running {
-        return Err(error(
-            StatusCode::CONFLICT,
-            "Stop generation before branching",
-        ));
-    }
-    let n = request.message_count;
-    if n > source.messages.len()
-        || (n > 0 && {
-            let last = &source.messages[n - 1];
-            last.role != "assistant" || !last.tool_calls.is_empty() || last.truncated
-        })
-    {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "Branch at a completed assistant response or before the first message",
-        ));
-    }
-    let new_id = format!(
-        "{:x}-{:x}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-        std::process::id()
-    );
-    let mut branch = Session::new(new_id.clone(), source.settings);
-    branch.title = format!("Ветка · {}", source.title);
-    branch.messages = source.messages[..n].to_vec();
-    branch.bookmarks = source
-        .bookmarks
-        .into_iter()
-        .filter(|m| m.message_index < n)
-        .collect();
-    branch.parent = Some(BranchOrigin {
-        session_id: id,
-        message_count: n,
-    });
-    let save_app = app.clone();
-    let branch = tokio::task::spawn_blocking(move || -> std::result::Result<_, ApiError> {
-        save(&save_app, &branch).map_err(crate::internal)?;
-        Ok(branch)
+    crate::blocking(move || {
+        let source = {
+            let registry = app.sessions.lock().unwrap();
+            let (source, _) = registry
+                .get(&id)
+                .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
+            let snapshot = source.lock().unwrap().clone();
+            snapshot
+        };
+        if source.status == SessionStatus::Running {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Stop generation before branching",
+            ));
+        }
+        let n = request.message_count;
+        if n > source.messages.len()
+            || (n > 0 && {
+                let last = &source.messages[n - 1];
+                last.role != "assistant" || !last.tool_calls.is_empty() || last.truncated
+            })
+        {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "Branch at a completed assistant response or before the first message",
+            ));
+        }
+        let new_id = format!(
+            "{:x}-{:x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            std::process::id()
+        );
+        let mut branch = Session::new(new_id.clone(), source.settings);
+        branch.title = format!("Ветка · {}", source.title);
+        branch.messages = source.messages[..n].to_vec();
+        branch.bookmarks = source
+            .bookmarks
+            .into_iter()
+            .filter(|m| m.message_index < n)
+            .collect();
+        branch.parent = Some(BranchOrigin {
+            session_id: id,
+            message_count: n,
+        });
+        save(&app, &branch).map_err(crate::internal)?;
+        attach(&app, branch);
+        Ok(Json(json!({"id":new_id})))
     })
     .await
-    .map_err(crate::internal)??;
-    attach(&app, branch);
-    Ok(Json(json!({"id":new_id})))
 }
 pub(crate) async fn session(State(app): State<App>, Path(id): Path<String>) -> ApiResult<Value> {
     let shared = {
@@ -348,6 +349,8 @@ pub(crate) async fn execute_background(
                                         waited["tasks"][0]["status"].as_str().unwrap_or("unknown")
                                     ),
                                     settings: None,
+                                    citations: vec![],
+                                    context_budget: None,
                                 })
                                 .await;
                         }
@@ -364,36 +367,35 @@ pub(crate) async fn delete_session(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> ApiResult<Value> {
-    let folder = {
-        let sessions = app.sessions.lock().unwrap();
-        let Some((shared, _)) = sessions.get(&id) else {
-            return Err(error(StatusCode::NOT_FOUND, "Conversation not found"));
+    crate::blocking(move || {
+        let folder = {
+            let sessions = app.sessions.lock().unwrap();
+            let Some((shared, _)) = sessions.get(&id) else {
+                return Err(error(StatusCode::NOT_FOUND, "Conversation not found"));
+            };
+            let folder = shared.lock().unwrap().folder;
+            folder
         };
-        let folder = shared.lock().unwrap().folder;
-        folder
-    };
-    if folder != HistoryFolder::Trash {
-        return Err(error(
-            StatusCode::CONFLICT,
-            "Only conversations in Trash can be permanently deleted",
-        ));
-    }
-    app.background.cancel_owned(&id);
-    app.interactions.clear_session(&id);
-    app.ext.terminals.purge_session(&id);
-    app.ext.agents.purge_session(&id);
-    app.sessions.lock().unwrap().remove(&id);
-    let path = app.data.join(format!("{id}.json"));
-    let data = app.data.clone();
-    let sid = id.clone();
-    let checkpoints = app.ext.checkpoints.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        let _ = std::fs::remove_file(path);
-        let _ = spill::delete_session_spills(&data, &sid);
-        let _ = checkpoints.delete_session(&data, &sid);
+        if folder != HistoryFolder::Trash {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Only conversations in Trash can be permanently deleted",
+            ));
+        }
+        app.background.cancel_owned(&id);
+        app.interactions.clear_session(&id);
+        app.ext.terminals.purge_session(&id);
+        app.ext.agents.purge_session(&id);
+        app.sessions.lock().unwrap().remove(&id);
+        // After removal: an extraction either fails to find the conversation
+        // or was registered before this cancel and sees it.
+        app.memory_extraction_cancels.cancel_session(&id);
+        let _ = std::fs::remove_file(app.data.join(format!("{id}.json")));
+        let _ = spill::delete_session_spills(&app.data, &id);
+        let _ = app.ext.checkpoints.delete_session(&app.data, &id);
+        Ok(Json(json!({"deleted": id})))
     })
-    .await;
-    Ok(Json(json!({"deleted": id})))
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -461,6 +463,31 @@ pub(crate) async fn action(
     Path(id): Path<String>,
     Json(mut action): Json<Action>,
 ) -> ApiResult<Value> {
+    if action.kind == ActionKind::Undo {
+        let sessions = app.sessions.lock().unwrap();
+        let (shared, _) = sessions
+            .get(&id)
+            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
+        let mut state = shared.lock().unwrap();
+        if state.status == SessionStatus::Running {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Stop generation before undoing a file change",
+            ));
+        }
+        let Some(last) = state.file_checkpoints.last().cloned() else {
+            return Err(error(StatusCode::CONFLICT, "No file change to undo"));
+        };
+        let restored = crate::undo::restore(&last).map_err(|e| error(StatusCode::CONFLICT, &e))?;
+        state.file_checkpoints.pop();
+        save(&app, &state).map_err(crate::internal)?;
+        return Ok(Json(json!({
+            "accepted": true,
+            "path": last.path,
+            "restored": restored,
+            "remaining": state.file_checkpoints.len(),
+        })));
+    }
     if matches!(action.kind, ActionKind::Rename | ActionKind::Move) {
         return crate::blocking(move || {
             let sessions = app.sessions.lock().unwrap();
@@ -517,13 +544,17 @@ pub(crate) async fn action(
     if let Some(settings) = &action.settings {
         validate_settings(settings, &app).map_err(crate::bad_request)?;
     }
-    let (current, folder) = {
+    let (current, folder, ephemeral_project) = {
         let sessions = app.sessions.lock().unwrap();
         let (s, _) = sessions
             .get(&id)
             .ok_or_else(|| error(StatusCode::NOT_FOUND, "Conversation not found"))?;
         let state = s.lock().unwrap();
-        (state.settings.clone(), state.folder)
+        (
+            state.settings.clone(),
+            state.folder,
+            state.ephemeral.as_ref().map(|e| e.project.clone()),
+        )
     };
     if folder != HistoryFolder::Active
         && !matches!(action.kind, ActionKind::Stop | ActionKind::ClearQueue)
@@ -546,6 +577,35 @@ pub(crate) async fn action(
             StatusCode::BAD_REQUEST,
             "Use Send now or Queue for images",
         ));
+    }
+    if matches!(
+        action.kind,
+        ActionKind::Send | ActionKind::SendNow | ActionKind::Steer
+    ) && !mentions::parse(&action.text)
+        .map_err(crate::bad_request)?
+        .is_empty()
+    {
+        let project = match ephemeral_project {
+            Some(project) => project,
+            None => app
+                .projects
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| p.id == chosen.project_id)
+                .cloned()
+                .ok_or_else(|| error(StatusCode::NOT_FOUND, "Unknown project"))?,
+        };
+        let data = app.data.clone();
+        let text = action.text.clone();
+        let attached =
+            tokio::task::spawn_blocking(move || mentions::attach(&project, &data, &text))
+                .await
+                .map_err(crate::internal)?
+                .map_err(|e| crate::bad_request(format!("{e:#}")))?;
+        action.text = attached.text;
+        action.citations = attached.citations;
+        action.context_budget = attached.budget;
     }
     let tx = app
         .sessions
