@@ -1,5 +1,8 @@
 //! allpaka - decide whether splitting a model across your machines is worth it,
 //! and if so, where to cut it.
+// clap's derived `Subcommand` impl builds one large command tree; newer
+// clippy flags its unoptimised stack frame. The derive output is not ours.
+#![allow(unknown_lints, clippy::large_unopt_stack_frames)]
 
 mod airbug;
 mod autotune;
@@ -35,7 +38,6 @@ struct Cli {
     command: Command,
 }
 
-#[allow(unknown_lints, clippy::large_unopt_stack_frames)]
 #[derive(Subcommand)]
 enum Command {
     /// Run a contiguous transformer stage on this machine.
