@@ -229,6 +229,19 @@ CUDA-ядер той стороны не нужен — загрузчик пе�
 
 ### D1. CI: первый зелёный прогон расширенного набора
 
+Состояние на 2026-11-15 (`main` после слияния с `origin/main`, раннер
+`macos-latest`): fmt, cross-backend check и clippy зелёные. `cargo test
+--workspace` красный на одном тесте —
+`crates/allpaka-backend/tests/gpu_parity.rs::rope_norm_end_to_end_gpu_paths_match_cpu`:
+Metal `prefill_attn_block(rope_norm=true)` расходится с CPU на одном элементе
+(−1.545 против −1.653, допуск ~0.055), KV-кэш совпадает. Тест и Metal-код — с
+той стороны слияния, в CI запущен впервые; оставлен падать намеренно до
+проверки на Mac (баг Metal или слияния). `gpu_moe_tail.rs::attend_mm_db_variants_are_bit_identical`
+пропускается на хостед-раннере GitHub (`attend_mm_fq` падает на виртуальном GPU),
+на настоящем Mac запускается. **DoD:** оба проверены на Mac, `cargo test
+--workspace` зелёный в CI, следующие шаги (сборка без default features,
+Studio-проверки) пройдены.
+
 `.github/workflows/ci.yml` теперь гоняет `fmt --check`, `clippy -D warnings`,
 `cargo test --workspace`, сборку CLI без default-features, node-проверки Studio
 и `scripts/test-studio.py`. Локально проверено на Windows (fmt, clippy, node) и
