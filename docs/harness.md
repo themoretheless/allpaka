@@ -455,3 +455,22 @@ Rust-тесты отдельно проверяют на сценарной мо
 - предупреждения политики в свидетельствах и сводке прогонов;
 - оценки по рубрике только после выбора;
 - предупреждения серии задач.
+
+## Расширения паритета с DeepSeek-Harness: профили, бандлы, workflows и PTC
+
+Поверх встроенного контура harness в Allpaka добавлены переносимые профили, бандлы конфигурации, декларативные многоэтапные графы и программируемый вызов инструментов (см. также [deepseek-harness-parity.md](deepseek-harness-parity.md)):
+
+- **Профили и бандлы (`crates/allpaka-chat/src/bundles.rs`)**:
+  - встроенные профили `default`, `coding-safe`, `autonomous-goal`, `research` и пользовательские профили (`GET/POST /api/profiles`, `DELETE /api/profiles/:pid`); при применении профиля в Studio `Settings.permission_preset` выставляется в `"custom"`, не смешивая namespace профиля и sandbox-пресетов (`readonly_audit`, `workspace_sandboxed`, `interactive_guarded`, `full_trusted`);
+  - экспорт (`GET /api/bundles/export?project_id=...`) и импорт (`POST /api/bundles/import`) единого `.allpaka-bundle.json` (активное дерево harness, workflows и custom-профили);
+  - горячая перезагрузка без перезапуска сервера (`POST /api/harness/reload`).
+- **Декларативные Workflows и цикл проверки (`crates/allpaka-chat/src/workflow.rs`)**:
+  - CRUD workflows (`/api/workflows`, `DELETE /api/workflows/:wid`) с топологической проверкой DAG и отклонением циклов;
+  - синхронное выполнение в сессии через `POST /api/sessions/:id/workflow` или инструмент модели `workflow`, а также цикл проверки `ralph`.
+- **Programmatic Tool Calling (`crates/allpaka-chat/src/ptc.rs`)**:
+  - инструмент `run_code` запускает изолированный Python 3 с токен-аутентифицированным loopback HTTP-мостом `studio.call_tool(name, ...)` (до 32 вызовов, лимит по таймауту и spill-усечение stdout/stderr);
+  - рекурсивный вызов `run_code`/`workflow`/`ralph`/`subagent_spawn` изнутри скрипта заблокирован; режим `ExecutionPolicy::files_only()` полностью отключает мост.
+- **Политики субагентов и Team DAG (`crates/allpaka-chat/src/runtime/subagent.rs`, `agent_team.rs`)**:
+  - субагенты запускаются с `ephemeral` и наследуют `ExecutionPolicy` родителя (при `files_only()` или `restricted` внешние/командные/team инструменты недоступны);
+  - Team DAG хранит зависимости задач на сессии, отклоняет циклы и преждевременное завершение зависимых задач (`HTTP 409`).
+
