@@ -131,11 +131,6 @@ greedy-стрим бит-совместим с монолитным прогон
 файлов через `@`; тест на актуальность — изменённый файл не выдаётся из кэша как
 свежий.
 
-Расхождение к устранению в этом же пункте: `docs/studio.md` пишет, что MCP «в
-этот цикл пока не включён», но `crates/allpaka-chat/src/mcp.rs` — уже работающий
-streamable-HTTP клиент к локальному `rag-mcp` (префикс `rag_`, только read-only
-инструменты при `read_only`). Документ надо привести в соответствие.
-
 ### C2. Checkpoints/undo, git diff, безопасные патчи, shell — закрыто в базовом контуре
 
 Реализованы `apply_patch` (`Begin Patch` / unified diff), автоматические чекпоинты с откатом (`patch.rs`), интерактивные PTY-терминалы (`terminal.rs`), Git worktrees и Forge PR (`worktree.rs`, `forge.rs`).
@@ -197,19 +192,25 @@ streamable-HTTP клиент к локальному `rag-mcp` (префикс `
 
 ## Трек D — гигиена (сквозной)
 
-### D1. CI: подключить существующие проверки — в работе
+### D1. CI: подключить существующие проверки — закрыто
 
 Подключены в `.github/workflows/ci.yml`: `cargo fmt --all -- --check`,
 `bash scripts/check-backends.sh`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo clippy -p allpaka-backend --target x86_64-pc-windows-msvc --features allpaka-backend/cuda -- -D warnings`,
 `cargo test --workspace`, `node --check crates/allpaka-chat/web/app.js`,
-`node scripts/test-studio-content.cjs`, `bash scripts/studio-ui-tests/run.sh`.
-Ещё не подключены к CI: `scripts/test-studio.py` (длительный сквозной прогон) и
-GPU-зависимые `scripts/test-serving-controls.py`, `scripts/test-serving-memory.py`
-(ждут self-hosted раннер D2).
+`node --check crates/allpaka-chat/web/harness-ext.js`, `node scripts/test-studio-content.cjs`,
+`node scripts/test-studio-key-save.cjs`, `bash scripts/studio-ui-tests/run.sh`,
+`python3 scripts/test-studio-sdk.py`, `python3 scripts/test-studio-files.py`,
+`python3 scripts/test-studio-callback-ci.py`, `python3 scripts/test-studio-guardrails.py`,
+`python3 scripts/test-studio-online-worker.py`, `python3 scripts/test-distributed.py` и
+`python3 scripts/test-studio.py`.
+GPU/GGUF-зависимые `scripts/test-serving-controls.py` и `scripts/test-serving-memory.py`
+относятся к треку self-hosted раннера D2.
 
 **DoD:** всё, что не требует Metal/GGUF, выполняется в CI и является обязательной
 проверкой.
+
+**Пруф:** `.github/workflows/ci.yml`.
 
 ### D2. Self-hosted Metal-раннер — ожидает
 

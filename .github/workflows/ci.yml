@@ -63,8 +63,21 @@ jobs:
       - name: Studio frontend & UI checks
         run: |
           node --check crates/allpaka-chat/web/app.js
+          node --check crates/allpaka-chat/web/harness-ext.js
           node scripts/test-studio-content.cjs
+          node scripts/test-studio-key-save.cjs
           bash scripts/studio-ui-tests/run.sh
+
+      - name: Studio SDK, HTTP & distributed E2E checks
+        run: |
+          cargo build -p allpaka-cli
+          python3 scripts/test-studio-sdk.py
+          python3 scripts/test-studio-files.py
+          python3 scripts/test-studio-callback-ci.py
+          python3 scripts/test-studio-guardrails.py
+          python3 scripts/test-studio-online-worker.py
+          python3 scripts/test-distributed.py
+          python3 scripts/test-studio.py
 
   # Опциональный разбор отказа. Показывает, почему упало, и предлагает команды;
   # сам ничего не чинит. Раскомментируйте, чтобы получать отчёт артефактом.
