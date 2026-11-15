@@ -45,6 +45,7 @@ pub fn prefill_begin(xs: &[f32]) -> Option<()> {
         gpu.pf_len = xs.len();
         gpu.pf_ffn_done = false;
         gpu.pf_rope_n = 0;
+        gpu.pf_rope_src = 0;
         // Prefill kernels overwrite arena addresses a decode matvec may have
         // quantised; the Q8 cache is keyed by pointer, so drop it.
         gpu.invalidate_q8();
@@ -94,6 +95,7 @@ pub fn prefill_replay(xs: &[f32]) -> Option<Vec<f32>> {
             .memcpy_dtoh(&gpu.pf_x.slice(0..xs.len()), &mut out)
             .ok()?;
         gpu.pf_rope_n = 0;
+        gpu.pf_rope_src = 0;
         gpu.invalidate_q8();
         crate::gpu::cuda::ggml::bind_peer_stream(&gpu.stream);
         Some(Some(out))
@@ -348,7 +350,7 @@ pub(super) fn try_prefill_attn_fused_dev(
         }
         let rope_src = rope_host.as_ptr() as usize;
         if gpu.pf_rope_n != rope_host.len() || gpu.pf_rope_src != rope_src {
-            if gpu.pf_rope_n == 0 {
+            if gpu.pf_rope_src == 0 {
                 upload_rope_pinned(gpu, rope_host, rope_at)?;
             } else {
                 // A second table mid-chunk (Gemma 3's local layers): a plain
@@ -875,6 +877,10 @@ pub(super) fn try_prefill_attn_fused_dev(
                         crate::gpu::cuda::ggml::mark_cudarc_dirty();
                     }
                 }
+                if !used_fa && ATTN_WINDOW.load(Ordering::Relaxed) != 0 {
+                    // Only the flash-attention mask carries the window.
+                    return None;
+                }
                 if !used_fa {
                     let use_kv = false && attend_use_kv_fused(hd, group_usz);
                     let f = if use_kv {
@@ -1169,6 +1175,10 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
         if !f.post_attn_norm.is_empty() {
             return None;
         }
+    }
+    // The paths below have no sliding window.
+    if ATTN_WINDOW.load(Ordering::Relaxed) != 0 {
+        return None;
     }
 
     let hs_owned = if let Some(f) = &req.fusion {

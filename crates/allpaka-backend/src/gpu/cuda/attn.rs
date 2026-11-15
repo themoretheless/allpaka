@@ -150,16 +150,19 @@ pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
     store_kv(req.cache, &k, req.k_off, req.pos, req.kv_dim)?;
     store_kv(req.cache, &v, req.v_off, req.pos, req.kv_dim)?;
     let group = req.n_heads / req.n_kv_heads.max(1);
+    // A sliding window is a later start: the rows of one layer are
+    // contiguous, so shift both offsets and shorten the row count.
+    let first = req.window.map_or(0, |w| (req.pos + 1).saturating_sub(w));
     let attn = attend(&AttnReq {
         cache: req.cache,
-        k_off: req.k_off,
-        v_off: req.v_off,
+        k_off: req.k_off + first * req.kv_dim,
+        v_off: req.v_off + first * req.kv_dim,
         q: &q,
         kv_dim: req.kv_dim,
         head_dim: hd,
         n_q_heads: req.n_heads,
         group,
-        n_pos: req.pos + 1,
+        n_pos: req.pos + 1 - first,
         scale: req.scale,
     })?;
     matvec(req.wo.0, req.wo.1, q_dim, hidden, &attn)

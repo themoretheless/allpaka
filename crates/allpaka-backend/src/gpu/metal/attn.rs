@@ -151,6 +151,9 @@ pub(super) fn encode_attend_from(
 }
 
 pub fn attn_block(req: &AttnBlockReq) -> Option<Vec<f32>> {
+    if req.window.is_some_and(|w| req.pos >= w) {
+        return None;
+    }
     let hd = req.head_dim;
     if hd != ATTN_HEAD_DIM || req.rope.len() != hd / 2 {
         return None;

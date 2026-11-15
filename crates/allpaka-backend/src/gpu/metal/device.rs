@@ -1176,3 +1176,8 @@ pub fn set_rope_inv_freq_swa(_inv_freq: &[f32]) -> bool {
 pub fn set_quant_gemm(_on: bool) -> bool {
     false
 }
+
+/// Sliding window for prefill attention; CUDA-only.
+pub fn set_attn_window(window: Option<usize>) -> bool {
+    window.is_none()
+}

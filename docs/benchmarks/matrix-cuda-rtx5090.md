@@ -9,7 +9,7 @@ each with the artifact that shows it. llama.cpp is `97e4ca7`, built by
 | Qwen3-32B Q4_K_M | `qwen3`, dense | greedy stream identical, 64 tokens after a 709-token prompt, 3 rounds | 106% (replayed stream), 103–112% (pp512–pp2048) | 118% (replay), 110% (`bench`) | `2026-11-14-token-replay-qwen3-32b.json`, `2026-11-10-allpaka-vs-llama-rtx5090.md`, `2026-11-13-cuda-prefill-determinism-rtx5090.md` |
 | Qwen2.5-7B-Instruct Q4_K_M | `qwen2`, dense, q/k/v bias | `verify --decode 32` passes against CUDA llama-server; replayed greedy stream identical for 4 tokens, then a near-tie split | 132% (replay) | 114% (replay), 104–128% through `serve` | `2026-11-14-token-replay-qwen25-7b.md`, `2026-11-14-serve-decode-7b-rtx5090.md` |
 | Llama-3.1-8B-Instruct Q4_K_M | `llama`, dense, NORM RoPE + `rope_freqs` | `verify --decode 32 --tol 0.3` passes on 3 prompts, argmax 96/96 | 110% (pp480 vs pp512) | 109% (`bench`) | `2026-11-14-verify-llama31-8b-rtx5090.md` |
-| Gemma-3-12B-it Q4_K_M | `gemma3`, dense, GeGLU, sandwich norms, SWA 1024 | `verify --decode 32` passes on 3 short prompts (argmax 96/96) and a 3011-token prompt past the window; 887-token fused prefill 0.53 (llama.cpp CUDA vs CPU: 0.44) | 90–93% (pp480 vs pp512) | 103% (`bench`) | `2026-11-15-verify-gemma3-12b-rtx5090.md` |
+| Gemma-3-12B-it Q4_K_M | `gemma3`, dense, GeGLU, sandwich norms, SWA 1024 | `verify --decode 32` passes on 3 short prompts and 1106/3011-token prompts past the window (argmax 160/160); 887-token prefill 0.53 (llama.cpp CUDA vs CPU: 0.44) | 90–95% (pp480 vs pp512), 107% (pp1232) | 103–105%, 102% at 1232 context | `2026-11-15-verify-gemma3-12b-rtx5090.md` |
 
 ## On `allpaka verify` for 32B
 

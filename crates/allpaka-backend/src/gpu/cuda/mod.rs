@@ -84,6 +84,20 @@ pub fn set_rope_inv_freq(inv_freq: &[f32]) -> bool {
     .unwrap_or(false)
 }
 
+/// Sliding window for the prefill attention blocks that follow (Gemma 3's
+/// local layers); None = full causal. False when the attention cannot apply
+/// one, and the caller must not rely on it.
+pub fn set_attn_window(window: Option<usize>) -> bool {
+    let ok = ggml::enabled() && ggml::fa_set_window(window.unwrap_or(0));
+    ATTN_WINDOW.store(if ok { window.unwrap_or(0) } else { 0 }, Ordering::Relaxed);
+    ok
+}
+
+/// The window `set_attn_window` installed; kernels without one must decline
+/// while it is non-zero.
+pub(super) static ATTN_WINDOW: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Prefill GEMMs on quantized weights (see `ggml::set_quant_gemm`).
 pub fn set_quant_gemm(on: bool) -> bool {
     ggml::set_quant_gemm(on)

@@ -69,6 +69,7 @@ ALLPAKA_GGML_API int allpaka_ggml_flash_attn(
 ALLPAKA_GGML_API void allpaka_fa_reset_mask_lim(void);
 ALLPAKA_GGML_API void allpaka_fa_set_min_kv(int32_t n);
 ALLPAKA_GGML_API void allpaka_ggml_set_quant_gemm(int32_t on);
+ALLPAKA_GGML_API void allpaka_fa_set_window(int32_t w);
 
 /** Drain ggml CUDA stream. Call before reading Y or mixing with other CUDA work. */
 ALLPAKA_GGML_API void allpaka_ggml_sync(void);

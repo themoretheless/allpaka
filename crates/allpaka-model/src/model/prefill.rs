@@ -121,12 +121,13 @@ impl<'a> Model<'a> {
         let attn_block_ok = matches!(c.rope_style, RopeStyle::Neox)
             && !cpu_attn_enabled()
             && !no_tokenbuf_enabled();
-        // The fused kernels attend over the whole cache: Gemma's local
-        // layers fit only while the window covers the chunk.
-        let prefill_fused_ok = attn_block_ok
-            && c.gemma
-                .as_ref()
-                .is_none_or(|g| base + m <= g.swa_window as usize);
+        // Gemma's local layers past the window need the flash-attention mask
+        // to carry the window (`set_attn_window`); without it they fit only
+        // while the window covers the chunk.
+        let window_ok = c.gemma.as_ref().is_none_or(|g| {
+            base + m <= g.swa_window as usize || allpaka_backend::gpu::set_attn_window(None)
+        });
+        let prefill_fused_ok = attn_block_ok && window_ok;
         drop(embed_span);
 
         // The fully fused prefill: xs lives on the GPU for the whole chunk,
@@ -193,7 +194,10 @@ impl<'a> Model<'a> {
             // the step-by-step path below. It has no sliding window, so a
             // Gemma local layer takes it only while the window covers the
             // whole chunk; the sandwich norms run on the host after it.
-            if attn_block_ok && layer.window.is_none_or(|w| base + m <= w) {
+            let windowed = layer.window.filter(|&w| base + m > w);
+            if attn_block_ok
+                && (windowed.is_none() || allpaka_backend::gpu::set_attn_window(windowed))
+            {
                 let fused = {
                     let _s = profile::span(profile::Phase::Attend);
                     let scale = 1.0 / (head_dim as f32).sqrt();
@@ -227,6 +231,9 @@ impl<'a> Model<'a> {
                         )
                     })
                 };
+                if windowed.is_some() {
+                    allpaka_backend::gpu::set_attn_window(None);
+                }
                 if let Some(mut projected) = fused {
                     if let Some(w) = &layer.post_attn_norm {
                         projected
@@ -345,7 +352,11 @@ impl<'a> Model<'a> {
         allpaka_backend::gpu::prefill_begin(xs)?;
         // Deferred buffers of earlier layers may still be in flight when a
         // layer declines; wait them out before the CPU fallback runs.
-        if self.forward_batch_fused_layers(xs, m, base, s).is_none() {
+        let done = self.forward_batch_fused_layers(xs, m, base, s);
+        if self.config.gemma.is_some() {
+            allpaka_backend::gpu::set_attn_window(None);
+        }
+        if done.is_none() {
             allpaka_backend::gpu::prefill_abort();
             return None;
         }
@@ -485,6 +496,10 @@ impl<'a> Model<'a> {
             } else {
                 let aw = layer.mixer.attn().expect("attn weights");
                 let _s = profile::span(profile::Phase::Attend);
+                let windowed = layer.window.filter(|&w| base + m > w);
+                if !allpaka_backend::gpu::set_attn_window(windowed) && windowed.is_some() {
+                    return None;
+                }
                 QuantMat::prefill_attn_block(
                     &aw.wq,
                     &aw.wk,

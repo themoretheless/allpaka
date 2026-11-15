@@ -72,6 +72,9 @@ pub struct AttnBlockReq<'a> {
     pub n_kv_heads: usize,
     pub pos: usize,
     pub scale: f32,
+    /// Sliding window (Gemma 3 local layers): attend over the last `w`
+    /// positions only. None = full causal.
+    pub window: Option<usize>,
 }
 
 /// One gated-delta-net (linear attention) layer inside [`TokenLayer`].

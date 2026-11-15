@@ -517,9 +517,11 @@ impl<'a> QuantMat<'a> {
         dims: (usize, usize, usize, usize),
         pos: usize,
         scale: f32,
+        window: Option<usize>,
     ) -> Option<Vec<f32>> {
         let (kv_dim, head_dim, n_heads, n_kv_heads) = dims;
         crate::gpu::attn_block(&crate::gpu::AttnBlockReq {
+            window,
             wq: (wq.ty, wq.data, wq.n_out),
             wk: (wk.ty, wk.data, wk.n_out),
             wv: (wv.ty, wv.data, wv.n_out),

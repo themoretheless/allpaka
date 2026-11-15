@@ -498,7 +498,6 @@ impl<'a> Model<'a> {
             // step-by-step path below.
             if matches!(c.rope_style, RopeStyle::Neox)
                 && !cpu_attn
-                && layer.window.is_none_or(|w| pos < w)
                 && pos < s.kv.capacity()
                 && allpaka_backend::gpu::decode_attention_capacity_safe(s.kv.capacity())
             {
@@ -526,6 +525,7 @@ impl<'a> Model<'a> {
                             ),
                             pos,
                             scale,
+                            layer.window,
                         )
                     })
                 };

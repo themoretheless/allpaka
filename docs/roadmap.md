@@ -21,7 +21,7 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 
 | Мешает | Пункты |
 |---|---|
-| Можно делать здесь (Windows + RTX 5090) | P8 (окно SWA в GPU-внимании для Gemma 3) |
+| Можно делать здесь (Windows + RTX 5090) | — |
 | Нужен Mac (Metal) | P4, P5, P6, P7, D3, D4, A7, D2 (Metal-раннер) |
 | Нужна вторая машина | B1 → B3 |
 | Нужны вы | D1 (push и зелёный CI), D2, D6, раздел «Ждёт решения владельца» |
@@ -105,10 +105,8 @@ pp480 — 481 dispatch в одном command buffer, GPU занят 321/322 мс
 Dense Qwen на CUDA — в матрице с паритетом (`docs/benchmarks/matrix-cuda-rtx5090.md`:
 Qwen3-32B, Qwen2.5-7B). Осталось:
 
-1. Gemma 4 (head_dim=512) — GGUF на машине нет. Gemma 3 в матрице:
-   decode 103%, prefill 90–93% от llama.cpp
-   (`2026-11-15-verify-gemma3-12b-rtx5090.md`). За окном 1024 токенов Gemma 3
-   идёт по per-layer пути: GPU-ядрам внимания нужно окно.
+1. Gemma 4 (head_dim=512) — GGUF на машине нет. Gemma 3 в матрице и за
+   окном 1024 (`2026-11-15-verify-gemma3-12b-rtx5090.md`).
 2. Опционально MTP-35B для паритета спекуляции.
 
 **DoD:** модель проходит greedy-паритет и попадает в матрицу с артефактом.

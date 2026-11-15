@@ -95,6 +95,10 @@ extern "C" int allpaka_fa_launch_direct(void * fa_tensor_v);
 // past it the caller falls back to a path that is orders of magnitude slower.
 static const int32_t ALLPAKA_FA_MAX_KV = 1 << 17;
 
+// Sliding window for the next prefill flash-attention calls (Gemma 3's local
+// layers); 0 = full causal. Set per layer by the caller.
+static int32_t g_fa_window = 0;
+
 namespace {
 
 std::mutex g_mu;
@@ -338,9 +342,12 @@ static Slot * get_or_create_slot(const ShapeKey & key) {
 struct FaKey {
     int32_t head_dim, n_q, n_kv_h, m, n_kv, kv_dim;
     uint32_t scale_bits;
+    // Sliding window baked into a prefill slot's mask (0 = full causal).
+    int32_t window = 0;
     bool operator==(const FaKey & o) const {
         return head_dim == o.head_dim && n_q == o.n_q && n_kv_h == o.n_kv_h
-            && m == o.m && n_kv == o.n_kv && kv_dim == o.kv_dim && scale_bits == o.scale_bits;
+            && m == o.m && n_kv == o.n_kv && kv_dim == o.kv_dim && scale_bits == o.scale_bits
+            && window == o.window;
     }
 };
 
@@ -353,6 +360,7 @@ struct FaKeyHash {
         h = h * 1315423911u + (size_t)k.n_kv;
         h = h * 1315423911u + (size_t)k.kv_dim;
         h = h * 1315423911u + (size_t)k.scale_bits;
+        h = h * 1315423911u + (size_t)k.window;
         return h;
     }
 };
@@ -424,14 +432,16 @@ static void free_fa_slot(FaSlot & s) {
     s.gf = nullptr;
 }
 
-static void fill_causal_mask(void * mask_dev, int32_t n_kv, int32_t m, int32_t base) {
+static void fill_causal_mask(void * mask_dev, int32_t n_kv, int32_t m, int32_t base,
+                             int32_t window = 0) {
     std::vector<ggml_fp16_t> host((size_t)n_kv * (size_t)m);
     const ggml_fp16_t zero = ggml_fp32_to_fp16(0.0f);
     const ggml_fp16_t neg = ggml_fp32_to_fp16(-INFINITY);
     for (int32_t t = 0; t < m; t++) {
         const int32_t lim = base + t;
         for (int32_t p = 0; p < n_kv; p++) {
-            host[(size_t)t * (size_t)n_kv + (size_t)p] = (p <= lim) ? zero : neg;
+            const bool seen = p <= lim && (window <= 0 || p > lim - window);
+            host[(size_t)t * (size_t)n_kv + (size_t)p] = seen ? zero : neg;
         }
     }
     cudaMemcpy(mask_dev, host.data(), host.size() * sizeof(ggml_fp16_t), cudaMemcpyHostToDevice);
@@ -522,7 +532,7 @@ static FaSlot * get_or_create_fa(const FaKey & key, float scale) {
 
     // Prefill: exact causal. Decode capacity slot: filled on first use.
     if (m > 1) {
-        fill_causal_mask(s.mask_dev, mask_w, m, /*base=*/n_kv - m);
+        fill_causal_mask(s.mask_dev, mask_w, m, /*base=*/n_kv - m, key.window);
         s.mask_lim = n_kv - 1;
     }
 
@@ -803,6 +813,10 @@ extern "C" void allpaka_fa_set_min_kv(int32_t n) {
     g_fa_min_kv = n > 0 ? n : 0;
 }
 
+extern "C" void allpaka_fa_set_window(int32_t w) {
+    g_fa_window = w > 0 ? w : 0;
+}
+
 extern "C" void allpaka_fa_reset_mask_lim(void) {
     if (g_fa_decode_slot) {
         g_fa_decode_slot->mask_lim = -1;
@@ -866,6 +880,9 @@ extern "C" int allpaka_ggml_flash_attn(
         n_kv = need;
     }
     FaKey key{head_dim, n_q_heads, n_kv_heads, m, n_kv, kv_dim, scale_bits};
+    if (m > 1) {
+        key.window = g_fa_window;
+    }
 
     FaSlot * slot = nullptr;
     if (m == 1 && g_fa_decode_valid && g_fa_decode_key == key && g_fa_decode_slot) {

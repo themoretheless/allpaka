@@ -199,10 +199,9 @@ impl<'a> Model<'a> {
         };
 
         let scale = 1.0 / (head_dim as f32).sqrt();
-        // The GPU attend kernels have no window; once a row's window starts
-        // past position 0, attention runs on the CPU.
-        let windowed = window.is_some_and(|w| base_pos + m > w);
-        let cpu_only = !allow_gpu_attend || cpu_attn_enabled() || windowed;
+        // A sliding window is a later start row: each GPU request shifts its
+        // K/V offsets to the first row it may see and shortens its count.
+        let cpu_only = !allow_gpu_attend || cpu_attn_enabled();
         let first_seen = |pos: usize| window.map_or(0, |w| (pos + 1).saturating_sub(w));
 
         // Single-token decode path: try fused attend + wo projection on GPU when !gate_in_q.
@@ -210,16 +209,17 @@ impl<'a> Model<'a> {
             let fused = {
                 let _s = profile::span(profile::Phase::Attend);
                 kv.gpu_view_ref(kv_layer).and_then(|(cache, k_off, v_off)| {
+                    let first = first_seen(base_pos);
                     aw.wo.attend_project(&allpaka_backend::gpu::AttnReq {
                         cache,
-                        k_off,
-                        v_off,
+                        k_off: k_off + first * kv_dim,
+                        v_off: v_off + first * kv_dim,
                         q: &q,
                         kv_dim,
                         head_dim,
                         n_q_heads: c.n_heads as usize,
                         group: c.group_size(),
-                        n_pos: base_pos + 1,
+                        n_pos: base_pos + 1 - first,
                         scale,
                     })
                 })
@@ -236,17 +236,20 @@ impl<'a> Model<'a> {
             let on_gpu = if m > 1 && !cpu_only && cache_synced {
                 kv.gpu_view(kv_layer).and_then(|(cache, k_off, v_off)| {
                     let reqs: Vec<allpaka_backend::gpu::AttnReq> = (0..m)
-                        .map(|i| allpaka_backend::gpu::AttnReq {
-                            cache,
-                            k_off,
-                            v_off,
-                            q: &q_ref[i * q_dim..(i + 1) * q_dim],
-                            kv_dim,
-                            head_dim,
-                            n_q_heads: c.n_heads as usize,
-                            group: c.group_size(),
-                            n_pos: base_pos + i + 1,
-                            scale,
+                        .map(|i| {
+                            let first = first_seen(base_pos + i);
+                            allpaka_backend::gpu::AttnReq {
+                                cache,
+                                k_off: k_off + first * kv_dim,
+                                v_off: v_off + first * kv_dim,
+                                q: &q_ref[i * q_dim..(i + 1) * q_dim],
+                                kv_dim,
+                                head_dim,
+                                n_q_heads: c.n_heads as usize,
+                                group: c.group_size(),
+                                n_pos: base_pos + i + 1 - first,
+                                scale,
+                            }
                         })
                         .collect();
                     allpaka_backend::gpu::attend_batch(&reqs)
