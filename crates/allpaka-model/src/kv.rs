@@ -702,6 +702,38 @@ impl KvCache {
     ///   memory in place — this is a zero-copy no-op returning `true`.
     /// * On **dUMA** (`SharedRegion::is_discrete()`), uploads the K and V byte
     ///   slices for `positions` to device VRAM (`H2D`).
+    /// The reverse of [`sync_gpu_range`]: bring `positions` of `layer` back
+    /// from device VRAM into the host store (dUMA only; a no-op on UMA or
+    /// without a GPU). GPU paths write K/V on the device alone; a CPU
+    /// attention over rows they wrote (Gemma 3's sliding window past the
+    /// GPU kernels' reach) must pull them first.
+    pub fn pull_gpu_range(&mut self, layer: usize, positions: std::ops::Range<usize>) -> bool {
+        if positions.start > positions.end || positions.end > self.capacity {
+            return false;
+        }
+        let slot = self.slot_of(layer);
+        let Some(shared) = self.shared.as_ref() else {
+            return true;
+        };
+        if !shared.is_discrete() || positions.is_empty() {
+            return true;
+        }
+        let count = (positions.end - positions.start) * self.kv_dim;
+        let k_at = slot * self.layer_stride + positions.start * self.kv_dim;
+        let v_at = self.v_base + k_at;
+        let (k_bytes, v_bytes, byte_count) = (k_at * 2, v_at * 2, count * 2);
+        let bytes = self.store.as_bytes_mut();
+        allpaka_backend::gpu::download_region_range(
+            shared,
+            k_bytes,
+            &mut bytes[k_bytes..k_bytes + byte_count],
+        ) && allpaka_backend::gpu::download_region_range(
+            shared,
+            v_bytes,
+            &mut bytes[v_bytes..v_bytes + byte_count],
+        )
+    }
+
     pub fn sync_gpu_range(&mut self, layer: usize, positions: std::ops::Range<usize>) -> bool {
         if positions.start > positions.end || positions.end > self.capacity {
             return false;

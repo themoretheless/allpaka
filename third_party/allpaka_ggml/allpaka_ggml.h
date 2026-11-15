@@ -68,6 +68,7 @@ ALLPAKA_GGML_API int allpaka_ggml_flash_attn(
 /** Force next decode FA to re-record mask_from_pos (for CUDA graph capture). */
 ALLPAKA_GGML_API void allpaka_fa_reset_mask_lim(void);
 ALLPAKA_GGML_API void allpaka_fa_set_min_kv(int32_t n);
+ALLPAKA_GGML_API void allpaka_ggml_set_quant_gemm(int32_t on);
 
 /** Drain ggml CUDA stream. Call before reading Y or mixing with other CUDA work. */
 ALLPAKA_GGML_API void allpaka_ggml_sync(void);

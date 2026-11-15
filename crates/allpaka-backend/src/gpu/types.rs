@@ -298,6 +298,10 @@ pub struct PrefillFusion<'a> {
     /// F32 raw router weights, `n_expert * hidden` floats.
     pub router: &'a [u8],
     pub n_expert: usize,
+    /// Gemma's post-attention norm (raw F32), applied to the attention
+    /// output before the residual add; empty for every other family. Only
+    /// the CUDA device-resident block implements it; the rest decline.
+    pub post_attn_norm: &'a [u8],
 }
 
 pub struct PrefillAttnReq<'a> {
@@ -419,6 +423,11 @@ pub struct GroupedCombine<'a> {
     pub m: usize,
     /// The NEXT layer's attention-norm weight (raw F32) plus RMS eps.
     pub next_norm: Option<(&'a [u8], f32)>,
+    /// Gemma: post-FFN norm (raw F32 plus RMS eps) on the down projection
+    /// before the residual add, and GeGLU instead of SwiGLU. Only the CUDA
+    /// dense device-resident FFN implements these; the rest decline.
+    pub post_norm: Option<(&'a [u8], f32)>,
+    pub gelu: bool,
 }
 
 /// A prefill chunk's whole routed FFN — every expert group's gate, up,

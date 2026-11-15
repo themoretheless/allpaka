@@ -198,6 +198,13 @@ pub fn prefill_abort() {
 }
 
 pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
+    if req
+        .fusion
+        .as_ref()
+        .is_some_and(|f| !f.post_attn_norm.is_empty())
+    {
+        return None;
+    }
     let hidden = req.hs.len() / req.m.max(1);
     let hd = req.head_dim;
     // 128 everywhere; 256 on qwen35moe's full-attention layers. Below the

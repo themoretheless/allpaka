@@ -218,6 +218,9 @@ pub struct CudaGpu {
     /// writes `pf_x` (or may reallocate `y_arena`) calls `pf_flush_add` first.
     pub pf_pending_add: Option<(u64, usize)>,
     pub pf_rope_n: usize,
+    /// Host address of the table `pf_rope_n` describes: Gemma 3 alternates
+    /// two tables of the same length between layers.
+    pub pf_rope_src: usize,
     pub x_f16_n: usize,
     /// Second stream: dequant next W while compute GEMMs the current W.
     pub dq_stream: Arc<CudaStream>,
@@ -526,6 +529,7 @@ pub(super) fn init_device() -> Option<CudaGpu> {
         f32_cache: HashMap::new(),
         pf_pending_add: None,
         pf_rope_n: 0,
+        pf_rope_src: 0,
         x_f16_n: 0,
         dq_stream,
         ev_w0,

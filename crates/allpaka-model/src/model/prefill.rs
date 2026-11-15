@@ -121,7 +121,12 @@ impl<'a> Model<'a> {
         let attn_block_ok = matches!(c.rope_style, RopeStyle::Neox)
             && !cpu_attn_enabled()
             && !no_tokenbuf_enabled();
-        let prefill_fused_ok = c.gemma.is_none() && attn_block_ok;
+        // The fused kernels attend over the whole cache: Gemma's local
+        // layers fit only while the window covers the chunk.
+        let prefill_fused_ok = attn_block_ok
+            && c.gemma
+                .as_ref()
+                .is_none_or(|g| base + m <= g.swa_window as usize);
         drop(embed_span);
 
         // The fully fused prefill: xs lives on the GPU for the whole chunk,
@@ -358,7 +363,8 @@ impl<'a> Model<'a> {
             .all(|l| l.mixer.gdn().is_none() && matches!(l.ffn, Ffn::Dense { .. }));
         // Small chunks gain nothing from a graph; keep them from evicting
         // the key of the large chunk in between (0 leaves graph state alone).
-        if !dense_attn || m < 64 {
+        // Gemma's local RoPE table is rebuilt per call, so it never replays.
+        if !dense_attn || m < 64 || self.config.gemma.is_some() {
             return 0;
         }
         let Some((cache, _, _)) = s.kv.gpu_view(0) else {
@@ -398,12 +404,30 @@ impl<'a> Model<'a> {
         let hidden = c.hidden as usize;
         let head_dim = c.head_dim as usize;
         let scale = 1.0 / (head_dim as f32).sqrt();
-        let rope_flat = &s.rope_cache[base * s.rope_cache_pairs..(base + m) * s.rope_cache_pairs];
+        let rope_global = &s.rope_cache[base * s.rope_cache_pairs..(base + m) * s.rope_cache_pairs];
+        // Gemma 3's local layers rotate with their own base.
+        let rope_swa: Vec<[f32; 2]> = (base..base + m)
+            .flat_map(|pos| {
+                self.rope_inv_freq_swa
+                    .iter()
+                    .map(move |&freq| (pos as f32 * freq).sin_cos().into())
+            })
+            .collect();
         let mut picked_buf = [(0usize, 0.0f32); 256];
         for (li, layer) in self.layers.iter().enumerate() {
             if layer.attn_norm_raw.is_empty() || layer.ffn_norm_raw.is_empty() {
                 return None;
             }
+            if (layer.post_attn_norm.is_some() && layer.post_attn_norm_raw.is_empty())
+                || (layer.post_ffn_norm.is_some() && layer.post_ffn_norm_raw.is_empty())
+            {
+                return None;
+            }
+            let rope_flat = if layer.window.is_some() {
+                rope_swa.as_slice()
+            } else {
+                rope_global
+            };
             // Router bytes for the fused attention block: MoE layers have a
             // real F32 router; a leading Dense layer (GLM's layer 0) has
             // none and skips the router matmul entirely.
@@ -423,6 +447,7 @@ impl<'a> Model<'a> {
                 ffn_norm: layer.ffn_norm_raw,
                 router: router_raw,
                 n_expert,
+                post_attn_norm: layer.post_attn_norm_raw,
             });
             // The gated-delta-net branch (qwen35moe linear-attention layers):
             // its own fused block, same contract as the attention one.
@@ -659,6 +684,9 @@ impl<'a> Model<'a> {
                     hit_w: &hit_w,
                     m,
                     next_norm,
+                    post_norm: (!layer.post_ffn_norm_raw.is_empty())
+                        .then_some((layer.post_ffn_norm_raw, c.rms_eps)),
+                    gelu: matches!(layer.ffn, Ffn::Dense { gelu: true, .. }),
                 }),
                 sh_m,
                 gpu_route,

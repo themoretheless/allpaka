@@ -710,6 +710,14 @@ extern "C" int allpaka_ggml_mul_mat_vec(
     return allpaka_direct_mmvq(g_be->context, w_dev, x_dev, y_dev, n_in, n_out, w_type);
 }
 
+// Keep prefill GEMM weights quantized (MMQ) instead of the f16 cache: the
+// f16 path converts activations to f16, which Gemma's outliers overflow.
+static bool g_quant_gemm = false;
+
+extern "C" void allpaka_ggml_set_quant_gemm(int32_t on) {
+    g_quant_gemm = on != 0;
+}
+
 extern "C" int allpaka_ggml_mul_mat(
     const void * w_dev,
     const float * x_dev,
@@ -758,7 +766,9 @@ extern "C" int allpaka_ggml_mul_mat(
         return 0;
     }
     int32_t ty_use = w_type;
-    const void * w_use = small_batch ? w_dev : f16_weight(w_dev, n_in, n_out, w_type, &ty_use);
+    const void * w_use = (small_batch || g_quant_gemm)
+        ? w_dev
+        : f16_weight(w_dev, n_in, n_out, w_type, &ty_use);
     ShapeKey key{n_in, n_out, m, ty_use};
     Slot * slot = get_or_create_slot(key);
     if (!slot) {

@@ -243,6 +243,7 @@ impl Model<'_> {
                         ffn_norm: layer.ffn_norm_raw,
                         router: &[],
                         n_expert: 0,
+                        post_attn_norm: &[],
                     }),
                     Some(&rows),
                 )?;
@@ -280,6 +281,8 @@ impl Model<'_> {
                         hit_w: &hit_w,
                         m: n,
                         next_norm,
+                        post_norm: None,
+                        gelu: false,
                     }),
                     None,
                     None,

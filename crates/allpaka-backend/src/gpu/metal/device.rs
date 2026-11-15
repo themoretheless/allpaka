@@ -1171,3 +1171,8 @@ impl Gpu {
 pub fn set_rope_inv_freq_swa(_inv_freq: &[f32]) -> bool {
     false
 }
+
+/// Prefill GEMMs on quantized weights; CUDA-only.
+pub fn set_quant_gemm(_on: bool) -> bool {
+    false
+}

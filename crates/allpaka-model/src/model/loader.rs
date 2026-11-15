@@ -185,6 +185,14 @@ impl<'a> Model<'a> {
                     Some(_) => Some(norm_vec(f, &name("post_ffw_norm"), hidden)?),
                     None => None,
                 },
+                post_attn_norm_raw: match &config.gemma {
+                    Some(_) => norm_raw(f, &name("post_attention_norm")),
+                    None => &[],
+                },
+                post_ffn_norm_raw: match &config.gemma {
+                    Some(_) => norm_raw(f, &name("post_ffw_norm")),
+                    None => &[],
+                },
                 window: config
                     .gemma
                     .as_ref()
@@ -269,6 +277,8 @@ impl<'a> Model<'a> {
         // Device-side RoPE freqs: decode skips per-token sin/cos H2D.
         let _ = allpaka_backend::gpu::set_rope_inv_freq(&model.rope_inv_freq);
         let _ = allpaka_backend::gpu::set_rope_inv_freq_swa(&model.rope_inv_freq_swa);
+        // Gemma's activations overflow the f16 prefill GEMM.
+        let _ = allpaka_backend::gpu::set_quant_gemm(model.config.gemma.is_some());
         Ok(model)
     }
 }

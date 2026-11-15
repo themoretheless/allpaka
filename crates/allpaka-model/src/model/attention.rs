@@ -255,6 +255,16 @@ impl<'a> Model<'a> {
                 None
             };
 
+            // GPU paths keep K/V on the device alone; the CPU attention below
+            // reads the host copy, so pull the earlier rows it will see (on a
+            // discrete GPU; a no-op otherwise). This call's own rows were
+            // just stored from the host.
+            if on_gpu.is_none() && !rewrite_kv {
+                let first = first_seen(base_pos);
+                if first < base_pos {
+                    kv.pull_gpu_range(kv_layer, first..base_pos);
+                }
+            }
             match on_gpu {
                 Some(rows) => {
                     for (out, row) in attn_out.chunks_mut(q_dim).zip(rows) {

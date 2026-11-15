@@ -346,9 +346,23 @@ pub(super) fn try_prefill_attn_fused_dev(
         {
             rmsnorm_pf_x_into_hs(gpu, fusion.attn_norm, hidden, m, req.eps)?;
         }
-        if gpu.pf_rope_n != rope_host.len() {
-            upload_rope_pinned(gpu, rope_host, rope_at)?;
+        let rope_src = rope_host.as_ptr() as usize;
+        if gpu.pf_rope_n != rope_host.len() || gpu.pf_rope_src != rope_src {
+            if gpu.pf_rope_n == 0 {
+                upload_rope_pinned(gpu, rope_host, rope_at)?;
+            } else {
+                // A second table mid-chunk (Gemma 3's local layers): a plain
+                // copy, so the pinned staging of a copy still in flight is
+                // not overwritten.
+                gpu.stream
+                    .memcpy_htod(
+                        rope_host,
+                        &mut gpu.x_arena.slice_mut(rope_at..rope_at + rope_host.len()),
+                    )
+                    .ok()?;
+            }
             gpu.pf_rope_n = rope_host.len();
+            gpu.pf_rope_src = rope_src;
         }
 
         let (wq_c, wq_o) = resolve_w(gpu, req.wq.1)?;
@@ -935,6 +949,9 @@ pub(super) fn try_prefill_attn_fused_dev(
                 drop(g);
                 p + (proj_at * 4) as u64
             };
+            if !fusion.post_attn_norm.is_empty() {
+                rmsnorm_rows_dev(gpu, proj_dev, fusion.post_attn_norm, hidden, m, req.eps)?;
+            }
             if crate::runtime::get().cuda_pf_defer_add {
                 add_rmsnorm_pf(gpu, proj_dev, fusion.ffn_norm, hidden, m, req.eps)?;
             } else {
@@ -1044,7 +1061,7 @@ pub(super) fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         {
             let (ybase, _yg) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
             {
-                let f = gpu.func_owned("swiglu")?;
+                let f = gpu.func_owned(if comb.gelu { "geglu_tanh" } else { "swiglu" })?;
                 let n = (m * ffn) as u32;
                 let cfg = CudaGpu::cfg_1d(n, 256);
                 let gp = ybase + (gate_at * 4) as u64;
@@ -1088,6 +1105,14 @@ pub(super) fn try_dense_ffn_pf(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             },
         )?;
         crate::gpu::cuda::ggml::prepare_for_cudarc();
+        if let Some((w, eps)) = comb.post_norm {
+            let p = {
+                let (p, g) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
+                drop(g);
+                p + (down_at * 4) as u64
+            };
+            rmsnorm_rows_dev(gpu, p, w, hidden, m, eps)?;
+        }
         if crate::runtime::get().cuda_pf_defer_add {
             // Fold the residual into the next layer's attention RMSNorm.
             let (p, g) = DevicePtr::device_ptr(&gpu.y_arena, &stream);
@@ -1140,6 +1165,9 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             if req.multi.is_some() {
                 return None;
             }
+        }
+        if !f.post_attn_norm.is_empty() {
+            return None;
         }
     }
 

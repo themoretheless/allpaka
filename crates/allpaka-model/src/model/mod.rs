@@ -56,6 +56,10 @@ pub(crate) struct Layer<'a> {
     /// FFN output before each is added to the residual stream.
     pub(crate) post_attn_norm: Option<Vec<f32>>,
     pub(crate) post_ffn_norm: Option<Vec<f32>>,
+    /// The same two norms as raw F32 mmap bytes for the fused prefill
+    /// (empty when absent).
+    pub(crate) post_attn_norm_raw: &'a [u8],
+    pub(crate) post_ffn_norm_raw: &'a [u8],
     /// Gemma 3 local layer: sliding-window attention over this many
     /// positions, rotated with `Model::rope_inv_freq_swa`.
     pub(crate) window: Option<usize>,

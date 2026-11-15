@@ -10,6 +10,13 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             return Some(out);
         }
     }
+    if req
+        .fused
+        .as_ref()
+        .is_some_and(|c| c.gelu || c.post_norm.is_some())
+    {
+        return None;
+    }
 
     // GPU routing: logits live in y_arena from the fused attn block; rebuild
     // groups/tok/CSR on the host from pf_hs + those logits, then fall through.
@@ -140,6 +147,8 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                     hit_w,
                     m,
                     next_norm: None,
+                    post_norm: None,
+                    gelu: false,
                 }),
                 Some(hs),
             )

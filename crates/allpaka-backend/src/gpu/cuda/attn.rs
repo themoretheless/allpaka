@@ -278,6 +278,39 @@ pub(super) fn dev_f32(gpu: &mut CudaGpu, key: usize, host: &[f32]) -> Option<u64
 
 /// Device address of an f32 norm weight given as raw little-endian bytes:
 /// the resident weight chunk when the bytes live there, else [`dev_f32`].
+/// Rows of `x` (device pointer, `m` rows of `n`) normalised in place:
+/// x = rmsnorm(x) * w, `w` raw F32 GGUF bytes. Gemma's sandwich norms.
+pub(super) fn rmsnorm_rows_dev(
+    gpu: &mut CudaGpu,
+    x: u64,
+    w_raw: &[u8],
+    n: usize,
+    m: usize,
+    eps: f32,
+) -> Option<()> {
+    let wp = dev_norm_bytes(gpu, w_raw, n)?;
+    let f = gpu.func_owned("rmsnorm_f32")?;
+    let n_u = n as u32;
+    let rows = m as u32;
+    let cfg = LaunchConfig {
+        grid_dim: (rows, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    unsafe {
+        gpu.stream
+            .launch_builder_pdl(&f)
+            .arg(&x)
+            .arg(&wp)
+            .arg(&n_u)
+            .arg(&eps)
+            .arg(&rows)
+            .launch_pdl(cfg)
+    }
+    .ok()?;
+    Some(())
+}
+
 pub(super) fn dev_norm_bytes(gpu: &mut CudaGpu, raw: &[u8], n: usize) -> Option<u64> {
     if raw.len() < n * 4 {
         return None;

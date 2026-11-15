@@ -365,9 +365,11 @@ extern "C" __global__ void geglu_tanh(
 {
     unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
+        // 0.5*x*(1+tanh(z)) == x*sigmoid(2z): no 1+tanh cancellation for
+        // negative z, where an approximate tanhf loses most of the digits.
         float x = gate[i];
-        float t = tanhf(0.7978845608f * x * (1.0f + 0.044715f * x * x));
-        gate[i] = 0.5f * x * (1.0f + t) * up[i];
+        float z = 0.7978845608f * x * (1.0f + 0.044715f * x * x);
+        gate[i] = x / (1.0f + expf(-2.0f * z)) * up[i];
     }
 }
 

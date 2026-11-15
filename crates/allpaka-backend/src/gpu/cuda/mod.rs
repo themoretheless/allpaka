@@ -84,6 +84,11 @@ pub fn set_rope_inv_freq(inv_freq: &[f32]) -> bool {
     .unwrap_or(false)
 }
 
+/// Prefill GEMMs on quantized weights (see `ggml::set_quant_gemm`).
+pub fn set_quant_gemm(on: bool) -> bool {
+    ggml::set_quant_gemm(on)
+}
+
 /// Upload the local layers' RoPE inv_freq (Gemma 3); empty clears it.
 pub fn set_rope_inv_freq_swa(inv_freq: &[f32]) -> bool {
     with_gpu(|gpu| {
@@ -189,6 +194,12 @@ pub fn matvec_batch(reqs: &[MatvecReq]) -> Option<Vec<Vec<f32>>> {
     if same_x && all_gemm && reqs.len() > 1 {
         return with_gpu(|gpu| {
             let x = reqs[0].x;
+            // Size both arenas for the whole batch first: growing one inside
+            // the loop reallocates it (zeroed), losing the outputs of the
+            // items already launched (Gemma's 15360-wide gate/up was the
+            // first shape to hit this).
+            let y_total: usize = reqs.iter().map(|r| r.m * r.n_out).sum();
+            gpu.ensure_arenas(x.len() * 4, y_total * 4)?;
             let mut y_off = 0usize;
             let mut offs = Vec::with_capacity(reqs.len());
             let t0 = Instant::now();
