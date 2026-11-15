@@ -1172,3 +1172,16 @@ pub fn set_quant_gemm(_on: bool) -> bool {
 pub fn set_attn_window(window: Option<usize>) -> bool {
     window.is_none()
 }
+
+/// Release a mapping handed to [`attach`]. Metal windows are no-copy views of
+/// host memory, so a later mapping at the same address is read live and
+/// nothing can go stale; the windows stay until the process exits.
+pub fn detach(_mapping: &[u8]) {}
+
+/// Prefill graph replay is CUDA-only.
+pub fn prefill_graph_key(_key: u64) {}
+
+/// Batched decode staging; CUDA only (`MultiRow` declines elsewhere).
+pub fn multi_stage(_key: u64, _positions: &[u32], _ropes: &[f32]) -> Option<()> {
+    None
+}
