@@ -309,8 +309,14 @@ impl Manager {
         json!({"tasks":rows,"persistent":self.1.is_some(),"automatic_replay":false,"summary":{"status_counts":status_counts,"known_duration_ms":known_duration_ms,"unknown_duration_count":unknown_duration_count,"duration_semantics":"sum_task_elapsed"}})
     }
     pub(crate) async fn execute(&self, owner: &str, cwd: &Path, args: &Value) -> Result<Value> {
-        self.execute_sandboxed(owner, cwd, args, crate::sandbox::SandboxMode::Unsandboxed, &[])
-            .await
+        self.execute_sandboxed(
+            owner,
+            cwd,
+            args,
+            crate::sandbox::SandboxMode::Unsandboxed,
+            &[],
+        )
+        .await
     }
     pub(crate) async fn execute_sandboxed(
         &self,

@@ -45,6 +45,15 @@ pub(crate) fn routes(app: App) -> Router {
                 )
             }),
         )
+        .route(
+            "/harness-ext.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../web/harness-ext.js"),
+                )
+            }),
+        )
         .route("/api/worker/run", post(remote_worker::run))
         .route("/api/config", get(config))
         .route("/api/permission-presets", get(sandbox::presets_api))
@@ -386,7 +395,10 @@ pub(crate) fn routes(app: App) -> Router {
         .route("/api/sessions/:id/spills", get(spill::list_api))
         .route("/api/sessions/:id/spills/:spill_id", get(spill::get_api))
         .route("/api/sessions/:id/checkpoints", get(patch::list_api))
-        .route("/api/sessions/:id/checkpoints/:cid/undo", post(patch::undo_api))
+        .route(
+            "/api/sessions/:id/checkpoints/:cid/undo",
+            post(patch::undo_api),
+        )
         .route(
             "/api/sessions/:id/terminals",
             get(terminal::list_api).post(terminal::create_api),
@@ -409,7 +421,10 @@ pub(crate) fn routes(app: App) -> Router {
             "/api/sessions/:id/forge-pr",
             get(forge::get_api).post(forge::post_api),
         )
-        .route("/api/sessions/:id/agents", get(crate::runtime::subagent::list_api))
+        .route(
+            "/api/sessions/:id/agents",
+            get(crate::runtime::subagent::list_api),
+        )
         .route(
             "/api/sessions/:id/agents/:aid/message",
             post(crate::runtime::subagent::message_api),
@@ -426,11 +441,67 @@ pub(crate) fn routes(app: App) -> Router {
             "/api/workflows",
             get(workflow::list_api).post(workflow::save_api),
         )
-        .route("/api/workflows/:wid", axum::routing::delete(workflow::delete_api))
-        .route("/api/sessions/:id/workflow", post(workflow::run_session_api))
+        .route(
+            "/api/workflows/:wid",
+            axum::routing::delete(workflow::delete_api),
+        )
+        .route(
+            "/api/sessions/:id/workflow",
+            post(workflow::run_session_api),
+        )
         .route("/api/ssh/test", post(ssh::test_api))
         .route("/api/documents/extract", post(documents::extract_api))
-        .route("/api/voice/transcribe", post(automation_seams::transcribe_api))
+        .route(
+            "/api/voice/transcribe",
+            post(automation_seams::transcribe_api),
+        )
+        .route(
+            "/api/profiles",
+            get(bundles::list_profiles_api).post(bundles::save_profile_api),
+        )
+        .route(
+            "/api/profiles/:pid",
+            axum::routing::delete(bundles::delete_profile_api),
+        )
+        .route("/api/bundles/export", get(bundles::export_bundle_api))
+        .route("/api/bundles/import", post(bundles::import_bundle_api))
+        .route("/api/harness/reload", post(bundles::reload_harness_api))
+        .route(
+            "/api/schedules",
+            get(schedule::list_api).post(schedule::create_api),
+        )
+        .route(
+            "/api/schedules/:sid",
+            axum::routing::delete(schedule::delete_api),
+        )
+        .route("/api/schedules/:sid/trigger", post(schedule::trigger_api))
+        .route(
+            "/api/webhooks",
+            get(webhook::list_api).post(webhook::create_api),
+        )
+        .route(
+            "/api/webhooks/:wid",
+            axum::routing::delete(webhook::delete_api),
+        )
+        .route("/api/webhooks/trigger/:wid", post(webhook::trigger_api))
+        .route(
+            "/api/sessions/:id/shares",
+            get(liveshare::list_session_shares_api).post(liveshare::create_session_share_api),
+        )
+        .route(
+            "/api/sessions/:id/shares/:sid",
+            axum::routing::delete(liveshare::revoke_session_share_api),
+        )
+        .route("/api/shares/:token", get(liveshare::get_public_share_api))
+        .route("/share/:token", get(liveshare::get_public_share_html))
+        .route(
+            "/api/observability/traces/:id/otlp",
+            get(otel::get_otlp_api),
+        )
+        .route(
+            "/api/observability/traces/:id/export",
+            post(otel::export_otlp_api),
+        )
         .route("/api/sessions/:id/plan", get(read_plan).post(save_plan))
         .layer(DefaultBodyLimit::max(10_000_000))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
@@ -448,23 +519,34 @@ pub(crate) async fn guard(
         }
         return next.run(req).await;
     }
+    let path = req.uri().path();
+    let is_webhook_trigger =
+        path.starts_with("/api/webhooks/trigger/") && req.method() == axum::http::Method::POST;
+    let is_public_share = (path.starts_with("/share/") || path.starts_with("/api/shares/"))
+        && req.method() == axum::http::Method::GET;
     let expected = app.origin.strip_prefix("http://").unwrap();
     let host_ok = req
         .headers()
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
         == Some(expected);
-    let origin_ok = req
-        .headers()
-        .get(header::ORIGIN)
-        .map(|h| h.to_str().ok() == Some(app.origin.as_str()))
-        .unwrap_or(true);
-    let site_ok = req
-        .headers()
-        .get("sec-fetch-site")
-        .map(|s| s != "cross-site")
-        .unwrap_or(true);
-    let mutation = req.method() != axum::http::Method::GET;
+    let origin_ok = if is_webhook_trigger || is_public_share {
+        true
+    } else {
+        req.headers()
+            .get(header::ORIGIN)
+            .map(|h| h.to_str().ok() == Some(app.origin.as_str()))
+            .unwrap_or(true)
+    };
+    let site_ok = if is_webhook_trigger || is_public_share {
+        true
+    } else {
+        req.headers()
+            .get("sec-fetch-site")
+            .map(|s| s != "cross-site")
+            .unwrap_or(true)
+    };
+    let mutation = req.method() != axum::http::Method::GET && !is_webhook_trigger;
     let intent_ok = !mutation
         || req
             .headers()

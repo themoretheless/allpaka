@@ -2356,3 +2356,51 @@ button svg, summary svg, .attach svg { vertical-align: -2px; }
     color: var(--muted); white-space: nowrap;
   }
 }
+
+/* DeepSeek-Harness parity extensions */
+.interaction-banner {
+  margin: 8px max(24px, calc(50% - 408px));
+  padding: 12px 16px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.interaction-banner[hidden] { display: none; }
+.interaction-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.interaction-preview {
+  margin: 0; padding: 8px 10px; border-radius: 8px; background: var(--bg);
+  border: 1px solid var(--line); max-height: 180px; overflow: auto; font-size: 12px;
+}
+.interaction-actions, .interaction-q-opts, .ops-row, .ops-tabs, .ops-head {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+}
+.interaction-reason, .ops-row input[type="text"], .ops-grid input[type="text"], .ops-grid textarea {
+  flex: 1; min-width: 160px; padding: 6px 10px; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; color: inherit; font-size: 12px;
+}
+.interaction-q-card {
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg); display: flex; flex-direction: column; gap: 6px;
+}
+.interaction-opt { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+#session-cwd-badge { margin: 6px max(24px, calc(50% - 408px)) 0; align-self: flex-start; font-size: 11px; }
+#ops-dialog { max-width: 860px; width: calc(100vw - 32px); }
+.ops-head { justify-content: space-between; margin-bottom: 10px; }
+.ops-tabs { border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 10px; }
+.ops-tabs button.active { border-color: var(--accent); color: var(--accent); }
+.ops-pane { display: flex; flex-direction: column; gap: 10px; }
+.ops-pane[hidden] { display: none; }
+.ops-grid { display: flex; flex-direction: column; gap: 8px; }
+.ops-card {
+  padding: 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg); display: flex; flex-direction: column; gap: 6px;
+}
+.pty-screen {
+  margin: 0; padding: 10px; min-height: 110px; max-height: 240px; overflow: auto;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg); font-size: 12px;
+}
+.team-dag-row { justify-content: space-between; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; }
+

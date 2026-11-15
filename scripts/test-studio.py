@@ -25,6 +25,8 @@ class Mock(BaseHTTPRequestHandler):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])));requests.append(body)
         messages=body['messages'];last=messages[-1];content=last.get('content','')
         if isinstance(content,list):content=''.join(p.get('text','') for p in content)
+        last_user=next((m.get('content','') for m in reversed(messages) if m.get('role')=='user'),'')
+        if isinstance(last_user,list):last_user=''.join(p.get('text','') for p in last_user)
         self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
         def event(value):self.wfile.write(('data: '+json.dumps(value)+'\n\n').encode());self.wfile.flush()
         try:
@@ -145,6 +147,33 @@ class Mock(BaseHTTPRequestHandler):
                 event({'choices':[{'delta':{'content':'MASTER merged answer (critic passed)'},'finish_reason':'stop'}],'usage':{'prompt_tokens':9,'completion_tokens':10}})
             elif 'Собери из них один итоговый ответ' in content:
                 event({'choices':[{'delta':{'content':'MASTER merged answer'},'finish_reason':'stop'}],'usage':{'prompt_tokens':7,'completion_tokens':8}})
+            elif last_user=='PARITY_PATCH':
+                if last.get('role')=='tool':
+                    event({'choices':[{'delta':{'content':'patch-complete'},'finish_reason':'stop'}],'usage':{'prompt_tokens':3,'completion_tokens':4}})
+                else:
+                    patch_txt='*** Begin Patch\n*** Add File: workspace/parity_note.txt\n+hello parity\n*** End Patch'
+                    event({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'par-patch','type':'function','function':{'name':'apply_patch','arguments':json.dumps({'patch':patch_txt})}}]},'finish_reason':'tool_calls'}]})
+            elif last_user=='PARITY_WD':
+                if last.get('role')=='tool':
+                    event({'choices':[{'delta':{'content':'wd-complete'},'finish_reason':'stop'}],'usage':{'prompt_tokens':3,'completion_tokens':4}})
+                else:
+                    event({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'par-wd','type':'function','function':{'name':'working_directory','arguments':json.dumps({'action':'set','path':'workspace/sub'})}}]},'finish_reason':'tool_calls'}]})
+            elif last_user=='PARITY_APPROVAL':
+                if last.get('role')=='tool':
+                    event({'choices':[{'delta':{'content':'approval-complete'},'finish_reason':'stop'}],'usage':{'prompt_tokens':3,'completion_tokens':4}})
+                else:
+                    event({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'par-apr','type':'function','function':{'name':'write_file','arguments':json.dumps({'path':'workspace/approved.txt','content':'approved-ok'})}}]},'finish_reason':'tool_calls'}]})
+            elif last_user=='PARITY_QUESTION':
+                if last.get('role')=='tool':
+                    event({'choices':[{'delta':{'content':'question-complete: '+content},'finish_reason':'stop'}],'usage':{'prompt_tokens':3,'completion_tokens':4}})
+                else:
+                    qargs={'questions':[{'id':'q1','question':'Choose flavor','options':['alpha','beta'],'multi_select':False}]}
+                    event({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'par-q','type':'function','function':{'name':'ask_user_question','arguments':json.dumps(qargs)}}]},'finish_reason':'tool_calls'}]})
+            elif last_user=='PARITY_PTC':
+                if last.get('role')=='tool':
+                    event({'choices':[{'delta':{'content':'ptc-complete: '+content},'finish_reason':'stop'}],'usage':{'prompt_tokens':3,'completion_tokens':4}})
+                else:
+                    event({'choices':[{'delta':{'tool_calls':[{'index':0,'id':'par-ptc','type':'function','function':{'name':'run_code','arguments':json.dumps({'code':"res = studio.call_tool('list_files', {'path': 'workspace'})\nprint('PTC_OK=' + str(bool(res)))"})}}]},'finish_reason':'tool_calls'}]})
             else:event({'choices':[{'delta':{'content':'answer: '+content},'finish_reason':'stop'}],'usage':{'prompt_tokens':3,'completion_tokens':4}})
             self.wfile.write(b'data: [DONE]\n\n');self.wfile.flush()
         except (BrokenPipeError,ConnectionResetError):pass
@@ -2913,6 +2942,125 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         resumed_checkpoint=Studio(base).session_plan(milestone_crash)
         assert resumed_checkpoint['checkpoints'][0]==goal_checkpoint['checkpoints'][0] and resumed_checkpoint['checkpoints'][1]['source']=='agent'
         print('PASS Goal checkpoint survives SIGKILL, does not auto-replay, and explicit resume receives stable completed milestone IDs and current revision',flush=True)
+
+        # DeepSeek-Harness parity end-to-end checks (Waves 1-8)
+        with urllib.request.urlopen(base+'/harness-ext.js',timeout=5) as resp:
+            assert resp.status==200 and 'StudioHarnessExt' in resp.read().decode('utf-8')
+        presets_res=Studio(base).list_permission_presets()
+        assert len(presets_res['presets'])==4 and {p['id'] for p in presets_res['presets']}=={'readonly_audit','workspace_sandboxed','interactive_guarded','full_trusted'}
+
+        (workspace/'sub').mkdir(exist_ok=True)
+        parity_s=create(mode='auto',allow_writes=True,team_mode=True)
+        act(parity_s,'send','PARITY_PATCH')
+        wait(parity_s,lambda st:st['status']=='idle' and (workspace/'parity_note.txt').exists())
+        assert (workspace/'parity_note.txt').read_text()=='hello parity\n'
+        cps=Studio(base).list_checkpoints(parity_s)['checkpoints']
+        assert len(cps)>=1
+        Studio(base).undo_checkpoint(parity_s,cps[0]['id'])
+        assert not (workspace/'parity_note.txt').exists()
+
+        act(parity_s,'send','PARITY_WD')
+        wd_state=wait(parity_s,lambda st:st['status']=='idle' and st.get('working_dir')=='workspace/sub')
+        assert wd_state['working_dir']=='workspace/sub'
+
+        guarded_s=create(mode='auto',allow_writes=True,approval_policy='always',sandbox_mode='unsandboxed')
+        act(guarded_s,'send','PARITY_APPROVAL')
+        apr_state=wait(guarded_s,lambda st:st.get('pending_approval') is not None)
+        Studio(base).respond_interaction(guarded_s,apr_state['pending_approval']['id'],'approval',decision='approve_once',reason='e2e ok')
+        wait(guarded_s,lambda st:st['status']=='idle' and not st.get('pending_approval'))
+        assert (workspace/'approved.txt').read_text()=='approved-ok'
+
+        act(parity_s,'send','PARITY_QUESTION')
+        q_state=wait(parity_s,lambda st:st.get('pending_question') is not None)
+        Studio(base).respond_interaction(parity_s,q_state['pending_question']['id'],'question',answers={'q1':'alpha'})
+        q_done=wait(parity_s,lambda st:st['status']=='idle' and not st.get('pending_question'))
+        assert any('question-complete:' in m.get('content','') and 'alpha' in m.get('content','') for m in q_done['messages'] if m.get('role')=='assistant')
+
+        pty_created=Studio(base).create_terminal(parity_s,command="printf 'pty-ok\\n'",cols=80,rows=24)
+        tid=pty_created['id']
+        pty_out=''
+        until_pty=time.time()+5
+        while time.time()<until_pty:
+            page=Studio(base).read_terminal(parity_s,tid,offset=0,max_bytes=8192,wait_ms=100)
+            pty_out+=page.get('output','')
+            if 'pty-ok' in pty_out:break
+            time.sleep(.05)
+        assert 'pty-ok' in pty_out,pty_out
+        Studio(base).close_terminal(parity_s,tid)
+
+        Studio(base).team_action(parity_s,'create',id='t1',title='Stage 1')
+        Studio(base).team_action(parity_s,'create',id='t2',title='Stage 2',dependencies=['t1'])
+        try:
+            Studio(base).team_action(parity_s,'update',task_id='t1',dependencies=['t2'])
+            raise AssertionError('DAG cycle was accepted')
+        except EvaluationError as err:
+            assert err.reason=='http_409'
+        Studio(base).team_action(parity_s,'update',task_id='t1',status='completed')
+        Studio(base).team_action(parity_s,'update',task_id='t2',status='completed')
+        assert Studio(base).get_team(parity_s)['summary']['completed']==2
+
+        wf=Studio(base).save_workflow([{'id':'st1','name':'Stage 1','prompt':'WORKFLOW_STAGE_1'}],workflow_id='wf_e2e',name='E2E WF')
+        assert wf['saved']['id']=='wf_e2e'
+        assert any(w['id']=='wf_e2e' for w in Studio(base).list_workflows()['workflows'])
+        wf_res=Studio(base).run_workflow(parity_s,workflow_id='wf_e2e')
+        assert wf_res['ok'] is True and wf_res['completed_count']==1
+        Studio(base).delete_workflow('wf_e2e')
+
+        act(parity_s,'send','PARITY_PTC')
+        ptc_done=wait(parity_s,lambda st:st['status']=='idle' and any('ptc-complete:' in m.get('content','') for m in st['messages'] if m.get('role')=='assistant'))
+        assert any('PTC_OK=True' in m.get('content','') for m in ptc_done['messages'] if m.get('role')=='assistant')
+
+        import base64
+        doc_res=Studio(base).extract_document(content_b64=base64.b64encode(b'<h1>Doc Title</h1><p>Body</p>').decode('ascii'),filename='test.html')
+        assert 'Doc Title' in doc_res['text']
+        try:
+            Studio(base).transcribe_voice('AAAA')
+            raise AssertionError('Unconfigured STT unexpectedly succeeded')
+        except EvaluationError as err:
+            assert err.reason=='http_501'
+
+        profs=Studio(base).list_profiles()['profiles']
+        assert any(p['id']=='coding-safe' for p in profs)
+        Studio(base).save_profile({'id':'e2e-prof','name':'E2E Prof','mode':'auto','sandbox_mode':'workspace_write','approval_policy':'commands','allow_writes':True,'max_steps':15,'team_mode':False})
+        bundle=Studio(base).export_bundle('default')
+        assert bundle['format']=='allpaka-bundle-v1'
+        assert Studio(base).import_bundle(bundle)['imported'] is True
+        assert Studio(base).reload_harness('default')['reloaded'] is True
+        Studio(base).delete_profile('e2e-prof')
+
+        sch=Studio(base).create_schedule('e2e-sch','every 15m','SCHEDULED_PING',project_id='default')['schedule']
+        assert Studio(base).trigger_schedule(sch['id'])['triggered'] is True
+        Studio(base).delete_schedule(sch['id'])
+
+        wh_res=Studio(base).create_webhook('e2e-wh','Handle {{payload}}',project_id='default')
+        wh_id,wh_secret=wh_res['webhook']['id'],wh_res['secret']
+        trig=Studio(base).trigger_webhook(wh_id,wh_secret,{'event':'ping'})
+        assert trig['accepted'] is True and trig['session_id']
+        bad_req=urllib.request.Request(base+'/api/webhooks/trigger/'+wh_id,data=b'{"event":"ping"}',headers={'Content-Type':'application/json','X-Allpaka-Signature-256':'sha256='+'0'*64},method='POST')
+        try:
+            urllib.request.urlopen(bad_req,timeout=5)
+            raise AssertionError('Bad webhook signature accepted')
+        except urllib.error.HTTPError as err:
+            assert err.code==401
+        Studio(base).delete_webhook(wh_id)
+
+        sh=Studio(base).create_share(parity_s,label='E2E Share')
+        pub=Studio(base).get_public_share(sh['token'])
+        assert pub['session']['id']==parity_s
+        with urllib.request.urlopen(base+sh['url'],timeout=5) as html_r:
+            assert html_r.status==200 and 'Read-only LiveShare' in html_r.read().decode('utf-8')
+        Studio(base).revoke_share(parity_s,sh['share']['id'])
+        try:
+            Studio(base).get_public_share(sh['token'])
+            raise AssertionError('Revoked share remained accessible')
+        except EvaluationError as err:
+            assert err.reason in ('http_403','http_404')
+
+        t_id=trace_rows(parity_s)[0]['id']
+        otlp=Studio(base).get_trace_otlp(t_id)
+        assert isinstance(otlp.get('resourceSpans'),list) and len(otlp['resourceSpans'])>=1
+        print('PASS DeepSeek-Harness parity E2E: presets, patch/undo, working_dir, approvals/questions, PTY, Team DAG, workflows, PTC, docs/voice, profiles/bundles/schedules/webhooks/LiveShare/OTLP',flush=True)
+
         if os.environ.get('ALLPAKA_TEST_NATIVE_VAULT')=='1':
             assert api('config')['credential_storage']
             dummy='allpaka-test-not-a-real-api-key'

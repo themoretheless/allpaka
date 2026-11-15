@@ -22,6 +22,7 @@
 | MTP | `docs/mtp.md` | «Снято / парковка» с условием возврата |
 | Опровергнутые оптимизации | `docs/moe-prefill.md` | «Снято / не делать без новых данных» |
 | `google/ax` (Go-оркестратор агентских нагрузок на Kubernetes) | внешний, актуален на 2026-09-24 | Заимствовано ровно одно: форма статуса (`phase` как одно слово, `conditions` как деталь, `watch` как переходы) → `allpaka watch`, и там же — `SwarmReport.status`/`Session.status` из `String` в enum с теми же словами на проводе (`types.rs`), а шаг tool-цикла переехал из строки `running · шаг N` в поле `step`. Песочницы, egress-allowlist, `suspend`/`resume` акторов, Redis-контролплейн и `atespace` не перенесены: у allpaka узкое место - пропускная способность памяти и хвост задержки линка, а не планирование кластера. `suspend`/`resume` к тому же закрыты на уровне сессии в Studio |
+| `deepseek-ai/deepseek-harness` | внешний, актуален | Реализован полный паритет подсистем в Studio/Harness/CLI/SDK/UI (Waves 1–8): см. `docs/deepseek-harness-parity.md` и задачу C5 ниже |
 | Структура репо и метрики «непонятности» | вне репо, в рабочем плане | Разбор по шести метрикам проведён и закрыт коммитами начиная с `90f259d` (гинтлинок, `state_file`, кластеры Studio, `/health`, README). Сам документ с метриками в `docs/` заведён не был: `roadmap.md` объявлен единственным источником правды, а `docs/benchmarks` уже занимает 1042 из 1207 трекаемых файлов |
 
 ---
@@ -135,24 +136,35 @@ greedy-стрим бит-совместим с монолитным прогон
 streamable-HTTP клиент к локальному `rag-mcp` (префикс `rag_`, только read-only
 инструменты при `read_only`). Документ надо привести в соответствие.
 
-### C2. Checkpoints/undo, git diff, безопасные патчи, shell — ожидает
+### C2. Checkpoints/undo, git diff, безопасные патчи, shell — закрыто в базовом контуре
 
-**DoD:** отмена с последующей сверкой фактического состояния; применение патча
-проверяется байт-в-байт на исходной копии — по образцу уже существующего
-контрактного теста `edit_file` (apply возвращённого diff через `git apply`).
+Реализованы `apply_patch` (`Begin Patch` / unified diff), автоматические чекпоинты с откатом (`patch.rs`), интерактивные PTY-терминалы (`terminal.rs`), Git worktrees и Forge PR (`worktree.rs`, `forge.rs`).
 
-### C3. Извлечение PDF/DOCX/XLSX/OCR/URL/аудио/видео — ожидает
+**DoD:** отмена с последующей сверкой фактического состояния; применение патча проверяется на исходной копии.
 
-Сейчас: PDF/DOCX/XLSX, OCR, аудио, видео и архивы не извлекаются
-(`docs/studio.md`).
+**Пруф:** unit-тесты `patch::tests::*`, `terminal::tests::*`, `worktree::tests::*` (`cargo test -p allpaka-chat --offline`) и сквозная проверка отката/PTY в `scripts/test-studio.py`.
 
-**DoD:** реальное извлечение, лимиты MIME/размера, сохранение исходника.
+### C3. Извлечение PDF/DOCX/XLSX/OCR/URL/аудио/видео — частично закрыто
+
+Реализованы встроенное извлечение текста PDF/DOCX/XLSX/PPTX/ODF/HTML/XML с лимитами распаковки (`documents.rs`), веб-поиск/чтение URL с SSRF-защитой (`web_tools.rs`) и внешний STT seam для аудио (`automation_seams.rs`). Локальный OCR без внешних бинарей и декодирование видеопотоков остаются открытыми.
+
+**DoD:** реальное извлечение, лимиты MIME/размера, сохранение исходника, а также OCR и видеопотоки при расширении за пределы текстовых/офисных форматов.
+
+**Пруф:** `documents::tests::*`, `web_tools::tests::*`, `automation_seams::tests::*` и проверки `/api/documents/extract` / `/api/voice/transcribe` в `scripts/test-studio.py`.
 
 ### C4. Стоимость/лимиты, сравнение моделей, фоновые задачи, память — ожидает
 
 **DoD:** точные usage/cost и бюджеты (сейчас `usage` относится к последнему
 запросу, суммарных бюджетов нет) и долговечный планировщик с восстановлением
 после рестарта.
+
+### C5. Функциональный паритет с `deepseek-ai/deepseek-harness` — закрыто
+
+Реализованы все 8 волн: spill-выгрузка, OS-песочница с fail-closed профилями прав, интерактивные approvals/questions, `apply_patch`/checkpoints/PTY/LSP/worktrees/Forge/SSH, субагенты + Team DAG, Programmatic Tool Calling (`run_code`) + DAG workflows, веб/документы/seams, профили/бандлы/ACP/schedules/HMAC-webhooks/LiveShare/OTLP, CLI-флаги (`--headless`, `--prompt`, `--profile`, `--dump-config`, `--acp`), UI «Операции» (`web/harness-ext.js`) и Python SDK (`sdk/python/allpaka_studio.py`).
+
+**DoD:** все 10 проверочных прогонов репозитория (`cargo fmt --all -- --check`, `check-backends.sh`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test -p allpaka-chat --offline`, `cargo test --workspace --offline`, `node --check`, `test-studio-content.cjs`, `studio-ui-tests/run.sh`, `test-studio-sdk.py`, `test-studio.py`) проходят без ошибок, без новых зависимостей Cargo и без правок продовых GPU-ядер.
+
+**Пруф:** `docs/deepseek-harness-parity.md`, `cargo test --workspace --offline`, `scripts/studio-ui-tests/run.sh`, `scripts/test-studio-sdk.py`, `scripts/test-studio.py`.
 
 ---
 

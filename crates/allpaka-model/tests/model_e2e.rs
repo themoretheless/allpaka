@@ -220,6 +220,7 @@ fn selective_gpu_mappings_cover_chosen_tensor_without_whole_file() {
 
 #[test]
 fn stage_loader_does_not_require_other_layers_or_endpoint_tensors() {
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let original = tiny_model("llama", false);
     // Rename tensors without changing GGUF offsets. The head must load
     // even when the other layer and output head are absent from metadata.
@@ -265,6 +266,7 @@ fn stage_loader_does_not_require_other_layers_or_endpoint_tensors() {
 
 #[test]
 fn tcp_pipeline_matches_local_model_and_rejects_wrong_key() {
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     use std::net::TcpListener;
     let path = write_temp("tcp-pipeline", &tiny_model("llama", false));
     let mut handles = Vec::new();
@@ -318,6 +320,7 @@ fn tcp_pipeline_matches_local_model_and_rejects_wrong_key() {
 
 #[test]
 fn pipeline_stages_match_whole_model_across_tokens() {
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let path = write_temp("pipeline-stages", &tiny_model("llama", false));
     let file = GgufFile::open(&path).unwrap();
     let model = Model::load(&file).unwrap();
@@ -363,7 +366,7 @@ fn the_config_reads_what_the_file_says() {
 
 #[test]
 fn qwen_shaped_files_flip_the_two_switches() {
-    let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let path = write_temp("qwen", &tiny_model("qwen3", true));
     let f = GgufFile::open(&path).unwrap();
     let c = Config::from_gguf(&f).unwrap();
@@ -377,6 +380,7 @@ fn qwen_shaped_files_flip_the_two_switches() {
 
 #[test]
 fn logits_are_finite_deterministic_and_vocab_sized() {
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let path = write_temp("determinism", &tiny_model("llama", false));
     let f = GgufFile::open(&path).unwrap();
     let a = logits_for(&f, &[3, 1, 4]);
@@ -392,6 +396,7 @@ fn logits_are_finite_deterministic_and_vocab_sized() {
 /// are wired wrong.
 #[test]
 fn changing_an_earlier_token_changes_the_current_logits() {
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let path = write_temp("attends", &tiny_model("llama", false));
     let f = GgufFile::open(&path).unwrap();
     let a = logits_for(&f, &[3, 1]);
@@ -404,6 +409,7 @@ fn changing_an_earlier_token_changes_the_current_logits() {
 /// prefix's logits no matter what they feed afterwards.
 #[test]
 fn logits_depend_only_on_the_prefix() {
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let path = write_temp("causal", &tiny_model("llama", false));
     let f = GgufFile::open(&path).unwrap();
     let a = logits_for(&f, &[3, 1, 4]);
@@ -418,6 +424,7 @@ fn logits_depend_only_on_the_prefix() {
 /// produces logits.
 #[test]
 fn a_tied_output_head_falls_back_to_the_embedding() {
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let bytes = tiny_model("llama", false);
     let path = write_temp("tied-src", &bytes);
     // Rebuild without the output tensor by name surgery: cheaper to just
@@ -461,6 +468,7 @@ fn a_tied_output_head_falls_back_to_the_embedding() {
 /// truncation is what chat prefix-reuse stands on.
 #[test]
 fn truncate_then_replay_matches_the_original_computation() {
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let path = write_temp("truncate", &tiny_model("llama", false));
     let f = GgufFile::open(&path).unwrap();
     let model = Model::load(&f).unwrap();
@@ -485,7 +493,7 @@ fn truncate_then_replay_matches_the_original_computation() {
 /// and the cache it leaves behind must continue identically.
 #[test]
 fn forward_batch_matches_sequential_forward() {
-    let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     for (arch, qk) in [("llama", false), ("qwen3", true)] {
         let path = write_temp(&format!("batch-{arch}"), &tiny_model(arch, qk));
         let f = GgufFile::open(&path).unwrap();
@@ -522,7 +530,7 @@ fn forward_batch_matches_sequential_forward() {
 /// The MoE path routes per token inside a batch too.
 #[test]
 fn forward_batch_matches_sequential_on_a_moe() {
-    let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let path = write_temp("batch-moe", &tiny_moe(None, 0));
     let f = GgufFile::open(&path).unwrap();
     let model = Model::load(&f).unwrap();
@@ -541,6 +549,7 @@ fn forward_batch_matches_sequential_on_a_moe() {
 
 #[test]
 fn an_out_of_vocab_token_is_an_error() {
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let path = write_temp("oov", &tiny_model("llama", false));
     let f = GgufFile::open(&path).unwrap();
     let model = Model::load(&f).unwrap();
@@ -648,7 +657,7 @@ fn route_picks_the_top_k_and_renormalises() {
 
 #[test]
 fn a_moe_model_produces_finite_deterministic_logits() {
-    let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let path = write_temp("moe-runs", &tiny_moe(None, 0));
     let f = GgufFile::open(&path).unwrap();
     let c = Config::from_gguf(&f).unwrap();
@@ -668,7 +677,7 @@ fn a_moe_model_produces_finite_deterministic_logits() {
 /// nothing; poisoning a picked one blows the logits up visibly.
 #[test]
 fn unrouted_experts_do_not_influence_the_output() {
-    let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = GREEDY_CHAIN_LOCK.read().unwrap_or_else(|e| e.into_inner());
     let clean = write_temp("moe-clean", &tiny_moe(None, 0));
     // Experts 0 and 1 form the always-picked pair (router rows +-1);
     // experts 2 and 3 have zero router rows and lose every top-2.
@@ -686,11 +695,11 @@ fn unrouted_experts_do_not_influence_the_output() {
     }
 }
 
-static GREEDY_CHAIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static GREEDY_CHAIN_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 #[test]
 fn gpu_greedy_chain_matches_step_by_step_on_128_head_dim() {
-    let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = GREEDY_CHAIN_LOCK.write().unwrap_or_else(|e| e.into_inner());
     let mut rng = Rng(12345);
     let mut mat =
         |rows: u64, cols: u64| -> Vec<f32> { (0..rows * cols).map(|_| rng.next_f32()).collect() };
@@ -785,7 +794,7 @@ fn gpu_greedy_chain_matches_step_by_step_on_128_head_dim() {
 
 #[test]
 fn gpu_moe_greedy_chain_matches_step_by_step() {
-    let _guard = GREEDY_CHAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = GREEDY_CHAIN_LOCK.write().unwrap_or_else(|e| e.into_inner());
     let mut rng = Rng(67890);
     let mut mat =
         |rows: u64, cols: u64| -> Vec<f32> { (0..rows * cols).map(|_| rng.next_f32()).collect() };

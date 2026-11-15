@@ -1505,3 +1505,31 @@ To run a saved quality source in the background, call `submit_online_quality_job
 Studio's Context panel now includes “Модельные оценки”. It lists the current project's saved background model jobs, pages of 20, and their state/provider/model. For a completed job, “Показать балл и объяснение” reads the linked immutable judge verdict; browsing and opening a verdict do not invoke the model. Interrupted jobs are shown without automatic retry. Submission remains available through the API/Python SDK; automatic model rules and a submission composer are still incomplete.
 
 Automatic model quality rules can now be configured through Python: save an evaluator with `save_online_model_evaluator(settings, rubric)`, save an online rule referencing its returned `evaluator_id`/`evaluator_version`, then activate that rule's snapshot with `bind_online_evaluation_rule`. When you explicitly save quality text for a selected completed trace, Studio queues the model assessment using pinned rule/selection/configuration hashes. Saving the evaluator or activating the rule does not itself call a model; traces remain metadata-only until you explicitly provide text. Repeating the same source save does not retry a finished/interrupted job. Source persistence and job admission are separate: a capacity/admission error preserves the source and is logged, and a later explicit repeat save can retry missing admission. Studio's rule composer still creates only trace-health rules; a model configuration/capture composer remains unfinished.
+
+## Расширения паритета с DeepSeek-Harness (CLI, Web UI «Операции» и автоматизация)
+
+Подробная матрица модулей и инвариантов безопасности приведена в [deepseek-harness-parity.md](deepseek-harness-parity.md).
+
+### CLI-режимы `allpaka studio`
+
+Команда `allpaka studio` (`crates/allpaka-cli/src/main.rs`, `dispatch.rs`) дополнительно поддерживает:
+- `--profile <id>` — преднастройка профиля запуска (`default`, `coding-safe`, `autonomous-goal`, `research` или сохранённого пользовательского профиля);
+- `--headless` и `--prompt <text>` — неинтерактивный одиночный запуск с JSON-отчётом в `stdout`;
+- `--dump-config` — вывод разрешённой конфигурации, пресетов и профилей в JSON без старта HTTP-сервера;
+- `--acp` — запуск Agent Client Protocol (JSON-RPC 2.0 по stdio).
+
+### Права, песочница, интеракции и панель «Операции» в Web UI
+
+1. **Параметры безопасности сессии (`#params-pop`)**:
+   - выбор пресета `#permission-preset` (`readonly_audit`, `workspace_sandboxed`, `interactive_guarded`, `full_trusted`, `custom`);
+   - выбор режима песочницы ОС `#sandbox-mode` (`unsandboxed`, `workspace_write`, `read_only`) и политики подтверждений `#approval-policy` (`never`, `commands`, `writes_and_commands`, `always`);
+   - включение `#team-mode` для инструментов Agent Team DAG.
+2. **Интерактивные подтверждения и вопросы (`#interaction-banner`)**: при появлении `pending_approval` или `pending_question` в ответе `GET /api/sessions/:id` над лентой отображается баннер подтверждения (`approve_once` / `approve_session` / `deny`) или формы `ask_user_question` (`POST /api/sessions/:id/interaction`), а также read-only бейдж `#session-cwd-badge` для `Session.working_dir`.
+3. **Диалог «Операции» (`#ops-dialog` в [`web/harness-ext.js`](../crates/allpaka-chat/web/harness-ext.js))**:
+   - **Терминалы**: создание, чтение буфера, ввод в stdin, resize и закрытие PTY (`/api/sessions/:id/terminals*`);
+   - **Чекпоинты и Spills**: список чекпоинтов с откатом (`POST /api/sessions/:id/checkpoints/:cid/undo`), просмотр выгруженных spill-фрагментов (`GET /api/sessions/:id/spills*`);
+   - **Worktrees и PR**: управление Git worktrees (`/api/sessions/:id/worktrees`, `/worktree`) и Forge PR/CI (`/api/sessions/:id/forge-pr`);
+   - **Агенты и Team**: просмотр субагентов, отправка сообщений/прерывание (`/api/sessions/:id/agents*`) и управление графом задач Team DAG (`/api/sessions/:id/team`);
+   - **Workflows и Доки**: редактирование и запуск DAG workflows (`/api/workflows`, `/api/sessions/:id/workflow`), извлечение текста PDF/DOCX/XLSX/PPTX/ODF/HTML/XML (`/api/documents/extract`), тест SSH (`/api/ssh/test`), STT seam (`/api/voice/transcribe`);
+   - **Автоматизация**: применение профилей (`/api/profiles`), экспорт/импорт бандлов `.allpaka-bundle.json` (`/api/bundles/export`, `/import`), hot reload (`/api/harness/reload`), расписания (`/api/schedules*`), HMAC-webhooks (`/api/webhooks*`), LiveShare read-only ссылки (`/api/sessions/:id/shares*`, `/api/shares/:token`, `/share/:token`) и экспорт трасс OTLP (`/api/observability/traces/:id/otlp`, `/export`).
+

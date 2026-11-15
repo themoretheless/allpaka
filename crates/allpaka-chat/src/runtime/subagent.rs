@@ -4,7 +4,10 @@
 
 use crate::ext::get_session;
 use crate::storage;
-use crate::{bad_request, not_found, ApiResult, App, Ephemeral, ExecutionPolicy, Message, Mode, Session, SessionStatus, Settings, SharedSession, TurnOutcome};
+use crate::{
+    bad_request, not_found, ApiResult, App, Ephemeral, ExecutionPolicy, Message, Mode, Session,
+    SessionStatus, Settings, SharedSession, TurnOutcome,
+};
 use anyhow::{bail, Context, Result};
 use axum::extract::{Path as AxumPath, State};
 use axum::Json;
@@ -86,7 +89,11 @@ pub(crate) async fn run_subagent(
     let mut span = trace.span("agent", &format!("subagent.{name}"), Some(parent_span));
     let outcome = nested_turn(app.clone(), shared.clone(), trace, span.id()).await;
     span.finish(
-        if outcome.is_ok() { "completed" } else { "failed" },
+        if outcome.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        },
         &Value::Null,
     );
     let state = shared.lock().unwrap();
@@ -156,19 +163,10 @@ impl AgentEntry {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct AgentTreeManager {
-    seq: AtomicU64,
-    agents: Mutex<HashMap<String, Arc<AgentEntry>>>,
-}
-
-impl Clone for AgentTreeManager {
-    fn clone(&self) -> Self {
-        Self {
-            seq: AtomicU64::new(self.seq.load(Ordering::Relaxed)),
-            agents: Mutex::new(HashMap::new()),
-        }
-    }
+    seq: Arc<AtomicU64>,
+    agents: Arc<Mutex<HashMap<String, Arc<AgentEntry>>>>,
 }
 
 pub(crate) fn tree_schemas() -> Vec<Value> {
@@ -257,9 +255,13 @@ fn resolve_external_command(runtime: &str) -> Result<Vec<String>> {
     {
         bail!("Invalid external_runtime name `{runtime}`");
     }
-    let key = format!("ALLPAKA_EXTERNAL_AGENT_{}", trimmed.to_ascii_uppercase().replace('-', "_"));
-    let val = std::env::var(&key)
-        .with_context(|| format!("External runtime `{trimmed}` is not configured (`{key}` env var not set)"))?;
+    let key = format!(
+        "ALLPAKA_EXTERNAL_AGENT_{}",
+        trimmed.to_ascii_uppercase().replace('-', "_")
+    );
+    let val = std::env::var(&key).with_context(|| {
+        format!("External runtime `{trimmed}` is not configured (`{key}` env var not set)")
+    })?;
     let parts: Vec<String> = val.split_whitespace().map(ToOwned::to_owned).collect();
     if parts.is_empty() {
         bail!("Configured external runtime command `{key}` is empty");
@@ -424,7 +426,10 @@ impl AgentTreeManager {
                 handle: Mutex::new(None),
                 notify: Arc::new(Notify::new()),
             });
-            self.agents.lock().unwrap().insert(agent_id.clone(), entry.clone());
+            self.agents
+                .lock()
+                .unwrap()
+                .insert(agent_id.clone(), entry.clone());
             let payload = json!({
                 "agent_id": agent_id,
                 "name": name,
@@ -474,7 +479,7 @@ impl AgentTreeManager {
         if fork_context {
             let parent_msgs = parent_session.lock().unwrap().messages.clone();
             let start = parent_msgs.len().saturating_sub(40);
-            for mut m in parent_msgs[start..].to_vec() {
+            for mut m in parent_msgs[start..].iter().cloned() {
                 m.images.clear();
                 child_session.messages.push(m);
             }
@@ -508,7 +513,10 @@ impl AgentTreeManager {
             handle: Mutex::new(None),
             notify: Arc::new(Notify::new()),
         });
-        self.agents.lock().unwrap().insert(agent_id.clone(), entry.clone());
+        self.agents
+            .lock()
+            .unwrap()
+            .insert(agent_id.clone(), entry.clone());
         let handle = spawn_inprocess_turn(app, entry.clone(), child_shared);
         *entry.handle.lock().unwrap() = Some(handle);
 
@@ -549,11 +557,15 @@ impl AgentTreeManager {
         if entry.parent_session_id != parent_session_id {
             bail!("Agent `{agent_id}` does not belong to this session");
         }
-        entry.mailbox.lock().unwrap().push_back(AgentMailboxMessage {
-            from: "parent".into(),
-            message: message.to_owned(),
-            sent_at_ms: storage::now_ms(),
-        });
+        entry
+            .mailbox
+            .lock()
+            .unwrap()
+            .push_back(AgentMailboxMessage {
+                from: "parent".into(),
+                message: message.to_owned(),
+                sent_at_ms: storage::now_ms(),
+            });
         if wake {
             let mut st = entry.status.lock().unwrap();
             if *st == AgentRunStatus::Completed {
@@ -567,8 +579,13 @@ impl AgentTreeManager {
                         .map(|m| m.message.as_str())
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    child_shared.lock().unwrap().messages.push(Message::text("user", &body));
-                    let handle = spawn_inprocess_turn(app.clone(), entry.clone(), child_shared.clone());
+                    child_shared
+                        .lock()
+                        .unwrap()
+                        .messages
+                        .push(Message::text("user", &body));
+                    let handle =
+                        spawn_inprocess_turn(app.clone(), entry.clone(), child_shared.clone());
                     *entry.handle.lock().unwrap() = Some(handle);
                 }
             }
@@ -592,8 +609,8 @@ impl AgentTreeManager {
         if entry.parent_session_id != parent_session_id {
             bail!("Agent `{agent_id}` does not belong to this session");
         }
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.clamp(10, 60_000));
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(timeout_ms.clamp(10, 60_000));
         loop {
             if *entry.status.lock().unwrap() != AgentRunStatus::Running {
                 break;
@@ -744,17 +761,13 @@ pub(crate) async fn interrupt_api(
     AxumPath((id, aid)): AxumPath<(String, String)>,
 ) -> ApiResult<Value> {
     let _ = get_session(&app, &id)?;
-    app.ext
-        .agents
-        .interrupt(&id, &aid)
-        .map(Json)
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                not_found(e)
-            } else {
-                bad_request(e)
-            }
-        })
+    app.ext.agents.interrupt(&id, &aid).map(Json).map_err(|e| {
+        if e.to_string().contains("not found") {
+            not_found(e)
+        } else {
+            bad_request(e)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -787,5 +800,33 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["ack"], "ping");
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn clone_shares_agent_registry_across_handles() {
+        let mgr = AgentTreeManager::default();
+        let (abort_tx, _) = watch::channel(false);
+        let entry = Arc::new(AgentEntry {
+            id: "ag-1".into(),
+            parent_session_id: "s1".into(),
+            name: "worker".into(),
+            role: "research".into(),
+            external_runtime: None,
+            created_at_ms: 1,
+            status: Mutex::new(AgentRunStatus::Running),
+            finished_at_ms: Mutex::new(None),
+            answer: Mutex::new(None),
+            error: Mutex::new(None),
+            mailbox: Mutex::new(VecDeque::new()),
+            session: None,
+            abort_tx,
+            handle: Mutex::new(None),
+            notify: Arc::new(Notify::new()),
+        });
+        mgr.agents.lock().unwrap().insert("ag-1".into(), entry);
+        let cloned = mgr.clone();
+        assert_eq!(cloned.list("s1").len(), 1);
+        cloned.purge_session("s1");
+        assert!(mgr.list("s1").is_empty());
     }
 }

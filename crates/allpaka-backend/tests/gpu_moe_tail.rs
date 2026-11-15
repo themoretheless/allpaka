@@ -39,6 +39,11 @@ fn grouped_tail_stores_match_conservative_barriers() {
     );
     let ib = buffer(tok.as_ptr().cast(), (tok.len() * 4) as u64);
     let zero = 0u64;
+    let get_mmid = |lib: &Library, name: &str, narrow: bool| {
+        let consts = FunctionConstantValues::new();
+        consts.set_constant_value_at_index((&narrow as *const bool).cast(), MTLDataType::Bool, 20);
+        lib.get_function(name, Some(consts)).unwrap()
+    };
     for (suffix, block_bytes, scales) in [
         ("q8_0", 34, vec![0]),
         ("q2_k", 84, vec![80, 82]),
@@ -71,158 +76,162 @@ fn grouped_tail_stores_match_conservative_barriers() {
             format!("mmllpg_id_{suffix}_bn16"),
             format!("mmllps_id_{suffix}_bn16"),
         ];
-        for name in kernels {
-            let outputs = libs.each_ref().map(|_| {
-                device.new_buffer(
-                    ((rows * no as usize + 64) * 4) as u64,
-                    MTLResourceOptions::StorageModeShared,
-                )
-            });
-            for (lib, out) in libs.iter().zip(&outputs) {
-                let fun = lib.get_function(&name, None).unwrap();
-                let pipe = device
-                    .new_compute_pipeline_state_with_function(&fun)
-                    .unwrap();
-                unsafe {
-                    std::slice::from_raw_parts_mut(
-                        out.contents().cast::<f32>(),
+        for narrow in [false, true] {
+            for name in &kernels {
+                let outputs = libs.each_ref().map(|_| {
+                    device.new_buffer(
+                        ((rows * no as usize + 64) * 4) as u64,
+                        MTLResourceOptions::StorageModeShared,
+                    )
+                });
+                for (lib, out) in libs.iter().zip(&outputs) {
+                    let fun = get_mmid(lib, name, narrow);
+                    let pipe = device
+                        .new_compute_pipeline_state_with_function(&fun)
+                        .unwrap();
+                    unsafe {
+                        std::slice::from_raw_parts_mut(
+                            out.contents().cast::<f32>(),
+                            rows * no as usize + 64,
+                        )
+                        .fill(-12345.0);
+                    }
+                    let cmd = queue.new_command_buffer();
+                    let enc =
+                        cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+                    enc.set_compute_pipeline_state(&pipe);
+                    enc.set_buffer(0, Some(&wb), 0);
+                    enc.set_buffer(1, Some(&xb), 0);
+                    enc.set_buffer(2, Some(out), 0);
+                    enc.set_bytes(3, 4, (&ni as *const u32).cast());
+                    enc.set_bytes(4, 4, (&no as *const u32).cast());
+                    enc.set_bytes(5, 8, (&zero as *const u64).cast());
+                    enc.set_buffer(6, Some(&tb), 0);
+                    let stride = stride as u64;
+                    enc.set_bytes(7, 8, (&stride as *const u64).cast());
+                    enc.set_buffer(8, Some(&ib), 0);
+                    enc.set_buffer(9, Some(&xb), 0);
+                    enc.set_buffer(10, Some(&wb), 0);
+                    enc.set_bytes(11, 8, (&zero as *const u64).cast());
+                    enc.set_bytes(12, 4, (&ni as *const u32).cast());
+                    for _ in 0..8 {
+                        enc.dispatch_thread_groups(
+                            MTLSize::new(2, 1, groups.len() as u64),
+                            MTLSize::new(128, 1, 1),
+                        );
+                    }
+                    enc.end_encoding();
+                    cmd.commit();
+                    cmd.wait_until_completed();
+                    assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{name}");
+                }
+                let output = |i: usize| unsafe {
+                    std::slice::from_raw_parts(
+                        outputs[i].contents().cast::<f32>(),
                         rows * no as usize + 64,
                     )
-                    .fill(-12345.0);
+                };
+                let (reference, actual) = (output(0), output(1));
+                for (i, (&a, &b)) in reference.iter().zip(actual).enumerate() {
+                    assert!(
+                        a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
+                        "{name} (narrow={narrow})[{i}]: {a} != {b}"
+                    );
+                    if i >= rows * no as usize {
+                        assert_eq!(b, -12345.0, "{name} wrote beyond output");
+                    } else {
+                        assert_ne!(b, -12345.0, "{name} missed output {i}");
+                    }
                 }
-                let cmd = queue.new_command_buffer();
-                let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
-                enc.set_compute_pipeline_state(&pipe);
-                enc.set_buffer(0, Some(&wb), 0);
-                enc.set_buffer(1, Some(&xb), 0);
-                enc.set_buffer(2, Some(out), 0);
-                enc.set_bytes(3, 4, (&ni as *const u32).cast());
-                enc.set_bytes(4, 4, (&no as *const u32).cast());
-                enc.set_bytes(5, 8, (&zero as *const u64).cast());
-                enc.set_buffer(6, Some(&tb), 0);
-                let stride = stride as u64;
-                enc.set_bytes(7, 8, (&stride as *const u64).cast());
-                enc.set_buffer(8, Some(&ib), 0);
-                enc.set_buffer(9, Some(&xb), 0);
-                enc.set_buffer(10, Some(&wb), 0);
-                enc.set_bytes(11, 8, (&zero as *const u64).cast());
-                enc.set_bytes(12, 4, (&ni as *const u32).cast());
-                for _ in 0..8 {
+            }
+
+            // Verify BN=16 kernels match BN=32 kernels bit-for-bit across all
+            // full-tile (m=16, m=32) and tail-tile (m=1, m=31, m=33, m=65) groups.
+            let bn16_pairs = vec![
+                (
+                    format!("mmll_id_{suffix}"),
+                    format!("mmll_id_{suffix}_bn16"),
+                ),
+                (
+                    format!("mmllg_id_{suffix}"),
+                    format!("mmllg_id_{suffix}_bn16"),
+                ),
+                (
+                    format!("mmlls_id_{suffix}"),
+                    format!("mmlls_id_{suffix}_bn16"),
+                ),
+                (
+                    format!("mmllpg_id_{suffix}"),
+                    format!("mmllpg_id_{suffix}_bn16"),
+                ),
+                (
+                    format!("mmllps_id_{suffix}"),
+                    format!("mmllps_id_{suffix}_bn16"),
+                ),
+            ];
+            for (k32, k16) in &bn16_pairs {
+                let outputs = [k32, k16].map(|kname| {
+                    let out = device.new_buffer(
+                        ((rows * no as usize + 64) * 4) as u64,
+                        MTLResourceOptions::StorageModeShared,
+                    );
+                    unsafe {
+                        std::slice::from_raw_parts_mut(
+                            out.contents().cast::<f32>(),
+                            rows * no as usize + 64,
+                        )
+                        .fill(-12345.0);
+                    }
+                    let fun = get_mmid(&libs[1], kname, narrow);
+                    let pipe = device
+                        .new_compute_pipeline_state_with_function(&fun)
+                        .unwrap();
+                    let cmd = queue.new_command_buffer();
+                    let enc =
+                        cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
+                    enc.set_compute_pipeline_state(&pipe);
+                    enc.set_buffer(0, Some(&wb), 0);
+                    enc.set_buffer(1, Some(&xb), 0);
+                    enc.set_buffer(2, Some(&out), 0);
+                    enc.set_bytes(3, 4, (&ni as *const u32).cast());
+                    enc.set_bytes(4, 4, (&no as *const u32).cast());
+                    enc.set_bytes(5, 8, (&zero as *const u64).cast());
+                    enc.set_buffer(6, Some(&tb), 0);
+                    let stride = stride as u64;
+                    enc.set_bytes(7, 8, (&stride as *const u64).cast());
+                    enc.set_buffer(8, Some(&ib), 0);
+                    enc.set_buffer(9, Some(&xb), 0);
+                    enc.set_buffer(10, Some(&wb), 0);
+                    enc.set_bytes(11, 8, (&zero as *const u64).cast());
+                    enc.set_bytes(12, 4, (&ni as *const u32).cast());
                     enc.dispatch_thread_groups(
-                        MTLSize::new(2, 1, groups.len() as u64),
+                        MTLSize::new(2, 2, groups.len() as u64),
                         MTLSize::new(128, 1, 1),
                     );
-                }
-                enc.end_encoding();
-                cmd.commit();
-                cmd.wait_until_completed();
-                assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{name}");
-            }
-            let output = |i: usize| unsafe {
-                std::slice::from_raw_parts(
-                    outputs[i].contents().cast::<f32>(),
-                    rows * no as usize + 64,
-                )
-            };
-            let (reference, actual) = (output(0), output(1));
-            for (i, (&a, &b)) in reference.iter().zip(actual).enumerate() {
-                assert!(
-                    a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
-                    "{name}[{i}]: {a} != {b}"
-                );
-                if i >= rows * no as usize {
-                    assert_eq!(b, -12345.0, "{name} wrote beyond output");
-                } else {
-                    assert_ne!(b, -12345.0, "{name} missed output {i}");
-                }
-            }
-        }
-
-        // Verify BN=16 kernels match BN=32 kernels bit-for-bit across all
-        // full-tile (m=16, m=32) and tail-tile (m=1, m=31, m=33, m=65) groups.
-        let bn16_pairs = vec![
-            (
-                format!("mmll_id_{suffix}"),
-                format!("mmll_id_{suffix}_bn16"),
-            ),
-            (
-                format!("mmllg_id_{suffix}"),
-                format!("mmllg_id_{suffix}_bn16"),
-            ),
-            (
-                format!("mmlls_id_{suffix}"),
-                format!("mmlls_id_{suffix}_bn16"),
-            ),
-            (
-                format!("mmllpg_id_{suffix}"),
-                format!("mmllpg_id_{suffix}_bn16"),
-            ),
-            (
-                format!("mmllps_id_{suffix}"),
-                format!("mmllps_id_{suffix}_bn16"),
-            ),
-        ];
-        for (k32, k16) in bn16_pairs {
-            let outputs = [&k32, &k16].map(|kname| {
-                let out = device.new_buffer(
-                    ((rows * no as usize + 64) * 4) as u64,
-                    MTLResourceOptions::StorageModeShared,
-                );
-                unsafe {
-                    std::slice::from_raw_parts_mut(
-                        out.contents().cast::<f32>(),
+                    enc.end_encoding();
+                    cmd.commit();
+                    cmd.wait_until_completed();
+                    assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{kname}");
+                    out
+                });
+                let out32 = unsafe {
+                    std::slice::from_raw_parts(
+                        outputs[0].contents().cast::<f32>(),
                         rows * no as usize + 64,
                     )
-                    .fill(-12345.0);
+                };
+                let out16 = unsafe {
+                    std::slice::from_raw_parts(
+                        outputs[1].contents().cast::<f32>(),
+                        rows * no as usize + 64,
+                    )
+                };
+                for (i, (&a, &b)) in out32.iter().zip(out16).enumerate() {
+                    assert!(
+                        a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
+                        "{k16} vs {k32} (narrow={narrow})[{i}]: {b} != {a}"
+                    );
                 }
-                let fun = libs[1].get_function(kname, None).unwrap();
-                let pipe = device
-                    .new_compute_pipeline_state_with_function(&fun)
-                    .unwrap();
-                let cmd = queue.new_command_buffer();
-                let enc = cmd.compute_command_encoder_with_dispatch_type(MTLDispatchType::Serial);
-                enc.set_compute_pipeline_state(&pipe);
-                enc.set_buffer(0, Some(&wb), 0);
-                enc.set_buffer(1, Some(&xb), 0);
-                enc.set_buffer(2, Some(&out), 0);
-                enc.set_bytes(3, 4, (&ni as *const u32).cast());
-                enc.set_bytes(4, 4, (&no as *const u32).cast());
-                enc.set_bytes(5, 8, (&zero as *const u64).cast());
-                enc.set_buffer(6, Some(&tb), 0);
-                let stride = stride as u64;
-                enc.set_bytes(7, 8, (&stride as *const u64).cast());
-                enc.set_buffer(8, Some(&ib), 0);
-                enc.set_buffer(9, Some(&xb), 0);
-                enc.set_buffer(10, Some(&wb), 0);
-                enc.set_bytes(11, 8, (&zero as *const u64).cast());
-                enc.set_bytes(12, 4, (&ni as *const u32).cast());
-                enc.dispatch_thread_groups(
-                    MTLSize::new(2, 2, groups.len() as u64),
-                    MTLSize::new(128, 1, 1),
-                );
-                enc.end_encoding();
-                cmd.commit();
-                cmd.wait_until_completed();
-                assert_eq!(cmd.status(), MTLCommandBufferStatus::Completed, "{kname}");
-                out
-            });
-            let out32 = unsafe {
-                std::slice::from_raw_parts(
-                    outputs[0].contents().cast::<f32>(),
-                    rows * no as usize + 64,
-                )
-            };
-            let out16 = unsafe {
-                std::slice::from_raw_parts(
-                    outputs[1].contents().cast::<f32>(),
-                    rows * no as usize + 64,
-                )
-            };
-            for (i, (&a, &b)) in out32.iter().zip(out16).enumerate() {
-                assert!(
-                    a.is_finite() && b.is_finite() && a.to_bits() == b.to_bits(),
-                    "{k16} vs {k32} [{i}]: {b} != {a}"
-                );
             }
         }
     }

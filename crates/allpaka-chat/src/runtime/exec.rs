@@ -69,13 +69,10 @@ pub(crate) async fn execute_command_ctx(
     )?;
     cmd.kill_on_drop(true);
 
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        cmd.output(),
-    )
-    .await
-    .context("Command timed out")?
-    .context("Failed to execute command")?;
+    let output = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
+        .await
+        .context("Command timed out")?
+        .context("Failed to execute command")?;
 
     let stdout_raw = String::from_utf8_lossy(&output.stdout);
     let stderr_raw = String::from_utf8_lossy(&output.stderr);

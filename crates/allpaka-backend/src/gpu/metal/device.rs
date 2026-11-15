@@ -1167,7 +1167,6 @@ impl Gpu {
     }
 }
 
-
 /// Narrow-MMA mode for tail tiles of the grouped mm (function constant 20).
 /// Pinned on every pipeline: an unset bool constant reads as TRUE on this
 /// Metal, so the off-arm of an A/B must be explicit. `ALLPAKA_MMID_NARROW=0`
