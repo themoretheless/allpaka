@@ -2066,5 +2066,164 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(EvaluationError) as raised:Fake().evaluate(request,baseline_id='base')
         self.assertEqual(raised.exception.run_id,'created')
 
+    def test_harness_parity_endpoints_and_id_validation(self):
+        class Fake(Studio):
+            def __init__(self):
+                self.calls = []
+            def request(self, path, body=None, timeout=10, method=None):
+                m = method or ('GET' if body is None else 'POST')
+                self.calls.append((m, path, body))
+                return {'ok': True}
+
+        client = Fake()
+        client.list_permission_presets()
+        client.respond_interaction('ses_1', 'req_1', 'approval', decision='approve_once', reason='ok')
+        client.respond_interaction('ses_1', 'req_2', 'question', answers={'q1': 'yes'})
+        client.list_spills('ses_1')
+        client.read_spill('ses_1', 'sp_1', offset=10, limit=500)
+        client.list_checkpoints('ses_1')
+        client.undo_checkpoint('ses_1', 'cp_1')
+        client.list_terminals('ses_1')
+        client.create_terminal('ses_1', command='ls', title='t', cols=80, rows=24)
+        client.read_terminal('ses_1', 'pty_1', offset=0, max_bytes=1024, wait_ms=50)
+        client.write_terminal('ses_1', 'pty_1', 'pwd\n')
+        client.resize_terminal('ses_1', 'pty_1', 120, 40)
+        client.close_terminal('ses_1', 'pty_1')
+        client.list_worktrees('ses_1')
+        client.worktree_action('ses_1', 'create', slug='wt1', branch='feat/wt1', attach_project=True)
+        client.get_forge_pr('ses_1')
+        client.forge_pr_action('ses_1', 'create', title='PR', body='desc', base='main')
+        client.list_agents('ses_1')
+        client.message_agent('ses_1', 'ag_1', 'hi', wake=True)
+        client.interrupt_agent('ses_1', 'ag_1')
+        client.get_team('ses_1')
+        client.team_action('ses_1', 'create', title='build', dependencies=[])
+        client.list_workflows()
+        client.save_workflow([{'id': 's1', 'name': 'S1', 'prompt': 'p'}], workflow_id='wf_1', name='WF')
+        client.delete_workflow('wf_1')
+        client.run_workflow('ses_1', workflow_id='wf_1')
+        client.test_ssh({'host': 'example.org', 'remote_root': '/srv'}, path='/srv')
+        client.extract_document(content_b64='SGVsbG8=', filename='doc.html', max_chars=2048)
+        client.transcribe_voice('AAAA', mime_type='audio/wav', language='en')
+        client.list_profiles()
+        client.save_profile({'id': 'custom1', 'name': 'Custom 1'})
+        client.delete_profile('custom1')
+        client.export_bundle('proj_1')
+        client.import_bundle({'version': 1, 'project_id': 'proj_1'})
+        client.reload_harness('proj_1')
+        client.list_schedules()
+        client.create_schedule('nightly', 'every 15m', 'audit', project_id='proj_1')
+        client.trigger_schedule('sch_1')
+        client.delete_schedule('sch_1')
+        client.list_webhooks()
+        client.create_webhook('hook', 'run {{payload}}', project_id='proj_1')
+        client.delete_webhook('whk_1')
+        client.list_shares('ses_1')
+        client.create_share('ses_1', label='RO', ttl_secs=3600)
+        client.revoke_share('ses_1', 'shr-1')
+        client.get_public_share('shr_' + 'a' * 64)
+        client.get_trace_otlp('tr_1')
+        client.export_trace_otlp('tr_1', endpoint='http://collector/v1/traces')
+
+        expected_prefixes = [
+            ('GET', 'permission-presets'),
+            ('POST', 'sessions/ses_1/interaction'),
+            ('POST', 'sessions/ses_1/interaction'),
+            ('GET', 'sessions/ses_1/spills'),
+            ('GET', 'sessions/ses_1/spills/sp_1?offset=10&limit=500'),
+            ('GET', 'sessions/ses_1/checkpoints'),
+            ('POST', 'sessions/ses_1/checkpoints/cp_1/undo'),
+            ('GET', 'sessions/ses_1/terminals'),
+            ('POST', 'sessions/ses_1/terminals'),
+            ('GET', 'sessions/ses_1/terminals/pty_1?offset=0&max_bytes=1024&wait_ms=50'),
+            ('POST', 'sessions/ses_1/terminals/pty_1/input'),
+            ('POST', 'sessions/ses_1/terminals/pty_1/resize'),
+            ('DELETE', 'sessions/ses_1/terminals/pty_1'),
+            ('GET', 'sessions/ses_1/worktrees'),
+            ('POST', 'sessions/ses_1/worktree'),
+            ('GET', 'sessions/ses_1/forge-pr'),
+            ('POST', 'sessions/ses_1/forge-pr'),
+            ('GET', 'sessions/ses_1/agents'),
+            ('POST', 'sessions/ses_1/agents/ag_1/message'),
+            ('POST', 'sessions/ses_1/agents/ag_1/interrupt'),
+            ('GET', 'sessions/ses_1/team'),
+            ('POST', 'sessions/ses_1/team'),
+            ('GET', 'workflows'),
+            ('POST', 'workflows'),
+            ('DELETE', 'workflows/wf_1'),
+            ('POST', 'sessions/ses_1/workflow'),
+            ('POST', 'ssh/test'),
+            ('POST', 'documents/extract'),
+            ('POST', 'voice/transcribe'),
+            ('GET', 'profiles'),
+            ('POST', 'profiles'),
+            ('DELETE', 'profiles/custom1'),
+            ('GET', 'bundles/export?project_id=proj_1'),
+            ('POST', 'bundles/import'),
+            ('POST', 'harness/reload'),
+            ('GET', 'schedules'),
+            ('POST', 'schedules'),
+            ('POST', 'schedules/sch_1/trigger'),
+            ('DELETE', 'schedules/sch_1'),
+            ('GET', 'webhooks'),
+            ('POST', 'webhooks'),
+            ('DELETE', 'webhooks/whk_1'),
+            ('GET', 'sessions/ses_1/shares'),
+            ('POST', 'sessions/ses_1/shares'),
+            ('DELETE', 'sessions/ses_1/shares/shr-1'),
+            ('GET', 'shares/shr_' + 'a' * 64),
+            ('GET', 'observability/traces/tr_1/otlp'),
+            ('POST', 'observability/traces/tr_1/export'),
+        ]
+        self.assertEqual([(m, p) for m, p, _ in client.calls], expected_prefixes)
+
+        for bad in ('', '../escape', 'a/b'):
+            with self.assertRaises(ValueError):
+                client.list_spills(bad)
+            with self.assertRaises(ValueError):
+                client.close_terminal('ses_1', bad)
+            with self.assertRaises(ValueError):
+                client.revoke_share('ses_1', bad)
+        with self.assertRaises(ValueError):
+            client.respond_interaction('ses_1', 'req_1', 'bogus')
+
+    def test_webhook_hmac_signing_and_trigger(self):
+        sig = Studio.sign_webhook_payload('whsec_secret_1234', b'{"ok":true}')
+        self.assertTrue(sig.startswith('sha256='))
+        self.assertEqual(len(sig), 7 + 64)
+
+        received = {}
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length', '0'))
+                received['path'] = self.path
+                received['sig'] = self.headers.get('X-Allpaka-Signature-256')
+                received['client'] = self.headers.get('X-Allpaka-Client')
+                received['body'] = self.rfile.read(length)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(b'{"accepted":true,"webhook_id":"whk_1"}')
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            s = Studio(f'http://127.0.0.1:{server.server_port}')
+            res = s.trigger_webhook('whk_1', 'whsec_secret_1234', {'event': 'ping'})
+            self.assertEqual(res['accepted'], True)
+            self.assertEqual(received['path'], '/api/webhooks/trigger/whk_1')
+            self.assertIsNone(received['client'])
+            self.assertEqual(
+                received['sig'],
+                Studio.sign_webhook_payload('whsec_secret_1234', received['body']),
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            t.join()
+
 
 if __name__=='__main__':unittest.main()

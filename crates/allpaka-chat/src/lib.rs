@@ -1,8 +1,10 @@
+mod acp;
 mod agent_team;
 mod api;
 mod automation_seams;
 mod background;
 mod bookmarks;
+mod bundles;
 mod cancel;
 mod code_search;
 mod compact;
@@ -27,6 +29,7 @@ mod interaction;
 mod judge;
 mod judge_presets;
 mod judge_runs;
+mod liveshare;
 mod lsp;
 mod mcp;
 mod memory;
@@ -35,6 +38,7 @@ mod model_evaluators;
 mod observability;
 mod online_evaluation;
 mod online_sources;
+mod otel;
 mod patch;
 mod plan;
 mod plugins;
@@ -48,6 +52,7 @@ mod remote_worker;
 mod review_queues;
 mod runtime;
 mod sandbox;
+mod schedule;
 mod spill;
 mod ssh;
 mod state_file;
@@ -58,6 +63,7 @@ mod terminal;
 mod tools;
 mod types;
 mod web_tools;
+mod webhook;
 mod workflow;
 mod worktree;
 
@@ -238,18 +244,56 @@ where
 {
     tokio::task::spawn_blocking(f).await.map_err(internal)?
 }
+#[derive(Clone, Debug)]
+pub struct StudioOptions {
+    pub bind: SocketAddr,
+    pub workspace: PathBuf,
+    pub data_dir: Option<PathBuf>,
+    pub profile: Option<String>,
+    pub headless: bool,
+    pub prompt: Option<String>,
+    pub dump_config: bool,
+    pub acp: bool,
+}
+
+impl Default for StudioOptions {
+    fn default() -> Self {
+        Self {
+            bind: SocketAddr::from(([127, 0, 0, 1], 8100)),
+            workspace: PathBuf::from("."),
+            data_dir: None,
+            profile: None,
+            headless: false,
+            prompt: None,
+            dump_config: false,
+            acp: false,
+        }
+    }
+}
+
 pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> Result<()> {
-    if !bind.ip().is_loopback() {
+    run_with_options(StudioOptions {
+        bind,
+        workspace,
+        data_dir,
+        ..Default::default()
+    })
+}
+
+pub fn run_with_options(opts: StudioOptions) -> Result<()> {
+    let non_server = opts.dump_config || opts.acp || opts.headless || opts.prompt.is_some();
+    if !non_server && !opts.bind.ip().is_loopback() {
         bail!("Studio is a local single-user service: bind to a loopback address");
     }
-    let workspace = workspace
+    let workspace = opts
+        .workspace
         .canonicalize()
         .context("Workspace does not exist")?;
     if !workspace.is_dir() {
         bail!("Workspace must be a directory");
     }
     let _workspace_lock = data_lock::DataLock::acquire_workspace(&workspace)?;
-    let data = data_dir.unwrap_or_else(|| {
+    let data = opts.data_dir.unwrap_or_else(|| {
         let home = std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
@@ -263,8 +307,15 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
         .enable_all()
         .build()?
         .block_on(async {
-            let listener = tokio::net::TcpListener::bind(bind).await?;
-            let addr = listener.local_addr()?;
+            let listener = if !non_server {
+                Some(tokio::net::TcpListener::bind(opts.bind).await?)
+            } else {
+                None
+            };
+            let addr = match &listener {
+                Some(l) => l.local_addr()?,
+                None => opts.bind,
+            };
             let projects_file = data.join("projects.state");
             let projects: Vec<context::Project> = if projects_file.exists() {
                 state_file::load_list(&data, "projects", "project", |_| Ok(()))?
@@ -317,6 +368,9 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                         name: "rag-mcp".into(),
                         kind: plugins::PluginKind::Mcp,
                         url,
+                        command: None,
+                        args: Vec::new(),
+                        env: std::collections::BTreeMap::new(),
                         enabled: true,
                         instructions: None,
                         unlocks_tool: None,
@@ -369,15 +423,74 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
             app.matrix_jobs.recover()?;
             quality_jobs::recover(&app.data)?;
             harness_refine::recover(&app.data)?;
-            let _quality_worker=quality_jobs::spawn(app.clone());
-            let _online_worker = (std::env::var("ALLPAKA_ONLINE_WORKER").as_deref()!=Ok("0")).then(||online_evaluation::spawn_worker(app.data.clone()));
-            if recovered_traces > 0 || recovered_runs > 0 {
-                eprintln!("Studio recovered {recovered_traces} interrupted traces and {recovered_runs} interrupted evaluation runs");
+            if opts.dump_config {
+                let profiles = bundles::all_profiles(&app)?;
+                let projects_snap = app.projects.lock().unwrap().clone();
+                let providers_snap: Vec<Value> = app
+                    .providers
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|p| json!({ "id": p.id, "name": p.name, "configured": !p.key.is_empty() }))
+                    .collect();
+                let summary = json!({
+                    "workspace": app.workspace.display().to_string(),
+                    "data_dir": app.data.display().to_string(),
+                    "profile": opts.profile,
+                    "projects": projects_snap,
+                    "providers": providers_snap,
+                    "profiles": profiles,
+                });
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+                return Ok(());
             }
             for config in &plugin_configs {
                 if config.enabled {
                     plugins::spawn_plugin_connect(app.clone(), config.id.clone());
                 }
+            }
+            if opts.acp {
+                return acp::run_stdio(app).await;
+            }
+            if opts.headless || opts.prompt.is_some() {
+                let mut settings = ext::default_settings(&app, "default");
+                if let Some(pid) = &opts.profile {
+                    let prof = bundles::resolve_profile(&app, pid)?;
+                    bundles::apply_profile(&prof, &mut settings);
+                }
+                if let Some(prompt_text) = opts.prompt {
+                    let sid = evaluation::new_id();
+                    let mut session = Session::new(sid.clone(), settings);
+                    session.messages.push(Message::text("user", &prompt_text));
+                    save(&app, &session)?;
+                    let shared: SharedSession = Arc::new(Mutex::new(session));
+                    let trace = app.observability.begin(&sid, "default")?;
+                    let mut span = trace.span("turn", "cli.headless", None);
+                    let outcome = turn_traced(app.clone(), shared.clone(), None, &trace, span.id()).await;
+                    span.finish(if outcome.is_ok() { "completed" } else { "failed" }, &Value::Null);
+                    let reply = {
+                        let s = shared.lock().unwrap();
+                        let _ = save(&app, &s);
+                        s.messages
+                            .iter()
+                            .rev()
+                            .find(|m| m.role == "assistant")
+                            .map(|m| m.content.clone())
+                            .unwrap_or_default()
+                    };
+                    if let Err(err) = outcome {
+                        bail!("Headless turn failed: {err:#}");
+                    }
+                    println!("{reply}");
+                }
+                return Ok(());
+            }
+            let _quality_worker=quality_jobs::spawn(app.clone());
+            let _online_worker = (std::env::var("ALLPAKA_ONLINE_WORKER").as_deref()!=Ok("0")).then(||online_evaluation::spawn_worker(app.data.clone()));
+            let _schedule_worker = (std::env::var("ALLPAKA_SCHEDULE_WORKER").as_deref() != Ok("0"))
+                .then(|| schedule::spawn_worker(app.clone()));
+            if recovered_traces > 0 || recovered_runs > 0 {
+                eprintln!("Studio recovered {recovered_traces} interrupted traces and {recovered_runs} interrupted evaluation runs");
             }
             rag::spawn_rag_maintenance(app.clone());
             for entry in std::fs::read_dir(app.data.as_ref())? {
@@ -420,7 +533,7 @@ pub fn run(bind: SocketAddr, workspace: PathBuf, data_dir: Option<PathBuf>) -> R
                 app.workspace.display(),
                 app.data.display()
             );
-            axum::serve(listener, router).await?;
+            axum::serve(listener.unwrap(), router).await?;
             Ok(())
         })
 }

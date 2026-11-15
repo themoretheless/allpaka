@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/style.css">
   <script src="/content.js" defer></script>
   <script src="/files.js" defer></script>
+  <script src="/harness-ext.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -83,6 +84,7 @@
         <span id="ctx-pct" hidden></span>
         <span class="hb-label">Контекст</span>
       </button>
+      <button id="ops-open" class="ghost header-btn" type="button" title="Терминалы, агенты, чекпоинты, workflows и автоматизация"><span class="hb-label">Операции</span></button>
       <span id="status" class="badge idle">Готов</span>
       <details class="menu" id="header-menu">
         <summary aria-label="Меню разговора" title="Меню разговора"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></svg></summary>
@@ -98,6 +100,8 @@
 
   <div id="model-info" class="muted" hidden></div>
   <div id="branch-origin" hidden></div>
+  <span id="session-cwd-badge" class="badge muted" hidden></span>
+  <section id="interaction-banner" class="interaction-banner" hidden aria-live="polite"></section>
 
   <section id="messages" aria-label="Сообщения" aria-live="polite">
     <div class="welcome">
@@ -161,6 +165,26 @@
         <label title="Глубина рассуждений: OpenAI/Grok/Gemini — reasoning_effort, OpenRouter — reasoning.effort, Claude — extended thinking. DeepSeek/Kimi/локальная модель игнорируют">Effort <select id="effort"><option value="" selected>Авто</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
         <label title="Максимум выходных токенов на запрос; допустимое значение зависит от модели">Токены <input id="output-tokens" type="number" value="8192" min="256" max="393216" step="256"></label>
         <label>Шаги <input id="steps" type="number" value="12" min="1" max="50"></label>
+        <label title="Профиль разрешений песочницы и подтверждений">Профиль прав <select id="permission-preset">
+          <option value="" selected>По умолчанию</option>
+          <option value="readonly_audit">Только чтение (аудит)</option>
+          <option value="workspace_sandboxed">Песочница проекта</option>
+          <option value="interactive_guarded">С подтверждением</option>
+          <option value="full_trusted">Полный доступ</option>
+          <option value="custom">Свой</option>
+        </select></label>
+        <label title="Режим изоляции команд ОС">Песочница <select id="sandbox-mode">
+          <option value="unsandboxed" selected>Без песочницы</option>
+          <option value="workspace_write">Запись в проект</option>
+          <option value="read_only">Только чтение</option>
+        </select></label>
+        <label title="Когда запрашивать подтверждение пользователя">Подтверждения <select id="approval-policy">
+          <option value="never" selected>Никогда</option>
+          <option value="commands">Команды</option>
+          <option value="writes_and_commands">Правки и команды</option>
+          <option value="always">Всегда</option>
+        </select></label>
+        <label title="Включить инструменты Agent Team DAG и субагентов"><input type="checkbox" id="team-mode"> Команда (Team)</label>
         <button id="layout-convert" type="button" title="Преобразовать раскладку в поле (RU ↔ EN)" aria-label="Преобразовать раскладку"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 5.5h11m0 0L11 3m2.5 2.5L11 8M13.5 10.5h-11m0 0L5 8m-2.5 2.5L5 13"/></svg></button>
         <button id="layout-toggle" type="button" title="Авто-исправление раскладки при вводе">Авто-раскладка</button>
       </div>
@@ -663,6 +687,139 @@
     <button id="file-add" type="button" disabled>Добавить весь файл в контекст</button>
     <small class="muted">Выделите текст мышью или задайте номера строк. Текстовые файлы до 100 KB; вложения появятся перед следующим сообщением.</small>
   </section></div>
+</dialog>
+<dialog id="ops-dialog" class="wide">
+  <div class="ops-head">
+    <h2>Операции Studio и Harness</h2>
+    <button id="ops-close" type="button">Закрыть</button>
+  </div>
+  <nav class="ops-tabs" aria-label="Разделы операций">
+    <button type="button" data-ops-tab="terminals" class="active">Терминалы</button>
+    <button type="button" data-ops-tab="checkpoints">Чекпоинты и Spills</button>
+    <button type="button" data-ops-tab="worktrees">Worktrees и PR</button>
+    <button type="button" data-ops-tab="team">Агенты и Team</button>
+    <button type="button" data-ops-tab="workflows">Workflows и Доки</button>
+    <button type="button" data-ops-tab="automation">Автоматизация</button>
+  </nav>
+  <div id="ops-error" class="muted" role="alert"></div>
+
+  <section data-ops-pane="terminals" class="ops-pane">
+    <div class="ops-row">
+      <input id="ops-pty-cmd" type="text" placeholder="Команда (необязательно, например bash)">
+      <button id="ops-pty-open" type="button" class="primary">Открыть PTY</button>
+      <button id="ops-pty-read" type="button">Обновить вывод</button>
+      <button id="ops-pty-resize" type="button">120×36</button>
+    </div>
+    <div id="ops-terminals-list"></div>
+    <pre id="ops-pty-output" class="pty-screen"></pre>
+    <div class="ops-row">
+      <input id="ops-pty-input" type="text" placeholder="Отправить строку в stdin">
+      <button id="ops-pty-send" type="button">Ввод ↵</button>
+    </div>
+  </section>
+
+  <section data-ops-pane="checkpoints" class="ops-pane" hidden>
+    <div id="ops-cwd-display" class="muted"></div>
+    <h3>Чекпоинты изменений</h3>
+    <div id="ops-checkpoints-list"></div>
+    <h3>Spills (выгруженный вывод)</h3>
+    <div id="ops-spills-list"></div>
+    <pre id="ops-spill-content" class="pty-screen"></pre>
+  </section>
+
+  <section data-ops-pane="worktrees" class="ops-pane" hidden>
+    <div class="ops-row">
+      <input id="ops-wt-slug" type="text" placeholder="Slug (например feat-ui)">
+      <input id="ops-wt-branch" type="text" placeholder="Ветка (необязательно)">
+      <label><input id="ops-wt-attach" type="checkbox"> Подключить как проект</label>
+      <button id="ops-wt-create" type="button" class="primary">Создать worktree</button>
+      <button id="ops-wt-remove" type="button" class="danger">Удалить</button>
+    </div>
+    <div id="ops-worktrees-list"></div>
+    <h3>Forge PR / MR</h3>
+    <div class="ops-row">
+      <input id="ops-pr-title" type="text" placeholder="Заголовок PR/MR">
+      <input id="ops-pr-base" type="text" placeholder="Базовая ветка">
+      <input id="ops-pr-body" type="text" placeholder="Описание">
+      <button id="ops-pr-create" type="button">Создать PR</button>
+      <button id="ops-pr-checks" type="button">Проверить CI</button>
+    </div>
+    <pre id="ops-forge-status" class="pty-screen"></pre>
+  </section>
+
+  <section data-ops-pane="team" class="ops-pane" hidden>
+    <h3>Субагенты</h3>
+    <div id="ops-agents-list"></div>
+    <h3>Команда (Team DAG)</h3>
+    <div class="ops-row">
+      <input id="ops-team-id" type="text" placeholder="ID (необязательно)">
+      <input id="ops-team-title" type="text" placeholder="Название задачи">
+      <input id="ops-team-deps" type="text" placeholder="Зависимости (через запятую)">
+      <button id="ops-team-add" type="button" class="primary">Добавить задачу</button>
+    </div>
+    <div id="ops-team-list"></div>
+  </section>
+
+  <section data-ops-pane="workflows" class="ops-pane" hidden>
+    <h3>Workflows</h3>
+    <div class="ops-grid">
+      <input id="ops-wf-name" type="text" placeholder="Название workflow">
+      <textarea id="ops-wf-stages" placeholder='[{"id":"step1","name":"Step 1","prompt":"Inspect repo"}]'></textarea>
+      <button id="ops-wf-save" type="button" class="primary">Сохранить Workflow</button>
+    </div>
+    <div id="ops-workflows-list"></div>
+    <h3>Извлечение документа и проверка SSH</h3>
+    <div class="ops-row">
+      <input id="ops-doc-path" type="text" placeholder="Путь к PDF/DOCX/XLSX/HTML">
+      <button id="ops-doc-extract" type="button">Извлечь текст</button>
+    </div>
+    <div class="ops-row">
+      <input id="ops-ssh-host" type="text" placeholder="SSH host">
+      <input id="ops-ssh-user" type="text" placeholder="user">
+      <input id="ops-ssh-root" type="text" placeholder="/remote/root">
+      <button id="ops-ssh-test" type="button">Тест SSH</button>
+    </div>
+    <pre id="ops-workflow-output" class="pty-screen"></pre>
+  </section>
+
+  <section data-ops-pane="automation" class="ops-pane" hidden>
+    <h3>Профили и бандлы</h3>
+    <div id="ops-profiles-list"></div>
+    <div class="ops-row">
+      <button id="ops-bundle-export" type="button">Экспорт бандла</button>
+      <button id="ops-bundle-import" type="button">Импорт бандла</button>
+      <button id="ops-harness-reload" type="button">Reload Harness</button>
+    </div>
+    <textarea id="ops-bundle-json" placeholder="JSON бандла (.allpaka-bundle.json)"></textarea>
+    <h3>Расписания</h3>
+    <div class="ops-row">
+      <input id="ops-sch-name" type="text" placeholder="Название">
+      <input id="ops-sch-cron" type="text" placeholder="every 15m или cron">
+      <input id="ops-sch-prompt" type="text" placeholder="Промпт">
+      <button id="ops-sch-create" type="button">Создать расписание</button>
+    </div>
+    <div id="ops-schedules-list"></div>
+    <h3>Webhooks</h3>
+    <div class="ops-row">
+      <input id="ops-wh-name" type="text" placeholder="Название">
+      <input id="ops-wh-template" type="text" placeholder="Шаблон с {{payload}}">
+      <button id="ops-wh-create" type="button">Создать Webhook</button>
+    </div>
+    <div id="ops-webhooks-list"></div>
+    <h3>LiveShare и OTLP</h3>
+    <div class="ops-row">
+      <input id="ops-share-label" type="text" placeholder="Подпись ссылки">
+      <button id="ops-share-create" type="button">Создать Share-ссылку</button>
+    </div>
+    <div id="ops-shares-list"></div>
+    <div class="ops-row">
+      <input id="ops-otlp-trace-id" type="text" placeholder="Trace ID">
+      <input id="ops-otlp-endpoint" type="text" placeholder="http://collector/v1/traces">
+      <button id="ops-otlp-preview" type="button">OTLP JSON</button>
+      <button id="ops-otlp-export" type="button">Экспорт OTLP</button>
+    </div>
+    <pre id="ops-automation-output" class="pty-screen"></pre>
+  </section>
 </dialog>
 </body>
 </html>

@@ -9,7 +9,7 @@
 //! not require a server restart: the next turn rebuilds schemas and prompts.
 
 use crate::mcp;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -22,6 +22,7 @@ use std::{
 pub enum PluginKind {
     #[default]
     Mcp,
+    McpStdio,
     Skill,
 }
 
@@ -33,6 +34,12 @@ pub struct PluginConfig {
     pub kind: PluginKind,
     #[serde(default)]
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
@@ -75,6 +82,41 @@ pub fn validate(config: &PluginConfig) -> Result<()> {
                 || config.url.chars().any(char::is_control)
             {
                 bail!("MCP plugin URL must start with http:// or https:// and be at most 500 characters");
+            }
+        }
+        PluginKind::McpStdio => {
+            let cmd = config.command.as_deref().map(str::trim).unwrap_or("");
+            if cmd.is_empty() || cmd.len() > 500 || cmd.chars().any(char::is_control) {
+                bail!("MCP stdio plugin requires a non-empty command (<= 500 chars)");
+            }
+            if config.args.len() > 32
+                || config
+                    .args
+                    .iter()
+                    .any(|a| a.len() > 1000 || a.chars().any(char::is_control))
+            {
+                bail!("MCP stdio args must contain at most 32 safe strings");
+            }
+            if config.env.len() > 32 {
+                bail!("MCP stdio env must contain at most 32 variables");
+            }
+            for (k, v) in &config.env {
+                let upper = k.to_ascii_uppercase();
+                if matches!(
+                    upper.as_str(),
+                    "LD_PRELOAD"
+                        | "LD_LIBRARY_PATH"
+                        | "DYLD_INSERT_LIBRARIES"
+                        | "DYLD_LIBRARY_PATH"
+                ) {
+                    bail!("Restricted loader environment variable `{k}` is not permitted");
+                }
+                if k.trim().is_empty()
+                    || k.chars().any(|c| c.is_control() || c == '=')
+                    || v.chars().any(char::is_control)
+                {
+                    bail!("Invalid environment variable `{k}` in MCP stdio config");
+                }
             }
         }
         PluginKind::Skill => {
@@ -137,6 +179,9 @@ pub fn defaults() -> Vec<PluginConfig> {
             name: "Shell".into(),
             kind: PluginKind::Skill,
             url: String::new(),
+            command: None,
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
             enabled: true,
             instructions: Some("Shell commands are available via run_command. Use for build, test, lint, and other dev tasks. Timeout 30s by default (max 120s). Output truncated at 128 KiB. Prefer dedicated tools (read_file, write_file, edit_file) for file operations. Commands run in the project root directory.".into()),
             unlocks_tool: Some("run_command".into()),
@@ -146,6 +191,9 @@ pub fn defaults() -> Vec<PluginConfig> {
             name: "Git".into(),
             kind: PluginKind::Skill,
             url: String::new(),
+            command: None,
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
             enabled: true,
             instructions: Some("Git operations via run_command. Read-only by default: status, diff, log, branch. Write operations (add, commit, push, reset, stash) only on explicit request. Never run reset --hard, clean -fdx, push --force, or delete branches without confirmation. Show what will be affected before destructive commands. Uncommitted changes are someone's work — don't stash or switch branches without asking.".into()),
             unlocks_tool: None,
@@ -155,6 +203,9 @@ pub fn defaults() -> Vec<PluginConfig> {
             name: "GitHub".into(),
             kind: PluginKind::Skill,
             url: String::new(),
+            command: None,
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
             enabled: true,
             instructions: Some("GitHub CLI (gh) via run_command. Read-only by default: pr list/view, issue list/view, run list/view, repo view. Write operations (pr create/merge/close, issue create/close, release create, workflow run) only on explicit request. Show what will be published before creating PRs, issues, or releases. Check auth with 'gh auth status' first. Respect rate limits — don't retry on 403/429.".into()),
             unlocks_tool: None,
@@ -172,7 +223,7 @@ use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) fn spawn_plugin_connect(app: App, id: String) {
     tokio::spawn(async move {
-        let (url, kind) = {
+        let cfg = {
             let registry = app.plugins.read().unwrap();
             let Some(state) = registry.get(&id) else {
                 return;
@@ -180,12 +231,20 @@ pub(crate) fn spawn_plugin_connect(app: App, id: String) {
             if !state.config.enabled {
                 return;
             }
-            (state.config.url.clone(), state.config.kind.clone())
+            state.config.clone()
         };
-        if kind == PluginKind::Skill {
+        if cfg.kind == PluginKind::Skill {
             return;
         }
-        match mcp::Client::connect(&app.client, &url).await {
+        let connected = match cfg.kind {
+            PluginKind::Mcp => mcp::Client::connect(&app.client, &cfg.url).await,
+            PluginKind::McpStdio => {
+                let cmd = cfg.command.as_deref().unwrap_or("");
+                mcp::Client::connect_stdio(cmd, &cfg.args, &cfg.env, &app.workspace).await
+            }
+            PluginKind::Skill => return,
+        };
+        match connected {
             Ok(client) => {
                 let count = client.tools.len();
                 if let Some(state) = app.plugins.write().unwrap().get_mut(&id) {
@@ -204,6 +263,25 @@ pub(crate) fn spawn_plugin_connect(app: App, id: String) {
         }
     });
 }
+
+pub(crate) fn reload_all(app: &App) {
+    let ids: Vec<String> = {
+        let mut reg = app.plugins.write().unwrap();
+        let mut enabled_ids = Vec::new();
+        for (id, state) in reg.iter_mut() {
+            state.client = None;
+            state.error = None;
+            if state.config.enabled && state.config.kind != PluginKind::Skill {
+                enabled_ids.push(id.clone());
+            }
+        }
+        enabled_ids
+    };
+    for id in ids {
+        spawn_plugin_connect(app.clone(), id);
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub(crate) struct PluginInput {
     #[serde(default)]
@@ -213,6 +291,12 @@ pub(crate) struct PluginInput {
     kind: Option<String>,
     #[serde(default)]
     url: String,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
@@ -233,11 +317,15 @@ pub(crate) async fn list_plugins(State(app): State<App>) -> Json<Value> {
                 "name": state.config.name,
                 "kind": state.config.kind,
                 "url": state.config.url,
+                "command": state.config.command,
+                "args": state.config.args,
                 "enabled": state.config.enabled,
                 "instructions": state.config.instructions,
                 "unlocks_tool": state.config.unlocks_tool,
                 "connected": state.client.is_some(),
                 "tools": state.client.as_ref().map(|c| c.tools.len()).unwrap_or(0),
+                "resources": state.client.as_ref().map(|c| c.resources.len()).unwrap_or(0),
+                "resource_templates": state.client.as_ref().map(|c| c.resource_templates.len()).unwrap_or(0),
                 "error": state.error,
             })
         })
@@ -259,6 +347,7 @@ pub(crate) async fn save_plugin(
     }
     let kind = match input.kind.as_deref() {
         Some("skill") => PluginKind::Skill,
+        Some("mcp_stdio") => PluginKind::McpStdio,
         _ => PluginKind::Mcp,
     };
     let config = PluginConfig {
@@ -266,6 +355,9 @@ pub(crate) async fn save_plugin(
         name: input.name.trim().to_string(),
         kind: kind.clone(),
         url: input.url.trim().to_string(),
+        command: input.command.map(|c| c.trim().to_string()),
+        args: input.args,
+        env: input.env,
         enabled: input.enabled,
         instructions: input.instructions,
         unlocks_tool: input.unlocks_tool,
@@ -284,9 +376,12 @@ pub(crate) async fn save_plugin(
             Some(state) => {
                 let changed = state.config.url != config.url
                     || state.config.kind != config.kind
+                    || state.config.command != config.command
+                    || state.config.args != config.args
+                    || state.config.env != config.env
                     || state.config.instructions != config.instructions;
                 state.config = config.clone();
-                if changed {
+                if changed || !config.enabled {
                     state.client = None;
                     state.error = None;
                 }
@@ -344,4 +439,100 @@ pub(crate) async fn reload_plugin(
         spawn_plugin_connect(app.clone(), id.clone());
     }
     Ok(Json(json!({"id": id, "connecting": enabled})))
+}
+
+pub(crate) fn manager_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "plugin_manager",
+            "description": "Inspect, toggle enablement of, or reload already-configured plugins and MCP servers (`list`, `toggle`, `reload`).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "toggle", "reload"] },
+                    "plugin_id": { "type": "string" },
+                    "enabled": { "type": "boolean" }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }
+        }
+    })
+}
+
+pub(crate) fn execute_manager(app: &App, args: &Value) -> Result<Value> {
+    let action = args["action"].as_str().context("Missing `action`")?;
+    match action {
+        "list" => {
+            let reg = app.plugins.read().unwrap();
+            let list: Vec<Value> = reg
+                .values()
+                .map(|s| {
+                    json!({
+                        "id": s.config.id,
+                        "name": s.config.name,
+                        "kind": s.config.kind,
+                        "enabled": s.config.enabled,
+                        "connected": s.client.is_some(),
+                        "tools": s.client.as_ref().map(|c| c.tools.len()).unwrap_or(0),
+                        "resources": s.client.as_ref().map(|c| c.resources.len()).unwrap_or(0),
+                        "error": s.error,
+                    })
+                })
+                .collect();
+            Ok(json!({ "plugins": list }))
+        }
+        "toggle" => {
+            let id = args["plugin_id"]
+                .as_str()
+                .context("`toggle` requires `plugin_id`")?
+                .trim();
+            let enable = args["enabled"]
+                .as_bool()
+                .context("`toggle` requires boolean `enabled`")?;
+            let configs = {
+                let mut reg = app.plugins.write().unwrap();
+                let state = reg
+                    .get_mut(id)
+                    .with_context(|| format!("Unknown plugin `{id}`"))?;
+                state.config.enabled = enable;
+                if !enable {
+                    state.client = None;
+                    state.error = None;
+                }
+                reg.values().map(|s| s.config.clone()).collect::<Vec<_>>()
+            };
+            save(app.data.as_path(), &configs)?;
+            if enable {
+                spawn_plugin_connect(app.clone(), id.to_owned());
+            }
+            Ok(json!({ "plugin_id": id, "enabled": enable }))
+        }
+        "reload" => {
+            let pid = args["plugin_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if let Some(id) = pid {
+                let enabled = {
+                    let mut reg = app.plugins.write().unwrap();
+                    let state = reg
+                        .get_mut(id)
+                        .with_context(|| format!("Unknown plugin `{id}`"))?;
+                    state.client = None;
+                    state.error = None;
+                    state.config.enabled
+                };
+                if enabled {
+                    spawn_plugin_connect(app.clone(), id.to_owned());
+                }
+                Ok(json!({ "plugin_id": id, "reloading": enabled }))
+            } else {
+                reload_all(app);
+                Ok(json!({ "reloading": "all" }))
+            }
+        }
+        other => bail!("Unsupported plugin_manager action `{other}`"),
+    }
 }

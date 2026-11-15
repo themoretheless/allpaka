@@ -96,6 +96,21 @@ pub(crate) enum Command {
         /// Conversation storage directory (defaults to OS user data directory).
         #[arg(long)]
         data_dir: Option<PathBuf>,
+        /// Optional named execution profile (default, coding-safe, autonomous-goal, research).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Run headless without opening a browser window.
+        #[arg(long)]
+        headless: bool,
+        /// Execute a single non-interactive prompt and print JSON output to stdout.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Print resolved Studio configuration and profiles as JSON and exit.
+        #[arg(long)]
+        dump_config: bool,
+        /// Run the Agent Client Protocol (ACP) JSON-RPC 2.0 server over stdio.
+        #[arg(long)]
+        acp: bool,
     },
     /// Explain the resolved GPU execution path for one GGUF model.
     Explain {
@@ -385,4 +400,42 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     airbug::install();
     dispatch::run(cli.command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn studio_cli_parses_headless_acp_profile_and_prompt_flags() {
+        let cli = Cli::try_parse_from([
+            "allpaka",
+            "studio",
+            "--profile",
+            "coding-safe",
+            "--headless",
+            "--prompt",
+            "ping",
+            "--dump-config",
+            "--acp",
+        ])
+        .expect("CLI parse must succeed");
+        match cli.command {
+            Command::Studio {
+                profile,
+                headless,
+                prompt,
+                dump_config,
+                acp,
+                ..
+            } => {
+                assert_eq!(profile.as_deref(), Some("coding-safe"));
+                assert!(headless);
+                assert_eq!(prompt.as_deref(), Some("ping"));
+                assert!(dump_config);
+                assert!(acp);
+            }
+            _ => panic!("expected Studio command"),
+        }
+    }
 }

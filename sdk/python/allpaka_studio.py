@@ -1,6 +1,7 @@
 """Dependency-free client for Allpaka Studio evaluations and metadata tracing (Python 3.9+)."""
 import json
 import hashlib
+import hmac
 import csv
 import io
 import math
@@ -1033,9 +1034,9 @@ class Studio:
         self._pool_lock = threading.Lock()
         self.opener = urllib.request.build_opener(_NoRedirect())
 
-    def request(self, path, body=None, timeout=10):
+    def request(self, path, body=None, timeout=10, method=None):
         payload = None if body is None else json.dumps(body, allow_nan=False).encode()
-        method = "GET" if payload is None else "POST"
+        http_method = method or ("GET" if payload is None else "POST")
         headers = {
             "Content-Type": "application/json",
             "X-Allpaka-Client": "studio",
@@ -1063,7 +1064,7 @@ class Studio:
                     if conn.sock is not None:
                         conn.sock.settimeout(timeout)
                 try:
-                    conn.request(method, "/api/" + path, body=payload, headers=headers)
+                    conn.request(http_method, "/api/" + path, body=payload, headers=headers)
                     response = conn.getresponse()
                     break
                 except (http.client.RemoteDisconnected, http.client.BadStatusLine, BrokenPipeError, ConnectionResetError):
@@ -2523,3 +2524,347 @@ class Studio:
                 thresholds[metric] = {"minimum": minimum, "observed": score, "passed": score >= minimum}
             passed = passed and all(row["passed"] for row in thresholds.values())
         return {"run": run, "comparison": comparison, "passed": passed, "thresholds": thresholds, "gate_policy": "strict_improvement" if require_improvement else "no_paired_regression"}
+
+    def _delete(self, path):
+        return self.request(path, method="DELETE")
+
+    def list_permission_presets(self):
+        """Return built-in sandbox/approval permission presets and host sandbox capabilities."""
+        return self.request("permission-presets")
+
+    def respond_interaction(self, session_id, request_id, kind, decision=None, answers=None, reason=None):
+        """Reply to a pending approval or ask_user_question prompt in a session."""
+        sid = self._id(session_id)
+        if kind not in ("approval", "question"):
+            raise ValueError("kind must be 'approval' or 'question'")
+        body = {"request_id": self._id(request_id), "kind": kind}
+        if decision is not None:
+            body["decision"] = decision
+        if answers is not None:
+            body["answers"] = answers
+        if reason is not None:
+            body["reason"] = reason
+        return self.request(f"sessions/{sid}/interaction", body)
+
+    def list_spills(self, session_id):
+        """List large-output spill files recorded for a session."""
+        return self.request(f"sessions/{self._id(session_id)}/spills")
+
+    def read_spill(self, session_id, spill_id, offset=0, limit=16000):
+        """Read a paginated slice of a session spill file."""
+        sid = self._id(session_id)
+        spid = self._id(spill_id)
+        qs = urllib.parse.urlencode({"offset": int(offset), "limit": int(limit)})
+        return self.request(f"sessions/{sid}/spills/{spid}?{qs}")
+
+    def list_checkpoints(self, session_id):
+        """List file-mutation checkpoints for a session."""
+        return self.request(f"sessions/{self._id(session_id)}/checkpoints")
+
+    def undo_checkpoint(self, session_id, checkpoint_id):
+        """Restore files from a recorded checkpoint."""
+        sid = self._id(session_id)
+        cid = self._id(checkpoint_id)
+        return self.request(f"sessions/{sid}/checkpoints/{cid}/undo", {})
+
+    def list_terminals(self, session_id):
+        """List active and closed PTY terminals belonging to a session."""
+        return self.request(f"sessions/{self._id(session_id)}/terminals")
+
+    def create_terminal(self, session_id, command=None, title=None, cols=100, rows=32):
+        """Spawn a new interactive PTY terminal in the session workspace."""
+        sid = self._id(session_id)
+        body = {"cols": int(cols), "rows": int(rows)}
+        if command is not None:
+            body["command"] = command
+        if title is not None:
+            body["title"] = title
+        return self.request(f"sessions/{sid}/terminals", body)
+
+    def read_terminal(self, session_id, terminal_id, offset=0, max_bytes=32768, wait_ms=0):
+        """Read paginated PTY output bytes from a session terminal."""
+        sid = self._id(session_id)
+        tid = self._id(terminal_id)
+        qs = urllib.parse.urlencode({"offset": int(offset), "max_bytes": int(max_bytes), "wait_ms": int(wait_ms)})
+        return self.request(f"sessions/{sid}/terminals/{tid}?{qs}")
+
+    def write_terminal(self, session_id, terminal_id, input_text):
+        """Write input bytes into a running session PTY terminal."""
+        sid = self._id(session_id)
+        tid = self._id(terminal_id)
+        return self.request(f"sessions/{sid}/terminals/{tid}/input", {"input": input_text})
+
+    def resize_terminal(self, session_id, terminal_id, cols, rows):
+        """Resize a running session PTY terminal."""
+        sid = self._id(session_id)
+        tid = self._id(terminal_id)
+        return self.request(f"sessions/{sid}/terminals/{tid}/resize", {"cols": int(cols), "rows": int(rows)})
+
+    def close_terminal(self, session_id, terminal_id):
+        """Terminate and close a session PTY terminal."""
+        sid = self._id(session_id)
+        tid = self._id(terminal_id)
+        return self._delete(f"sessions/{sid}/terminals/{tid}")
+
+    def list_worktrees(self, session_id):
+        """List git worktrees visible to the session repository."""
+        return self.request(f"sessions/{self._id(session_id)}/worktrees")
+
+    def worktree_action(self, session_id, action, slug=None, branch=None, base_ref=None, attach_project=False):
+        """Create, remove, or list git worktrees via POST /sessions/:id/worktree."""
+        sid = self._id(session_id)
+        body = {"action": action, "attach_project": bool(attach_project)}
+        if slug is not None:
+            body["slug"] = slug
+        if branch is not None:
+            body["branch"] = branch
+        if base_ref is not None:
+            body["base_ref"] = base_ref
+        return self.request(f"sessions/{sid}/worktree", body)
+
+    def get_forge_pr(self, session_id):
+        """Inspect GitHub/GitLab PR/MR status for the session repository."""
+        return self.request(f"sessions/{self._id(session_id)}/forge-pr")
+
+    def forge_pr_action(self, session_id, action, **kwargs):
+        """Run a forge PR action (`status`, `checks`, `create`, `comment`)."""
+        sid = self._id(session_id)
+        body = {"action": action}
+        body.update({k: v for k, v in kwargs.items() if v is not None})
+        return self.request(f"sessions/{sid}/forge-pr", body)
+
+    def list_agents(self, session_id):
+        """List spawned subagents in the session."""
+        return self.request(f"sessions/{self._id(session_id)}/agents")
+
+    def message_agent(self, session_id, agent_id, message, wake=True):
+        """Send a mailbox message to a spawned subagent."""
+        sid = self._id(session_id)
+        aid = self._id(agent_id)
+        return self.request(f"sessions/{sid}/agents/{aid}/message", {"message": message, "wake": bool(wake)})
+
+    def interrupt_agent(self, session_id, agent_id):
+        """Interrupt a running spawned subagent."""
+        sid = self._id(session_id)
+        aid = self._id(agent_id)
+        return self.request(f"sessions/{sid}/agents/{aid}/interrupt", {})
+
+    def get_team(self, session_id):
+        """Read Agent Team DAG tasks and summary for a session."""
+        return self.request(f"sessions/{self._id(session_id)}/team")
+
+    def team_action(self, session_id, action, **kwargs):
+        """Create, update, or delete an Agent Team DAG task."""
+        sid = self._id(session_id)
+        body = {"action": action}
+        body.update({k: v for k, v in kwargs.items() if v is not None})
+        return self.request(f"sessions/{sid}/team", body)
+
+    def list_workflows(self):
+        """List saved declarative DAG workflows."""
+        return self.request("workflows")
+
+    def save_workflow(self, stages, workflow_id=None, name=None, description=""):
+        """Create or update a declarative DAG workflow."""
+        body = {"stages": list(stages), "description": description}
+        if workflow_id is not None:
+            body["workflow_id"] = self._id(workflow_id)
+        if name is not None:
+            body["name"] = name
+        return self.request("workflows", body)
+
+    def delete_workflow(self, workflow_id):
+        """Delete a saved workflow by ID."""
+        return self._delete(f"workflows/{self._id(workflow_id)}")
+
+    def run_workflow(self, session_id, workflow_id=None, stages=None):
+        """Execute a workflow synchronously inside a session."""
+        sid = self._id(session_id)
+        body = {}
+        if workflow_id is not None:
+            body["workflow_id"] = self._id(workflow_id)
+        if stages is not None:
+            body["stages"] = list(stages)
+        return self.request(f"sessions/{sid}/workflow", body)
+
+    def test_ssh(self, ssh, path="/"):
+        """Test connectivity to a configured remote SSH root."""
+        return self.request("ssh/test", {"ssh": ssh, "path": path})
+
+    def extract_document(self, content_b64=None, filename=None, session_id=None, path=None, max_chars=None):
+        """Extract text from PDF/DOCX/XLSX/PPTX/ODF/HTML/XML documents."""
+        body = {}
+        if content_b64 is not None:
+            body["content_b64"] = content_b64
+        if filename is not None:
+            body["filename"] = filename
+        if session_id is not None:
+            body["session_id"] = self._id(session_id)
+        if path is not None:
+            body["path"] = path
+        if max_chars is not None:
+            body["max_chars"] = int(max_chars)
+        return self.request("documents/extract", body)
+
+    def transcribe_voice(self, audio_b64, mime_type=None, language=None):
+        """Transcribe audio via the configured STT seam backend."""
+        body = {"audio_b64": audio_b64}
+        if mime_type is not None:
+            body["mime_type"] = mime_type
+        if language is not None:
+            body["language"] = language
+        return self.request("voice/transcribe", body)
+
+    def list_profiles(self):
+        """List built-in and custom named runtime profiles."""
+        return self.request("profiles")
+
+    def save_profile(self, profile):
+        """Create or update a custom named runtime profile."""
+        return self.request("profiles", profile)
+
+    def delete_profile(self, profile_id):
+        """Delete a custom named runtime profile."""
+        return self._delete(f"profiles/{self._id(profile_id)}")
+
+    def export_bundle(self, project_id="default"):
+        """Export harness tree, workflows, and custom profiles as a portable bundle."""
+        qs = urllib.parse.urlencode({"project_id": self._id(project_id)})
+        return self.request(f"bundles/export?{qs}")
+
+    def import_bundle(self, bundle):
+        """Import a portable `.allpaka-bundle.json` bundle."""
+        return self.request("bundles/import", bundle)
+
+    def reload_harness(self, project_id="default"):
+        """Reload active harness tree and MCP plugins for a project."""
+        return self.request("harness/reload", {"project_id": self._id(project_id)})
+
+    def list_schedules(self):
+        """List recurring cron/interval schedules."""
+        return self.request("schedules")
+
+    def create_schedule(self, name, schedule, prompt, project_id="default", profile=None, enabled=True):
+        """Create a recurring cron or interval schedule."""
+        body = {
+            "name": name,
+            "schedule": schedule,
+            "prompt": prompt,
+            "project_id": self._id(project_id),
+            "enabled": bool(enabled),
+        }
+        if profile is not None:
+            body["profile"] = profile
+        return self.request("schedules", body)
+
+    def delete_schedule(self, schedule_id):
+        """Delete a schedule by ID."""
+        return self._delete(f"schedules/{self._id(schedule_id)}")
+
+    def trigger_schedule(self, schedule_id):
+        """Trigger a schedule immediately."""
+        return self.request(f"schedules/{self._id(schedule_id)}/trigger", {})
+
+    def list_webhooks(self):
+        """List configured inbound webhooks (secrets redacted)."""
+        return self.request("webhooks")
+
+    def create_webhook(self, name, prompt_template, project_id="default", profile=None, enabled=True):
+        """Create an HMAC-SHA256 webhook trigger (returns one-time secret)."""
+        body = {
+            "name": name,
+            "prompt_template": prompt_template,
+            "project_id": self._id(project_id),
+            "enabled": bool(enabled),
+        }
+        if profile is not None:
+            body["profile"] = profile
+        return self.request("webhooks", body)
+
+    def delete_webhook(self, webhook_id):
+        """Delete a webhook by ID."""
+        return self._delete(f"webhooks/{self._id(webhook_id)}")
+
+    @staticmethod
+    def sign_webhook_payload(secret, payload):
+        """Compute `sha256=<hex>` HMAC signature header value for webhook payloads."""
+        key = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
+        if isinstance(payload, (dict, list)):
+            raw = json.dumps(payload, allow_nan=False).encode("utf-8")
+        elif isinstance(payload, str):
+            raw = payload.encode("utf-8")
+        else:
+            raw = bytes(payload)
+        digest = hmac.new(key, raw, hashlib.sha256).hexdigest()
+        return "sha256=" + digest
+
+    def trigger_webhook(self, webhook_id, secret, payload, timeout=10):
+        """Send an external signed POST request to `/api/webhooks/trigger/:wid`."""
+        wid = self._id(webhook_id)
+        if isinstance(payload, (dict, list)):
+            raw = json.dumps(payload, allow_nan=False).encode("utf-8")
+        elif isinstance(payload, str):
+            raw = payload.encode("utf-8")
+        else:
+            raw = bytes(payload)
+        sig = self.sign_webhook_payload(secret, raw)
+        parsed = urllib.parse.urlsplit(self.base_url)
+        cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        conn = cls(parsed.hostname, parsed.port, timeout=timeout)
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "Content-Length": str(len(raw)),
+                "X-Allpaka-Signature-256": sig,
+            }
+            conn.request("POST", "/api/webhooks/trigger/" + wid, body=raw, headers=headers)
+            response = conn.getresponse()
+            if not 200 <= response.status < 300:
+                raise EvaluationError("http_" + str(response.status))
+            data = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(data) > MAX_RESPONSE_BYTES:
+                raise EvaluationError("response_too_large")
+            return json.loads(data, parse_constant=_reject_nonfinite)
+        except EvaluationError:
+            raise
+        except (http.client.HTTPException, urllib.error.URLError, TimeoutError, OSError):
+            raise EvaluationError("connection_error") from None
+        except (ValueError, UnicodeError):
+            raise EvaluationError("invalid_response") from None
+        finally:
+            conn.close()
+
+    def list_shares(self, session_id):
+        """List LiveShare read-only capability links for a session."""
+        return self.request(f"sessions/{self._id(session_id)}/shares")
+
+    def create_share(self, session_id, label=None, ttl_secs=None):
+        """Create a capability-hashed LiveShare read-only link for a session."""
+        sid = self._id(session_id)
+        body = {}
+        if label is not None:
+            body["label"] = label
+        if ttl_secs is not None:
+            body["ttl_secs"] = int(ttl_secs)
+        return self.request(f"sessions/{sid}/shares", body)
+
+    def revoke_share(self, session_id, share_id):
+        """Revoke an existing LiveShare link by share ID (`shr-...`)."""
+        sid = self._id(session_id)
+        shid = self._id(share_id)
+        return self._delete(f"sessions/{sid}/shares/{shid}")
+
+    def get_public_share(self, token):
+        """Fetch sanitized JSON snapshot of a LiveShare capability token."""
+        tok = self._id(token)
+        return self.request(f"shares/{tok}")
+
+    def get_trace_otlp(self, trace_id):
+        """Export an observability trace in OTLP/HTTP JSON (`resourceSpans`) format."""
+        return self.request(f"observability/traces/{self._id(trace_id)}/otlp")
+
+    def export_trace_otlp(self, trace_id, endpoint=None):
+        """Push an observability trace to an OTLP/HTTP collector endpoint."""
+        tid = self._id(trace_id)
+        body = {} if endpoint is None else {"endpoint": endpoint}
+        return self.request(f"observability/traces/{tid}/export", body)

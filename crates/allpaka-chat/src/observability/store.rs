@@ -100,6 +100,10 @@ impl Store {
     pub(crate) fn validate_target(&self, id: &str, span: Option<usize>) -> Result<()> {
         self.read_validated_record(id, span, None).map(|_| ())
     }
+    pub(crate) fn trace_record_json(&self, id: &str) -> Result<Value> {
+        let record = self.read_validated_record(id, None, None)?;
+        serde_json::to_value(record).map_err(Into::into)
+    }
     pub(crate) fn new(data: &std::path::Path) -> Result<Self> {
         let root = data.join("observability/traces");
         std::fs::create_dir_all(&root)?;

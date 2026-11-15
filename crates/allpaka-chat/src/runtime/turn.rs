@@ -159,6 +159,7 @@ impl TurnContext {
             && policy.commands != CommandExecution::Disabled;
         let harness_dynamic = settings.mode != Mode::Swarm;
         let scripts_runnable = matches!(settings.mode, Mode::Auto | Mode::Goal) && cmd_enabled;
+        let scheduled_origin = s.lock().unwrap().scheduled_origin;
         let schemas = Self::build_schemas(
             &app,
             &settings,
@@ -170,6 +171,7 @@ impl TurnContext {
             cmd_enabled,
             harness_dynamic,
             scripts_runnable,
+            scheduled_origin,
         );
         let rag_plugin_id = rag::connected_rag_id(&app).filter(|_| !restricted);
         let (system, rag_context) = Self::compose_system(
@@ -222,6 +224,7 @@ impl TurnContext {
         cmd_enabled: bool,
         harness_dynamic: bool,
         scripts_runnable: bool,
+        scheduled_origin: bool,
     ) -> Vec<Value> {
         let mut tool_settings = settings.clone();
         tool_settings.allow_writes &= project.roots.iter().any(|r| r.writable);
@@ -258,6 +261,7 @@ impl TurnContext {
                 schemas.push(crate::web_tools::web_fetch_schema());
                 schemas.push(crate::web_tools::web_search_schema());
                 schemas.push(crate::documents::schema());
+                schemas.extend(crate::mcp::resource_schemas());
                 for s in crate::terminal::schema_list() {
                     let n = s["function"]["name"].as_str().unwrap_or("");
                     if n == "user_terminal_list" || n == "user_terminal_read" {
@@ -281,6 +285,14 @@ impl TurnContext {
                     schemas.push(crate::workflow::workflow_schema());
                     schemas.push(crate::automation_seams::browser_schema());
                     schemas.push(crate::automation_seams::computer_schema());
+                    schemas.push(crate::plugins::manager_schema());
+                    for s in crate::schedule::schemas() {
+                        let n = s["function"]["name"].as_str().unwrap_or("");
+                        if scheduled_origin && (n == "schedule_create" || n == "schedule_edit") {
+                            continue;
+                        }
+                        schemas.push(s);
+                    }
                     schemas.extend(crate::runtime::subagent::tree_schemas());
                 }
                 if settings.team_mode {
@@ -718,7 +730,10 @@ impl TurnContext {
         let session_id_owned = self.s.lock().unwrap().id.clone();
         let exec_ctx = crate::ExecContext {
             data: Some(self.app.data.as_ref()),
-            session_id: self.ephemeral.is_none().then_some(session_id_owned.as_str()),
+            session_id: self
+                .ephemeral
+                .is_none()
+                .then_some(session_id_owned.as_str()),
             sandbox_mode: effective_sandbox,
             writable_roots: &writable_roots,
             allow_loopback_ipc: false,
@@ -812,7 +827,12 @@ impl TurnContext {
                 bail!("glob_files is unavailable in restricted sessions");
             }
             let wd = self.s.lock().unwrap().working_dir.clone();
-            return crate::patch::glob_files(&self.project, wd.as_deref(), self.app.data.as_ref(), &args);
+            return crate::patch::glob_files(
+                &self.project,
+                wd.as_deref(),
+                self.app.data.as_ref(),
+                &args,
+            );
         }
         if name == "working_directory" {
             if self.restricted || self.ephemeral.is_some() {
@@ -843,7 +863,12 @@ impl TurnContext {
             if self.restricted || self.ephemeral.is_some() {
                 bail!("lsp requires a non-ephemeral session");
             }
-            return self.app.ext.lsp.execute(&self.project, self.app.data.as_ref(), &args).await;
+            return self
+                .app
+                .ext
+                .lsp
+                .execute(&self.project, self.app.data.as_ref(), &args)
+                .await;
         }
         if matches!(
             name,
@@ -897,7 +922,14 @@ impl TurnContext {
                 bail!("create_worktree requires a non-ephemeral Auto/Goal turn with command execution enabled");
             }
             let allow = self.settings.allow_writes && self.project.roots.iter().any(|r| r.writable);
-            return crate::worktree::execute(&self.app, &session_id_owned, &self.s, &self.project, allow, &args);
+            return crate::worktree::execute(
+                &self.app,
+                &session_id_owned,
+                &self.s,
+                &self.project,
+                allow,
+                &args,
+            );
         }
         if name == "forge_pr" {
             if self.restricted
@@ -912,13 +944,19 @@ impl TurnContext {
         }
         if matches!(
             name,
-            "subagent_spawn" | "list_agents" | "send_agent_message" | "wait_agent" | "interrupt_agent"
+            "subagent_spawn"
+                | "list_agents"
+                | "send_agent_message"
+                | "wait_agent"
+                | "interrupt_agent"
         ) {
             if self.restricted || self.ephemeral.is_some() || self.nested {
                 bail!("Collaborative subagent tree tools require a non-ephemeral root session");
             }
             if !matches!(self.settings.mode, Mode::Auto | Mode::Goal) || !self.cmd_enabled {
-                bail!("Subagent spawning requires an Auto/Goal turn with command execution enabled");
+                bail!(
+                    "Subagent spawning requires an Auto/Goal turn with command execution enabled"
+                );
             }
             return match name {
                 "subagent_spawn" => {
@@ -934,7 +972,9 @@ impl TurnContext {
                         .spawn(self.app.clone(), &session_id_owned, &self.s, parent, &args)
                         .await
                 }
-                "list_agents" => Ok(json!({ "agents": self.app.ext.agents.list(&session_id_owned) })),
+                "list_agents" => {
+                    Ok(json!({ "agents": self.app.ext.agents.list(&session_id_owned) }))
+                }
                 "send_agent_message" => {
                     let aid = args["agent_id"].as_str().context("agent_id is required")?;
                     let msg = args["message"].as_str().context("message is required")?;
@@ -946,7 +986,10 @@ impl TurnContext {
                 }
                 "wait_agent" => {
                     let aid = args["agent_id"].as_str().context("agent_id is required")?;
-                    let ms = args.get("timeout_ms").and_then(Value::as_u64).unwrap_or(5000);
+                    let ms = args
+                        .get("timeout_ms")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(5000);
                     self.app.ext.agents.wait(&session_id_owned, aid, ms).await
                 }
                 "interrupt_agent" => {
@@ -1004,7 +1047,9 @@ impl TurnContext {
                 || !matches!(self.settings.mode, Mode::Auto | Mode::Goal)
                 || !self.cmd_enabled
             {
-                bail!("{name} requires a non-ephemeral Auto/Goal turn with command execution enabled");
+                bail!(
+                    "{name} requires a non-ephemeral Auto/Goal turn with command execution enabled"
+                );
             }
             let base_root = self
                 .project
@@ -1057,8 +1102,12 @@ impl TurnContext {
                 bail!("web_fetch requires a non-ephemeral Plan/Auto/Goal turn");
             }
             let sid = self.s.lock().unwrap().id.clone();
-            return crate::web_tools::execute_web_fetch(Some(self.app.data.as_ref()), Some(&sid), &args)
-                .await;
+            return crate::web_tools::execute_web_fetch(
+                Some(self.app.data.as_ref()),
+                Some(&sid),
+                &args,
+            )
+            .await;
         }
         if name == "web_search" {
             if self.restricted
@@ -1091,7 +1140,9 @@ impl TurnContext {
                 || !matches!(self.settings.mode, Mode::Auto | Mode::Goal)
                 || !self.cmd_enabled
             {
-                bail!("{name} requires a non-ephemeral Auto/Goal turn with command execution enabled");
+                bail!(
+                    "{name} requires a non-ephemeral Auto/Goal turn with command execution enabled"
+                );
             }
             let sid = self.s.lock().unwrap().id.clone();
             let base_cwd = self.project.roots.first().map(|r| r.path.as_path());
@@ -1115,6 +1166,50 @@ impl TurnContext {
                 .await
             };
         }
+        if matches!(
+            name,
+            "list_mcp_resources" | "list_mcp_resource_templates" | "read_mcp_resource"
+        ) {
+            if self.restricted
+                || self.ephemeral.is_some()
+                || !matches!(self.settings.mode, Mode::Plan | Mode::Auto | Mode::Goal)
+            {
+                bail!("{name} requires a non-ephemeral Plan/Auto/Goal turn");
+            }
+            return crate::mcp::execute_resource_tool(&self.app, name, &args).await;
+        }
+        if name == "plugin_manager" {
+            if self.restricted
+                || self.ephemeral.is_some()
+                || !matches!(self.settings.mode, Mode::Auto | Mode::Goal)
+                || !self.cmd_enabled
+            {
+                bail!("plugin_manager requires a non-ephemeral Auto/Goal turn with command execution enabled");
+            }
+            return crate::plugins::execute_manager(&self.app, &args);
+        }
+        if matches!(
+            name,
+            "schedule_create" | "schedule_edit" | "schedule_list" | "schedule_view"
+        ) {
+            if self.restricted
+                || self.ephemeral.is_some()
+                || !matches!(self.settings.mode, Mode::Auto | Mode::Goal)
+                || !self.cmd_enabled
+            {
+                bail!(
+                    "{name} requires a non-ephemeral Auto/Goal turn with command execution enabled"
+                );
+            }
+            let scheduled_origin = self.s.lock().unwrap().scheduled_origin;
+            return crate::schedule::execute_tool(
+                &self.app,
+                &self.settings,
+                scheduled_origin,
+                name,
+                &args,
+            );
+        }
         if name == "list_files" && args["path"] == "." {
             return Ok(json!({
                 "contexts": self.project.roots.iter()
@@ -1126,7 +1221,8 @@ impl TurnContext {
             return client.call(&tool, &args).await;
         }
         if name == "run_command" && self.cmd_enabled {
-            if let Some(remote_res) = crate::ssh::execute_remote_command(&self.project, &args).await?
+            if let Some(remote_res) =
+                crate::ssh::execute_remote_command(&self.project, &args).await?
             {
                 return Ok(remote_res);
             }

@@ -137,8 +137,7 @@ pub fn atomic_create_new_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
-const B64_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Encode arbitrary bytes using standard RFC 4648 base64 with `=` padding.
 pub fn base64_encode(input: &[u8]) -> String {
@@ -166,10 +165,7 @@ pub fn base64_encode(input: &[u8]) -> String {
 
 /// Decode standard RFC 4648 base64 (ignoring ASCII whitespace).
 pub fn base64_decode(input: &str) -> Result<Vec<u8>> {
-    let compact: Vec<u8> = input
-        .bytes()
-        .filter(|b| !b.is_ascii_whitespace())
-        .collect();
+    let compact: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     if compact.is_empty() {
         return Ok(Vec::new());
     }
