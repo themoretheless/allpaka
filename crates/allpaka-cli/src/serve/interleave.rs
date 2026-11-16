@@ -93,8 +93,12 @@ impl Gate {
     /// End this turn and wait for the next one: anyone who asked meanwhile
     /// goes first.
     pub(super) fn pass(&self) {
-        self.leave();
-        self.enter();
+        let mut state = self.state.lock().unwrap();
+        state.serving += 1;
+        let ticket = state.next;
+        state.next += 1;
+        self.turn.notify_all();
+        drop(self.wait_turn(state, ticket));
     }
 
     /// One decode step of `session`, called holding the turn and returning
@@ -370,8 +374,9 @@ mod tests {
         let (g, l) = (Arc::clone(&gate), Arc::clone(&log));
         let worker = std::thread::spawn(move || {
             g.enter();
-            for i in 0..5 {
+            for i in 0..200 {
                 l.lock().unwrap().push(format!("w{i}"));
+                std::thread::yield_now();
                 g.pass();
             }
             g.leave();
@@ -380,17 +385,17 @@ mod tests {
         while gate.state.lock().unwrap().next < 2 {
             std::thread::yield_now();
         }
-        for i in 0..5 {
+        for i in 0..200 {
             log.lock().unwrap().push(format!("m{i}"));
+            std::thread::yield_now();
             gate.pass();
         }
         gate.leave();
         worker.join().unwrap();
         let log = log.lock().unwrap().clone();
-        assert_eq!(
-            log,
-            ["m0", "w0", "m1", "w1", "m2", "w2", "m3", "w3", "m4", "w4"],
-            "{log:?}"
-        );
+        let expected: Vec<String> = (0..200)
+            .flat_map(|i| [format!("m{i}"), format!("w{i}")])
+            .collect();
+        assert_eq!(log, expected, "{log:?}");
     }
 }
