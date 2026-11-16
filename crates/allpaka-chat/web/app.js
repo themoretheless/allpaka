@@ -43,6 +43,8 @@ function savePrefs() {
       project: $('project').value,
       provider: $('provider').value,
       model: $('model').value.trim(),
+      fallbackProvider: $('fallback-provider')?.value || '',
+      fallbackModel: $('fallback-model')?.value.trim() || '',
       mode: $('mode').value,
       steps: Number($('steps').value),
       outputTokens: Number($('output-tokens').value),
@@ -63,6 +65,8 @@ function applyPrefs() {
   const providerOk = config.providers.some(p => p.id === prefs.provider);
   if (providerOk) $('provider').value = prefs.provider;
   if (providerOk && typeof prefs.model === 'string') $('model').value = prefs.model;
+  if ($('fallback-provider')) $('fallback-provider').value = config.providers.some(p => p.id === prefs.fallbackProvider) ? prefs.fallbackProvider : '';
+  if ($('fallback-model') && typeof prefs.fallbackModel === 'string') $('fallback-model').value = prefs.fallbackModel;
   if (['chat', 'plan', 'auto', 'goal', 'swarm'].includes(prefs.mode)) $('mode').value = prefs.mode;
   const steps = Number(prefs.steps);
   if (Number.isFinite(steps) && steps >= 1 && steps <= 50) $('steps').value = steps;
@@ -279,11 +283,12 @@ function swarmState(report){
   if(status==='running')return {label:report.step>1?`работает · шаг ${report.step}`:'работает',className:'swarm-run'};
   return {label:'в очереди',className:'muted'};
 }
-function settings() {return {guardrails:$('chat-guardrails-enabled').checked?{input_policy_sha256:$('chat-guardrails-input').value.trim(),output_policy_sha256:$('chat-guardrails-output').value.trim(),action:$('chat-guardrails-action').value}:null,verbosity:$('verbosity').value,project_id:$('project').value,provider:$('provider').value,model:$('model').value.trim(),mode:$('mode').value,max_steps:Number($('steps').value),max_output_tokens:Number($('output-tokens').value),auto_compact:$('auto-compact').checked,compact_threshold:$('compact-threshold').value?Number($('compact-threshold').value):24000,allow_writes:$('writes').checked,json_mode:$('json-mode').checked,reasoning_effort:$('effort').value||null,sandbox_mode:$('sandbox-mode')?.value||'unsandboxed',approval_policy:$('approval-policy')?.value||'never',permission_preset:$('permission-preset')?.value||null,team_mode:!!$('team-mode')?.checked,swarm:collectSwarm(),budget:Object.fromEntries([['max_tokens','budget-tokens'],['max_cost','budget-cost']].map(([key,id])=>[key,$(id)?.value.trim()||'']).filter(([,value])=>value).map(([key,value])=>[key,Number(value)]))};}
+function settings() {return {guardrails:$('chat-guardrails-enabled').checked?{input_policy_sha256:$('chat-guardrails-input').value.trim(),output_policy_sha256:$('chat-guardrails-output').value.trim(),action:$('chat-guardrails-action').value}:null,verbosity:$('verbosity').value,project_id:$('project').value,provider:$('provider').value,model:$('model').value.trim(),mode:$('mode').value,max_steps:Number($('steps').value),max_output_tokens:Number($('output-tokens').value),auto_compact:$('auto-compact').checked,compact_threshold:$('compact-threshold').value?Number($('compact-threshold').value):24000,allow_writes:$('writes').checked,json_mode:$('json-mode').checked,reasoning_effort:$('effort').value||null,sandbox_mode:$('sandbox-mode')?.value||'unsandboxed',approval_policy:$('approval-policy')?.value||'never',permission_preset:$('permission-preset')?.value||null,team_mode:!!$('team-mode')?.checked,swarm:collectSwarm(),budget:Object.fromEntries([['max_tokens','budget-tokens'],['max_cost','budget-cost']].map(([key,id])=>[key,$(id)?.value.trim()||'']).filter(([,value])=>value).map(([key,value])=>[key,Number(value)])),...(($('fallback-provider')?.value.trim()&&$('fallback-model')?.value.trim())?{fallbacks:[{provider:$('fallback-provider').value.trim(),model:$('fallback-model').value.trim()},...((typeof current!=='undefined'&&current?.settings?.fallbacks?.[0]?.provider===$('fallback-provider').value.trim()&&current?.settings?.fallbacks?.[0]?.model===$('fallback-model').value.trim())?current.settings.fallbacks.slice(1):[])]}:{})};}
 async function loadConfig() {
   config=await api('config');
   $('project').replaceChildren(...config.projects.map(p=>{const o=node('option',p.name);o.value=p.id;return o;}));
   $('provider').replaceChildren(...config.providers.map(p=>{const o=node('option',p.name+(p.configured?'':' · ключ не задан'));o.value=p.id;return o;}));
+  if($('fallback-provider'))$('fallback-provider').replaceChildren(...[{id:'',name:'Нет'}].concat(config.providers.map(p=>({id:p.id,name:p.name+(p.configured?'':' · ключ не задан')}))).map(p=>{const o=node('option',p.name);o.value=p.id;return o;}));
   applyPrefs();
   renderContext();
 }
@@ -406,7 +411,7 @@ function renderStatus(status) {
 }
 async function openChat(id) {
   active=id;lastMessages='';messageCache=[];pendingSend=null;pendingRev++;const s=await api('sessions/'+id);if(active!==id)return;
-  $('verbosity').value=s.settings.verbosity||'normal';$('auto-compact').checked=s.settings.auto_compact??true;$('compact-threshold').value=s.settings.compact_threshold??24000;$('budget-tokens').value=s.settings.budget?.max_tokens??'';$('budget-cost').value=s.settings.budget?.max_cost??'';current=s;$('history-folder').value=s.folder||'active';$('project').value=s.settings.project_id;$('provider').value=s.settings.provider;$('model').value=s.settings.model;$('mode').value=s.settings.mode;$('steps').value=s.settings.max_steps;$('output-tokens').value=s.settings.max_output_tokens??8192;$('writes').checked=s.settings.allow_writes;$('json-mode').checked=!!s.settings.json_mode;$('effort').value=s.settings.reasoning_effort||'';if($('sandbox-mode'))$('sandbox-mode').value=s.settings.sandbox_mode||'unsandboxed';if($('approval-policy'))$('approval-policy').value=s.settings.approval_policy||'never';if($('permission-preset'))$('permission-preset').value=s.settings.permission_preset||'';if($('team-mode'))$('team-mode').checked=!!s.settings.team_mode;$('chat-guardrails-enabled').checked=!!s.settings.guardrails;$('chat-guardrails-input').value=s.settings.guardrails?.input_policy_sha256||'';$('chat-guardrails-output').value=s.settings.guardrails?.output_policy_sha256||'';$('chat-guardrails-action').value=s.settings.guardrails?.action||'block';applySwarm(s.settings.swarm);
+  $('verbosity').value=s.settings.verbosity||'normal';$('auto-compact').checked=s.settings.auto_compact??true;$('compact-threshold').value=s.settings.compact_threshold??24000;$('budget-tokens').value=s.settings.budget?.max_tokens??'';$('budget-cost').value=s.settings.budget?.max_cost??'';current=s;$('history-folder').value=s.folder||'active';$('project').value=s.settings.project_id;$('provider').value=s.settings.provider;$('model').value=s.settings.model;if($('fallback-provider'))$('fallback-provider').value=s.settings.fallbacks?.[0]?.provider||'';if($('fallback-model'))$('fallback-model').value=s.settings.fallbacks?.[0]?.model||'';$('mode').value=s.settings.mode;$('steps').value=s.settings.max_steps;$('output-tokens').value=s.settings.max_output_tokens??8192;$('writes').checked=s.settings.allow_writes;$('json-mode').checked=!!s.settings.json_mode;$('effort').value=s.settings.reasoning_effort||'';if($('sandbox-mode'))$('sandbox-mode').value=s.settings.sandbox_mode||'unsandboxed';if($('approval-policy'))$('approval-policy').value=s.settings.approval_policy||'never';if($('permission-preset'))$('permission-preset').value=s.settings.permission_preset||'';if($('team-mode'))$('team-mode').checked=!!s.settings.team_mode;$('chat-guardrails-enabled').checked=!!s.settings.guardrails;$('chat-guardrails-input').value=s.settings.guardrails?.input_policy_sha256||'';$('chat-guardrails-output').value=s.settings.guardrails?.output_policy_sha256||'';$('chat-guardrails-action').value=s.settings.guardrails?.action||'block';applySwarm(s.settings.swarm);
   savePrefs();
   renderModelInfo();renderContext();modeHelp();render(s);await listChats();
 }
@@ -3090,6 +3095,8 @@ $('save-keys').onclick=async()=>{
 };
 $('load-models').onclick=async()=>{try{const models=await refreshModels($('provider').value);if(models)notify(`${models.length} моделей. Выберите Model ID.`);}catch(e){fail(e);}};
 $('provider').onchange=()=>{$('model').value='';$('models').replaceChildren();renderModelInfo();refreshContextModel();savePrefs();refreshModels($('provider').value,{selectFirst:true}).catch(()=>{});};
+if($('fallback-provider'))$('fallback-provider').onchange=savePrefs;
+if($('fallback-model'))$('fallback-model').oninput=savePrefs;
 $('project').onchange=()=>{clearTraceBulk();renderContext();resetChat();savePrefs();};
 $('mode').onchange=()=>{modeHelp();refreshContextModel();savePrefs();};
 $('steps').oninput=savePrefs;

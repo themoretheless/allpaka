@@ -134,13 +134,14 @@ pub(crate) async fn turn_traced(
             bail!("Conversation budget reached ({spent}). Raise the budget to continue.");
         }
         let buffer_output = guardrails.buffers_output();
-        let (mut message, usage) = turn.call_model(&history, index, buffer_output).await?;
+        let (mut message, usage, answered_provider, answered_model) =
+            turn.call_model(&history, index, buffer_output).await?;
         if let Err(blocked) = guardrails.check_output(&message.content, trace, parent_span)? {
             turn.discard_reply(index, &usage);
             return Err(blocked);
         }
-        message.provider = Some(settings.provider.clone());
-        message.model = Some(settings.model.clone());
+        message.provider = Some(answered_provider);
+        message.model = Some(answered_model);
         let truncated = message.truncated;
         let calls = message.tool_calls.clone();
         let rag_answer = if calls.is_empty()

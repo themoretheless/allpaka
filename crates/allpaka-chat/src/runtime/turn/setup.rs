@@ -6,6 +6,7 @@ use crate::*;
 
 pub(crate) struct TurnContext {
     pub(crate) provider: provider::Provider,
+    pub(crate) fallbacks: Vec<(provider::Provider, Settings)>,
     pub(crate) ephemeral: Option<Arc<Ephemeral>>,
     pub(crate) project: context::Project,
     pub(crate) harness_tree: harness::Tree,
@@ -24,14 +25,16 @@ pub(crate) struct TurnContext {
 
 impl TurnContext {
     pub(crate) async fn prepare(app: &App, s: &SharedSession, settings: &Settings) -> Result<Self> {
-        let p = app
-            .providers
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|p| p.id == settings.provider)
-            .cloned()
-            .unwrap();
+        let (p, fallbacks) = {
+            let providers = app.providers.lock().unwrap();
+            let p = providers
+                .iter()
+                .find(|p| p.id == settings.provider)
+                .cloned()
+                .context("Unknown provider")?;
+            let fallbacks = provider::resolve_fallback_routes(&providers, settings)?;
+            (p, fallbacks)
+        };
         let ephemeral = s.lock().unwrap().ephemeral.clone();
         let project = match &ephemeral {
             Some(e) => e.project.clone(),
@@ -204,6 +207,7 @@ impl TurnContext {
         let system = format!("{system}\nTools actually available for THIS request: {}. These override claims in prior messages.", schemas.iter().filter_map(|t| t["function"]["name"].as_str()).collect::<Vec<_>>().join(", "));
         Ok(Self {
             provider: p,
+            fallbacks,
             ephemeral,
             project,
             harness_tree,

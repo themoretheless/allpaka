@@ -178,6 +178,14 @@ fn default_swarm_report_bytes() -> usize {
     6000
 }
 
+/// Explicit secondary provider/model route attempted when the active
+/// provider fails or rejects due to rate/quota/upstream errors.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct FallbackRoute {
+    pub provider: String,
+    pub model: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Settings {
     #[serde(skip)]
@@ -220,6 +228,9 @@ pub struct Settings {
     /// Spending limits for the whole conversation; absent means none.
     #[serde(default, skip_serializing_if = "Budget::is_unlimited")]
     pub budget: Budget,
+    /// Ordered fallback provider/model routes tried when a provider call fails.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallbacks: Vec<FallbackRoute>,
 }
 
 /// What a conversation may spend in total. A turn stops before the model
@@ -769,5 +780,25 @@ mod usage_tests {
             .unwrap()
             .get("usage_total")
             .is_none());
+    }
+
+    #[test]
+    fn empty_fallbacks_are_omitted_and_configured_routes_round_trip() {
+        let bare: super::Settings =
+            serde_json::from_value(json!({"provider": "local", "model": "mock"})).unwrap();
+        let bare_json = serde_json::to_value(&bare).unwrap();
+        assert!(bare_json.get("fallbacks").is_none(), "{bare_json}");
+
+        let with_fb: super::Settings = serde_json::from_value(json!({
+            "provider": "openai",
+            "model": "gpt-4.1",
+            "fallbacks": [{"provider": "anthropic", "model": "claude-sonnet-4-5"}]
+        }))
+        .unwrap();
+        let fb_json = serde_json::to_value(&with_fb).unwrap();
+        assert_eq!(
+            fb_json["fallbacks"],
+            json!([{"provider": "anthropic", "model": "claude-sonnet-4-5"}])
+        );
     }
 }

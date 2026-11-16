@@ -144,6 +144,8 @@
     <label>Модель<select id="provider"></select></label>
     <label class="model-field">Model ID<input id="model" list="models" placeholder="Выберите или введите model ID" autocomplete="off"><datalist id="models"></datalist></label>
     <button id="load-models" title="Загрузить модели провайдера">Обновить</button>
+    <label title="Запасной провайдер при ошибке или лимите основного">Резерв<select id="fallback-provider"><option value="">Нет</option></select></label>
+    <label class="model-field" title="Model ID запасного провайдера">Резерв ID<input id="fallback-model" maxlength="200" placeholder="Запасной Model ID" autocomplete="off"></label>
   </div>
           </details>
           <details class="pop params-pop" id="params-pop">

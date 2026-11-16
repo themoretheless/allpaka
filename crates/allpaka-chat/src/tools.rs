@@ -564,6 +564,7 @@ mod tests {
             permission_preset: None,
             team_mode: false,
             budget: Default::default(),
+            fallbacks: Vec::new(),
         };
         assert_eq!(schemas(&s, false).len(), 5);
         assert!(execute(

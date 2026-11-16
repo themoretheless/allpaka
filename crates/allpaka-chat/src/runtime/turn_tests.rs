@@ -428,3 +428,160 @@ async fn an_observed_output_failure_is_recorded_and_kept() {
     );
     finish(f);
 }
+
+fn trace_model_spans(f: &Fixture) -> Vec<(String, String, Option<String>, String)> {
+    let files: Vec<_> = std::fs::read_dir(f.data.join("observability/traces"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    let record: Value = serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+    record["spans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["kind"] == "model")
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap().to_string(),
+                s["status"].as_str().unwrap().to_string(),
+                s["provider_id"].as_str().map(ToString::to_string),
+                s["kind"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// When the primary provider fails (HTTP 429 or incomplete mid-stream drop),
+/// `turn` clears any partial streamed output and continues on the configured
+/// fallback route, attributing both `Message.{provider,model}` and the trace's
+/// failed primary + completed fallback `model` spans.
+#[tokio::test]
+async fn fallback_route_continues_turn_on_primary_failure_with_trace_attribution() {
+    use axum::{http::StatusCode, response::IntoResponse, routing::post, Router};
+
+    let f = fixture(|req| {
+        let model = req["model"].as_str().unwrap_or("");
+        say(&format!("fallback answered via {model}"))
+    })
+    .await;
+
+    // 1. Primary provider that always returns HTTP 429.
+    let listener_429 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_429 = listener_429.local_addr().unwrap();
+    let srv_429 = tokio::spawn(async move {
+        let router = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response() }),
+        );
+        axum::serve(listener_429, router).await.unwrap();
+    });
+
+    // 2. Primary provider that streams partial tokens, then drops without [DONE].
+    let listener_drop = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_drop = listener_drop.local_addr().unwrap();
+    let srv_drop = tokio::spawn(async move {
+        let router = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    [("content-type", "text/event-stream")],
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"STALE_PRIMARY \"}}]}\n\n",
+                )
+                    .into_response()
+            }),
+        );
+        axum::serve(listener_drop, router).await.unwrap();
+    });
+
+    {
+        let mut providers = f.app.providers.lock().unwrap();
+        let mut p_429 = f.provider.clone();
+        p_429.id = "primary_429".into();
+        p_429.name = "Primary 429".into();
+        p_429.base = format!("http://{addr_429}/v1");
+        providers.push(p_429);
+
+        let mut p_drop = f.provider.clone();
+        p_drop.id = "primary_drop".into();
+        p_drop.name = "Primary Drop".into();
+        p_drop.base = format!("http://{addr_drop}/v1");
+        providers.push(p_drop);
+    }
+
+    // Validate settings validation rules for fallbacks.
+    let mut base_s = auto_settings();
+    base_s.provider = "primary_429".into();
+    base_s.model = "primary-m".into();
+    base_s.fallbacks = vec![FallbackRoute {
+        provider: "fixture".into(),
+        model: "backup-m".into(),
+    }];
+    crate::api::validate_settings(&base_s, &f.app).unwrap();
+
+    let mut dup_s = base_s.clone();
+    dup_s.fallbacks = vec![FallbackRoute {
+        provider: "primary_429".into(),
+        model: "primary-m".into(),
+    }];
+    assert!(crate::api::validate_settings(&dup_s, &f.app).is_err());
+
+    let mut too_many = base_s.clone();
+    too_many.fallbacks = (0..5)
+        .map(|i| FallbackRoute {
+            provider: "fixture".into(),
+            model: format!("m-{i}"),
+        })
+        .collect();
+    assert!(crate::api::validate_settings(&too_many, &f.app).is_err());
+
+    // Execute HTTP 429 failover.
+    let s1 = session(base_s.clone(), "hello");
+    let out1 = crate::turn(f.app.clone(), s1.clone(), None).await.unwrap();
+    assert!(matches!(out1, TurnOutcome::Complete), "{out1:?}");
+    {
+        let st = s1.lock().unwrap();
+        let reply = st.messages.last().unwrap();
+        assert_eq!(reply.content, "fallback answered via backup-m");
+        assert_eq!(reply.provider.as_deref(), Some("fixture"));
+        assert_eq!(reply.model.as_deref(), Some("backup-m"));
+    }
+    let mspans = trace_model_spans(&f);
+    assert_eq!(
+        mspans,
+        [
+            (
+                "primary-m".into(),
+                "failed".into(),
+                Some("primary_429".into()),
+                "model".into()
+            ),
+            (
+                "backup-m".into(),
+                "completed".into(),
+                Some("fixture".into()),
+                "model".into()
+            ),
+        ]
+    );
+
+    // Execute mid-stream drop failover and confirm stale partial prefix is wiped.
+    let mut drop_s = base_s;
+    drop_s.provider = "primary_drop".into();
+    let s2 = session(drop_s, "hello drop");
+    let out2 = crate::turn(f.app.clone(), s2.clone(), None).await.unwrap();
+    assert!(matches!(out2, TurnOutcome::Complete), "{out2:?}");
+    {
+        let st = s2.lock().unwrap();
+        let reply = st.messages.last().unwrap();
+        assert_eq!(reply.content, "fallback answered via backup-m");
+        assert!(!reply.content.contains("STALE_PRIMARY"));
+        assert_eq!(reply.provider.as_deref(), Some("fixture"));
+        assert_eq!(reply.model.as_deref(), Some("backup-m"));
+    }
+
+    srv_429.abort();
+    srv_drop.abort();
+    finish(f);
+}

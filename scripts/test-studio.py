@@ -27,6 +27,18 @@ class Mock(BaseHTTPRequestHandler):
         if isinstance(content,list):content=''.join(p.get('text','') for p in content)
         last_user=next((m.get('content','') for m in reversed(messages) if m.get('role')=='user'),'')
         if isinstance(last_user,list):last_user=''.join(p.get('text','') for p in last_user)
+        if body.get('model')=='rate-limited-primary':
+            self.send_response(429);self.send_header('Content-Type','application/json');self.end_headers()
+            try:self.wfile.write(b'{"error":"rate_limit_exceeded"}')
+            except (BrokenPipeError,ConnectionResetError):pass
+            return
+        if body.get('model')=='partial-drop-primary':
+            self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+            try:
+                self.wfile.write(('data: '+json.dumps({'choices':[{'delta':{'content':'PARTIAL_DROP_PREFIX '}}]})+'\n\n').encode())
+                self.wfile.flush()
+            except (BrokenPipeError,ConnectionResetError):pass
+            return
         self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
         def event(value):self.wfile.write(('data: '+json.dumps(value)+'\n\n').encode());self.wfile.flush()
         try:
@@ -3116,6 +3128,40 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         otlp=Studio(base).get_trace_otlp(t_id)
         assert isinstance(otlp.get('resourceSpans'),list) and len(otlp['resourceSpans'])>=1
         print('PASS DeepSeek-Harness parity E2E: presets, patch/undo, working_dir, approvals/questions, PTY, Team DAG, workflows, PTC, docs/voice, profiles/bundles/schedules/webhooks/LiveShare/OTLP',flush=True)
+
+        # C4 fallback provider routing with trace attribution and mid-stream drop cleanup.
+        fb_provider=api('providers',dict(id='fb-backup',name='Fallback Backup',base=f'http://127.0.0.1:{mock.server_port}/v1'))
+        assert fb_provider['id']=='fb-backup'
+        reject('sessions',dict(settings,fallbacks=[dict(provider='local',model='mock')]))
+        reject('sessions',dict(settings,fallbacks=[dict(provider='unknown-fb',model='m')]))
+        reject('sessions',dict(settings,fallbacks=[dict(provider='fb-backup',model='')]))
+        fb_429=create(provider='local',model='rate-limited-primary',fallbacks=[dict(provider='fb-backup',model='backup-model')])
+        act(fb_429,'send','FALLBACK_HTTP_429')
+        fb_429_s=wait(fb_429,lambda s:s['status']=='idle' and len(s['messages'])==2)
+        fb_429_msg=fb_429_s['messages'][-1]
+        assert fb_429_msg['content']=='answer: FALLBACK_HTTP_429',fb_429_msg
+        assert fb_429_msg['provider']=='fb-backup' and fb_429_msg['model']=='backup-model',fb_429_msg
+        fb_429_traces=trace_rows(fb_429)
+        assert_trace_tree(fb_429_traces[0])
+        fb_429_models=[sp for sp in fb_429_traces[0]['spans'] if sp['kind']=='model']
+        assert [(sp['name'],sp['status'],sp['provider_id']) for sp in fb_429_models]==[
+            ('rate-limited-primary','failed','local'),
+            ('backup-model','completed','fb-backup'),
+        ],fb_429_models
+
+        fb_drop=create(provider='local',model='partial-drop-primary',fallbacks=[dict(provider='fb-backup',model='backup-model')])
+        act(fb_drop,'send','FALLBACK_STREAM_DROP')
+        fb_drop_s=wait(fb_drop,lambda s:s['status']=='idle' and len(s['messages'])==2)
+        fb_drop_msg=fb_drop_s['messages'][-1]
+        assert fb_drop_msg['content']=='answer: FALLBACK_STREAM_DROP' and 'PARTIAL_DROP_PREFIX' not in fb_drop_msg['content'],fb_drop_msg
+        assert fb_drop_msg['provider']=='fb-backup' and fb_drop_msg['model']=='backup-model',fb_drop_msg
+        fb_drop_models=[sp for sp in trace_rows(fb_drop)[0]['spans'] if sp['kind']=='model']
+        assert [(sp['name'],sp['status'],sp['provider_id']) for sp in fb_drop_models]==[
+            ('partial-drop-primary','failed','local'),
+            ('backup-model','completed','fb-backup'),
+        ],fb_drop_models
+        api('providers/fb-backup/delete',{})
+        print('PASS fallback provider routing on HTTP 429 and mid-stream drop with clean reply, message attribution and trace spans',flush=True)
 
         if os.environ.get('ALLPAKA_TEST_NATIVE_VAULT')=='1':
             assert api('config')['credential_storage']

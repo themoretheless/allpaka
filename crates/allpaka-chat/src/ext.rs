@@ -158,6 +158,7 @@ pub(crate) fn default_settings(app: &App, project_id: &str) -> Settings {
         permission_preset: None,
         team_mode: false,
         budget: crate::types::Budget::default(),
+        fallbacks: Vec::new(),
     }
 }
 

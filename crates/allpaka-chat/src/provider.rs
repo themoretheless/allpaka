@@ -50,6 +50,48 @@ impl Provider {
         }
     }
 }
+pub fn max_output_limit(provider: &str, model: &str) -> u32 {
+    if provider == "deepseek"
+        && ["deepseek-v4-pro", "deepseek-flash", "deepseek-v4-flash"].contains(&model)
+    {
+        393216
+    } else {
+        131072
+    }
+}
+
+/// Resolve configured fallback routes against currently available providers.
+pub(crate) fn resolve_fallback_routes(
+    providers: &[Provider],
+    base: &Settings,
+) -> Result<Vec<(Provider, Settings)>> {
+    let mut routes = Vec::with_capacity(base.fallbacks.len());
+    for fb in &base.fallbacks {
+        let p = providers
+            .iter()
+            .find(|p| p.id == fb.provider)
+            .cloned()
+            .with_context(|| format!("Unknown fallback provider: {}", fb.provider))?;
+        let mut s = base.clone();
+        s.provider = fb.provider.clone();
+        s.model = fb.model.trim().to_string();
+        s.max_output_tokens = s
+            .max_output_tokens
+            .min(max_output_limit(&s.provider, &s.model));
+        s.fallbacks.clear();
+        routes.push((p, s));
+    }
+    Ok(routes)
+}
+
+/// All validation (settings, images, guardrails, conversation budget) happens
+/// before `provider::generate` runs, so any failure returned by
+/// `provider::generate` is a transport, timeout, rate-limit, quota, or
+/// upstream stream error eligible for explicit fallback routing.
+pub(crate) fn is_failover_eligible(_err: &anyhow::Error) -> bool {
+    true
+}
+
 pub fn defaults() -> Vec<Provider> {
     [
         (

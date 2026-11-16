@@ -40,13 +40,7 @@ pub(crate) fn validate_settings(s: &Settings, app: &App) -> Result<()> {
     if !(4096..=1000000).contains(&s.compact_threshold) {
         bail!("Compaction threshold must be between 4096 and 1000000 estimated tokens");
     }
-    let output_limit = if s.provider == "deepseek"
-        && ["deepseek-v4-pro", "deepseek-flash", "deepseek-v4-flash"].contains(&s.model.as_str())
-    {
-        393216
-    } else {
-        131072
-    };
+    let output_limit = provider::max_output_limit(&s.provider, s.model.as_str());
     if !(256..=output_limit).contains(&s.max_output_tokens) {
         bail!("Output token limit must be between 256 and {output_limit}; the selected model may have a lower maximum");
     }
@@ -107,6 +101,41 @@ pub(crate) fn validate_settings(s: &Settings, app: &App) -> Result<()> {
         .context("Unknown provider")?;
     if !p.public().configured {
         bail!("Set {} or enter the API key in Connections", p.env);
+    }
+    if s.fallbacks.len() > 4 {
+        bail!("At most 4 fallback routes are allowed");
+    }
+    for (idx, fb) in s.fallbacks.iter().enumerate() {
+        let model = fb.model.trim();
+        if model.is_empty() || fb.model.len() > 200 || fb.model.chars().any(char::is_control) {
+            bail!("Fallback {}: choose a model ID", idx + 1);
+        }
+        if fb.provider == s.provider && model == s.model.trim() {
+            bail!(
+                "Fallback {} duplicates the primary provider and model",
+                idx + 1
+            );
+        }
+        if s.fallbacks[..idx]
+            .iter()
+            .any(|prev| prev.provider == fb.provider && prev.model.trim() == model)
+        {
+            bail!("Fallback {} duplicates an earlier fallback route", idx + 1);
+        }
+        let fp = providers
+            .iter()
+            .find(|p| p.id == fb.provider)
+            .with_context(|| format!("Fallback {}: unknown provider", idx + 1))?;
+        if !fp.public().configured {
+            if fp.env.is_empty() {
+                bail!("Fallback {}: provider is not configured", idx + 1);
+            }
+            bail!(
+                "Fallback {}: set {} or enter the API key in Connections",
+                idx + 1,
+                fp.env
+            );
+        }
     }
     Ok(())
 }
