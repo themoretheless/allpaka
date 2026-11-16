@@ -15,14 +15,14 @@ open / Open gaps» из `docs/MLX-INTEGRATION-FINAL.md`,
 2. Число без ссылки на артефакт не считается результатом.
 3. Сделанный пункт удаляется из плана, а не помечается «done».
 
-Сверено с деревом на `11343d5`.
+Сверено с деревом на `74e3364`.
 
 ## Что осталось — сводка
 
 | Мешает | Пункты |
 |---|---|
 | Можно делать здесь (Windows + RTX 5090) | — |
-| Нужен Mac (Metal) | P4, P5, P6, P7, D3, D4, A7, D2 (Metal-раннер) |
+| Нужен Mac (Metal) | P4, P5, P6, P7, D3, A7, D2 (Metal-раннер) |
 | Нужна вторая машина | B1 → B3 |
 | Нужны вы | D1 (push и зелёный CI), D2, D6, раздел «Ждёт решения владельца» |
 
@@ -207,15 +207,10 @@ CI-проверка на скачиваемом эталонном чекпои�
 C3 — извлечение PDF/DOCX/XLSX на чистом Rust (`zip` + `quick-xml`, `lopdf`),
 URL через `reqwest`, OCR и аудио/видео через внешние `tesseract`/`ffmpeg`/whisper CLI
 с явной ошибкой при их отсутствии (`docs/studio.md`, «Извлечение вложений»);
+C4 — запасная маршрутизация провайдеров при отказе или лимите с очисткой
+оборванного потока и записью ответившего провайдера/модели в сообщении и трассе
+(`docs/studio.md`, «Какая модель отвечает»);
 C5 — функциональный паритет с `deepseek-ai/deepseek-harness` (`docs/deepseek-harness-parity.md`).
-
-### C4. Fallback и provider routing
-
-Сумма расхода по беседе и бюджет готовы (`docs/studio.md`), включая Swarm и
-сжатие истории.
-
-**DoD:** при отказе или лимите провайдера ход продолжается на запасном
-провайдере по явной настройке, с записью в трассе, кто ответил.
 
 ---
 
@@ -231,27 +226,21 @@ CUDA-ядер той стороны не нужен — загрузчик пе�
 
 ### D1. CI: первый зелёный прогон расширенного набора
 
-Состояние на 2026-11-15 (`main` после слияния с `origin/main`, раннер
-`macos-latest`): fmt, cross-backend check и clippy зелёные. `cargo test
---workspace` красный на одном тесте —
-`crates/allpaka-backend/tests/gpu_parity.rs::rope_norm_end_to_end_gpu_paths_match_cpu`:
-Metal `prefill_attn_block(rope_norm=true)` расходится с CPU на одном элементе
-(−1.545 против −1.653, допуск ~0.055), KV-кэш совпадает. Тест и Metal-код — с
-той стороны слияния, в CI запущен впервые; оставлен падать намеренно до
-проверки на Mac (баг Metal или слияния). `gpu_moe_tail.rs::attend_mm_db_variants_are_bit_identical`
-пропускается на хостед-раннере GitHub (`attend_mm_fq` падает на виртуальном GPU),
-на настоящем Mac запускается. **DoD:** оба проверены на Mac, `cargo test
---workspace` зелёный в CI, следующие шаги (сборка без default features,
-Studio-проверки) пройдены.
+Локально на Mac (M4 Max) и кросс-таргетах закрыты и проверены:
+- `rope_norm_end_to_end_gpu_paths_match_cpu` (обе ветки GQA и MHA; синтетическая
+  шкала `Q6_K` в фикстуре приведена к рабочему масштабу, без `20k`-компенсации);
+- `gpu_moe_tail::attend_mm_db_variants_are_bit_identical` + детекция
+  паравиртуализованного Metal GPU (`is_paravirt`) с откатом `attend_mm_fq`
+  на двухдиспетчерный `qk_prep_batch + attend_mm`;
+- атомарный `Gate::pass` в `serve/interleave.rs`;
+- нулевой warning-бюджет в `scripts/check-backends.sh` (native / stub / cuda);
+- Windows-совместимость фоновых проверок в `background.rs` и `scripts/test-studio.py`.
 
-`.github/workflows/ci.yml` теперь гоняет `fmt --check`, `clippy -D warnings`,
-`cargo test --workspace`, сборку CLI без default-features, node-проверки Studio
-и `scripts/test-studio.py`. Локально проверено на Windows (fmt, clippy, node) и
-clippy backend/model под `aarch64-apple-darwin`; на раннере `macos-14` набор
-ещё не запускался. `test-studio.py` на Windows не проходит целиком: проверка
-`signal==15` у фоновых задач POSIX-специфична.
+`.github/workflows/ci.yml` гоняет `fmt --check`, `clippy -D warnings`,
+`cargo test --workspace`, сборку CLI без default-features, node-проверки Studio,
+`scripts/studio-ui-tests/run.sh` и `scripts/test-studio.py`.
 
-**DoD:** зелёный прогон на `macos-14` после push; проверки отмечены
+**DoD:** зелёный прогон на `macos-latest` после push; проверки отмечены
 обязательными в защите ветки.
 
 ### D2. Self-hosted GPU-раннеры
@@ -264,17 +253,6 @@ clippy backend/model под `aarch64-apple-darwin`; на раннере `macos-1
 1 657 строк горячего пути; вместе с ним — request-структуры для Metal-лаунчеров
 и билдер dispatch-бойлерплейта (`set_pipeline + set_buffer×N + dispatch`).
 Нужен Mac. **DoD:** A B A B без регрессии за пределы шума, greedy-паритет.
-
-### D4. Soundness-FIXME
-
-- `gpu/metal/ffn_grouped.rs:216` — гонка рестейджинга GLM router bias
-  (вероятный баг GLM fused prefill). Нужен Mac.
-- `gpu/metal/verify.rs:361` — дамп `ALLPAKA_VERIFY_DEBUG`.
-- `tests/gpu_parity.rs`: запись в общий срез убрана (все матрицы готовятся один
-  раз до attach), но файл собирается только под macOS — здесь он прошёл лишь
-  clippy под `aarch64-apple-darwin`. Осталось прогнать на Metal.
-
-**DoD:** `grep 'FIXME(soundness)'` пуст, на каждый — тест или обоснование.
 
 ### D6. Мусор и мёртвый код
 
