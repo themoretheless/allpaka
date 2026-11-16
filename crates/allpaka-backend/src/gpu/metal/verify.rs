@@ -363,50 +363,40 @@ pub(super) fn encode_verify_tokens(
                 enc.end_encoding();
                 cmd.commit();
                 cmd.wait_until_completed();
-                let yp = gpu.y_arena.contents() as *const f32;
-                // FIXME(soundness): (debug-only, ALLPAKA_VERIFY_DEBUG) `cmd` was just committed and
-                // waited, so the GPU is idle and these shared slices only read. `x0`, `d0`
-                // and `h0` stay inside their `align(m * hidden)` regions. But the layer-1
-                // dump assumes the shape it was written for: `wts_at + 16`, `logits_at + 256`
-                // and `downo_at + 9 * hidden` are not bounded by their regions (they spill
-                // into later ones), and nothing proves they stay below `total` for every
-                // model. Bound each read by its region size (`m * max_slots`,
-                // `m * max_expert`, `m * max_slots * hidden`) to make it sound.
-                unsafe {
-                    let x0 = std::slice::from_raw_parts(yp.add(x_at), hidden);
-                    let d0 = std::slice::from_raw_parts(yp.add(delta_at), hidden);
-                    let sx: f64 = x0.iter().map(|&v| v as f64).sum();
-                    let sd: f64 = d0.iter().map(|&v| v as f64).sum();
-                    eprintln!("verify layer {li} in: sum_x={sx:.6} sum_delta={sd:.6}");
-                    if li == 1 {
-                        let wts = std::slice::from_raw_parts(yp.add(wts_at), 16);
-                        eprintln!("  wts[..]: {:?}", &wts[..9]);
-                        let do0 = std::slice::from_raw_parts(yp.add(downo_at), 9 * hidden);
-                        for srow in 0..9 {
-                            let r = &do0[srow * hidden..(srow + 1) * hidden];
-                            let s: f64 = r.iter().map(|&v| v as f64).sum();
-                            eprintln!("  downo[{srow}] sum={s:.6} head={:.6}", r[0]);
-                        }
-                        let h0 = std::slice::from_raw_parts(yp.add(h_at), hidden);
-                        let hs: f64 = h0.iter().map(|&v| v as f64).sum();
-                        eprintln!("  h_ffn_in sum={hs:.6}");
-                        std::fs::write(
-                            "/tmp/h0.bin",
-                            std::slice::from_raw_parts(h0.as_ptr() as *const u8, hidden * 4),
-                        )
-                        .ok();
-                        eprintln!(
-                            "  h_ffn_in head=[{:.6} {:.6} {:.6}] tail=[{:.6} {:.6} {:.6}]",
-                            h0[0], h0[1], h0[2], h0[2045], h0[2046], h0[2047]
-                        );
-                        let lg = std::slice::from_raw_parts(yp.add(logits_at), 256);
-                        let ls: f64 = lg.iter().map(|&v| v as f64).sum();
-                        eprintln!("  router logits sum={ls:.6}");
-                        eprintln!(
-                            "  router logits head=[{:.6} {:.6} {:.6} {:.6}]",
-                            lg[0], lg[1], lg[2], lg[3]
-                        );
+                // SAFETY: `ensure_arenas(4096, total * 4)` reserved at least
+                // `total` f32 elements in `StorageModeShared` `y_arena`, and
+                // `cmd.wait_until_completed()` retired all GPU writes before
+                // the next command buffer is encoded.
+                let arena = unsafe {
+                    std::slice::from_raw_parts(gpu.y_arena.contents() as *const f32, total)
+                };
+                let x0 = &arena[x_at..x_at + hidden];
+                let d0 = &arena[delta_at..delta_at + hidden];
+                let sx: f64 = x0.iter().map(|&v| v as f64).sum();
+                let sd: f64 = d0.iter().map(|&v| v as f64).sum();
+                eprintln!("verify layer {li} in: sum_x={sx:.6} sum_delta={sd:.6}");
+                if li == 1 {
+                    let slots_n = (m * max_slots).min(9);
+                    let wts = &arena[wts_at..wts_at + slots_n];
+                    eprintln!("  wts[..]: {wts:?}");
+                    let do0 = &arena[downo_at..downo_at + slots_n * hidden];
+                    for (srow, r) in do0.chunks_exact(hidden).enumerate() {
+                        let s: f64 = r.iter().map(|&v| v as f64).sum();
+                        let first = r.first().copied().unwrap_or(0.0);
+                        eprintln!("  downo[{srow}] sum={s:.6} head={first:.6}");
                     }
+                    let h0 = &arena[h_at..h_at + hidden];
+                    let hs: f64 = h0.iter().map(|&v| v as f64).sum();
+                    eprintln!("  h_ffn_in sum={hs:.6}");
+                    let h_head = &h0[..h0.len().min(3)];
+                    let h_tail = &h0[h0.len().saturating_sub(3)..];
+                    eprintln!("  h_ffn_in head={h_head:?} tail={h_tail:?}");
+                    let logits_n = (m * max_expert).min(256);
+                    let lg = &arena[logits_at..logits_at + logits_n];
+                    let ls: f64 = lg.iter().map(|&v| v as f64).sum();
+                    eprintln!("  router logits sum={ls:.6}");
+                    let lg_head = &lg[..lg.len().min(4)];
+                    eprintln!("  router logits head={lg_head:?}");
                 }
                 cmd = gpu.queue.new_command_buffer();
                 enc = cmd

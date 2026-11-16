@@ -82,6 +82,8 @@ fn attached_region() -> Option<&'static [u8]> {
             for &(ty, off, rows, n_in) in MATRICES {
                 tame_scales(region, ty, off, rows, n_in);
             }
+            init_rope_norm_fixtures(Some(region));
+            init_embed_fixtures(Some(region));
             if !gpu::attach(region) {
                 eprintln!("SKIP: no Metal device; parity tests need one");
                 return None;
@@ -334,22 +336,38 @@ fn q6_k_matches_cpu_reference() {
     check_parity(GgmlType::Q6K, 48, 1024, 20, 8 << 20);
 }
 
-/// End-to-end GPU vs CPU parity for `RopeStyle::Norm` (`rope_norm: true`)
-/// across `QuantMat::prefill_attn_block`, `QuantMat::attn_block`, and
-/// `gpu::decode_token` (`m = 1` and `m = 3` verify).
-#[test]
-fn rope_norm_end_to_end_gpu_paths_match_cpu() {
-    use allpaka_backend::ops::{self, f16};
+struct RopeNormFixtures {
+    hidden: usize,
+    n_heads: usize,
+    n_kv: usize,
+    hd: usize,
+    q_dim: usize,
+    kv_dim: usize,
+    ffn: usize,
+    vocab: usize,
+    eps: f32,
+    wq: (usize, usize),
+    wk: (usize, usize),
+    wv: (usize, usize),
+    wo: (usize, usize),
+    wo_mha: (usize, usize),
+    wg: (usize, usize),
+    wu: (usize, usize),
+    wd: (usize, usize),
+    out: (usize, usize),
+    an: (usize, usize),
+    fn_: (usize, usize),
+    on: (usize, usize),
+    attn_norm_f: Vec<f32>,
+    ffn_norm_f: Vec<f32>,
+    out_norm_f: Vec<f32>,
+    q_norm_f: Vec<f32>,
+    k_norm_f: Vec<f32>,
+}
 
-    let Some(region) = attached_region() else {
-        return;
-    };
-    let region_mut =
-        unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
-
-    // Use offsets [44 MiB .. 56 MiB] disjoint from all other parity tests.
-    // Test both MHA (`n_heads == n_kv == 2`, exercises two-dispatch `qk_prep_batch` + `attend_mm`
-    // because `n_heads < 2 * n_kv`) and GQA (`n_heads = 4, n_kv = 2`, exercises fused `attend_mm_fq`).
+/// Deterministic layout and (when `region` is `Some`, before `gpu::attach`)
+/// initialisation of `[44 MiB .. 56 MiB]` for `rope_norm` and `verify` tests.
+fn init_rope_norm_fixtures(mut region: Option<&mut [u8]>) -> RopeNormFixtures {
     let hidden = 512usize;
     let n_heads = 4usize;
     let n_kv = 2usize;
@@ -361,13 +379,12 @@ fn rope_norm_end_to_end_gpu_paths_match_cpu() {
     let eps = 1e-6f32;
 
     let mut cur = 44 << 20;
-    let alloc_qmat = |rm: &mut [u8],
+    let alloc_qmat = |region: &mut Option<&mut [u8]>,
                       cur: &mut usize,
                       ty: GgmlType,
                       rows: usize,
                       cols: usize|
      -> (usize, usize) {
-        tame_scales(rm, ty, *cur, rows, cols);
         let be = if ty == GgmlType::F32 {
             1
         } else if ty == GgmlType::Q8_0 {
@@ -382,38 +399,52 @@ fn rope_norm_end_to_end_gpu_paths_match_cpu() {
             GgmlType::Q6K => 210,
             _ => unreachable!(),
         };
-        // Set dmin ≈ d / 4 so unsigned 4-bit nibbles (mean 7.5) with 6-bit
-        // scales/mins (mean 31.5) are zero-centered instead of creating huge
-        // rank-1 outputs (~100).
-        if ty == GgmlType::Q4K {
-            let half_dmin = 0x191Fu16.to_le_bytes(); // 0.0025 (= d / 4)
-            for blk in rm[*cur..*cur + rows * cols / be * bb].chunks_exact_mut(144) {
-                blk[2..4].copy_from_slice(&half_dmin);
-            }
-        }
         let len = rows * cols / be * bb;
         let off = *cur;
-        *cur = (*cur + len + 4095) & !4095;
-        (off, len)
-    };
-    let alloc_f32_vec = |rm: &mut [u8], cur: &mut usize, vals: &[f32]| -> (usize, usize) {
-        let len = vals.len() * 4;
-        let off = *cur;
-        for (i, &v) in vals.iter().enumerate() {
-            rm[off + i * 4..off + (i + 1) * 4].copy_from_slice(&v.to_le_bytes());
+        if let Some(rm) = region.as_deref_mut() {
+            tame_scales(rm, ty, off, rows, cols);
+            // Set dmin ≈ d / 4 on Q4_K so unsigned 4-bit nibbles (mean 7.5) with
+            // 6-bit scales/mins (mean 31.5) are zero-centered instead of creating
+            // huge rank-1 outputs (~100), and tame Q6_K's signed 8-bit sub-scales
+            // (d = 0.001 instead of 0.01) so synthetic V/output magnitudes stay
+            // realistic (~10 instead of 20_000, avoiding catastrophic cancellation).
+            if ty == GgmlType::Q4K {
+                let half_dmin = 0x191Fu16.to_le_bytes(); // 0.0025 (= d / 4)
+                for blk in rm[off..off + len].chunks_exact_mut(144) {
+                    blk[2..4].copy_from_slice(&half_dmin);
+                }
+            } else if ty == GgmlType::Q6K {
+                let small_d = 0x181Fu16.to_le_bytes(); // ~0.001 in f16
+                for blk in rm[off..off + len].chunks_exact_mut(210) {
+                    blk[208..210].copy_from_slice(&small_d);
+                }
+            }
         }
         *cur = (*cur + len + 4095) & !4095;
         (off, len)
     };
+    let alloc_f32_vec =
+        |region: &mut Option<&mut [u8]>, cur: &mut usize, vals: &[f32]| -> (usize, usize) {
+            let len = vals.len() * 4;
+            let off = *cur;
+            if let Some(rm) = region.as_deref_mut() {
+                for (i, &v) in vals.iter().enumerate() {
+                    rm[off + i * 4..off + (i + 1) * 4].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            *cur = (*cur + len + 4095) & !4095;
+            (off, len)
+        };
 
-    let (wq_off, wq_len) = alloc_qmat(region_mut, &mut cur, GgmlType::Q4K, q_dim, hidden);
-    let (wk_off, wk_len) = alloc_qmat(region_mut, &mut cur, GgmlType::Q4K, kv_dim, hidden);
-    let (wv_off, wv_len) = alloc_qmat(region_mut, &mut cur, GgmlType::Q6K, kv_dim, hidden);
-    let (wo_off, wo_len) = alloc_qmat(region_mut, &mut cur, GgmlType::Q4K, hidden, q_dim);
-    let (wg_off, wg_len) = alloc_qmat(region_mut, &mut cur, GgmlType::Q4K, ffn, hidden);
-    let (wu_off, wu_len) = alloc_qmat(region_mut, &mut cur, GgmlType::Q4K, ffn, hidden);
-    let (wd_off, wd_len) = alloc_qmat(region_mut, &mut cur, GgmlType::Q6K, hidden, ffn);
-    let (out_off, out_len) = alloc_qmat(region_mut, &mut cur, GgmlType::Q6K, vocab, hidden);
+    let wq = alloc_qmat(&mut region, &mut cur, GgmlType::Q4K, q_dim, hidden);
+    let wk = alloc_qmat(&mut region, &mut cur, GgmlType::Q4K, kv_dim, hidden);
+    let wv = alloc_qmat(&mut region, &mut cur, GgmlType::Q6K, kv_dim, hidden);
+    let wo = alloc_qmat(&mut region, &mut cur, GgmlType::Q4K, hidden, q_dim);
+    let wo_mha = alloc_qmat(&mut region, &mut cur, GgmlType::Q4K, hidden, kv_dim);
+    let wg = alloc_qmat(&mut region, &mut cur, GgmlType::Q4K, ffn, hidden);
+    let wu = alloc_qmat(&mut region, &mut cur, GgmlType::Q4K, ffn, hidden);
+    let wd = alloc_qmat(&mut region, &mut cur, GgmlType::Q6K, hidden, ffn);
+    let out = alloc_qmat(&mut region, &mut cur, GgmlType::Q6K, vocab, hidden);
 
     let attn_norm_f: Vec<f32> = (0..hidden).map(|i| 0.9 + (i % 31) as f32 * 0.005).collect();
     let ffn_norm_f: Vec<f32> = (0..hidden)
@@ -424,9 +455,155 @@ fn rope_norm_end_to_end_gpu_paths_match_cpu() {
         .collect();
     let q_norm_f: Vec<f32> = (0..hd).map(|i| 0.88 + i as f32 * 0.001).collect();
     let k_norm_f: Vec<f32> = (0..hd).map(|i| 0.92 + i as f32 * 0.001).collect();
-    let (an_off, an_len) = alloc_f32_vec(region_mut, &mut cur, &attn_norm_f);
-    let (fn_off, fn_len) = alloc_f32_vec(region_mut, &mut cur, &ffn_norm_f);
-    let (on_off, on_len) = alloc_f32_vec(region_mut, &mut cur, &out_norm_f);
+    let an = alloc_f32_vec(&mut region, &mut cur, &attn_norm_f);
+    let fn_ = alloc_f32_vec(&mut region, &mut cur, &ffn_norm_f);
+    let on = alloc_f32_vec(&mut region, &mut cur, &out_norm_f);
+    assert!(
+        cur <= (56 << 20),
+        "rope_norm fixtures exceeded [44..56 MiB]"
+    );
+
+    RopeNormFixtures {
+        hidden,
+        n_heads,
+        n_kv,
+        hd,
+        q_dim,
+        kv_dim,
+        ffn,
+        vocab,
+        eps,
+        wq,
+        wk,
+        wv,
+        wo,
+        wo_mha,
+        wg,
+        wu,
+        wd,
+        out,
+        an,
+        fn_,
+        on,
+        attn_norm_f,
+        ffn_norm_f,
+        out_norm_f,
+        q_norm_f,
+        k_norm_f,
+    }
+}
+
+/// Deterministic layout and (when `region` is `Some`, before `gpu::attach`)
+/// initialisation of `[58 MiB .. 63 MiB]` for the 10-format GPU embed test.
+fn init_embed_fixtures(
+    region: Option<&mut [u8]>,
+) -> (usize, usize, usize, usize, usize, usize, [GgmlType; 10]) {
+    let hidden = 512usize;
+    let vocab = 64usize;
+    let n_tokens = 6usize;
+    let norm_off = 58 << 20;
+    let out_off = 59 << 20;
+    let embd_base_off = 60 << 20;
+    let formats = [
+        GgmlType::Q4K,
+        GgmlType::Q5K,
+        GgmlType::Q6K,
+        GgmlType::Q8_0,
+        GgmlType::Q2K,
+        GgmlType::Q3K,
+        GgmlType::Q5_0,
+        GgmlType::F16,
+        GgmlType::F32,
+        GgmlType::BF16,
+    ];
+    if let Some(rm) = region {
+        for (i, c) in rm[norm_off..norm_off + hidden * 4]
+            .chunks_exact_mut(4)
+            .enumerate()
+        {
+            c.copy_from_slice(&(0.75f32 + (i % 7) as f32 * 0.05).to_le_bytes());
+        }
+        tame_scales(rm, GgmlType::Q4K, out_off, vocab, hidden);
+        for (idx, ty) in formats.into_iter().enumerate() {
+            let off = embd_base_off + idx * (256 << 10);
+            let rb = ty.expected_bytes(hidden).unwrap();
+            let total = n_tokens * rb;
+            match ty {
+                GgmlType::F32 => tame_scales(rm, ty, off, n_tokens, hidden),
+                GgmlType::F16 => {
+                    for (i, c) in rm[off..off + total].chunks_exact_mut(2).enumerate() {
+                        let h = allpaka_dtype::f32_to_f16(((i % 31) as f32 - 15.0) * 0.04);
+                        c.copy_from_slice(&h.to_le_bytes());
+                    }
+                }
+                GgmlType::BF16 => {
+                    for (i, c) in rm[off..off + total].chunks_exact_mut(2).enumerate() {
+                        let b = allpaka_dtype::f32_to_bf16(((i % 29) as f32 - 14.0) * 0.05);
+                        c.copy_from_slice(&b.to_le_bytes());
+                    }
+                }
+                GgmlType::Q5_0 => {
+                    let half = 0x211Fu16.to_le_bytes();
+                    for r in 0..n_tokens {
+                        for blk in 0..hidden / 32 {
+                            let at = off + r * rb + blk * 22;
+                            rm[at] = half[0];
+                            rm[at + 1] = half[1];
+                        }
+                    }
+                }
+                other => tame_scales(rm, other, off, n_tokens, hidden),
+            }
+        }
+    }
+    (
+        hidden,
+        vocab,
+        n_tokens,
+        norm_off,
+        out_off,
+        embd_base_off,
+        formats,
+    )
+}
+
+/// End-to-end GPU vs CPU parity for `RopeStyle::Norm` (`rope_norm: true`)
+/// across `QuantMat::prefill_attn_block`, `QuantMat::attn_block`, and
+/// `gpu::decode_token` (`m = 1` and `m = 3` verify).
+#[test]
+fn rope_norm_end_to_end_gpu_paths_match_cpu() {
+    use allpaka_backend::ops::{self, f16};
+
+    let Some(region) = attached_region() else {
+        return;
+    };
+    let fx = init_rope_norm_fixtures(None);
+    let hidden = fx.hidden;
+    let n_heads = fx.n_heads;
+    let n_kv = fx.n_kv;
+    let hd = fx.hd;
+    let q_dim = fx.q_dim;
+    let kv_dim = fx.kv_dim;
+    let ffn = fx.ffn;
+    let vocab = fx.vocab;
+    let eps = fx.eps;
+    let (wq_off, wq_len) = fx.wq;
+    let (wk_off, wk_len) = fx.wk;
+    let (wv_off, wv_len) = fx.wv;
+    let (wo_off, wo_len) = fx.wo;
+    let (wo_mha_off, wo_mha_len) = fx.wo_mha;
+    let (wg_off, wg_len) = fx.wg;
+    let (wu_off, wu_len) = fx.wu;
+    let (wd_off, wd_len) = fx.wd;
+    let (out_off, out_len) = fx.out;
+    let (an_off, an_len) = fx.an;
+    let (fn_off, fn_len) = fx.fn_;
+    let (on_off, on_len) = fx.on;
+    let attn_norm_f = fx.attn_norm_f;
+    let ffn_norm_f = fx.ffn_norm_f;
+    let out_norm_f = fx.out_norm_f;
+    let q_norm_f = fx.q_norm_f;
+    let k_norm_f = fx.k_norm_f;
 
     let wq_g = QuantMat::new(
         &region[wq_off..wq_off + wq_len],
@@ -653,6 +830,121 @@ fn rope_norm_end_to_end_gpu_paths_match_cpu() {
         );
     }
 
+    // 1b. MHA (`n_heads == n_kv == 2`) prefill (`m = 18`, `rope_norm = true`) exercises
+    // the two-dispatch `qk_prep_batch` + `attend_mm` path (`n_heads < 2 * n_kv`).
+    let mha_heads = n_kv;
+    let wq_mha_len = wq_len / 2;
+    let wq_mha_g = QuantMat::new(
+        &region[wq_off..wq_off + wq_mha_len],
+        GgmlType::Q4K,
+        kv_dim,
+        hidden,
+    )
+    .unwrap();
+    let wo_mha_g = QuantMat::new(
+        &region[wo_mha_off..wo_mha_off + wo_mha_len],
+        GgmlType::Q4K,
+        hidden,
+        kv_dim,
+    )
+    .unwrap();
+    let wo_mha_r = deq(&wo_mha_g);
+    let mha_kv_ptr = unsafe { std::alloc::alloc_zeroed(kv_layout) };
+    assert!(!mha_kv_ptr.is_null());
+    let mha_kv_slice = unsafe { std::slice::from_raw_parts_mut(mha_kv_ptr, kv_bytes) };
+    let gpu_kv_mha = gpu::wrap_region(mha_kv_slice).expect("page-aligned MHA KV must wrap");
+    let got_mha = QuantMat::prefill_attn_block(
+        &wq_mha_g,
+        &wk_g,
+        &wv_g,
+        &wo_mha_g,
+        &hs_pf,
+        m_pf,
+        Some(&q_norm_f),
+        Some(&k_norm_f),
+        &ropes_pf,
+        hd,
+        true,
+        false,
+        None,
+        eps,
+        &gpu_kv_mha,
+        (k_off, v_off),
+        (kv_dim, hd, mha_heads, n_kv),
+        0,
+        scale,
+        None,
+        None,
+    )
+    .expect("GPU must accept MHA prefill_attn_block with rope_norm=true");
+    let mut cpu_kv_mha = vec![0u16; kv_elems];
+    let proj_mm = |rows: &[Vec<f32>], x: &[f32]| dot_rows_mm(rows, x);
+    let mut want_mha = vec![0.0f32; m_pf * hidden];
+    for r in 0..m_pf {
+        let h_in = &hs_pf[r * hidden..(r + 1) * hidden];
+        let rope = &ropes_pf[r * (hd / 2)..(r + 1) * (hd / 2)];
+        let mut q = proj_mm(&wq_r[..kv_dim], h_in);
+        let mut k = proj_mm(&wk_r, h_in);
+        let v = proj_mm(&wv_r, h_in);
+        for h in 0..mha_heads {
+            let sl = &mut q[h * hd..(h + 1) * hd];
+            ops::rmsnorm(sl, &q_norm_f, eps);
+            ops::rope_norm_cached_from_array(sl, rope);
+            for qe in sl.iter_mut() {
+                *qe = round_f16(*qe);
+            }
+            let ksl = &mut k[h * hd..(h + 1) * hd];
+            ops::rmsnorm(ksl, &k_norm_f, eps);
+            ops::rope_norm_cached_from_array(ksl, rope);
+        }
+        for d in 0..kv_dim {
+            cpu_kv_mha[k_off + r * kv_dim + d] = f16::scalar_from_f32(k[d]);
+            cpu_kv_mha[v_off + r * kv_dim + d] = f16::scalar_from_f32(v[d]);
+        }
+        let n_pos = r + 1;
+        let mut attn = vec![0.0f32; kv_dim];
+        for qh in 0..mha_heads {
+            let qv = &q[qh * hd..(qh + 1) * hd];
+            let mut sc = vec![0.0f32; n_pos];
+            let mut mx = f32::NEG_INFINITY;
+            for t in 0..n_pos {
+                let ks =
+                    &cpu_kv_mha[k_off + t * kv_dim + qh * hd..k_off + t * kv_dim + (qh + 1) * hd];
+                let s = qv
+                    .iter()
+                    .zip(ks)
+                    .map(|(&qe, &ke)| qe * f16::to_f32(ke))
+                    .sum::<f32>()
+                    * scale;
+                sc[t] = s;
+                mx = mx.max(s);
+            }
+            let mut den = 0.0f32;
+            for s in &mut sc {
+                *s = (*s - mx).exp();
+                den += *s;
+            }
+            let dst = &mut attn[qh * hd..(qh + 1) * hd];
+            for (t, &wgt) in sc.iter().enumerate() {
+                let p = wgt / den;
+                let vs =
+                    &cpu_kv_mha[v_off + t * kv_dim + qh * hd..v_off + t * kv_dim + (qh + 1) * hd];
+                for d in 0..hd {
+                    dst[d] += p * f16::to_f32(vs[d]);
+                }
+            }
+        }
+        want_mha[r * hidden..(r + 1) * hidden].copy_from_slice(&proj_mm(&wo_mha_r, &attn));
+    }
+    for (i, (&g, &w)) in got_mha.iter().zip(&want_mha).enumerate() {
+        assert!(
+            (g - w).abs() < 3e-2 + 1.5e-2 * w.abs(),
+            "prefill_attn_block MHA (rope_norm=true)[{i}]: gpu {g} vs cpu {w}"
+        );
+    }
+    drop(gpu_kv_mha);
+    unsafe { std::alloc::dealloc(mha_kv_ptr, kv_layout) };
+
     // 2. Single-token `QuantMat::attn_block` (`pos = m_pf`, `rope_norm = true`).
     let h_dec: Vec<f32> = (0..hidden)
         .map(|i| ((i * 37 + 11) % 71) as f32 * 0.02 - 0.7)
@@ -857,76 +1149,17 @@ fn gpu_embed_decode_token_matches_cpu_for_all_ten_formats() {
     let Some(region) = attached_region() else {
         return;
     };
-    let region_mut =
-        unsafe { std::slice::from_raw_parts_mut(region.as_ptr() as *mut u8, region.len()) };
-
-    // Use offsets [58 MiB .. 63 MiB] disjoint from all other parity tests.
-    let hidden = 512usize;
-    let vocab = 64usize;
-    let n_tokens = 6usize;
-    let norm_off = 58 << 20;
-    let out_off = 59 << 20;
-    let embd_base_off = 60 << 20;
-
-    // Output norm = finite positive F32 weights.
-    for (i, c) in region_mut[norm_off..norm_off + hidden * 4]
-        .chunks_exact_mut(4)
-        .enumerate()
-    {
-        c.copy_from_slice(&(0.75f32 + (i % 7) as f32 * 0.05).to_le_bytes());
-    }
-    tame_scales(region_mut, GgmlType::Q4K, out_off, vocab, hidden);
+    let (hidden, vocab, n_tokens, norm_off, out_off, embd_base_off, formats) =
+        init_embed_fixtures(None);
     let out_bytes = vocab * hidden / 256 * 144;
 
     let cache = gpu::wrap_region(&region[0..PAGE]).expect("wrap_region");
     let rope = vec![[0.0f32, 1.0f32]; 64];
 
-    let formats = [
-        GgmlType::Q4K,
-        GgmlType::Q5K,
-        GgmlType::Q6K,
-        GgmlType::Q8_0,
-        GgmlType::Q2K,
-        GgmlType::Q3K,
-        GgmlType::Q5_0,
-        GgmlType::F16,
-        GgmlType::F32,
-        GgmlType::BF16,
-    ];
-
     for (idx, ty) in formats.into_iter().enumerate() {
         let off = embd_base_off + idx * (256 << 10);
         let rb = ty.expected_bytes(hidden).unwrap();
         let total = n_tokens * rb;
-
-        match ty {
-            GgmlType::F32 => {
-                tame_scales(region_mut, ty, off, n_tokens, hidden);
-            }
-            GgmlType::F16 => {
-                for (i, c) in region_mut[off..off + total].chunks_exact_mut(2).enumerate() {
-                    let h = allpaka_dtype::f32_to_f16(((i % 31) as f32 - 15.0) * 0.04);
-                    c.copy_from_slice(&h.to_le_bytes());
-                }
-            }
-            GgmlType::BF16 => {
-                for (i, c) in region_mut[off..off + total].chunks_exact_mut(2).enumerate() {
-                    let b = allpaka_dtype::f32_to_bf16(((i % 29) as f32 - 14.0) * 0.05);
-                    c.copy_from_slice(&b.to_le_bytes());
-                }
-            }
-            GgmlType::Q5_0 => {
-                let half = 0x211Fu16.to_le_bytes();
-                for r in 0..n_tokens {
-                    for blk in 0..hidden / 32 {
-                        let at = off + r * rb + blk * 22;
-                        region_mut[at] = half[0];
-                        region_mut[at + 1] = half[1];
-                    }
-                }
-            }
-            other => tame_scales(region_mut, other, off, n_tokens, hidden),
-        }
 
         let embd_slice = &region[off..off + total];
         let embd_cpu = QuantMat::new(embd_slice, ty, n_tokens, hidden).unwrap();
@@ -978,4 +1211,127 @@ fn gpu_embed_decode_token_matches_cpu_for_all_ten_formats() {
             );
         }
     }
+}
+
+/// Regression for D4 (`ALLPAKA_VERIFY_DEBUG` bounds): a 2-layer dense model with
+/// `hidden = 512 < 2048`, `max_slots = 1` (< 9), and `max_expert = 1` (< 256)
+/// must dump layer 1 safely without reading past region bounds or panicking.
+#[test]
+fn verify_debug_dense_small_hidden_is_sound() {
+    if std::env::var_os("ALLPAKA_TEST_VERIFY_DEBUG_CHILD").is_none() {
+        let exe = std::env::current_exe().expect("current_exe");
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "verify_debug_dense_small_hidden_is_sound",
+                "--nocapture",
+            ])
+            .env("ALLPAKA_VERIFY_DEBUG", "1")
+            .env("ALLPAKA_TEST_VERIFY_DEBUG_CHILD", "1")
+            .output()
+            .expect("spawn verify debug child");
+        assert!(
+            output.status.success(),
+            "ALLPAKA_VERIFY_DEBUG child failed ({:?}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if attached_region().is_some() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("verify layer 1 in:"),
+                "expected ALLPAKA_VERIFY_DEBUG dump on layer 1, got: {stderr}"
+            );
+        }
+        return;
+    }
+    let Some(region) = attached_region() else {
+        return;
+    };
+    let fx = init_rope_norm_fixtures(None);
+    let hidden = fx.hidden;
+    let hd = fx.hd;
+    let q_dim = fx.q_dim;
+    let kv_dim = fx.kv_dim;
+    let ffn = fx.ffn;
+    let vocab = fx.vocab;
+    let eps = fx.eps;
+    let (wq_off, wq_len) = fx.wq;
+    let (wk_off, wk_len) = fx.wk;
+    let (wv_off, wv_len) = fx.wv;
+    let (wo_off, wo_len) = fx.wo;
+    let (wg_off, wg_len) = fx.wg;
+    let (wu_off, wu_len) = fx.wu;
+    let (wd_off, wd_len) = fx.wd;
+    let (out_off, out_len) = fx.out;
+    let (an_off, an_len) = fx.an;
+    let (fn_off, fn_len) = fx.fn_;
+    let (on_off, on_len) = fx.on;
+
+    let cap = 16usize;
+    let kv_bytes = (2 * cap * kv_dim * 2 + PAGE - 1) & !(PAGE - 1);
+    let kv_layout = std::alloc::Layout::from_size_align(kv_bytes, PAGE).unwrap();
+    let kv_ptr = unsafe { std::alloc::alloc_zeroed(kv_layout) };
+    assert!(!kv_ptr.is_null());
+    let kv_slice = unsafe { std::slice::from_raw_parts_mut(kv_ptr, kv_bytes) };
+    let gpu_kv = gpu::wrap_region(kv_slice).expect("page-aligned KV must wrap");
+
+    let layer = |k_off: usize, v_off: usize| gpu::TokenLayer {
+        attn_norm: &region[an_off..an_off + an_len],
+        ffn_norm: &region[fn_off..fn_off + fn_len],
+        gdn: None,
+        wq: (GgmlType::Q4K, &region[wq_off..wq_off + wq_len], q_dim),
+        wk: (GgmlType::Q4K, &region[wk_off..wk_off + wk_len], kv_dim),
+        wv: (GgmlType::Q6K, &region[wv_off..wv_off + wv_len], kv_dim),
+        wo: (GgmlType::Q4K, &region[wo_off..wo_off + wo_len], hidden),
+        q_bias: None,
+        k_bias: None,
+        v_bias: None,
+        gate_in_q: false,
+        q_norm: Some(&fx.q_norm_f),
+        k_norm: Some(&fx.k_norm_f),
+        k_off,
+        v_off,
+        ffn: gpu::TokenFfn::Dense {
+            gate: (GgmlType::Q4K, &region[wg_off..wg_off + wg_len], ffn),
+            up: (GgmlType::Q4K, &region[wu_off..wu_off + wu_len], ffn),
+            down: (GgmlType::Q6K, &region[wd_off..wd_off + wd_len], hidden),
+        },
+        post_attn_norm: None,
+        post_ffn_norm: None,
+        gelu: false,
+        swa_rope: false,
+    };
+    let layers = [layer(0, cap * kv_dim), layer(0, cap * kv_dim)];
+    let m = 3usize;
+    let x = vec![0.05f32; m * hidden];
+    let rope = vec![[0.0f32, 1.0f32]; m * (hd / 2)];
+    let out = gpu::decode_token(&gpu::TokenReq {
+        layers: &layers,
+        output_norm: &region[on_off..on_off + on_len],
+        output: (GgmlType::Q6K, &region[out_off..out_off + out_len], vocab),
+        embd: None,
+        token_id: None,
+        x: &x,
+        m,
+        rope: &rope,
+        rot_dim: hd,
+        rope_norm: true,
+        eps,
+        cache: &gpu_kv,
+        cache_capacity: cap,
+        ssm: None,
+        ssm_slots: None,
+        kv_dim,
+        head_dim: hd,
+        n_heads: fx.n_heads,
+        n_kv_heads: fx.n_kv,
+        pos: 0,
+        scale: (hd as f32).sqrt().recip(),
+        argmax: true,
+    })
+    .expect("2-layer dense verify with ALLPAKA_VERIFY_DEBUG=1 must succeed");
+    assert!(matches!(out, gpu::TokenOut::Rows { .. }));
+    drop(gpu_kv);
+    unsafe { std::alloc::dealloc(kv_ptr, kv_layout) };
 }

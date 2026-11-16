@@ -2392,9 +2392,14 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         background_answers=Studio(base).export_background(bg,include_outputs=True)
         assert any(task['stdout']=='background-done' for task in background_answers['tasks'])
 
-        temporary=Studio(base).start_background(bg,'kill -TERM $$',name='Temporary receipt')
-        signalled=Studio(base).wait_background(bg,[temporary['id']],wait_seconds=5)['tasks'][0]
-        assert signalled['status']=='failed' and signalled['exit_code'] is None and signalled['signal']==15
+        if os.name=='nt':
+            temporary=Studio(base).start_background(bg,'cmd /c exit 7',name='Temporary receipt')
+            signalled=Studio(base).wait_background(bg,[temporary['id']],wait_seconds=5)['tasks'][0]
+            assert signalled['status']=='failed' and signalled['exit_code']==7 and signalled['signal'] is None
+        else:
+            temporary=Studio(base).start_background(bg,'kill -TERM $$',name='Temporary receipt')
+            signalled=Studio(base).wait_background(bg,[temporary['id']],wait_seconds=5)['tasks'][0]
+            assert signalled['status']=='failed' and signalled['exit_code'] is None and signalled['signal']==15
         assert Studio(base).cleanup_background(bg,temporary['id'])['removed']==1
         assert Studio(base).background_output(bg,bg_id)['stdout']=='background-done'
         assert temporary['id'] not in [task['id'] for task in Studio(base).background_tasks(bg)['tasks']]
@@ -2407,23 +2412,29 @@ with tempfile.TemporaryDirectory(prefix='allpaka-studio-test-') as tmp:
         except EvaluationError as e:assert e.reason=='http_400'
         try:Studio(base).start_background(searched,'printf forbidden');raise AssertionError('Chat started command')
         except EvaluationError as e:assert e.reason=='http_403'
-        cancelled=Studio(base).start_background(bg,'sleep 30',timeout=30)['id']
+        cancel_cmd='ping -n 31 127.0.0.1 >NUL' if os.name=='nt' else 'sleep 30'
+        cancelled=Studio(base).start_background(bg,cancel_cmd,timeout=30)['id']
         assert Studio(base).cancel_background(bg,cancelled)['cancel_requested'] is True
         assert Studio(base).wait_background(bg,[cancelled],wait_seconds=3)['tasks'][0]['status']=='cancelled'
         print('PASS source search tool roundtrip and background execution, output, wait, cancel, permissions and ownership')
+        short_sleep_cmd=f'"{sys.executable}" -c "import time; time.sleep(0.05)"' if os.name=='nt' else 'sleep 0.05'
         wake_session=create(mode='auto');act(wake_session,'send','wake setup');wait(wake_session,lambda s:s['status']=='idle' and len(s['messages'])==2)
-        wake_task=Studio(base).start_background(wake_session,'sleep 0.05',follow_up='Continue after the command. Inspect the result.')
+        wake_task=Studio(base).start_background(wake_session,short_sleep_cmd,follow_up='Continue after the command. Inspect the result.')
         wake_state=wait(wake_session,lambda s:s['status']=='idle' and len(s['messages'])==4)
         assert wake_task['id'] in wake_state['messages'][2]['content'] and 'Continue after the command' in wake_state['messages'][2]['content']
         stopped_wake=create(mode='auto');act(stopped_wake,'send','wake stop setup');wait(stopped_wake,lambda s:s['status']=='idle' and len(s['messages'])==2)
         act(stopped_wake,'stop');wait(stopped_wake,lambda s:s['status']=='paused')
         before_stopped_wake=len(requests)
-        ignored_task=Studio(base).start_background(stopped_wake,'sleep 0.05',follow_up='Do not override Stop.')
+        ignored_task=Studio(base).start_background(stopped_wake,short_sleep_cmd,follow_up='Do not override Stop.')
         Studio(base).wait_background(stopped_wake,[ignored_task['id']],wait_seconds=3);time.sleep(.2)
         assert api('sessions/'+stopped_wake)['status']=='paused' and len(api('sessions/'+stopped_wake)['messages'])==2 and len(requests)==before_stopped_wake
         stale_wake=create(mode='auto');act(stale_wake,'send','stale setup');wait(stale_wake,lambda s:s['status']=='idle' and len(s['messages'])==2)
         stale_release=pathlib.Path(tmp)/'release-stale-background'
-        stale_task=Studio(base).start_background(stale_wake,'while [ ! -f '+__import__('shlex').quote(str(stale_release))+' ]; do sleep 0.01; done',timeout=10,follow_up='STALE_FOLLOW_UP')
+        if os.name=='nt':
+            stale_cmd=f'"{sys.executable}" -c "import os,time; [time.sleep(0.01) for _ in iter(lambda: not os.path.exists({json.dumps(str(stale_release))}), False)]"'
+        else:
+            stale_cmd='while [ ! -f '+__import__('shlex').quote(str(stale_release))+' ]; do sleep 0.01; done'
+        stale_task=Studio(base).start_background(stale_wake,stale_cmd,timeout=10,follow_up='STALE_FOLLOW_UP')
         act(stale_wake,'stop');wait(stale_wake,lambda s:s['status']=='paused')
         act(stale_wake,'send','New task after Stop');wait(stale_wake,lambda s:s['status']=='idle' and len(s['messages'])==4)
         stale_release.write_text('release')

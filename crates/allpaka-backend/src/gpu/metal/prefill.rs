@@ -659,7 +659,7 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
             // unless ALLPAKA_PF_FQK=1 is requested explicitly.
             let tiles = (req.m as u32).div_ceil(8);
             let fqk_allowed = crate::runtime::get().pf_fused_qk
-                && (std::env::var_os("GITHUB_ACTIONS").is_none()
+                && ((!gpu.is_paravirt && std::env::var_os("GITHUB_ACTIONS").is_none())
                     || std::env::var("ALLPAKA_PF_FQK").as_deref() == Ok("1"));
             let fused_qk = attend_mm()
                 && fqk_allowed
@@ -929,6 +929,11 @@ pub fn prefill_attn_block(req: &PrefillAttnReq) -> Option<Vec<f32>> {
         } else {
             cmd.commit();
             cmd.wait_until_completed();
+            assert_ne!(
+                cmd.status(),
+                metal::MTLCommandBufferStatus::Error,
+                "Metal prefill_attn_block command buffer failed"
+            );
             note_gpu_times(cmd);
         }
         WAIT_NS.fetch_add(t_wait.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -1459,6 +1464,11 @@ pub fn prefill_gdn_block(req: &PrefillGdnReq) -> Option<Vec<f32>> {
         } else {
             cmd.commit();
             cmd.wait_until_completed();
+            assert_ne!(
+                cmd.status(),
+                metal::MTLCommandBufferStatus::Error,
+                "Metal prefill_gdn_block command buffer failed"
+            );
             note_gpu_times(cmd);
         }
         WAIT_NS.fetch_add(t_wait.elapsed().as_nanos() as u64, Ordering::Relaxed);

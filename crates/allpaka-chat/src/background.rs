@@ -886,6 +886,7 @@ mod tests {
             .is_empty());
         std::fs::remove_dir_all(directory).unwrap();
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn unix_signal_termination_is_distinct_from_exit_code() {
         let directory =

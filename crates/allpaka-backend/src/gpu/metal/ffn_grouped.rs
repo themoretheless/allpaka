@@ -17,7 +17,12 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
         // route_pick holds 8 candidates per token and the fused buffers are
         // the only ones it can read logits from; anything else keeps CPU
         // routing. total_rows is exactly m * n_used in this mode.
-        if r.n_used > 8 || req.fused.as_ref().map_or(0, |c| c.m) * r.n_used != req.total_rows {
+        if req.n_expert == 0
+            || r.n_used > 8
+            || req.fused.as_ref().map_or(0, |c| c.m) * r.n_used != req.total_rows
+            || r.bias
+                .is_some_and(|b| b.len() < req.n_expert || req.n_expert * 4 > 4096)
+        {
             return None;
         }
     } else if req.groups.is_empty() || req.tok.len() != req.total_rows {
@@ -209,24 +214,6 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             return None; // the attention block did not leave logits behind
         }
         let n_logits = m_fused * req.n_expert;
-        // Counts/counters self-clean on the GPU (route_scan zeroes them
-        // after every layer), so staging once per allocation/bias is enough;
-        // per-layer CPU writes would race the deferred buffers.
-        let bptr = req
-            .route
-            .as_ref()
-            .and_then(|r| r.bias)
-            .map_or(0, |b| b.as_ptr() as usize);
-        if gpu.route_staged != Some(bptr) {
-            unsafe {
-                let rb = gpu.route_buf.contents() as *mut f32;
-                std::ptr::write_bytes(rb, 0, rl.table); // counts + counters
-                if let Some(b) = req.route.as_ref().and_then(|r| r.bias) {
-                    std::ptr::copy_nonoverlapping(b.as_ptr(), rb.add(rl.bias), req.n_expert);
-                }
-            }
-            gpu.route_staged = Some(bptr);
-        }
         if y_total * 4 > gpu.y_cap {
             if gpu.pf_obuf_cmd.is_some() && route_mode {
                 // One-buffer mode: nothing has committed yet, a CPU
@@ -473,10 +460,18 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
             let rb = &gpu.route_buf;
             let tgs = (m_fused as u64).div_ceil(256);
             let lg_buf = if lg_tag == "route" { rb } else { y };
+            let bind_bias = |enc: &metal::ComputeCommandEncoderRef| match r.bias {
+                Some(b) if !b.is_empty() => enc.set_bytes(
+                    1,
+                    (req.n_expert * 4) as u64,
+                    b[..req.n_expert].as_ptr() as *const _,
+                ),
+                _ => enc.set_buffer(1, Some(rb), 0),
+            };
             if use_route_fused {
                 enc.set_compute_pipeline_state(&gpu.pipelines[&("route_fused", 1, 1)]);
                 enc.set_buffer(0, Some(lg_buf), e(lg_off));
-                enc.set_buffer(1, Some(rb), e(rl.bias));
+                bind_bias(enc);
                 enc.set_buffer(2, Some(rb), e(rl.picks));
                 enc.set_buffer(3, Some(rb), e(rl.pickw));
                 enc.set_buffer(4, Some(rb), e(rl.table));
@@ -490,9 +485,26 @@ pub fn ffn_batch_grouped(req: &GroupedFfnReq) -> Option<Vec<f32>> {
                 cstamp!(gpu, enc, "rc");
                 gpu.dbg_route.set(Some((rl.table, req.n_expert)));
             } else {
+                // Zero `counts` and `counters` on the encoder right before
+                // `route_pick`: if `n_expert` grew inside an existing `route_buf`
+                // allocation, `route_scan` only cleared the smaller range, and
+                // CPU writes here would race deferred/onebuf command buffers.
+                let zero_words = rl.table as u32;
+                if zero_words > 0 {
+                    enc.set_compute_pipeline_state(&gpu.pipelines[&("zero_f32", 1, 1)]);
+                    enc.set_buffer(0, Some(rb), 0);
+                    enc.set_bytes(1, 4, &zero_words as *const u32 as *const _);
+                    enc.dispatch_thread_groups(
+                        MTLSize::new((zero_words as u64).div_ceil(256), 1, 1),
+                        MTLSize::new(256, 1, 1),
+                    );
+                    if !no_barrier() {
+                        enc.memory_barrier_with_resources(&[rb]);
+                    }
+                }
                 enc.set_compute_pipeline_state(&gpu.pipelines[&("route_pick", 1, 1)]);
                 enc.set_buffer(0, Some(lg_buf), e(lg_off));
-                enc.set_buffer(1, Some(rb), e(rl.bias));
+                bind_bias(enc);
                 enc.set_buffer(2, Some(rb), e(rl.counts));
                 enc.set_buffer(3, Some(rb), e(rl.picks));
                 enc.set_buffer(4, Some(rb), e(rl.pickw));

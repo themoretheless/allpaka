@@ -2556,3 +2556,282 @@ fn embed_row_f32_dtoken_all_formats_match_cpu_dequant() {
         }
     }
 }
+
+/// Regression for D4 (`ffn_grouped.rs` GLM router bias restaging):
+/// two fused-prefill MoE layers in one chunk with distinct `r.bias` slices
+/// must each route with their own bias (in `onebuf`, `defer`, and
+/// `route_pick` modes) rather than clobbering layer 0 with layer 1's bias.
+#[test]
+fn multi_layer_router_bias_restaging_does_not_clobber_earlier_layers() {
+    use allpaka_backend::gpu;
+    use allpaka_dtype::GgmlType;
+
+    let Some(device) = Device::system_default() else {
+        return;
+    };
+    drop(device);
+
+    if std::env::var_os("ALLPAKA_TEST_MOE_BIAS_CHILD").is_none() {
+        let exe = std::env::current_exe().expect("current_exe");
+        for (env_k, env_v) in [("ALLPAKA_PF_ONEBUF", "0"), ("ALLPAKA_NO_ROUTE_FUSED", "1")] {
+            let output = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "multi_layer_router_bias_restaging_does_not_clobber_earlier_layers",
+                ])
+                .env(env_k, env_v)
+                .env("ALLPAKA_TEST_MOE_BIAS_CHILD", "1")
+                .output()
+                .expect("spawn child moe bias test");
+            assert!(
+                output.status.success(),
+                "{env_k}={env_v} child failed ({:?}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    const PAGE: usize = 16384;
+    let hidden = 512usize;
+    let n_heads = 4usize;
+    let n_kv = 2usize;
+    let hd = 128usize;
+    let q_dim = n_heads * hd;
+    let kv_dim = n_kv * hd;
+    let ffn = 256usize;
+    let n_expert = 4usize;
+    let n_used = 1usize;
+    let m = 18usize;
+    let eps = 1e-6f32;
+    let scale = (hd as f32).sqrt().recip();
+
+    let region_bytes = 8 << 20;
+    let layout = std::alloc::Layout::from_size_align(region_bytes, PAGE).unwrap();
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    assert!(!ptr.is_null());
+    let region = unsafe { std::slice::from_raw_parts_mut(ptr, region_bytes) };
+
+    let mut cur = 0usize;
+    let alloc_qmat = |region: &mut [u8],
+                      cur: &mut usize,
+                      ty: GgmlType,
+                      rows: usize,
+                      cols: usize,
+                      seed: u8|
+     -> (usize, usize) {
+        let be = if ty == GgmlType::Q8_0 { 32 } else { 256 };
+        let bb = match ty {
+            GgmlType::Q4K => 144,
+            GgmlType::Q6K => 210,
+            GgmlType::Q8_0 => 34,
+            _ => unreachable!(),
+        };
+        let len = rows * cols / be * bb;
+        let off = *cur;
+        let mut st = 0x9E37_79B9_7F4A_7C15u64 ^ (seed as u64 + 1).wrapping_mul(0x517cc1b727220a95);
+        for b in region[off..off + len].iter_mut() {
+            st = st
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *b = (st >> 56) as u8;
+        }
+        let d_bits = 0x1400u16.to_le_bytes(); // ~0.000244: keeps multi-layer activations far from f16 overflow
+        let dmin_bits = 0x0C00u16.to_le_bytes(); // d / 4
+        for blk in region[off..off + len].chunks_exact_mut(bb) {
+            match ty {
+                GgmlType::Q4K => {
+                    blk[0..2].copy_from_slice(&d_bits);
+                    blk[2..4].copy_from_slice(&dmin_bits);
+                }
+                GgmlType::Q6K => blk[208..210].copy_from_slice(&d_bits),
+                GgmlType::Q8_0 => blk[0..2].copy_from_slice(&d_bits),
+                _ => unreachable!(),
+            }
+        }
+        *cur = (*cur + len + 4095) & !4095;
+        (off, len)
+    };
+    let alloc_f32 = |region: &mut [u8], cur: &mut usize, vals: &[f32]| -> (usize, usize) {
+        let len = vals.len() * 4;
+        let off = *cur;
+        for (i, &v) in vals.iter().enumerate() {
+            region[off + i * 4..off + (i + 1) * 4].copy_from_slice(&v.to_le_bytes());
+        }
+        *cur = (*cur + len + 4095) & !4095;
+        (off, len)
+    };
+
+    let wq = alloc_qmat(region, &mut cur, GgmlType::Q4K, q_dim, hidden, 1);
+    let wk = alloc_qmat(region, &mut cur, GgmlType::Q4K, kv_dim, hidden, 2);
+    let wv = alloc_qmat(region, &mut cur, GgmlType::Q6K, kv_dim, hidden, 3);
+    let wo = alloc_qmat(region, &mut cur, GgmlType::Q4K, hidden, q_dim, 4);
+    let gate_exps = alloc_qmat(region, &mut cur, GgmlType::Q4K, n_expert * ffn, hidden, 5);
+    let up_exps = alloc_qmat(region, &mut cur, GgmlType::Q4K, n_expert * ffn, hidden, 6);
+    let down_exps = alloc_qmat(region, &mut cur, GgmlType::Q6K, n_expert * hidden, ffn, 7);
+    // Boost expert 2 scales relative to expert 0 so choosing expert 0 vs 2 produces
+    // unmistakably distinct residual outputs while staying bounded in f16.
+    let exp_down_stride = hidden * (ffn / 256) * 210;
+    let exp2_start = down_exps.0 + 2 * exp_down_stride;
+    for blk in region[exp2_start..exp2_start + exp_down_stride].chunks_exact_mut(210) {
+        blk[208..210].copy_from_slice(&0x2400u16.to_le_bytes());
+    }
+
+    let ones = vec![1.0f32; hidden];
+    let attn_norm = alloc_f32(region, &mut cur, &ones);
+    let ffn_norm = alloc_f32(region, &mut cur, &ones);
+    let router_w: Vec<f32> = (0..n_expert * hidden)
+        .map(|i| ((i % 13) as f32 - 6.0) * 1e-4)
+        .collect();
+    let router = alloc_f32(region, &mut cur, &router_w);
+    assert!(cur <= region_bytes);
+
+    let weights: &'static [u8] = region;
+    assert!(gpu::attach(weights), "Metal attach must succeed");
+
+    let cap = 32usize;
+    let kv_elems = 4 * cap * kv_dim;
+    let kv_bytes = (kv_elems * 2 + PAGE - 1) & !(PAGE - 1);
+    let kv_layout = std::alloc::Layout::from_size_align(kv_bytes, PAGE).unwrap();
+    let kv_ptr = unsafe { std::alloc::alloc_zeroed(kv_layout) };
+    assert!(!kv_ptr.is_null());
+    let kv_slice = unsafe { std::slice::from_raw_parts_mut(kv_ptr, kv_bytes) };
+    let gpu_kv = gpu::wrap_region(kv_slice).expect("page-aligned KV must wrap");
+
+    let xs: Vec<f32> = (0..m * hidden)
+        .map(|i| ((i * 19 + 3) % 53) as f32 * 0.03 - 0.75)
+        .collect();
+    let ropes = vec![[0.0f32, 1.0f32]; m * (hd / 2)];
+    let bias0 = [20.0f32, -20.0, -20.0, -20.0];
+    let bias1 = [-20.0f32, -20.0, 20.0, -20.0];
+
+    let step_layer = |layer_idx: usize, bias: &[f32]| {
+        let k_off = layer_idx * 2 * cap * kv_dim;
+        let v_off = k_off + cap * kv_dim;
+        let attn_out = gpu::prefill_attn_block(&gpu::PrefillAttnReq {
+            wq: (GgmlType::Q4K, &weights[wq.0..wq.0 + wq.1], q_dim),
+            wk: (GgmlType::Q4K, &weights[wk.0..wk.0 + wk.1], kv_dim),
+            wv: (GgmlType::Q6K, &weights[wv.0..wv.0 + wv.1], kv_dim),
+            wo: (GgmlType::Q4K, &weights[wo.0..wo.0 + wo.1], hidden),
+            hs: &xs,
+            m,
+            q_norm: None,
+            k_norm: None,
+            ropes: &ropes,
+            rot_dim: hd,
+            rope_norm: false,
+            gate_in_q: false,
+            attn_bias: None,
+            eps,
+            cache: &gpu_kv,
+            k_off,
+            v_off,
+            kv_dim,
+            head_dim: hd,
+            n_heads,
+            n_kv_heads: n_kv,
+            base: 0,
+            scale,
+            fusion: Some(gpu::PrefillFusion {
+                attn_norm: &weights[attn_norm.0..attn_norm.0 + attn_norm.1],
+                ffn_norm: &weights[ffn_norm.0..ffn_norm.0 + ffn_norm.1],
+                router: &weights[router.0..router.0 + router.1],
+                n_expert,
+                post_attn_norm: &[],
+            }),
+            multi: None,
+        })
+        .expect("fused prefill_attn_block must succeed");
+        assert!(attn_out.is_empty());
+
+        let ffn_out = gpu::ffn_batch_grouped(&gpu::GroupedFfnReq {
+            gate: (
+                GgmlType::Q4K,
+                &weights[gate_exps.0..gate_exps.0 + gate_exps.1],
+            ),
+            up: (GgmlType::Q4K, &weights[up_exps.0..up_exps.0 + up_exps.1]),
+            down: (
+                GgmlType::Q6K,
+                &weights[down_exps.0..down_exps.0 + down_exps.1],
+            ),
+            n_expert,
+            hidden,
+            ffn,
+            groups: &[],
+            x: &[],
+            tok: &[],
+            total_rows: m * n_used,
+            fused: Some(gpu::GroupedCombine {
+                tok_off: &[],
+                hit_row: &[],
+                hit_w: &[],
+                m,
+                next_norm: None,
+                post_norm: None,
+                gelu: false,
+            }),
+            shared: None,
+            route: Some(gpu::GroupedRoute {
+                n_used,
+                norm: false,
+                scale: 1.0,
+                bias: Some(bias),
+                sigmoid: true,
+            }),
+        })
+        .expect("fused ffn_batch_grouped must succeed");
+        assert!(ffn_out.is_empty());
+    };
+
+    // Ground truth: run Layer 0 and Layer 1 in separate prefill chunks so each
+    // layer's router bias is guaranteed isolated on the GPU.
+    let mut mid = xs.clone();
+    gpu::prefill_begin(&xs).unwrap();
+    step_layer(0, &bias0);
+    gpu::prefill_end(&mut mid).unwrap();
+
+    let mut want = mid.clone();
+    gpu::prefill_begin(&mid).unwrap();
+    step_layer(1, &bias1);
+    gpu::prefill_end(&mut want).unwrap();
+
+    // Control: both layers forced to bias1 (the old cross-layer clobber bug).
+    let mut wrong_mid = xs.clone();
+    gpu::prefill_begin(&xs).unwrap();
+    step_layer(0, &bias1);
+    gpu::prefill_end(&mut wrong_mid).unwrap();
+    let mut wrong = wrong_mid.clone();
+    gpu::prefill_begin(&wrong_mid).unwrap();
+    step_layer(1, &bias1);
+    gpu::prefill_end(&mut wrong).unwrap();
+    assert!(
+        want.iter().all(|v| v.is_finite()) && wrong.iter().all(|v| v.is_finite()),
+        "synthetic MoE fixture overflowed to non-finite values"
+    );
+    let max_wrong_diff = want
+        .iter()
+        .zip(&wrong)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_wrong_diff > 1e-2,
+        "test fixture did not separate expert 0 vs expert 2 (diff={max_wrong_diff})"
+    );
+
+    // Target: both layers in one prefill chunk with distinct per-layer biases.
+    let mut got = xs.clone();
+    gpu::prefill_begin(&xs).unwrap();
+    step_layer(0, &bias0);
+    step_layer(1, &bias1);
+    gpu::prefill_end(&mut got).unwrap();
+
+    for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (g - w).abs() < 1e-5,
+            "multi-layer bias restaging clobber at [{i}]: got {g} vs want {w}"
+        );
+    }
+
+    drop(gpu_kv);
+    unsafe { std::alloc::dealloc(kv_ptr, kv_layout) };
+}

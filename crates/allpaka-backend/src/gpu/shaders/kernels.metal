@@ -2127,7 +2127,7 @@ struct RouteParams {
 
 kernel void route_pick(
     device const float* logits [[buffer(0)]],
-    device const float* bias [[buffer(1)]],
+    constant float* bias [[buffer(1)]],
     device atomic_uint* counts [[buffer(2)]],
     device uint* picks [[buffer(3)]],
     device float* pickw [[buffer(4)]],
@@ -2262,7 +2262,7 @@ kernel void route_scatter(
 // intermediate kernel dispatches and two device-memory barriers per MoE layer.
 kernel void route_fused(
     device const float* logits [[buffer(0)]],
-    device const float* bias [[buffer(1)]],
+    constant float* bias [[buffer(1)]],
     device uint* picks [[buffer(2)]],
     device float* pickw [[buffer(3)]],
     device MmGroup* table [[buffer(4)]],

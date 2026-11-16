@@ -90,6 +90,7 @@ pub const fn embed_row_groups(fmt: u32, n_in: usize) -> u32 {
 /// The request is self-consistent and its K and V rows (f16) fit a cache of
 /// `cache_len` bytes. Kernel limits such as supported head dims are the
 /// backend's; each backend's region type keeps its own length.
+#[cfg_attr(not(any(target_os = "macos", feature = "cuda")), allow(dead_code))]
 pub(crate) fn attn_bounds_ok(req: &AttnReq, cache_len: usize) -> bool {
     req.n_pos > 0
         && req.group > 0

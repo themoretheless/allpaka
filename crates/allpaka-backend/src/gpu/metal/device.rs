@@ -16,6 +16,7 @@ pub(super) struct WeightChunk {
 
 pub struct Gpu {
     pub(super) device: Device,
+    pub(super) is_paravirt: bool,
     pub(super) queue: CommandQueue,
     /// One pipeline per (kernel, tile, lanes-per-row): both are function
     /// constants, so each shape is its own specialisation. The full cross
@@ -61,11 +62,6 @@ pub struct Gpu {
     /// Debug: (table word-offset, n_expert) of the last fused routing, for
     /// ALLPAKA_ROWS_DEBUG to dump the per-expert row histogram after prefill.
     pub(super) dbg_route: std::cell::Cell<Option<(usize, usize)>>,
-    /// The bias pointer (0 = none) route_buf's counters were last zeroed
-    /// and staged for; route_scan self-cleans them on the GPU between
-    /// layers, so CPU re-staging is needed only on realloc or a bias change
-    /// (per-layer CPU writes would race the deferred buffers).
-    pub(super) route_staged: Option<usize>,
     /// Fused-prefill deferred commits: layer buffers chain through this
     /// event instead of one CPU wait per layer. `pf_ev_val` is the last
     /// signalled value; `pf_pending` holds committed buffers until their
@@ -105,7 +101,6 @@ pub(super) struct RouteLayout {
     pub(super) hit_w: usize,
     pub(super) tok_off: usize,
     pub(super) logits: usize,
-    pub(super) bias: usize,
     pub(super) tiles: usize,
     pub(super) tile_bound: usize,
     pub(super) total: usize,
@@ -130,11 +125,10 @@ pub(super) fn route_layout(
     let hit_w = hit_row + align(m * hits);
     let tok_off = hit_w + align(m * hits);
     let logits = tok_off + align(m + 1);
-    let bias = logits + align(m * n_expert);
     // Tight mmid grid: one descriptor per non-empty 32-row chunk.
     // ceil sum bound: total/32 + one partial chunk per expert.
     let tile_bound = n_expert + (m * n_used) / tile_w;
-    let tiles = bias + align(n_expert);
+    let tiles = logits + align(m * n_expert);
     let total = tiles + align(tile_bound * 3);
     RouteLayout {
         counts,
@@ -147,7 +141,6 @@ pub(super) fn route_layout(
         hit_w,
         tok_off,
         logits,
-        bias,
         tiles,
         tile_bound,
         total,
@@ -420,13 +413,18 @@ pub(super) fn init_device() -> Option<Gpu> {
     let pf_x = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
     let pf_hs = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
     let route_buf = device.new_buffer(1 << 12, MTLResourceOptions::StorageModeShared);
+    // SAFETY: `route_buf` was just allocated with 4096 bytes of StorageModeShared
+    // memory and has not been bound to any command buffer yet.
+    unsafe { std::ptr::write_bytes(route_buf.contents() as *mut u8, 0, 1 << 12) };
     let pf_attn_sync = device.new_buffer(256, MTLResourceOptions::StorageModeShared);
     unsafe { std::ptr::write_bytes(pf_attn_sync.contents() as *mut u8, 0, 256) };
     let pf_ev = device.new_shared_event();
+    let is_paravirt = device.name().to_ascii_lowercase().contains("paravirtual");
 
     Some(Gpu {
         queue: device.new_command_queue(),
         device,
+        is_paravirt,
         pipelines,
         library,
         chunks: Vec::new(),
@@ -446,7 +444,6 @@ pub(super) fn init_device() -> Option<Gpu> {
         route_buf,
         route_cap: 1 << 12,
         dbg_route: std::cell::Cell::new(None),
-        route_staged: None,
         pf_ev,
         pf_ev_val: 0,
         pf_pending: std::collections::VecDeque::new(),
@@ -1020,10 +1017,12 @@ impl Gpu {
             let buf = self
                 .device
                 .new_buffer(cap as u64, MTLResourceOptions::StorageModeShared);
+            // SAFETY: `self.prefill_drain()` just waited on all queued GPU work,
+            // and `buf` is freshly allocated with `cap` bytes of shared storage.
+            unsafe { std::ptr::write_bytes(buf.contents() as *mut u8, 0, cap) };
             self.pin_buffer_in_residency(&buf);
             self.route_buf = buf;
             self.route_cap = cap;
-            self.route_staged = None;
         }
     }
 
