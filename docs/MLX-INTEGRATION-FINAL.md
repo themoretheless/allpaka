@@ -141,10 +141,6 @@ running 6 tests (integration)
 test result: ok. 6 passed; 0 failed
 ```
 
-## Next Steps for Production Use
-
-Tracked in [roadmap.md](roadmap.md), item A7.
-
 ## Preregistration Readiness
 
 The MLX format integration is **ready for benchmark gating validation**:

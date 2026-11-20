@@ -284,20 +284,6 @@ mmbench modes: `MM_ID=1` (grouped mmid, `MM_ACT`/`MM_EXP`/`MM_USED`),
 (attend_mm vs attend_rows_t8 parity + per-dispatch timing), `MM_MMAP=1`
 (mmap no-copy weights), `MM_DENORM=1` (denormal activations).
 
-## Remaining ideas (not done)
-
-- Try llama.cpp's `kernel_mul_mm_q4_K` as the plain-mm kernel. Probably a
-  dead end: our mmll/mm64ll measure 11.3-11.8 TFLOPS steady-state on the
-  30B shapes (2048->2048/512/768, m=480), matching llama's microbench; the
-  in-model loss (~5 TFLOPS effective) is not the kernel peak, not cold
-  weights (MM_WSPAN 2 GB: same 11.3-11.8), and one-shot dispatch alone
-  explains only 11.8 -> 8.5. The in-model mechanism is unidentified.
-- Decode gap (35.8 vs llama ~41-43 tok/s) is a separate front — see
-  `docs/decode-opts.md` for the Q5_K/Q8_0 `_mv` + SWFUSE (opt-IN since
-  2026-09-26) / default ATTN_MV
-  work (MEGA aimed at that gap is **disabled** until a non-spinning redesign;
-  do not set `ALLPAKA_MEGA`).
-
 # qwen35moe prefill (Qwen3.6-35B-A3B, same machine)
 
 Hybrid arch: 30 gated-delta-net layers (conv 4-tap depthwise + deltanet

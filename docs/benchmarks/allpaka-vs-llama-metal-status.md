@@ -167,12 +167,6 @@ SWFUSE, ATTN_MV, mm_ll — see metal-performance playbook. These moved allpaka
 from CPU-class rates to competitive GPU rates; they do **not** imply
 universal llama beat.
 
-## Open gaps (priority)
-
-Tracked in [roadmap.md](../roadmap.md): GLM decode — P4 (includes the
-unmeasured `MV_ID`/`SHARED_STAGGER`/`MV_TG` knobs, `scripts/glm-ab-stagger.sh`
-and the GPU-capture step), 235B decode — P5.
-
 ## Dead ends (do not retry)
 
 RFUSE under normflag, SHARED_TAIL tok/s, NR0≠2, Q8 K-split+shmem, MEGA
@@ -400,10 +394,6 @@ logits is impossible on this path; kernel changes are arbitrated by the
 parity/tolerance tests plus bit-exact same-shape kernel comparisons
 (fused vs separate), not by end-to-end hashes. Root cause not chased
 (perf-neutral; quality-neutral at argmax level).
-
-### Open: mmbench q6_k anomaly, needs a quiet machine
-
-Tracked in [roadmap.md](../roadmap.md), item P6.
 
 ## 2026-11-09 (round 2): decode side of the Q6_K fold + fused decode QKV
 

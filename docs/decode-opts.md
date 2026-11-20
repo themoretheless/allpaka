@@ -80,11 +80,6 @@ scripts/glm-ab-stagger.sh
 
 Ship rule: keep `MV_ID` default ON only if cool GLM decode ≥ llama; otherwise
 `ALLPAKA_MV_ID=0` (or revert) and Metal-capture Q8/Q4 in-graph BW — no new fuse knobs.
-
-## Still open
-
-Tracked in [roadmap.md](roadmap.md): GLM decode and matvec throughput — P4,
-in-graph mm gap — P6, MTP economics and MEGA — «Снято / не делать без новых
-данных». MEGA stays disabled (`mega_enabled()` is always false): its in-kernel
+MEGA stays disabled (`mega_enabled()` is always false): its in-kernel
 `mega_sync` busy-waited on a device `atomic_uint` across threadgroups and froze
 the Mac. Judge progress on cool-machine sustained A/B, not hot paired runs.

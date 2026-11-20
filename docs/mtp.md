@@ -84,11 +84,3 @@ MTP в `serve` НЕ подключён: при текущем соотношен
 - `crates/allpaka-model/tests/verify_tokens_parity.rs` — verify vs batch-путь
   (smoke) и teacher-forced verify vs GPU decode (жёсткий, m=5/3/2).
 - `gpu_parity` (allpaka-backend) — страж численности decode-ядер.
-
-## Если возвращаться к скорости
-
-Замерено: verify ≈ 12 мс фикс + ~2.65 мс/строка; ROWS-батчинг экспертов
-диспатчи режет, но время не двигает — упор в полезную работу ядер
-(~110-150 ГБ/с). Реальные рычаги: ускорение matvec-ядер глобально (вне
-объёма MTP) либо one-buffer драфт-шаг (~2 мс → ~1 мс). До ~145 tok/s этого
-недостаточно.

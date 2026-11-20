@@ -111,10 +111,6 @@ crates/allpaka-mlx/
 
 **Key difference:** MLX uses true group-affine (scale/bias shared across 64 elements), while some GGUF variants use finer-grained scales. This gives MLX better compression but requires careful alignment with allpaka's matmul kernels.
 
-## Future Work
-
-Tracked in [roadmap.md](roadmap.md), item A7.
-
 ## References
 
 - Original MLX format validation: PR #XXXXX (checkpoint in `~/models/qqvm-qwen3-30b-A3B-mlx-snapshot/`)
